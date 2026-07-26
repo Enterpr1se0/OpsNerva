@@ -162,6 +162,12 @@ func TestWorkspaceAdminCreateUpdateAndRemove(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(docsRoot, "preserved.txt"), []byte("keep"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(docsRoot, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(docsRoot, "nested", "inner.txt"), []byte("deep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	updated, err := svc.UpdateAdminWorkspace(context.Background(), "project", domain.WorkspaceInput{ID: "project", Access: "read_only"}, "admin-web")
 	if err != nil {
 		t.Fatal(err)
@@ -178,14 +184,18 @@ func TestWorkspaceAdminCreateUpdateAndRemove(t *testing.T) {
 	if _, ok := svc.workspaceByID("docs"); ok {
 		t.Fatal("removed workspace remains active")
 	}
-	if _, err := os.Stat(filepath.Join(docsRoot, "preserved.txt")); err != nil {
-		t.Fatalf("removing registration deleted Workspace data: %v", err)
+	if _, err := os.Lstat(docsRoot); !os.IsNotExist(err) {
+		t.Fatalf("removing the Workspace did not delete its directory: %v", err)
 	}
 	if _, err := svc.CreateAdminWorkspace(context.Background(), domain.WorkspaceInput{ID: "docs", Access: "read_write"}, "admin-web"); err != nil {
 		t.Fatal(err)
 	}
-	if content, err := os.ReadFile(filepath.Join(docsRoot, "preserved.txt")); err != nil || string(content) != "keep" {
-		t.Fatalf("re-adding Workspace did not reuse its directory: %q err=%v", content, err)
+	entries, err := os.ReadDir(docsRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("re-added Workspace directory is not empty: %d entries", len(entries))
 	}
 }
 

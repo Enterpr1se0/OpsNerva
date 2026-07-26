@@ -203,7 +203,8 @@ func (s *Service) UpdateAdminWorkspace(ctx context.Context, id string, input dom
 
 func (s *Service) DeleteAdminWorkspace(ctx context.Context, id, actor string) error {
 	id = strings.TrimSpace(id)
-	if _, ok := s.workspaceByID(id); !ok {
+	workspace, ok := s.workspaceByID(id)
+	if !ok {
 		return fmt.Errorf("workspace %q not found", id)
 	}
 	if err := s.store.DeleteWorkspace(ctx, id); err != nil {
@@ -211,8 +212,20 @@ func (s *Service) DeleteAdminWorkspace(ctx context.Context, id, actor string) er
 	}
 	s.workspaceMu.Lock()
 	delete(s.workspaces, id)
+	workspaceRoot := s.workspaceRoot
 	s.workspaceMu.Unlock()
-	s.audit(ctx, "", "workspace_removed", actor, map[string]any{"workspace_id": id})
+	// Unregister first so the agent loses access, then delete the directory.
+	// Only ever remove a path strictly inside the managed workspace root.
+	var removeErr error
+	filesRemoved := false
+	if workspace.Root != "" && workspaceRoot != "" && filepath.Clean(workspace.Root) != filepath.Clean(workspaceRoot) && localPathContains(workspace.Root, workspaceRoot) {
+		removeErr = os.RemoveAll(workspace.Root)
+		filesRemoved = removeErr == nil
+	}
+	s.audit(ctx, "", "workspace_removed", actor, map[string]any{"workspace_id": id, "root": workspace.Root, "files_removed": filesRemoved})
+	if removeErr != nil {
+		return fmt.Errorf("workspace %q was unregistered, but its directory could not be fully removed: %w", id, removeErr)
+	}
 	return nil
 }
 
