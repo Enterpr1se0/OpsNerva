@@ -65,6 +65,6 @@
 
 ## 8. Workspace 与持久长任务
 
-直接在 Agent 对话左侧的 Workspace 文件栏选择 `default`，上传一次性示例仓库文件或压缩包。展示文件浏览、子目录导航、文本预览、二进制元数据提示和可恢复删除；强调点击文件只会预览，不会自动给 LLM 发送任务。在 System 设置中展示 Workspace Shell 三种模式，默认保留 Sandbox。要求 Agent 用 `workspace_shell` 解压压缩包，审批框应展示完整脚本、Workspace 和 Bubblewrap 后端，批准后展示产物，并说明沙箱断网、看不到宿主绝对路径且只能按 Workspace access 落盘。可另行切到 Host Shell 展示显著权限警告和被禁用的会话级授权按钮；Host 每次必须单独批准，且 `read_only` Workspace 不允许调用。随后要求 Agent 读取 README、搜索启动入口并调用 `workspace_file_edit` 提交一个单文件 unified diff；审批框必须显示完整 diff，且只允许配置中声明的 validator。
+直接在 Agent 对话左侧的 Workspace 文件栏选择 `default`，上传一次性示例仓库文件或压缩包。展示文件浏览、子目录导航、文本预览、二进制元数据提示和需确认的永久删除；强调点击文件只会预览，不会自动给 LLM 发送任务。在 System 设置中展示 Workspace Shell 三种模式，默认保留 Sandbox。要求 Agent 用 `workspace_shell` 解压压缩包，审批框应展示完整脚本、Workspace 和 Bubblewrap 后端，批准后展示产物，并说明沙箱断网、看不到宿主绝对路径且只能按 Workspace access 落盘。可另行切到 Host Shell 展示显著权限警告和被禁用的会话级授权按钮；Host 每次必须单独批准，且 `read_only` Workspace 不允许调用。随后要求 Agent 读取 README、搜索启动入口并调用 `workspace_file_edit` 提交一个单文件 unified diff；审批框必须显示完整 diff，且只允许配置中声明的 validator。
 
 再让 Agent 调用 `ssh_exec` 或 `ssh_run_script` 并设置 `background: true`，启动一个短时后台诊断任务。保存返回的 `task_id`，刷新页面后用 `ssh_task(action=status)` 查看状态和输出，最后用 `ssh_task(action=cancel)` 演示取消。说明服务重启后无法重新附着到旧 SSH 进程，数据库会把未完成任务明确标为 `interrupted`，不会假装仍在运行。
