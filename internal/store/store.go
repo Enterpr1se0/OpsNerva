@@ -320,6 +320,7 @@ CREATE TABLE IF NOT EXISTS runs (
   host_id TEXT NOT NULL,
   request_json TEXT NOT NULL,
   request_cipher TEXT NOT NULL DEFAULT '',
+  search_text TEXT NOT NULL DEFAULT '',
   request_digest TEXT NOT NULL,
   risk TEXT NOT NULL,
   status TEXT NOT NULL,
@@ -572,6 +573,21 @@ SELECT session_id,'',min(created_at),max(created_at) FROM chat_messages GROUP BY
 		_, err := s.db.ExecContext(ctx, `UPDATE system_settings SET approval_explanations_enabled=
 CASE WHEN subagent_reviews_enabled<>0 AND beginner_explanations_enabled<>0 THEN 1 ELSE 0 END`)
 		if err != nil && !strings.Contains(strings.ToLower(err.Error()), "no such column") {
+			return err
+		}
+	}
+	// Backfill the plain-text audit search column once when it is first added.
+	// request_json is JSON-escaped, so quotes, redirections, and backslashes in
+	// a command never matched a LIKE query against it; search_text stores the
+	// redacted request text without JSON escaping.
+	addedRunSearchText := false
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE runs ADD COLUMN search_text TEXT NOT NULL DEFAULT ''`); err == nil {
+		addedRunSearchText = true
+	} else if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return err
+	}
+	if addedRunSearchText {
+		if err := s.backfillRunSearchText(ctx); err != nil {
 			return err
 		}
 	}
@@ -1102,9 +1118,42 @@ func scanHost(row scanner) (domain.Host, error) {
 	return host, err
 }
 
+func (s *Store) backfillRunSearchText(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, request_json FROM runs`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	updates := make(map[string]string)
+	for rows.Next() {
+		var id, requestJSON string
+		if err := rows.Scan(&id, &requestJSON); err != nil {
+			return err
+		}
+		var req domain.ExecRequest
+		// Redaction can break the stored JSON; those rows keep the
+		// request_json LIKE fallback in SearchRuns.
+		if json.Unmarshal([]byte(requestJSON), &req) != nil {
+			continue
+		}
+		if text := req.SearchText(); text != "" {
+			updates[id] = text
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for id, text := range updates {
+		if _, err := s.db.ExecContext(ctx, `UPDATE runs SET search_text=? WHERE id=?`, text, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Store) CreateRun(ctx context.Context, run domain.Run) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO runs(id,session_id,host_id,request_json,request_cipher,request_digest,risk,status,ai_review_json,
-started_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, run.ID, run.SessionID, run.HostID, run.RequestJSON, run.RequestCipher, run.RequestDigest,
+	_, err := s.db.ExecContext(ctx, `INSERT INTO runs(id,session_id,host_id,request_json,request_cipher,search_text,request_digest,risk,status,ai_review_json,
+started_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, run.ID, run.SessionID, run.HostID, run.RequestJSON, run.RequestCipher, run.SearchText, run.RequestDigest,
 		run.Risk, run.Status, run.AIReviewJSON, formatTime(run.StartedAt))
 	return err
 }
@@ -1127,13 +1176,20 @@ FROM runs WHERE id=?`, id)
 	return scanRun(row)
 }
 
+// likePattern wraps query in wildcards for a substring LIKE match, escaping
+// every character LIKE treats specially so the query only matches literally.
+func likePattern(query string) string {
+	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(query)
+	return "%" + escaped + "%"
+}
+
 func (s *Store) SearchRuns(ctx context.Context, query, hostID string, limit int) ([]domain.Run, error) {
-	pattern := "%" + strings.ReplaceAll(query, "%", "\\%") + "%"
+	pattern := likePattern(query)
 	statement := `SELECT id,session_id,host_id,request_json,request_cipher,request_digest,risk,status,
 exit_code,stdout_redacted,stderr_redacted,stdout_cipher,stderr_cipher,error,ai_review_json,started_at,completed_at
-FROM runs WHERE (?='' OR host_id=?) AND (?='' OR request_json LIKE ? ESCAPE '\' OR stdout_redacted LIKE ? ESCAPE '\'
-		OR stderr_redacted LIKE ? ESCAPE '\') ORDER BY started_at DESC`
-	arguments := []any{hostID, hostID, query, pattern, pattern, pattern}
+FROM runs WHERE (?='' OR host_id=?) AND (?='' OR search_text LIKE ? ESCAPE '\' OR request_json LIKE ? ESCAPE '\'
+		OR stdout_redacted LIKE ? ESCAPE '\' OR stderr_redacted LIKE ? ESCAPE '\') ORDER BY started_at DESC`
+	arguments := []any{hostID, hostID, query, pattern, pattern, pattern, pattern}
 	if limit > 0 {
 		statement += " LIMIT ?"
 		arguments = append(arguments, limit)

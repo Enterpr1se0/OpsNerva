@@ -239,7 +239,7 @@ type WorkspaceShellInput struct {
 
 type HistorySearchInput struct {
 	RunID  string `json:"run_id,omitempty" jsonschema:"exact audit run identifier; mutually exclusive with search filters"`
-	Query  string `json:"query,omitempty" jsonschema:"text found in command or redacted output"`
+	Query  string `json:"query,omitempty" jsonschema:"literal substring matched against the command text and redacted output; prefer one short distinctive keyword because secrets appear as [REDACTED] and long exact phrases often miss"`
 	HostID string `json:"host_id,omitempty" jsonschema:"optional registered host identifier"`
 	Limit  int    `json:"limit,omitempty" jsonschema:"optional maximum results; omitted returns every matching audited run"`
 }
@@ -703,7 +703,7 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_history", "Search audited commands and redacted results, or provide run_id to get one exact run. Raw encrypted output is never exposed to the model.", func(ctx context.Context, input HistorySearchInput) (any, error) {
+	if err := appendTool(toolutils.InferTool("ssh_history", "Search audited commands and redacted results by literal substring, or provide run_id to get one exact run. Secrets are stored as [REDACTED], so search with short distinctive keywords instead of full command lines. Raw encrypted output is never exposed to the model.", func(ctx context.Context, input HistorySearchInput) (any, error) {
 		result, err := ReadHistoryTool(ctx, svc, input)
 		return normalizeValueToolResult(ctx, "ssh_history", result, err)
 	})); err != nil {

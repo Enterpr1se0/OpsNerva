@@ -1008,7 +1008,8 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 		}
 	}
 	run := domain.Run{
-		ID: ids.New("run"), SessionID: sessionID, HostID: host.ID, RequestJSON: requestRedacted, RequestCipher: requestCipher, RequestDigest: digest,
+		ID: ids.New("run"), SessionID: sessionID, HostID: host.ID, RequestJSON: requestRedacted, RequestCipher: requestCipher,
+		SearchText: s.redactor.Redact(req.SearchText()), RequestDigest: digest,
 		Risk: decision.Risk, Status: "created", AIReviewJSON: reviewJSON, AIReview: commandExplanation, StartedAt: now,
 	}
 	logger := observability.FromContext(ctx).With(

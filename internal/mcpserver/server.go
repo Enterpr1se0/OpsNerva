@@ -67,7 +67,7 @@ func New(svc *service.Service, version string) *Server {
 			output, err = agent.NormalizeExecToolResult(output, err)
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_history", Description: "Search audited commands and redacted outputs, or get one exact run by run_id."},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_history", Description: "Search audited commands and redacted outputs by literal substring, or get one exact run by run_id. Secrets are stored as [REDACTED]; prefer short distinctive keywords over full command lines."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.HistorySearchInput) (*mcp.CallToolResult, agent.HistoryOutput, error) {
 			output, err := agent.ReadHistoryTool(ctx, svc, input)
 			return nil, output, err

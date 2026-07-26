@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type Workspace struct {
 	ID        string    `json:"id"`
@@ -439,6 +442,26 @@ type ExecRequest struct {
 	LocalPath                 string              `json:"-"`
 }
 
+// SearchText returns the request's human-readable text exactly as submitted,
+// without JSON string escaping, so audit search can match what an operator or
+// model would type (quotes, redirections, backslashes, newlines).
+func (r ExecRequest) SearchText() string {
+	parts := []string{r.Program}
+	parts = append(parts, r.Args...)
+	parts = append(parts, r.Script, r.Cwd, r.Reason, r.ExpectedChanges, r.Rollback,
+		r.RemotePath, r.SourcePath, r.RelativePath, r.SearchPattern)
+	if r.Change != nil {
+		parts = append(parts, r.Change.Diff)
+	}
+	filtered := parts[:0]
+	for _, part := range parts {
+		if part != "" {
+			filtered = append(filtered, part)
+		}
+	}
+	return strings.Join(filtered, "\n")
+}
+
 type ToolMeta struct {
 	ToolVersion string `json:"tool_version,omitempty"`
 	OK          bool   `json:"ok"`
@@ -539,6 +562,7 @@ type Run struct {
 	HostID         string         `json:"host_id"`
 	RequestJSON    string         `json:"request_json"`
 	RequestCipher  string         `json:"-"`
+	SearchText     string         `json:"-"`
 	RequestDigest  string         `json:"request_digest"`
 	Risk           RiskLevel      `json:"risk"`
 	Status         string         `json:"status"`
