@@ -34,7 +34,7 @@ import (
 	"eino-ops-agent/internal/store"
 )
 
-const version = "0.1.3"
+const version = "0.1.4"
 
 type application struct {
 	config    config.Config

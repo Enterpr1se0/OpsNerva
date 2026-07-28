@@ -212,7 +212,7 @@ function App() {
       </nav>
       <div className="sidebar-foot">
 			<button className="logout-button" onClick={async()=>{try{await api.logout()}finally{setAuth('guest')}}}><LogOut size={15}/>{t('shell.signOut')}</button>
-        <div className="build">v0.1.2</div>
+        <div className="build">v0.1.4</div>
       </div>
     </aside>
     <main>
