@@ -139,6 +139,19 @@ func rootToolError(err error) error {
 	}
 }
 
+// normalizeEmptyToolArguments repairs tool calls whose argument payload
+// arrived empty. The Claude model component deliberately rewrites "{}"
+// streaming arguments to "" to keep chunk concatenation stable, which would
+// otherwise fail JSON unmarshalling for every parameterless tool call.
+func normalizeEmptyToolArguments(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
+	return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+		if strings.TrimSpace(input.Arguments) == "" {
+			input.Arguments = "{}"
+		}
+		return next(ctx, input)
+	}
+}
+
 func normalizeToolCallErrors(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
 	return func(ctx context.Context, input *compose.ToolInput) (output *compose.ToolOutput, err error) {
 		started := time.Now()

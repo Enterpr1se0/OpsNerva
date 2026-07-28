@@ -196,6 +196,7 @@ const zh = {
     displayName: '显示名称', providerType: '提供商类型', modelId: '模型 ID', fetching: '获取中...', fetchModels: '获取模型', selectModel: '选择模型...',
     modelPlaceholder: '获取模型或手动输入 ID', available: '有 {{count}} 个模型可用', enterManually: '手动输入', apiKey: 'API Key', keepKey: '留空以保留当前 Key',
     baseUrl: 'Base URL', officialEndpoint: '留空使用 OpenAI 官方地址',
+    userAgent: 'User-Agent 改写', userAgentHint: '留空使用 SDK 默认值；网关拒绝 SDK 请求时可填写自定义 UA',
 			proxyUrl: '代理地址', proxyUsername: '代理用户名', proxyPassword: '代理密码',
 		keepProxyPassword: '留空保留当前密码', clearProxyPassword: '清除已保存密码', proxy: '代理', noProxy: '未配置', proxyAuth: '已保存认证',
     sendingHello: '发送 Hello...', testModel: '测试模型', saveProvider: '保存提供商', active: '活动', endpoint: '端点', providerDefault: '提供商默认值', credential: '凭据',

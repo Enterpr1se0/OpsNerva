@@ -39,6 +39,26 @@ type resolvedModelProvider struct {
 	ProxyURL      string
 	ProxyUsername string
 	ProxyPassword string
+	UserAgent     string
+}
+
+func validateProviderUserAgent(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	// net/http rejects header values containing any control byte, so a stored
+	// value with one would fail every subsequent request to the provider.
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return "", fmt.Errorf("user agent cannot contain control characters")
+		}
+	}
+	if len(value) > 256 {
+		return "", fmt.Errorf("user agent is too long")
+	}
+	return value, nil
+}
+
+func providerKindRequiresAPIKey(kind string) bool {
+	return kind == "openai" || kind == "deepseek" || kind == "anthropic"
 }
 
 func normalizeProviderBaseURL(value, kind string) (string, error) {
@@ -49,6 +69,8 @@ func normalizeProviderBaseURL(value, kind string) (string, error) {
 			value = "https://api.openai.com/v1"
 		case "deepseek":
 			value = "https://api.deepseek.com"
+		case "anthropic":
+			value = "https://api.anthropic.com"
 		case "ollama":
 			value = "http://127.0.0.1:11434/v1"
 		case "openai_compatible":
@@ -87,6 +109,13 @@ func normalizeProviderBaseURL(value, kind string) (string, error) {
 			break
 		}
 	}
+	if kind == "anthropic" {
+		// The Anthropic SDK appends /v1/... itself, so the stored base URL
+		// must not end with the version segment. DiscoverModels and the
+		// agent's max_tokens lookup rely on this by appending /v1/... too.
+		path = strings.TrimSuffix(path, "/messages")
+		path = strings.TrimSuffix(path, "/v1")
+	}
 	parsed.Path = strings.TrimRight(path, "/")
 	parsed.RawPath = ""
 	return strings.TrimRight(parsed.String(), "/"), nil
@@ -100,6 +129,7 @@ func (s *Service) resolveModelProvider(
 	inputProxyURL, inputProxyUsername *string,
 	inputProxyPassword string,
 	clearProxyPassword bool,
+	inputUserAgent *string,
 ) (resolvedModelProvider, error) {
 	result := resolvedModelProvider{
 		ID: strings.TrimSpace(providerID), Kind: strings.TrimSpace(kind), APIKey: strings.TrimSpace(inputAPIKey),
@@ -119,6 +149,7 @@ func (s *Service) resolveModelProvider(
 		result.ProxyURL = cfg.ProxyURL
 		result.ProxyUsername = cfg.ProxyUsername
 		result.ProxyPassword = cfg.ProxyPassword
+		result.UserAgent = cfg.UserAgent
 		storedProxyURL = cfg.ProxyURL
 		storedProxyUsername = cfg.ProxyUsername
 		if result.APIKey == "" {
@@ -134,6 +165,14 @@ func (s *Service) resolveModelProvider(
 	if inputProxyUsername != nil {
 		result.ProxyUsername = strings.TrimSpace(*inputProxyUsername)
 	}
+	if inputUserAgent != nil {
+		result.UserAgent = *inputUserAgent
+	}
+	normalizedUserAgent, err := validateProviderUserAgent(result.UserAgent)
+	if err != nil {
+		return resolvedModelProvider{}, err
+	}
+	result.UserAgent = normalizedUserAgent
 	normalizedProxyURL, err := proxyx.NormalizeURL(result.ProxyURL)
 	if err != nil {
 		return resolvedModelProvider{}, err
@@ -152,7 +191,7 @@ func (s *Service) resolveModelProvider(
 	if result.Kind == "" {
 		result.Kind = "openai_compatible"
 	}
-	if (result.Kind == "openai" || result.Kind == "deepseek") && result.APIKey == "" {
+	if providerKindRequiresAPIKey(result.Kind) && result.APIKey == "" {
 		return resolvedModelProvider{}, fmt.Errorf("api_key is required for %s", result.Kind)
 	}
 	normalizedBaseURL, err := normalizeProviderBaseURL(result.BaseURL, result.Kind)
@@ -179,6 +218,7 @@ func (s *Service) ModelTestConfig(ctx context.Context, input domain.ModelTestInp
 	resolved, err := s.resolveModelProvider(
 		ctx, input.ID, input.Kind, input.BaseURL, input.APIKey,
 		input.ProxyURL, input.ProxyUsername, input.ProxyPassword, input.ClearProxyPassword,
+		input.UserAgent,
 	)
 	if err != nil {
 		return config.Model{}, err
@@ -188,7 +228,7 @@ func (s *Service) ModelTestConfig(ctx context.Context, input domain.ModelTestInp
 		return config.Model{}, fmt.Errorf("model is required")
 	}
 	return config.Model{
-		APIKey: resolved.APIKey, BaseURL: resolved.BaseURL, Name: model,
+		APIKey: resolved.APIKey, Kind: resolved.Kind, BaseURL: resolved.BaseURL, Name: model, UserAgent: resolved.UserAgent,
 		ProxyURL: resolved.ProxyURL, ProxyUsername: resolved.ProxyUsername, ProxyPassword: resolved.ProxyPassword,
 	}, nil
 }
@@ -197,17 +237,27 @@ func (s *Service) DiscoverModels(ctx context.Context, input domain.ModelDiscover
 	resolved, err := s.resolveModelProvider(
 		ctx, input.ID, input.Kind, input.BaseURL, input.APIKey,
 		input.ProxyURL, input.ProxyUsername, input.ProxyPassword, input.ClearProxyPassword,
+		input.UserAgent,
 	)
 	if err != nil {
 		return domain.ModelCatalog{}, err
 	}
+	// Anthropic's wire dialect: the catalog lives under /v1 (pages cap at 1000
+	// entries, far above the current model count, so one request covers the
+	// whole list) and authenticates via x-api-key instead of a Bearer token.
 	endpoint := resolved.BaseURL + "/models"
+	if resolved.Kind == "anthropic" {
+		endpoint = resolved.BaseURL + "/v1/models?limit=1000"
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return domain.ModelCatalog{}, fmt.Errorf("invalid model catalog endpoint: %w", err)
 	}
 	request.Header.Set("Accept", "application/json")
-	if resolved.APIKey != "" {
+	if resolved.Kind == "anthropic" {
+		request.Header.Set("x-api-key", resolved.APIKey)
+		request.Header.Set("anthropic-version", "2023-06-01")
+	} else if resolved.APIKey != "" {
 		request.Header.Set("Authorization", "Bearer "+resolved.APIKey)
 	}
 	client := &http.Client{Timeout: 15 * time.Second}
@@ -216,6 +266,9 @@ func (s *Service) DiscoverModels(ctx context.Context, input domain.ModelDiscover
 		if err != nil {
 			return domain.ModelCatalog{}, err
 		}
+	}
+	if resolved.UserAgent != "" {
+		client = proxyx.WrapHeaders(client, map[string]string{"User-Agent": resolved.UserAgent})
 	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	response, err := client.Do(request)

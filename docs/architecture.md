@@ -122,7 +122,7 @@ Runner 在调用工具前通过 Go context 绑定当前 session ID，Service 创
 
 ## Model provider routing
 
-模型提供商统一映射为 Eino 的 OpenAI-compatible ChatModel，可保存 OpenAI、DeepSeek、Ollama 和自定义兼容端点。API Key 在进入 SQLite 前使用与审计数据相同的 AES-256-GCM 主密钥加密，对外只返回 `has_api_key`。每条提供商记录还可独立保存 HTTP、HTTPS、SOCKS5 或 SOCKS5H 代理；代理密码加密后只通过 `has_proxy_password` 暴露状态。模型发现、配置测试、主 Agent 和选择该记录的 subagent 共用同一显式代理客户端，不从其他提供商继承代理。
+模型提供商按 kind 映射为 Eino ChatModel：Anthropic 走 Claude 组件（原生 Anthropic API，`x-api-key` 认证），其余（OpenAI、DeepSeek、Ollama 和自定义兼容端点）走 OpenAI-compatible 组件。每条提供商记录可选配置 User-Agent 改写，对该提供商的聊天、连接测试和模型发现请求统一生效，用于兼容按 UA 过滤请求的网关（SDK 默认 UA 形如 `Anthropic/Go x.y.z`，可能被部分中转站拒绝）。API Key 在进入 SQLite 前使用与审计数据相同的 AES-256-GCM 主密钥加密，对外只返回 `has_api_key`。每条提供商记录还可独立保存 HTTP、HTTPS、SOCKS5 或 SOCKS5H 代理；代理密码加密后只通过 `has_proxy_password` 暴露状态。模型发现、配置测试、主 Agent 和选择该记录的 subagent 共用同一显式代理客户端，不从其他提供商继承代理。
 
 SQLite 使用部分唯一索引保证最多只有一个 active provider。切换时服务更新 active route，构建新的 ChatModelAgent 与 Runner，再通过互斥锁原子替换运行时指针；已经取得旧 Runner 的请求可以正常结束，新请求使用新配置。没有 active provider 时才回退到 `OPENAI_*` 环境变量。
 

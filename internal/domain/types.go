@@ -100,6 +100,7 @@ type ModelProvider struct {
 	ProxyUsername       string    `json:"proxy_username,omitempty"`
 	ProxyPasswordCipher string    `json:"-"`
 	HasProxyPassword    bool      `json:"has_proxy_password"`
+	UserAgent           string    `json:"user_agent,omitempty"`
 	Active              bool      `json:"active"`
 	CreatedAt           time.Time `json:"created_at"`
 	UpdatedAt           time.Time `json:"updated_at"`
@@ -116,6 +117,9 @@ type ModelProviderInput struct {
 	ProxyUsername      string `json:"proxy_username,omitempty"`
 	ProxyPassword      string `json:"proxy_password,omitempty"`
 	ClearProxyPassword bool   `json:"clear_proxy_password,omitempty"`
+	// UserAgent is a pointer so an omitted field keeps the stored value while
+	// an explicit empty string clears it, matching the test/discovery inputs.
+	UserAgent *string `json:"user_agent,omitempty"`
 }
 
 type ModelDiscoveryInput struct {
@@ -127,6 +131,7 @@ type ModelDiscoveryInput struct {
 	ProxyUsername      *string `json:"proxy_username,omitempty"`
 	ProxyPassword      string  `json:"proxy_password,omitempty"`
 	ClearProxyPassword bool    `json:"clear_proxy_password,omitempty"`
+	UserAgent          *string `json:"user_agent,omitempty"`
 }
 
 type ModelTestInput struct {
@@ -139,6 +144,7 @@ type ModelTestInput struct {
 	ProxyUsername      *string `json:"proxy_username,omitempty"`
 	ProxyPassword      string  `json:"proxy_password,omitempty"`
 	ClearProxyPassword bool    `json:"clear_proxy_password,omitempty"`
+	UserAgent          *string `json:"user_agent,omitempty"`
 }
 
 type ModelCatalog struct {

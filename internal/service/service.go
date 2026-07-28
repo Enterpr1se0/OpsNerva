@@ -305,6 +305,14 @@ func (s *Service) SaveModelProvider(ctx context.Context, input domain.ModelProvi
 	input.BaseURL = strings.TrimSpace(input.BaseURL)
 	input.Model = strings.TrimSpace(input.Model)
 	input.ProxyUsername = strings.TrimSpace(input.ProxyUsername)
+	userAgent := ""
+	if input.UserAgent != nil {
+		normalizedUserAgent, err := validateProviderUserAgent(*input.UserAgent)
+		if err != nil {
+			return domain.ModelProvider{}, err
+		}
+		userAgent = normalizedUserAgent
+	}
 	if input.Name == "" {
 		return domain.ModelProvider{}, fmt.Errorf("provider name is required")
 	}
@@ -315,7 +323,7 @@ func (s *Service) SaveModelProvider(ctx context.Context, input domain.ModelProvi
 		input.Kind = "openai_compatible"
 	}
 	switch input.Kind {
-	case "openai", "deepseek", "openai_compatible", "ollama":
+	case "openai", "deepseek", "anthropic", "openai_compatible", "ollama":
 	default:
 		return domain.ModelProvider{}, fmt.Errorf("invalid provider kind %q", input.Kind)
 	}
@@ -344,7 +352,7 @@ func (s *Service) SaveModelProvider(ctx context.Context, input domain.ModelProvi
 
 	provider := domain.ModelProvider{
 		ID: input.ID, Name: input.Name, Kind: input.Kind, BaseURL: input.BaseURL, Model: input.Model,
-		ProxyURL: input.ProxyURL, ProxyUsername: input.ProxyUsername,
+		ProxyURL: input.ProxyURL, ProxyUsername: input.ProxyUsername, UserAgent: userAgent,
 	}
 	if input.ID != "" {
 		existing, err := s.store.GetModelProvider(ctx, input.ID)
@@ -354,6 +362,9 @@ func (s *Service) SaveModelProvider(ctx context.Context, input domain.ModelProvi
 		provider.CreatedAt = existing.CreatedAt
 		provider.Active = existing.Active
 		provider.APIKeyCipher = existing.APIKeyCipher
+		if input.UserAgent == nil {
+			provider.UserAgent = existing.UserAgent
+		}
 		if provider.ProxyURL == existing.ProxyURL && provider.ProxyUsername == existing.ProxyUsername {
 			provider.ProxyPasswordCipher = existing.ProxyPasswordCipher
 		}
@@ -365,7 +376,7 @@ func (s *Service) SaveModelProvider(ctx context.Context, input domain.ModelProvi
 		}
 		provider.APIKeyCipher = cipher
 	}
-	if (provider.Kind == "openai" || provider.Kind == "deepseek") && provider.APIKeyCipher == "" {
+	if providerKindRequiresAPIKey(provider.Kind) && provider.APIKeyCipher == "" {
 		return domain.ModelProvider{}, fmt.Errorf("api_key is required for %s", provider.Kind)
 	}
 	if input.ClearProxyPassword || provider.ProxyURL == "" || provider.ProxyUsername == "" {
@@ -544,7 +555,7 @@ func (s *Service) ModelProviderConfig(ctx context.Context, id string) (config.Mo
 		return config.Model{}, domain.ModelProvider{}, fmt.Errorf("decrypt model provider proxy password: %w", err)
 	}
 	return config.Model{
-		APIKey: string(key), BaseURL: provider.BaseURL, Name: provider.Model,
+		APIKey: string(key), Kind: provider.Kind, BaseURL: provider.BaseURL, Name: provider.Model, UserAgent: provider.UserAgent,
 		ProxyURL: provider.ProxyURL, ProxyUsername: provider.ProxyUsername, ProxyPassword: string(proxyPassword),
 	}, provider, nil
 }

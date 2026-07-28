@@ -178,7 +178,7 @@ export interface ChatState {
   plan?: AgentPlan | null
 }
 
-export type ModelProviderKind = 'openai' | 'deepseek' | 'openai_compatible' | 'ollama'
+export type ModelProviderKind = 'openai' | 'deepseek' | 'anthropic' | 'openai_compatible' | 'ollama'
 
 export interface ModelProvider {
   id: string
@@ -190,6 +190,7 @@ export interface ModelProvider {
 	proxy_url?: string
 	proxy_username?: string
 	has_proxy_password: boolean
+	user_agent?: string
   active: boolean
   created_at: string
   updated_at: string
@@ -206,6 +207,7 @@ export interface ModelProviderInput {
 	proxy_username: string
 	proxy_password: string
 	clear_proxy_password?: boolean
+	user_agent: string
 }
 
 export interface ModelDiscoveryInput {
@@ -217,6 +219,7 @@ export interface ModelDiscoveryInput {
 	proxy_username: string
 	proxy_password: string
 	clear_proxy_password?: boolean
+	user_agent?: string
 }
 
 export interface ModelTestInput extends ModelDiscoveryInput {

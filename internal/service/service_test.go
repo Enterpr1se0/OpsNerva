@@ -1413,6 +1413,97 @@ func TestDiscoverModelsUsesStoredKeyAndRedactsUpstreamErrors(t *testing.T) {
 	}
 }
 
+func TestDiscoverModelsAnthropic(t *testing.T) {
+	const secret = "sk-ant-secret"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Query().Get("limit") != "1000" {
+			http.Error(w, "missing limit", http.StatusBadRequest)
+			return
+		}
+		if r.Header.Get("x-api-key") != secret || r.Header.Get("anthropic-version") == "" {
+			http.Error(w, "missing anthropic auth headers", http.StatusUnauthorized)
+			return
+		}
+		if r.Header.Get("User-Agent") != "OpsPilot-Test/1.0" {
+			http.Error(w, "user agent was not rewritten", http.StatusForbidden)
+			return
+		}
+		if r.Header.Get("Authorization") != "" {
+			http.Error(w, "unexpected bearer authorization", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"claude-opus-4-8"},{"id":"claude-haiku-4-5"}]}`))
+	}))
+	defer server.Close()
+
+	svc, _, _ := newTestService(t)
+	ctx := context.Background()
+	if _, err := svc.SaveModelProvider(ctx, domain.ModelProviderInput{
+		Name: "claude", Kind: "anthropic", BaseURL: server.URL, Model: "claude-opus-4-8",
+	}, "test"); err == nil {
+		t.Fatal("anthropic provider without an API key was accepted")
+	}
+	ptr := func(value string) *string { return &value }
+	for _, invalid := range []string{"broken\nagent", "escape\x1bagent"} {
+		if _, err := svc.SaveModelProvider(ctx, domain.ModelProviderInput{
+			Name: "claude", Kind: "anthropic", BaseURL: server.URL, Model: "claude-opus-4-8", APIKey: secret,
+			UserAgent: ptr(invalid),
+		}, "test"); err == nil {
+			t.Fatalf("user agent %q with control characters was accepted", invalid)
+		}
+	}
+	provider, err := svc.SaveModelProvider(ctx, domain.ModelProviderInput{
+		Name: "claude", Kind: "anthropic", BaseURL: server.URL + "/v1", Model: "claude-opus-4-8", APIKey: secret,
+		UserAgent: ptr("OpsPilot-Test/1.0"),
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.BaseURL != server.URL {
+		t.Fatalf("expected version segment stripped from base URL, got %q", provider.BaseURL)
+	}
+	if provider.UserAgent != "OpsPilot-Test/1.0" {
+		t.Fatalf("user agent was not persisted, got %q", provider.UserAgent)
+	}
+	renamed, err := svc.SaveModelProvider(ctx, domain.ModelProviderInput{
+		ID: provider.ID, Name: "claude renamed", Kind: "anthropic", BaseURL: server.URL, Model: "claude-opus-4-8",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renamed.UserAgent != "OpsPilot-Test/1.0" {
+		t.Fatalf("omitting user_agent on edit should keep the stored value, got %q", renamed.UserAgent)
+	}
+	cleared, err := svc.SaveModelProvider(ctx, domain.ModelProviderInput{
+		ID: provider.ID, Name: "claude renamed", Kind: "anthropic", BaseURL: server.URL, Model: "claude-opus-4-8",
+		UserAgent: ptr(""),
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared.UserAgent != "" {
+		t.Fatalf("explicit empty user_agent should clear the stored value, got %q", cleared.UserAgent)
+	}
+	if _, err := svc.SaveModelProvider(ctx, domain.ModelProviderInput{
+		ID: provider.ID, Name: "claude renamed", Kind: "anthropic", BaseURL: server.URL, Model: "claude-opus-4-8",
+		UserAgent: ptr("OpsPilot-Test/1.0"),
+	}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := svc.DiscoverModels(ctx, domain.ModelDiscoveryInput{ID: provider.ID}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if catalog.Count != 2 || strings.Join(catalog.Models, ",") != "claude-haiku-4-5,claude-opus-4-8" {
+		t.Fatalf("unexpected catalog %#v", catalog)
+	}
+}
+
 func TestNormalizeProviderBaseURL(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -1426,6 +1517,10 @@ func TestNormalizeProviderBaseURL(t *testing.T) {
 		{name: "public domain", value: "api.example.com/v1", kind: "openai_compatible", want: "https://api.example.com/v1"},
 		{name: "OpenAI default", value: "", kind: "openai", want: "https://api.openai.com/v1"},
 		{name: "DeepSeek default", value: "", kind: "deepseek", want: "https://api.deepseek.com"},
+		{name: "Anthropic default", value: "", kind: "anthropic", want: "https://api.anthropic.com"},
+		{name: "Anthropic strips version segment", value: "https://api.anthropic.com/v1", kind: "anthropic", want: "https://api.anthropic.com"},
+		{name: "Anthropic strips messages endpoint", value: "https://gateway.example.com/v1/messages", kind: "anthropic", want: "https://gateway.example.com"},
+		{name: "Anthropic strips models endpoint", value: "https://api.anthropic.com/v1/models", kind: "anthropic", want: "https://api.anthropic.com"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

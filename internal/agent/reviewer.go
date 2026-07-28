@@ -13,7 +13,6 @@ import (
 	"eino-ops-agent/internal/config"
 	"eino-ops-agent/internal/domain"
 
-	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
 )
@@ -47,18 +46,7 @@ func buildReadOnlySubagent(ctx context.Context, cfg config.Model, requestTimeout
 	if requestTimeout <= 0 {
 		requestTimeout = time.Duration(domain.DefaultSubagentTimeoutSeconds) * time.Second
 	}
-	modelCfg, err := chatModelConfig(cfg, requestTimeout+subagentTransportTimeoutGrace)
-	if err != nil {
-		return nil, err
-	}
-	maxTokens := maxReviewCompletionTokens
-	modelName := strings.ToLower(strings.TrimSpace(cfg.Name))
-	if strings.HasPrefix(modelName, "o1") || strings.HasPrefix(modelName, "o3") || strings.HasPrefix(modelName, "o4") || strings.HasPrefix(modelName, "gpt-5") {
-		modelCfg.MaxCompletionTokens = &maxTokens
-	} else {
-		modelCfg.MaxTokens = &maxTokens
-	}
-	chatModel, err := openai.NewChatModel(ctx, modelCfg)
+	chatModel, err := newChatModel(ctx, cfg, requestTimeout+subagentTransportTimeoutGrace, maxReviewCompletionTokens)
 	if err != nil {
 		return nil, err
 	}

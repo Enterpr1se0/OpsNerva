@@ -195,6 +195,7 @@ const en = {
     displayName: 'Display name', providerType: 'Provider type', modelId: 'Model ID', fetching: 'Fetching...', fetchModels: 'Fetch models', selectModel: 'Select a model...',
     modelPlaceholder: 'Fetch models or enter an ID', available: '{{count}} models available', enterManually: 'enter manually', apiKey: 'API key', keepKey: 'Leave blank to keep current key',
     baseUrl: 'Base URL', officialEndpoint: 'Blank uses the official OpenAI endpoint',
+    userAgent: 'User-Agent override', userAgentHint: 'Blank keeps the SDK default; set this when a gateway rejects SDK requests',
 			proxyUrl: 'Proxy URL', proxyUsername: 'Proxy username', proxyPassword: 'Proxy password',
 		keepProxyPassword: 'Blank keeps the current password', clearProxyPassword: 'Clear saved password', proxy: 'Proxy', noProxy: 'Not configured', proxyAuth: 'Authentication saved',
     sendingHello: 'Sending Hello...', testModel: 'Test model', saveProvider: 'Save provider', active: 'ACTIVE', endpoint: 'Endpoint', providerDefault: 'Provider default', credential: 'Credential',

@@ -8,6 +8,43 @@ import (
 	"time"
 )
 
+// HeaderRewriteTransport sets fixed header values on every outgoing request,
+// replacing any value the underlying client or SDK would otherwise send.
+type HeaderRewriteTransport struct {
+	Base    http.RoundTripper
+	Headers map[string]string
+}
+
+func (t HeaderRewriteTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	clone := request.Clone(request.Context())
+	clone.Header = request.Header.Clone()
+	for name, value := range t.Headers {
+		clone.Header.Set(name, value)
+	}
+	base := t.Base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return base.RoundTrip(clone)
+}
+
+// WrapHeaders returns a shallow copy of client with a header-rewriting
+// transport. SDK header options typically append instead of replacing defaults,
+// so callers that must override a default header (e.g. User-Agent) need the
+// transport-level rewrite. The input client remains safe for independent use.
+func WrapHeaders(client *http.Client, headers map[string]string) *http.Client {
+	if client == nil {
+		client = &http.Client{}
+	}
+	result := *client
+	fixedHeaders := make(map[string]string, len(headers))
+	for name, value := range headers {
+		fixedHeaders[name] = value
+	}
+	result.Transport = HeaderRewriteTransport{Base: client.Transport, Headers: fixedHeaders}
+	return &result
+}
+
 func NormalizeURL(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {

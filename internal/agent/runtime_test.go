@@ -125,6 +125,113 @@ func TestProviderRejectsEmptyResponse(t *testing.T) {
 	}
 }
 
+func TestProviderAnthropicUsesNativeMessagesRequest(t *testing.T) {
+	const (
+		apiKey    = "anthropic-fixture-key"
+		userAgent = "OpsPilot-Test/1.0"
+	)
+	requestPaths := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPaths <- r.URL.Path
+		if r.URL.Path != "/v1/messages" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("x-api-key") != apiKey {
+			t.Errorf("x-api-key = %q, want configured key", r.Header.Get("x-api-key"))
+		}
+		if r.Header.Get("anthropic-version") == "" {
+			t.Error("anthropic-version header is missing")
+		}
+		if r.Header.Get("User-Agent") != userAgent {
+			t.Errorf("User-Agent = %q, want %q", r.Header.Get("User-Agent"), userAgent)
+		}
+		if r.Header.Get("Authorization") != "" {
+			t.Errorf("unexpected Authorization header %q", r.Header.Get("Authorization"))
+		}
+		var request struct {
+			MaxTokens int             `json:"max_tokens"`
+			Model     string          `json:"model"`
+			Messages  json.RawMessage `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode Anthropic request: %v", err)
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		if request.MaxTokens != modelConnectionTestMaxTokens {
+			t.Errorf("max_tokens = %d, want %d", request.MaxTokens, modelConnectionTestMaxTokens)
+		}
+		if request.Model != "claude-fixture" || !strings.Contains(string(request.Messages), "Hello") {
+			t.Errorf("unexpected Anthropic request: model=%q messages=%s", request.Model, request.Messages)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+  "id":"msg_fixture","type":"message","role":"assistant","model":"claude-fixture",
+  "content":[{"type":"text","text":"Hello from Claude"}],
+  "stop_reason":"end_turn","stop_sequence":null,
+  "usage":{"input_tokens":1,"output_tokens":3}
+}`))
+	}))
+	defer server.Close()
+
+	result, err := (&Runtime{}).TestProvider(context.Background(), config.Model{
+		APIKey: apiKey, Kind: "anthropic", BaseURL: server.URL, Name: "claude-fixture", UserAgent: userAgent,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Response != "Hello from Claude" {
+		t.Fatalf("unexpected Anthropic test response %#v", result)
+	}
+	select {
+	case path := <-requestPaths:
+		if path != "/v1/messages" {
+			t.Fatalf("request path = %q, want /v1/messages", path)
+		}
+	default:
+		t.Fatal("Anthropic test did not make a request")
+	}
+	select {
+	case path := <-requestPaths:
+		t.Fatalf("Anthropic connection test made an extra request to %q", path)
+	default:
+	}
+}
+
+func TestAnthropicRequestsDoNotFollowRedirects(t *testing.T) {
+	const apiKey = "must-not-leak"
+	redirected := make(chan http.Header, 2)
+	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirected <- r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_sink","type":"message","role":"assistant","model":"claude-fixture","content":[{"type":"text","text":"unexpected"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer sink.Close()
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, sink.URL+"/credential-sink", http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+
+	cfg := config.Model{APIKey: apiKey, Kind: "anthropic", BaseURL: redirector.URL, Name: "claude-fixture"}
+	if _, err := (&Runtime{}).TestProvider(context.Background(), cfg); err == nil {
+		t.Fatal("Anthropic connection test accepted a redirect response")
+	}
+	client, err := modelHTTPClient(cfg, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lookupAnthropicOutputLimit(context.Background(), cfg, client); err == nil {
+		t.Fatal("Anthropic model lookup accepted a redirect response")
+	}
+	select {
+	case headers := <-redirected:
+		t.Fatalf("Anthropic redirect reached another origin with x-api-key %q", headers.Get("x-api-key"))
+	default:
+	}
+}
+
 func TestRuntimeReloadAppliesCompleteSystemPromptToExistingConversation(t *testing.T) {
 	type wireMessage struct {
 		Role    string `json:"role"`

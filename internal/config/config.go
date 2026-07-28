@@ -66,8 +66,10 @@ type SSH struct {
 
 type Model struct {
 	APIKey        string `yaml:"-"`
+	Kind          string `yaml:"kind"`
 	BaseURL       string `yaml:"base_url"`
 	Name          string `yaml:"name"`
+	UserAgent     string `yaml:"user_agent"`
 	ProxyURL      string `yaml:"-"`
 	ProxyUsername string `yaml:"-"`
 	ProxyPassword string `yaml:"-"`

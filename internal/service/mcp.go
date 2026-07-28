@@ -18,6 +18,7 @@ import (
 
 	"eino-ops-agent/internal/domain"
 	"eino-ops-agent/internal/observability"
+	"eino-ops-agent/internal/proxyx"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
@@ -360,7 +361,7 @@ func (s *Service) connectMCPServer(ctx context.Context, server domain.MCPServer)
 		command.Env = append(os.Environ(), mapAsEnvironment(secrets.Env)...)
 		transport = &mcp.CommandTransport{Command: command}
 	case domain.MCPTransportStreamableHTTP:
-		client := &http.Client{Timeout: mcpCallTimeout, Transport: headerTransport{base: http.DefaultTransport, headers: secrets.Headers}}
+		client := &http.Client{Timeout: mcpCallTimeout, Transport: proxyx.HeaderRewriteTransport{Base: http.DefaultTransport, Headers: secrets.Headers}}
 		transport = &mcp.StreamableClientTransport{Endpoint: server.URL, HTTPClient: client, MaxRetries: 1, DisableStandaloneSSE: true}
 	default:
 		return nil, nil, fmt.Errorf("unsupported MCP transport %q", server.Transport)
@@ -484,20 +485,6 @@ func (s *Service) decryptMCPSecrets(ciphertext string) (mcpSecrets, error) {
 		result.Headers = map[string]string{}
 	}
 	return result, nil
-}
-
-type headerTransport struct {
-	base    http.RoundTripper
-	headers map[string]string
-}
-
-func (t headerTransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	clone := request.Clone(request.Context())
-	clone.Header = request.Header.Clone()
-	for name, value := range t.headers {
-		clone.Header.Set(name, value)
-	}
-	return t.base.RoundTrip(clone)
 }
 
 func validateMCPInput(input domain.MCPServerInput) error {

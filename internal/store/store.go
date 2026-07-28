@@ -455,6 +455,7 @@ CREATE TABLE IF NOT EXISTS model_providers (
   proxy_url TEXT NOT NULL DEFAULT '',
   proxy_username TEXT NOT NULL DEFAULT '',
   proxy_password_cipher TEXT NOT NULL DEFAULT '',
+  user_agent TEXT NOT NULL DEFAULT '',
   active INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -553,6 +554,7 @@ SELECT session_id,'',min(created_at),max(created_at) FROM chat_messages GROUP BY
 		`ALTER TABLE model_providers ADD COLUMN proxy_url TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE model_providers ADD COLUMN proxy_username TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE model_providers ADD COLUMN proxy_password_cipher TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE model_providers ADD COLUMN user_agent TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE system_settings ADD COLUMN chat_image_allowed_types_json TEXT NOT NULL DEFAULT '["image/png","image/jpeg","image/webp","image/gif"]'`,
 		`ALTER TABLE system_settings ADD COLUMN system_prompt TEXT DEFAULT NULL`,
 	} {
@@ -747,13 +749,13 @@ func (s *Store) UpsertModelProvider(ctx context.Context, provider domain.ModelPr
 	}
 	provider.UpdatedAt = now
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO model_providers(id,name,kind,base_url,model,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,active,created_at,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+INSERT INTO model_providers(id,name,kind,base_url,model,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,user_agent,active,created_at,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET name=excluded.name,kind=excluded.kind,base_url=excluded.base_url,
 model=excluded.model,api_key_cipher=excluded.api_key_cipher,proxy_url=excluded.proxy_url,proxy_username=excluded.proxy_username,
-proxy_password_cipher=excluded.proxy_password_cipher,updated_at=excluded.updated_at`,
+proxy_password_cipher=excluded.proxy_password_cipher,user_agent=excluded.user_agent,updated_at=excluded.updated_at`,
 		provider.ID, provider.Name, provider.Kind, provider.BaseURL, provider.Model, provider.APIKeyCipher,
-		provider.ProxyURL, provider.ProxyUsername, provider.ProxyPasswordCipher,
+		provider.ProxyURL, provider.ProxyUsername, provider.ProxyPasswordCipher, provider.UserAgent,
 		boolInt(provider.Active), formatTime(provider.CreatedAt), formatTime(provider.UpdatedAt))
 	if err != nil {
 		return domain.ModelProvider{}, err
@@ -762,19 +764,19 @@ proxy_password_cipher=excluded.proxy_password_cipher,updated_at=excluded.updated
 }
 
 func (s *Store) GetModelProvider(ctx context.Context, id string) (domain.ModelProvider, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id,name,kind,base_url,model,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,active,created_at,updated_at
+	row := s.db.QueryRowContext(ctx, `SELECT id,name,kind,base_url,model,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,user_agent,active,created_at,updated_at
 FROM model_providers WHERE id=?`, id)
 	return scanModelProvider(row)
 }
 
 func (s *Store) ActiveModelProvider(ctx context.Context) (domain.ModelProvider, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id,name,kind,base_url,model,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,active,created_at,updated_at
+	row := s.db.QueryRowContext(ctx, `SELECT id,name,kind,base_url,model,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,user_agent,active,created_at,updated_at
 FROM model_providers WHERE active=1 LIMIT 1`)
 	return scanModelProvider(row)
 }
 
 func (s *Store) ListModelProviders(ctx context.Context) ([]domain.ModelProvider, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,kind,base_url,model,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,active,created_at,updated_at
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,kind,base_url,model,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,user_agent,active,created_at,updated_at
 FROM model_providers ORDER BY active DESC,name`)
 	if err != nil {
 		return nil, err
@@ -1031,7 +1033,7 @@ func scanModelProvider(row scanner) (domain.ModelProvider, error) {
 	var active int
 	var created, updated string
 	err := row.Scan(&provider.ID, &provider.Name, &provider.Kind, &provider.BaseURL, &provider.Model,
-		&provider.APIKeyCipher, &provider.ProxyURL, &provider.ProxyUsername, &provider.ProxyPasswordCipher, &active, &created, &updated)
+		&provider.APIKeyCipher, &provider.ProxyURL, &provider.ProxyUsername, &provider.ProxyPasswordCipher, &provider.UserAgent, &active, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.ModelProvider{}, ErrNotFound
 	}
