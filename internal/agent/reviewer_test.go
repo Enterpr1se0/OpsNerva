@@ -8,7 +8,7 @@ import (
 
 func TestDecodeExplanationJSONAndRejectUnexpectedFields(t *testing.T) {
 	var explanation domain.CommandExplanation
-	response := "```json\n{\"summary\":\"重启服务\",\"mechanism\":\"systemd restarts the unit\",\"effects\":[\"brief interruption\"],\"risks\":[\"requests may fail\"],\"beginner_tips\":[\"check status first\"],\"rollback_guide\":\"restart the previous release\"}\n```"
+	response := "```json\n{\"summary\":\"重启服务\",\"mechanism\":\"systemd restarts the unit\",\"risks\":[\"requests may fail\"]}\n```"
 	if err := decodeJSONObject(response, &explanation); err != nil {
 		t.Fatal(err)
 	}

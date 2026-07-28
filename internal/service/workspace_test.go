@@ -632,7 +632,7 @@ func TestWorkspaceDirectUploadUsesOneVersionBoundApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := fmt.Sprintf("%x", sha256.Sum256(content))
-	pending, err := svc.UploadWorkspaceFileToHost(context.Background(), host.ID, "project", "deploy.yaml", digest, "/tmp/deploy.yaml", "deploy exact fixture", "remove remote fixture", "test")
+	pending, err := svc.UploadWorkspaceFileToHost(context.Background(), host.ID, "project", "deploy.yaml", digest, "/tmp/deploy.yaml", "deploy exact fixture", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -654,7 +654,7 @@ func TestWorkspaceDirectUploadUsesOneVersionBoundApproval(t *testing.T) {
 		t.Fatalf("transport did not receive the resolved version-bound source: %#v", transport.calls)
 	}
 
-	stale, err := svc.UploadWorkspaceFileToHost(context.Background(), host.ID, "project", "deploy.yaml", digest, "/tmp/deploy-2.yaml", "detect source change", "remove remote fixture", "test")
+	stale, err := svc.UploadWorkspaceFileToHost(context.Background(), host.ID, "project", "deploy.yaml", digest, "/tmp/deploy-2.yaml", "detect source change", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -677,11 +677,11 @@ func TestWorkspaceShellRunsInApprovalGatedSandbox(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("WORKSPACE_SECRET=must-not-leak\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.RunWorkspaceShell(context.Background(), "project", "pwd", "../", nil, 10, "invalid traversal", "none", "none", "test"); err == nil || !strings.Contains(err.Error(), "clean and relative") {
+	if _, err := svc.RunWorkspaceShell(context.Background(), "project", "pwd", "../", nil, 10, "invalid traversal", "test"); err == nil || !strings.Contains(err.Error(), "clean and relative") {
 		t.Fatalf("workspace shell traversal cwd was not rejected before approval: %v", err)
 	}
 
-	pending, err := svc.RunWorkspaceShell(context.Background(), "project", "test ! -e /home/pig\npwd\nmkdir -p extracted\nprintf 'ready\\n' > extracted/value.txt\ncat .env || true\n", ".", nil, 10, "extract a release archive", "create extracted files", "remove extracted", "test")
+	pending, err := svc.RunWorkspaceShell(context.Background(), "project", "test ! -e /home/pig\npwd\nmkdir -p extracted\nprintf 'ready\\n' > extracted/value.txt\ncat .env || true\n", ".", nil, 10, "extract a release archive", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -708,7 +708,7 @@ func TestWorkspaceShellFailsClosedWithoutSandbox(t *testing.T) {
 	if len(capabilities) != 1 || capabilities[0].Shell {
 		t.Fatalf("unavailable sandbox was advertised: %#v", capabilities)
 	}
-	if _, err := svc.RunWorkspaceShell(context.Background(), "project", "pwd", ".", nil, 10, "inspect workspace", "none", "none", "test"); err == nil || !strings.Contains(err.Error(), "unavailable") {
+	if _, err := svc.RunWorkspaceShell(context.Background(), "project", "pwd", ".", nil, 10, "inspect workspace", "test"); err == nil || !strings.Contains(err.Error(), "unavailable") {
 		t.Fatalf("workspace shell did not fail closed: %v", err)
 	}
 }
@@ -718,7 +718,7 @@ func TestReadOnlyWorkspaceShellCannotPersistChanges(t *testing.T) {
 		t.Skip("bubblewrap is not installed")
 	}
 	svc, root := newWorkspaceService(t, "read_only")
-	pending, err := svc.RunWorkspaceShell(context.Background(), "project", "printf 'blocked\\n' > created.txt", ".", nil, 10, "verify read-only mount", "none", "none", "test")
+	pending, err := svc.RunWorkspaceShell(context.Background(), "project", "printf 'blocked\\n' > created.txt", ".", nil, 10, "verify read-only mount", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -749,7 +749,7 @@ func TestHostWorkspaceShellRequiresFreshOneTimeApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := WithSessionID(context.Background(), "host-shell-session")
-	pending, err := svc.RunWorkspaceShell(ctx, "project", "pwd\nprintf 'ok\\n' > host-created.txt", ".", nil, 10, "exercise host shell", "create a fixture", "remove fixture", "test")
+	pending, err := svc.RunWorkspaceShell(ctx, "project", "pwd\nprintf 'ok\\n' > host-created.txt", ".", nil, 10, "exercise host shell", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -769,7 +769,7 @@ func TestHostWorkspaceShellRequiresFreshOneTimeApproval(t *testing.T) {
 	if content, err := os.ReadFile(filepath.Join(root, "host-created.txt")); err != nil || string(content) != "ok\n" {
 		t.Fatalf("host shell did not write the workspace fixture: content=%q err=%v", content, err)
 	}
-	repeated, err := svc.RunWorkspaceShell(ctx, "project", "pwd\nprintf 'ok\\n' > host-created.txt", ".", nil, 10, "exercise host shell", "create a fixture", "remove fixture", "test")
+	repeated, err := svc.RunWorkspaceShell(ctx, "project", "pwd\nprintf 'ok\\n' > host-created.txt", ".", nil, 10, "exercise host shell", "test")
 	if err != nil || repeated.Status != "approval_required" {
 		t.Fatalf("repeated host shell reused approval: %#v err=%v", repeated, err)
 	}
@@ -786,7 +786,7 @@ func TestHostWorkspaceShellRejectsReadOnlyDisabledAndBackendSwitch(t *testing.T)
 	}, "test"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readOnlyService.RunWorkspaceShell(context.Background(), "project", "pwd", ".", nil, 10, "inspect", "none", "none", "test"); err == nil || !strings.Contains(err.Error(), "read_only") {
+	if _, err := readOnlyService.RunWorkspaceShell(context.Background(), "project", "pwd", ".", nil, 10, "inspect", "test"); err == nil || !strings.Contains(err.Error(), "read_only") {
 		t.Fatalf("read_only workspace accepted host shell: %v", err)
 	}
 
@@ -796,7 +796,7 @@ func TestHostWorkspaceShellRejectsReadOnlyDisabledAndBackendSwitch(t *testing.T)
 	}, "test"); err != nil {
 		t.Fatal(err)
 	}
-	pending, err := svc.RunWorkspaceShell(context.Background(), "project", "pwd", ".", nil, 10, "inspect", "none", "none", "test")
+	pending, err := svc.RunWorkspaceShell(context.Background(), "project", "pwd", ".", nil, 10, "inspect", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -809,7 +809,7 @@ func TestHostWorkspaceShellRejectsReadOnlyDisabledAndBackendSwitch(t *testing.T)
 	if _, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed before setting changed", "operator"); err == nil || !strings.Contains(err.Error(), "disabled") {
 		t.Fatalf("approved host shell ran after backend was disabled: %v", err)
 	}
-	if _, err := svc.RunWorkspaceShell(context.Background(), "project", "pwd", ".", nil, 10, "inspect", "none", "none", "test"); err == nil || !strings.Contains(err.Error(), "disabled") {
+	if _, err := svc.RunWorkspaceShell(context.Background(), "project", "pwd", ".", nil, 10, "inspect", "test"); err == nil || !strings.Contains(err.Error(), "disabled") {
 		t.Fatalf("disabled workspace shell created an approval: %v", err)
 	}
 }

@@ -14,14 +14,12 @@ import (
 
 var transferSHA256Pattern = regexp.MustCompile(`^[a-fA-F0-9]{64}$`)
 
-func (s *Service) TransferFileBetweenHosts(ctx context.Context, sourceHostID, sourcePath, expectedSHA256, destinationHostID, destinationPath string, overwrite bool, expectedDestinationSHA256 string, timeoutSeconds int, reason, rollback, actor string) (domain.ExecResult, error) {
+func (s *Service) TransferFileBetweenHosts(ctx context.Context, sourceHostID, sourcePath, expectedSHA256, destinationHostID, destinationPath string, overwrite bool, expectedDestinationSHA256 string, timeoutSeconds int, reason, actor string) (domain.ExecResult, error) {
 	return s.Submit(ctx, domain.ExecRequest{
 		HostID: destinationHostID, Mode: domain.ExecSSHFileTransfer,
 		SourceHostID: sourceHostID, SourcePath: sourcePath, ExpectedSHA256: expectedSHA256,
 		RemotePath: destinationPath, Overwrite: overwrite, ExpectedDestinationSHA256: expectedDestinationSHA256,
 		TimeoutSeconds: timeoutSeconds, Reason: reason,
-		ExpectedChanges: "transfer one version-bound file from SSH host " + sourceHostID + " to " + destinationHostID,
-		Rollback:        rollback,
 	}, actor)
 }
 
@@ -68,9 +66,6 @@ func validateSSHFileTransferRequest(req domain.ExecRequest) error {
 		}
 	} else if req.ExpectedDestinationSHA256 != "" {
 		return fmt.Errorf("expected_destination_sha256 is only valid when overwrite is true")
-	}
-	if strings.TrimSpace(req.Rollback) == "" {
-		return fmt.Errorf("rollback is required for an SSH file transfer")
 	}
 	return nil
 }

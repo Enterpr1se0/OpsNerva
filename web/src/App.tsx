@@ -3,17 +3,17 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
 import {
-  Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronRight, CircleDot, Clock3, Cpu, Edit3, Eye, EyeOff, FileText, FolderOpen, FunctionSquare, History, ImagePlus, KeyRound, LockKeyhole, LogOut,
-  Download, ListChecks, LoaderCircle, Plus, Power, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, Square, TerminalSquare, Trash2, UploadCloud, X, Zap,
+  Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronLeft, ChevronRight, CircleDot, Clock3, Cpu, Edit3, Eye, EyeOff, FileText, FolderOpen, FunctionSquare, History, ImagePlus, KeyRound, LockKeyhole, LogOut,
+  Cable, Download, ListChecks, LoaderCircle, Plus, Power, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, Square, TerminalSquare, Trash2, UploadCloud, UserRound, X, Zap,
 } from 'lucide-react'
 import { api, chatAttachmentURL, streamChat, workspaceFileEventsURL } from './api'
 import i18n, { localeFor, type SupportedLanguage } from './i18n'
-import type { AgentEvent, AgentPlan, Approval, ChatMessage, ChatSession, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelProvider, ModelProviderInput, ModelProviderKind, Run, ServerLogEntry, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
+import type { AgentEvent, AgentPlan, Approval, ApprovalExecutionResult, ChatMessage, ChatSession, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelProvider, ModelProviderInput, ModelProviderKind, Proxy, ProxyInput, Run, ServerLogEntry, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
 
 type Page = 'chat' | 'config' | 'extensions' | 'audit' | 'logs'
 type ChatEntryImage = {id:string;name:string;mimeType:string;sizeBytes:number;url:string}
 type PendingChatImage = {id:string;file:File;url:string}
-type ChatEntry = { id: string; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; tool?: string; images?:ChatEntryImage[]; active?: boolean; streaming?: boolean; status?: 'pending' | 'completed' | 'failed' }
+type ChatEntry = { id: string; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; tool?: string; toolCallId?:string; runId?:string; transient?:boolean; liveStdout?:string; liveStderr?:string; images?:ChatEntryImage[]; active?: boolean; streaming?: boolean; status?: 'pending' | 'completed' | 'failed' }
 type ActiveChatStream = { id: string; sessionId: string; controller: AbortController }
 
 function historyEntries(messages:ChatMessage[],sessionID:string):ChatEntry[]{
@@ -22,6 +22,74 @@ function historyEntries(messages:ChatMessage[],sessionID:string):ChatEntry[]{
 
 function deactivateReasoning(entry:ChatEntry):ChatEntry{
 	return entry.kind==='reasoning'&&entry.active?{...entry,active:false}:entry
+}
+
+function toolContentWithStatus(content:string,status:string,runID?:string){
+	try{
+		const payload=JSON.parse(content)
+		if(payload&&typeof payload==='object'&&!Array.isArray(payload))return JSON.stringify({...payload,status,...(runID?{run_id:runID}:{})})
+	}catch{/* keep malformed tool output visible */}
+	return JSON.stringify({status,...(runID?{run_id:runID}:{}),value:content})
+}
+
+function updateActiveToolStatus(entries:ChatEntry[],status:string,runID?:string){
+	let index=-1
+	for(let itemIndex=entries.length-1;itemIndex>=0;itemIndex--){
+		if(entries[itemIndex].kind==='tool'&&entries[itemIndex].transient){index=itemIndex;break}
+	}
+	if(index<0)return entries
+	return entries.map((item,itemIndex)=>itemIndex===index?{...item,content:toolContentWithStatus(item.content,status,runID),runId:runID||item.runId}:item)
+}
+
+function updateToolRunStatus(entries:ChatEntry[],runID:string,status:string){
+	if(!runID)return entries
+	return entries.map(item=>{
+		if(item.kind!=='tool')return item
+		const payload=parseRecord(item.content)
+		const result=jsonRecord(payload.result),task=jsonRecord(payload.task)
+		const itemRunID=item.runId||textValue(payload.run_id)||textValue(result?.run_id)||textValue(task?.run_id)
+		const currentStatus=textValue(payload.status)||textValue(result?.status)||textValue(task?.status)
+		if(itemRunID===runID&&status==='in_progress'&&!item.transient&&['completed','failed','interrupted','rejected','denied','expired'].includes(currentStatus))return item
+		return itemRunID===runID?{...item,runId:runID,content:toolContentWithStatus(item.content,status),transient:status==='in_progress'||status==='approval_required'}:item
+	})
+}
+
+function appendToolOutput(entries:ChatEntry[],frame:AgentEvent){
+	const runID=frame.run_id||''
+	const callID=frame.tool_call_id||''
+	let index=callID?entries.findIndex(item=>item.kind==='tool'&&item.toolCallId===callID):-1
+	if(index<0&&runID){
+		index=entries.findIndex(item=>{
+			if(item.kind!=='tool')return false
+			const payload=parseRecord(item.content),result=jsonRecord(payload.result),task=jsonRecord(payload.task)
+			return (item.runId||textValue(payload.run_id)||textValue(result?.run_id)||textValue(task?.run_id))===runID
+		})
+	}
+	if(index<0){
+		for(let itemIndex=entries.length-1;itemIndex>=0;itemIndex--){
+			if(entries[itemIndex].kind==='tool'&&entries[itemIndex].transient){index=itemIndex;break}
+		}
+	}
+	if(index<0)return entries
+	const status=frame.status==='running'?'in_progress':frame.status||'in_progress'
+	return entries.map((item,itemIndex)=>{
+		if(itemIndex!==index)return item
+		const currentPayload=parseRecord(item.content)
+		const currentStatus=textValue(currentPayload.status)||textValue(jsonRecord(currentPayload.result)?.status)||textValue(jsonRecord(currentPayload.task)?.status)
+		if(!item.transient&&status==='in_progress'&&currentStatus!=='running'&&currentStatus!=='in_progress')return item
+		const content=toolContentWithStatus(item.content,status,runID)
+		const chunk=frame.content||''
+		return {
+			...item,
+			content,
+			tool:frame.tool_name||item.tool,
+			toolCallId:callID||item.toolCallId,
+			runId:runID||item.runId,
+			liveStdout:frame.stream==='stdout'?(item.liveStdout||'')+chunk:item.liveStdout,
+			liveStderr:frame.stream==='stderr'?(item.liveStderr||'')+chunk:item.liveStderr,
+			transient:status==='in_progress'||status==='approval_required',
+		}
+	})
 }
 
 function planFromToolContent(content:string):AgentPlan|null{
@@ -65,6 +133,7 @@ function App() {
   const [health, setHealth] = useState<Health | null>(null)
   const [hosts, setHosts] = useState<Host[]>([])
   const [providers, setProviders] = useState<ModelProvider[]>([])
+  const [proxies, setProxies] = useState<Proxy[]>([])
   const [settings, setSettings] = useState<SystemSettings | null>(null)
 	const [capabilities,setCapabilities]=useState<ToolCapabilities>({workspaces:[]})
 	const [toolCatalog,setToolCatalog]=useState<LLMToolCatalog|null>(null)
@@ -72,18 +141,20 @@ function App() {
 	const [mcpServers,setMCPServers]=useState<MCPServer[]>([])
   const [approvals, setApprovals] = useState<Approval[]>([])
   const [runs, setRuns] = useState<Run[]>([])
+  const [sshTunnels,setSSHTunnels]=useState<SSHTunnel[]>([])
   const [error, setError] = useState('')
 	const [agentStreaming,setAgentStreaming]=useState(false)
 
   const refresh = useCallback(async () => {
     try {
-	  const [nextHealth, nextHosts, nextProviders, nextSettings, nextCapabilities, nextToolCatalog, nextSkills, nextMCPServers, nextApprovals, nextRuns] = await Promise.all([
-		api.health(), api.hosts(), api.modelProviders(), api.systemSettings(), api.capabilities(), api.llmTools(), api.skills(), api.mcpServers(), api.approvals(), api.runs(),
+	  const [nextHealth, nextHosts, nextProviders, nextProxies, nextSettings, nextCapabilities, nextToolCatalog, nextSkills, nextMCPServers, nextApprovals, nextRuns, nextSSHTunnels] = await Promise.all([
+		api.health(), api.hosts(), api.modelProviders(), api.proxies(), api.systemSettings(), api.capabilities(), api.llmTools(), api.skills(), api.mcpServers(), api.approvals(), api.runs(), api.sshTunnels(),
       ])
-	  setHealth(nextHealth); setHosts(nextHosts); setProviders(nextProviders); setSettings(nextSettings);setCapabilities(nextCapabilities);setToolCatalog(nextToolCatalog);setSkills(nextSkills);setMCPServers(nextMCPServers); setApprovals(nextApprovals); setRuns(nextRuns); setError('')
+	  setHealth(nextHealth); setHosts(nextHosts); setProviders(nextProviders); setProxies(nextProxies);setSettings(nextSettings);setCapabilities(nextCapabilities);setToolCatalog(nextToolCatalog);setSkills(nextSkills);setMCPServers(nextMCPServers); setApprovals(nextApprovals); setRuns(nextRuns);setSSHTunnels(nextSSHTunnels.tunnels||[]); setError('')
 	} catch (err) { const message=errorText(err);if(/authentication required/i.test(message))setAuth('guest');setError(message) }
   }, [])
-	const refreshApprovals=useCallback(async()=>{
+	const refreshApprovals=useCallback(async(decidedID?:string)=>{
+		if(decidedID)setApprovals(current=>current.filter(item=>item.id!==decidedID))
 		try{setApprovals(await api.approvals())}
 		catch(err){const message=errorText(err);if(/authentication required/i.test(message))setAuth('guest');setError(message)}
 	},[])
@@ -120,6 +191,14 @@ function App() {
 	if(auth==='guest')return <LoginPage onAuthenticated={()=>setAuth('authenticated')}/>
 
   const title = t(`shell.pageTitles.${page}`)
+	const stopSSHTunnel=async(id:string)=>{
+		try{
+			await api.stopSSHTunnel(id)
+			setSSHTunnels(current=>current.filter(item=>item.id!==id))
+		}catch(err){
+			setError(errorText(err))
+		}
+	}
 
   return <div className="app-shell">
     <aside className="sidebar">
@@ -139,13 +218,14 @@ function App() {
     <main>
 	      <header className="topbar"><div><h1>{title}</h1></div><div className="top-actions">
         <LanguageSwitch/>
+        <SSHTunnelStatus tunnels={sshTunnels} onStop={stopSSHTunnel}/>
         <span className={`status ${health?.status === 'ok' ? 'online' : ''}`}><CircleDot size={14}/>{health?.status === 'ok' ? t('shell.online') : t('shell.disconnected')}</span>
         <button className="icon-button" onClick={refresh} title={t('shell.refresh')}><RefreshCw size={17}/></button>
       </div></header>
       {error && <div className="global-error"><ShieldAlert size={17}/>{error}<button onClick={() => setError('')}><X size={15}/></button></div>}
       <section className="workspace">
-			{page === 'chat' && <ChatPage hosts={hosts} approvals={approvals} runs={runs} capabilities={capabilities} imageTypes={settings?.chat_image_allowed_types||defaultChatImageTypes} agentAvailable={!!health?.agent_available} modelName={health?.model?.model} refresh={refresh} refreshApprovals={refreshApprovals} onStreamingChange={setAgentStreaming}/>}
-		{page === 'config' && <ConfigurationPage hosts={hosts} providers={providers} settings={settings} capabilities={capabilities} health={health} refresh={refresh}/>}
+			{page === 'chat' && <ChatPage hosts={hosts} tunnels={sshTunnels} approvals={approvals} runs={runs} capabilities={capabilities} imageTypes={settings?.chat_image_allowed_types||defaultChatImageTypes} agentAvailable={!!health?.agent_available} modelName={health?.model?.model} refresh={refresh} refreshApprovals={refreshApprovals} onStreamingChange={setAgentStreaming}/>}
+		{page === 'config' && <ConfigurationPage hosts={hosts} providers={providers} proxies={proxies} settings={settings} capabilities={capabilities} health={health} refresh={refresh}/>}
 		{page === 'extensions' && <ExtensionsPage skills={skills} mcpServers={mcpServers} toolCatalog={toolCatalog} refresh={refresh}/>}
         {page === 'audit' && <AuditPage runs={runs} hosts={hosts}/>}
         {page === 'logs' && <LogsPage/>}
@@ -161,6 +241,26 @@ function LanguageSwitch(){
 		<button type="button" className={language==='zh'?'active':''} aria-pressed={language==='zh'} onClick={()=>void instance.changeLanguage('zh')}>{t('language.chinese')}</button>
 		<button type="button" className={language==='en'?'active':''} aria-pressed={language==='en'} onClick={()=>void instance.changeLanguage('en')}>{t('language.english')}</button>
 	</div>
+}
+
+function SSHTunnelStatus({tunnels,onStop}:{tunnels:SSHTunnel[];onStop:(id:string)=>Promise<void>}){
+	const {t,i18n:instance}=useTranslation()
+	const [stopping,setStopping]=useState('')
+	return <details className="ssh-tunnel-status">
+		<summary title={t('tunnels.title')}><Cable size={14}/><span>{t('tunnels.short')}</span><em>{tunnels.length}</em></summary>
+		<div className="ssh-tunnel-popover">
+			<header><span><Cable size={15}/><b>{t('tunnels.title')}</b></span><small>{t('tunnels.localOnly')}</small></header>
+			<div>
+				{tunnels.map(tunnel=><section className={tunnel.status} key={tunnel.id}>
+					<div className="ssh-tunnel-route"><i/><code>{tunnel.host_name||tunnel.host_id}:{tunnel.remote_host}:{tunnel.remote_port}</code><span>→</span><code>localhost:{tunnel.local_port}</code></div>
+					<dl><div><dt>{t('common.status')}</dt><dd>{t(`statusLabels.${tunnel.status}`,{defaultValue:tunnel.status})}</dd></div><div><dt>{t('tunnels.connections')}</dt><dd>{tunnel.active_connections} / {tunnel.total_connections}</dd></div><div><dt>{t('tunnels.traffic')}</dt><dd>↑ {formatFileSize(tunnel.bytes_sent)} · ↓ {formatFileSize(tunnel.bytes_received)}</dd></div><div><dt>{t('tunnels.started')}</dt><dd>{new Date(tunnel.started_at).toLocaleTimeString(localeFor(instance.language))}</dd></div></dl>
+					<div className="ssh-tunnel-meta"><span>{tunnel.proxy_used?t('tunnels.viaProxy'):t('tunnels.direct')}</span><code>{tunnel.id}</code><button type="button" disabled={stopping===tunnel.id} onClick={async()=>{setStopping(tunnel.id);try{await onStop(tunnel.id)}finally{setStopping('')}}}>{stopping===tunnel.id?<LoaderCircle className="spin" size={12}/>:<Square size={10} fill="currentColor"/>}{t('tunnels.stop')}</button></div>
+					{tunnel.error&&<p><ShieldAlert size={12}/>{tunnel.error}</p>}
+				</section>)}
+				{!tunnels.length&&<div className="ssh-tunnel-empty">{t('tunnels.empty')}</div>}
+			</div>
+		</div>
+	</details>
 }
 
 type PasswordInputProps=Omit<React.InputHTMLAttributes<HTMLInputElement>,'type'>
@@ -207,22 +307,33 @@ function LoginPage({onAuthenticated}:{onAuthenticated:()=>void}){
 		return <div className="auth-screen"><LanguageSwitch/><section className="login-card"><div className="login-mark"><TerminalSquare size={29}/></div><span>{t('auth.subtitle')}</span><h1>{t('auth.title')}</h1><form onSubmit={submit}><label><div className="login-input"><LockKeyhole size={17}/><PasswordInput aria-label={t('password.current')} autoComplete="current-password" value={password} onChange={event=>setPassword(event.target.value)} autoFocus required/></div></label>{error&&<div className="login-error"><ShieldAlert size={15}/>{error}</div>}<button className="primary" disabled={busy||password.length===0}>{busy?<LoaderCircle className="spin" size={17}/>:<ShieldCheck size={17}/>}<span>{busy?t('auth.authenticating'):t('auth.enter')}</span></button></form></section></div>
 }
 
-type ConfigurationSection = 'models' | 'hosts' | 'system'
+type ConfigurationSection = 'models' | 'hosts' | 'proxies' | 'system'
 
-function ConfigurationPage({hosts,providers,settings,capabilities,health,refresh}:{hosts:Host[];providers:ModelProvider[];settings:SystemSettings|null;capabilities:ToolCapabilities;health:Health|null;refresh:()=>Promise<void>}) {
+function ConfigurationEditorPage({icon,title,busy,onBack,children}:{icon:React.ReactNode;title:string;busy?:boolean;onBack:()=>void;children:React.ReactNode}){
+	const {t}=useTranslation()
+	return <div className="configuration-editor-page">
+		<button type="button" className="configuration-editor-back" disabled={busy} onClick={onBack}><ChevronLeft size={16}/>{t('config.backToList')}</button>
+		<header className="configuration-editor-header panel"><div>{icon}</div><span><small>{t('config.editor')}</small><h2>{title}</h2></span></header>
+		{children}
+	</div>
+}
+
+function ConfigurationPage({hosts,providers,proxies,settings,capabilities,health,refresh}:{hosts:Host[];providers:ModelProvider[];proxies:Proxy[];settings:SystemSettings|null;capabilities:ToolCapabilities;health:Health|null;refresh:()=>Promise<void>}) {
   const {t}=useTranslation()
   const [section,setSection]=useState<ConfigurationSection>('models')
   const tabs:[ConfigurationSection,React.ReactNode,string,string][]=[
     ['models',<Cpu size={17}/>, t('config.tabs.models'), t('config.configured',{count:providers.length})],
     ['hosts',<Server size={17}/>, t('config.tabs.hosts'), t('config.registered',{count:hosts.length})],
+    ['proxies',<Cable size={17}/>, t('config.tabs.proxies'), t('config.configured',{count:proxies.length})],
     ['system',<SlidersHorizontal size={17}/>, t('config.tabs.system'), t('config.maxIterations',{count:settings?.agent_max_iterations??50})],
 	  ]
 	  return <div className="configuration-center page-stack">
 	    <div className="configuration-tabs" role="tablist" aria-label={t('config.sections')}>{tabs.map(([id,icon,label,meta])=><button type="button" role="tab" aria-selected={section===id} className={section===id?'active':''} onClick={()=>setSection(id)} key={id}>{icon}<span><b>{label}</b><small>{meta}</small></span><ChevronRight size={15}/></button>)}</div>
     <div className="configuration-content" role="tabpanel">
-      {section==='models'&&<ModelsPage providers={providers} health={health} refresh={refresh}/>} 
-      {section==='hosts'&&<HostsPage hosts={hosts} refresh={refresh}/>}
-	  {section==='system'&&<SystemSettingsPage settings={settings} providers={providers} capabilities={capabilities} modelStatus={health?.model} refresh={refresh}/>}
+      {section==='models'&&<ModelsPage providers={providers} proxies={proxies} health={health} refresh={refresh}/>}
+      {section==='hosts'&&<HostsPage hosts={hosts} proxies={proxies} refresh={refresh}/>}
+      {section==='proxies'&&<ProxiesPage proxies={proxies} refresh={refresh}/>}
+	  {section==='system'&&<SystemSettingsPage settings={settings} providers={providers} proxies={proxies} capabilities={capabilities} modelStatus={health?.model} refresh={refresh}/>}
     </div>
   </div>
 }
@@ -403,7 +514,7 @@ function SettingsSectionFooter({dirty,busy,saving,onDiscard}:{dirty:boolean;busy
 
 type SystemSettingsSection='iterations'|'prompt'|'explanation'|'images'|'shell'
 
-function SystemSettingsPage({settings,providers,capabilities,modelStatus,refresh}:{settings:SystemSettings|null;providers:ModelProvider[];capabilities:ToolCapabilities;modelStatus?:Health['model'];refresh:()=>Promise<void>}) {
+function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus,refresh}:{settings:SystemSettings|null;providers:ModelProvider[];proxies:Proxy[];capabilities:ToolCapabilities;modelStatus?:Health['model'];refresh:()=>Promise<void>}) {
   const {t}=useTranslation()
   const savedValue=settings?.agent_max_iterations??50
   const savedPrompt=settings?.system_prompt??''
@@ -495,7 +606,7 @@ function SystemSettingsPage({settings,providers,capabilities,modelStatus,refresh
 			</SettingsDisclosure>
 		</div>
 	<WorkspaceSettingsPanel workspaces={capabilities.workspaces} refresh={refresh} onNotice={setNotice}/>
-	<WebSearchSettingsPanel refresh={refresh}/>
+	<WebSearchSettingsPanel proxies={proxies} refresh={refresh}/>
 	<AdminPasswordPanel/>
   </div>
 }
@@ -512,22 +623,21 @@ function WorkspaceSettingsPanel({workspaces,refresh,onNotice}:{workspaces:Worksp
 	return <SettingsDisclosure className="workspace-settings" icon={<FolderOpen size={18}/>} title={t('settings.capabilities')} meta={t('workspace.registeredCount',{count:workspaces.length})}><div className="workspace-settings-actions"><button type="button" onClick={beginCreate}><Plus size={13}/>{t('workspace.add')}</button></div>{open&&<div className="workspace-settings-editor"><label><span>{t('workspace.id')}</span><input value={input.id} disabled={!!editing} maxLength={64} onChange={event=>setInput(current=>({...current,id:event.target.value}))}/></label><label><span>{t('workspace.permission')}</span><select value={input.access} onChange={event=>setInput(current=>({...current,access:event.target.value as WorkspaceInput['access']}))}><option value="read_only">{t('workspace.readOnly')}</option><option value="read_write">{t('workspace.readWrite')}</option></select></label><div><button type="button" onClick={close}>{t('common.cancel')}</button><button type="button" className="primary" disabled={busy==='save'||!input.id.trim()} onClick={()=>void save()}>{busy==='save'?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {t('common.save')}</button></div></div>}<div className="workspace-settings-list">{workspaces.map(workspace=><div className="workspace-settings-row" key={workspace.id}><code>{workspace.id}</code><em className={workspace.access}>{workspace.access==='read_write'?t('workspace.readWrite'):t('workspace.readOnly')}</em><button type="button" title={t('common.edit')} onClick={()=>beginEdit(workspace)}><Edit3 size={13}/></button><button type="button" className="danger" disabled={busy===`delete-${workspace.id}`} title={t('workspace.remove')} onClick={()=>setDeleteCandidate(workspace)}>{busy===`delete-${workspace.id}`?<LoaderCircle className="spin" size={13}/>:<Trash2 size={13}/>}</button></div>)}{!workspaces.length&&<div className="workspace-settings-empty">{t('settings.noWorkspace')}</div>}</div>{deleteCandidate&&<DestructiveConfirmDialog label={t('workspace.removeDialogLabel')} title={t('workspace.removeTitle',{id:deleteCandidate.id})} description={t('workspace.removeText')} busy={busy===`delete-${deleteCandidate.id}`} onCancel={()=>setDeleteCandidate(null)} onConfirm={()=>void remove()}/>}</SettingsDisclosure>
 }
 
-const defaultWebSearchInput:WebSearchSettingsInput={enabled:false,base_url:'https://api.tavily.com',api_key:'',proxy_url:'',proxy_username:'',proxy_password:'',timeout_seconds:20,max_results:10}
+const defaultWebSearchInput:WebSearchSettingsInput={enabled:false,base_url:'https://api.tavily.com',api_key:'',proxy_id:'',timeout_seconds:20,max_results:10}
 
-function WebSearchSettingsPanel({refresh}:{refresh:()=>Promise<void>}){
+function WebSearchSettingsPanel({proxies,refresh}:{proxies:Proxy[];refresh:()=>Promise<void>}){
 	const {t}=useTranslation()
 	const [stored,setStored]=useState<WebSearchSettings|null>(null),[input,setInput]=useState<WebSearchSettingsInput>(defaultWebSearchInput)
 	const [loading,setLoading]=useState(true),[busy,setBusy]=useState(''),[dirty,setDirty]=useState(false),[notice,setNotice]=useState('')
 	const hasEffectiveAPIKey=!!input.api_key?.trim()||!!stored?.has_api_key&&!input.clear_api_key
-	const applyStored=(value:WebSearchSettings)=>{setStored(value);setInput({enabled:value.enabled,base_url:value.base_url,api_key:'',proxy_url:value.proxy_url||'',proxy_username:value.proxy_username||'',proxy_password:'',timeout_seconds:value.timeout_seconds,max_results:value.max_results});setDirty(false)}
+	const applyStored=(value:WebSearchSettings)=>{setStored(value);setInput({enabled:value.enabled,base_url:value.base_url,api_key:'',proxy_id:value.proxy_id||'',timeout_seconds:value.timeout_seconds,max_results:value.max_results});setDirty(false)}
 	useEffect(()=>{let active=true;api.webSearchSettings().then(value=>{if(active)applyStored(value)}).catch(err=>{if(active)setNotice(errorText(err))}).finally(()=>{if(active)setLoading(false)});return()=>{active=false}},[])
 	const update=<K extends keyof WebSearchSettingsInput>(key:K,value:WebSearchSettingsInput[K])=>{setInput(current=>({...current,[key]:value}));setDirty(true);setNotice('')}
 	const save=async()=>{setBusy('save');setNotice('');try{const value=await api.saveWebSearchSettings(input);applyStored(value);setNotice(t('webSearch.saved'));await refresh()}catch(err){setNotice(errorText(err))}finally{setBusy('')}}
 	const test=async()=>{setBusy('test');setNotice('');try{const result=await api.testWebSearch();setNotice(t('webSearch.testPassed',{count:result.results.length}))}catch(err){setNotice(errorText(err))}finally{setBusy('')}}
 	const clearKey=()=>{setInput(current=>({...current,enabled:false,api_key:'',clear_api_key:true}));setDirty(true);setNotice('')}
-	const clearProxyPassword=()=>{setInput(current=>({...current,proxy_password:'',clear_proxy_password:true}));setDirty(true);setNotice('')}
 	if(loading)return <SettingsDisclosure className="web-search-settings" icon={<Search size={18}/>} title={t('webSearch.title')} meta={t('common.loading')}><div className="settings-loading"><LoaderCircle className="spin" size={16}/>{t('common.loading')}</div></SettingsDisclosure>
-	return <SettingsDisclosure className="web-search-settings" icon={<Search size={18}/>} title={t('webSearch.title')} meta={input.enabled?t('common.enabled'):t('common.disabled')}><label className="web-search-toggle"><span>{t('webSearch.title')}</span><input type="checkbox" checked={input.enabled} onChange={event=>update('enabled',event.target.checked)}/><i/><b>{input.enabled?t('common.enabled'):t('common.disabled')}</b></label><div className="web-search-grid"><label><span>{t('webSearch.baseURL')}</span><input value={input.base_url} onChange={event=>update('base_url',event.target.value)} placeholder="https://api.tavily.com"/></label><label><span>{t('webSearch.apiKey')}</span><PasswordInput value={input.api_key||''} onChange={event=>update('api_key',event.target.value)} placeholder={stored?.has_api_key?t('webSearch.savedSecret'):''}/></label><label><span>{t('webSearch.proxyURL')}</span><input value={input.proxy_url||''} onChange={event=>update('proxy_url',event.target.value)}/></label><label><span>{t('webSearch.proxyUsername')}</span><input value={input.proxy_username||''} onChange={event=>update('proxy_username',event.target.value)}/></label><label><span>{t('webSearch.proxyPassword')}</span><PasswordInput value={input.proxy_password||''} onChange={event=>update('proxy_password',event.target.value)} placeholder={stored?.has_proxy_password?t('webSearch.savedSecret'):''}/></label><label><span>{t('webSearch.timeout')}</span><input type="number" min="5" max="120" value={input.timeout_seconds} onChange={event=>update('timeout_seconds',Number(event.target.value))}/></label><label><span>{t('webSearch.maxResults')}</span><input type="number" min="1" max="20" value={input.max_results} onChange={event=>update('max_results',Number(event.target.value))}/></label></div>{notice&&<p>{notice}</p>}<footer><div>{stored?.has_api_key&&<button type="button" className="danger" onClick={clearKey}>{t('webSearch.clearKey')}</button>}{stored?.has_proxy_password&&<button type="button" className="danger" onClick={clearProxyPassword}>{t('webSearch.clearProxyPassword')}</button>}</div><button type="button" disabled={busy!==''||dirty||!stored?.enabled||!stored.has_api_key} onClick={()=>void test()}>{busy==='test'?<LoaderCircle className="spin" size={13}/>:<Search size={13}/>} {t('common.test')}</button><button type="button" className="primary" disabled={busy!==''||!dirty||input.enabled&&!hasEffectiveAPIKey} onClick={()=>void save()}>{busy==='save'?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {t('common.save')}</button></footer></SettingsDisclosure>
+	return <SettingsDisclosure className="web-search-settings" icon={<Search size={18}/>} title={t('webSearch.title')} meta={input.enabled?t('common.enabled'):t('common.disabled')}><label className="web-search-toggle"><span>{t('webSearch.title')}</span><input type="checkbox" checked={input.enabled} onChange={event=>update('enabled',event.target.checked)}/><i/><b>{input.enabled?t('common.enabled'):t('common.disabled')}</b></label><div className="web-search-grid"><label><span>{t('webSearch.baseURL')}</span><input value={input.base_url} onChange={event=>update('base_url',event.target.value)} placeholder="https://api.tavily.com"/></label><label><span>{t('webSearch.apiKey')}</span><PasswordInput value={input.api_key||''} onChange={event=>update('api_key',event.target.value)} placeholder={stored?.has_api_key?t('webSearch.savedSecret'):''}/></label><label><span>{t('common.proxy')}</span><select value={input.proxy_id||''} onChange={event=>update('proxy_id',event.target.value)}><option value="">{t('common.direct')}</option>{proxies.map(proxy=><option value={proxy.id} key={proxy.id}>{proxy.name} · {proxy.url}</option>)}</select></label><label><span>{t('webSearch.timeout')}</span><input type="number" min="5" max="120" value={input.timeout_seconds} onChange={event=>update('timeout_seconds',Number(event.target.value))}/></label><label><span>{t('webSearch.maxResults')}</span><input type="number" min="1" max="20" value={input.max_results} onChange={event=>update('max_results',Number(event.target.value))}/></label></div>{notice&&<p>{notice}</p>}<footer><div>{stored?.has_api_key&&<button type="button" className="danger" onClick={clearKey}>{t('webSearch.clearKey')}</button>}</div><button type="button" disabled={busy!==''||dirty||!stored?.enabled||!stored.has_api_key} onClick={()=>void test()}>{busy==='test'?<LoaderCircle className="spin" size={13}/>:<Search size={13}/>} {t('common.test')}</button><button type="button" className="primary" disabled={busy!==''||!dirty||input.enabled&&!hasEffectiveAPIKey} onClick={()=>void save()}>{busy==='save'?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {t('common.save')}</button></footer></SettingsDisclosure>
 }
 
 function AdminPasswordPanel(){
@@ -541,7 +651,7 @@ function Nav({ active, icon, label, count, warn, onClick }: {active:boolean;icon
   return <button className={`nav-item ${active ? 'active' : ''}`} onClick={onClick}>{icon}<span>{label}</span>{count !== undefined && <em className={warn ? 'warn' : ''}>{count}</em>}</button>
 }
 
-function ChatPage({ hosts, approvals, runs, capabilities, imageTypes, agentAvailable, modelName, refresh, refreshApprovals, onStreamingChange }: {hosts:Host[];approvals:Approval[];runs:Run[];capabilities:ToolCapabilities;imageTypes:string[];agentAvailable:boolean;modelName?:string;refresh:()=>Promise<void>;refreshApprovals:()=>Promise<void>;onStreamingChange:(streaming:boolean)=>void}) {
+function ChatPage({ hosts, tunnels, approvals, runs, capabilities, imageTypes, agentAvailable, modelName, refresh, refreshApprovals, onStreamingChange }: {hosts:Host[];tunnels:SSHTunnel[];approvals:Approval[];runs:Run[];capabilities:ToolCapabilities;imageTypes:string[];agentAvailable:boolean;modelName?:string;refresh:()=>Promise<void>;refreshApprovals:(decidedID?:string)=>Promise<void>;onStreamingChange:(streaming:boolean)=>void}) {
 	const {t,i18n:instance}=useTranslation()
   const [entries, setEntries] = useState<ChatEntry[]>([])
 	  const [message, setMessage] = useState('')
@@ -558,6 +668,7 @@ function ChatPage({ hosts, approvals, runs, capabilities, imageTypes, agentAvail
   const [running, setRunning] = useState(false)
   const [detachedRunning,setDetachedRunning]=useState(false)
 	const [stopping,setStopping]=useState(false)
+	const [modelRetrying,setModelRetrying]=useState(false)
   const [reasoningSeen, setReasoningSeen] = useState(false)
   const [plan,setPlan]=useState<AgentPlan|null>(null)
 	const [approvalNotice,setApprovalNotice]=useState('')
@@ -570,6 +681,7 @@ function ChatPage({ hosts, approvals, runs, capabilities, imageTypes, agentAvail
 	  const imageURLsRef=useRef(new Set<string>())
   const sessionLoadRef=useRef('')
   const hostNames = useMemo(() => hosts.map((host) => host.name).join(', '), [hosts])
+  const tunnelSummary=tunnels.length?tunnels.map(tunnel=>`${tunnel.host_name||tunnel.host_id}:${tunnel.remote_host}:${tunnel.remote_port} → localhost:${tunnel.local_port}`).join(' · '):t('tunnels.none')
   const currentApprovals=useMemo(()=>sessionId?approvals.filter(item=>item.session_id===sessionId):[],[approvals,sessionId])
 	const pendingExplanationID=currentApprovals.find(item=>item.ai_review?.status==='pending')?.id||''
 	const sessionBusy=running||detachedRunning
@@ -601,6 +713,7 @@ function ChatPage({ hosts, approvals, runs, capabilities, imageTypes, agentAvail
     activeStreamRef.current=null
     stream.controller.abort()
     setRunning(false)
+    setModelRetrying(false)
   }, [])
 
   const loadSession = useCallback(async (id: string) => {
@@ -611,7 +724,7 @@ function ChatPage({ hosts, approvals, runs, capabilities, imageTypes, agentAvail
     try {
       const state = await api.chatState(id)
       if(sessionLoadRef.current!==requestID)return
-	      setEntries(historyEntries(state.messages||[],id));setDetachedRunning(!!state.active);setStopping(false);setPlan(state.plan||null);setWorkspaceID(state.workspace_id||'');setBoundWorkspaceID(state.workspace_id||'')
+	      setEntries(historyEntries(state.messages||[],id));setDetachedRunning(!!state.active);setStopping(false);setModelRetrying(false);setPlan(state.plan||null);setWorkspaceID(state.workspace_id||'');setBoundWorkspaceID(state.workspace_id||'')
       setSessionId(id); rememberSession(id); setHistoryError('')
       void refresh()
     } catch (err) { if(sessionLoadRef.current===requestID)setHistoryError(errorText(err)) }
@@ -662,7 +775,7 @@ function ChatPage({ hosts, approvals, runs, capabilities, imageTypes, agentAvail
     sessionLoadRef.current=''
     setLoadingSession('')
     setHistoryOpen(false)
-	    stickToLatest.current=true;setSessionId('');setBoundWorkspaceID('');setEntries([]); setMessage('');clearPendingImages(); setHistoryError(''); setReasoningSeen(false);setDetachedRunning(false);setStopping(false);setPlan(null); rememberSession(newSessionMarker)
+	    stickToLatest.current=true;setSessionId('');setBoundWorkspaceID('');setEntries([]); setMessage('');clearPendingImages(); setHistoryError(''); setReasoningSeen(false);setDetachedRunning(false);setStopping(false);setModelRetrying(false);setPlan(null); rememberSession(newSessionMarker)
     void refreshSessions()
   }
 
@@ -713,14 +826,19 @@ function ChatPage({ hosts, approvals, runs, capabilities, imageTypes, agentAvail
     activeStreamRef.current={id:streamID,sessionId:sessionId,controller}
     const isAttached=()=>activeStreamRef.current?.id===streamID
     stickToLatest.current=true
-    setApprovalNotice('');setReasoningSeen(false);setStopping(false);setRunning(true)
+    setApprovalNotice('');setReasoningSeen(false);setStopping(false);setModelRetrying(false);setRunning(true)
 	    const entryImages=queryImages.map(image=>({id:image.id,name:image.file.name,mimeType:image.file.type,sizeBytes:image.file.size,url:image.url}))
 	    setEntries((old) => [...old, { id: userEntryID, kind: 'user', content: query, images:entryImages, status:'pending' }, { id: 'streaming', kind: 'assistant', content: '', streaming:true }])
 	    try {
-	      await streamChat(sessionId, selectedWorkspace?.id||'', query, queryImages.map(image=>image.file), (frame: AgentEvent) => {
+      await streamChat(sessionId, selectedWorkspace?.id||'', query, queryImages.map(image=>image.file), (frame: AgentEvent) => {
         if(!isAttached())return
 	        if (frame.session_id) { querySessionID=frame.session_id;activeStreamRef.current!.sessionId=frame.session_id;setSessionId(frame.session_id);setBoundWorkspaceID(selectedWorkspace?.id||'');rememberSession(frame.session_id) }
-        if (frame.type === 'approval') { setEntries(old=>old.map(item=>item.id===userEntryID?{...item,status:'completed'}:item));setApprovalNotice('');void refreshApprovals() }
+        if(frame.type==='retry')setModelRetrying(true)
+        else if(['approval','reasoning','tool','tool_output','message','done','interrupted','error'].includes(frame.type))setModelRetrying(false)
+        if (frame.type === 'approval') { setEntries(old=>updateActiveToolStatus(old.map(item=>item.id===userEntryID?{...item,status:'completed'}:item),'approval_required',frame.run_id));setApprovalNotice('');void refreshApprovals() }
+        if(frame.type==='tool_output'){
+          setEntries(old=>appendToolOutput(old,frame))
+        }
         if (frame.type === 'reasoning' && frame.content) {
           setReasoningSeen(true)
           const reasoningID=`reasoning_${frame.segment_id||'current'}`
@@ -730,21 +848,37 @@ function ChatPage({ hosts, approvals, runs, capabilities, imageTypes, agentAvail
             return [...old.filter((item)=>item.id!=='streaming').map(deactivateReasoning),{id:reasoningID,kind:'reasoning',content:frame.content!,active:true},{id:'streaming',kind:'assistant',content:'',streaming:true}]
           })
         }
-        if (frame.type === 'message' && frame.content) {
-          if (frame.role === 'tool') {setEntries((old) => [...old.filter((item) => item.id !== 'streaming').map(deactivateReasoning), { id: clientId(), kind: 'tool', content: frame.content!, tool: frame.tool_name }, { id: 'streaming', kind: 'assistant', content: '', streaming:true }]);if(frame.tool_name?.startsWith('ops_plan_')){const nextPlan=planFromToolContent(frame.content);if(nextPlan)setPlan(nextPlan)}if(/approval_id|approval_required/.test(frame.content))void refresh()}
-          else setEntries((old) => old.map((item) => item.id === 'streaming' ? {...item, content: item.content + frame.content} : deactivateReasoning(item)))
+        if (frame.type === 'tool' && frame.content) {
+          setEntries(old=>{
+            const callID=frame.tool_call_id||''
+            let index=callID?old.findIndex(item=>item.kind==='tool'&&item.toolCallId===callID):-1
+            if(index<0&&!callID){
+              for(let itemIndex=old.length-1;itemIndex>=0;itemIndex--){
+                const item=old[itemIndex]
+                if(item.kind==='tool'&&item.transient&&item.tool===frame.tool_name){index=itemIndex;break}
+              }
+            }
+            const transient=frame.status==='in_progress'
+            if(index>=0)return old.map((item,itemIndex)=>itemIndex===index?{...item,content:frame.content!,tool:frame.tool_name||item.tool,toolCallId:callID||item.toolCallId,runId:textValue(parseRecord(frame.content!).run_id)||item.runId,liveStdout:transient?item.liveStdout:undefined,liveStderr:transient?item.liveStderr:undefined,transient}:item)
+            const entry:ChatEntry={id:callID?`tool_${callID}`:clientId(),kind:'tool',content:frame.content!,tool:frame.tool_name,toolCallId:callID||undefined,runId:textValue(parseRecord(frame.content!).run_id)||undefined,transient}
+            return [...old.filter(item=>item.id!=='streaming').map(deactivateReasoning),entry,{id:'streaming',kind:'assistant',content:'',streaming:true}]
+          })
+          if(frame.tool_name?.startsWith('ops_plan_')){const nextPlan=planFromToolContent(frame.content);if(nextPlan)setPlan(nextPlan)}
+          if(/approval_id|approval_required/.test(frame.content))void refresh()
         }
+        if (frame.type === 'message' && frame.content) setEntries((old) => old.map((item) => item.id === 'streaming' ? {...item, content: item.content + frame.content} : deactivateReasoning(item)))
         if (frame.type === 'done') setEntries(old=>old.map(item=>item.id===userEntryID?{...item,status:'completed'}:item.id==='streaming'?{...item,streaming:false}:item))
-			if (frame.type === 'interrupted') {setStopping(false);setDetachedRunning(false);setEntries(old=>[...old.filter(item=>item.id!=='streaming').map(item=>item.id===userEntryID?{...item,status:'failed' as const}:deactivateReasoning(item)),{id:clientId(),kind:'assistant',content:frame.content||t('chat.stopped')}])}
-			if (frame.type === 'error') setEntries((old) => [...old.map(item=>item.id===userEntryID?{...item,status:'failed' as const}:item.id==='streaming'?{...item,streaming:false}:item), { id: clientId(), kind: 'error', content: frame.error || t('chat.agentError') }])
+			if (frame.type === 'interrupted') {setStopping(false);setDetachedRunning(false);setEntries(old=>[...updateActiveToolStatus(old.filter(item=>item.id!=='streaming').map(item=>item.id===userEntryID?{...item,status:'failed' as const}:deactivateReasoning(item)),'interrupted'),{id:clientId(),kind:'assistant',content:frame.content||t('chat.stopped')}])}
+			if (frame.type === 'error') setEntries((old) => [...updateActiveToolStatus(old.map(item=>item.id===userEntryID?{...item,status:'failed' as const}:item.id==='streaming'?{...item,streaming:false}:item),'failed'), { id: clientId(), kind: 'error', content: frame.error || t('chat.agentError') }])
       },controller.signal)
-    } catch (err) { if(isAttached())setEntries((old) => [...old.map(item=>item.id===userEntryID?{...item,status:'failed' as const}:item), { id: clientId(), kind: 'error', content: errorText(err) }]) }
+    } catch (err) { if(isAttached()){setModelRetrying(false);setEntries((old) => [...updateActiveToolStatus(old.map(item=>item.id===userEntryID?{...item,status:'failed' as const}:item),'failed'), { id: clientId(), kind: 'error', content: errorText(err) }])} }
     finally {
       if(!isAttached())return
+      setModelRetrying(false)
       setEntries((old) => old.filter((item) => item.id !== 'streaming' || item.content !== '').map((item)=>item.id==='streaming'?{...item,streaming:false}:deactivateReasoning(item)))
       setRunning(false)
 		setStopping(false)
-	      if(querySessionID){try{const state=await api.chatState(querySessionID);if(!isAttached())return;setDetachedRunning(!!state.active);setPlan(state.plan||null);setBoundWorkspaceID(state.workspace_id||'');setEntries(old=>[...historyEntries(state.messages||[],querySessionID),...old.filter(item=>item.kind==='error'&&!item.id.startsWith('history_'))]);for(const image of queryImages){URL.revokeObjectURL(image.url);imageURLsRef.current.delete(image.url)}}catch{/* polling or the next reload will recover state */}}
+	      if(querySessionID){try{const state=await api.chatState(querySessionID);if(!isAttached())return;setDetachedRunning(!!state.active);setPlan(state.plan||null);setBoundWorkspaceID(state.workspace_id||'');setEntries(old=>[...historyEntries(state.messages||[],querySessionID),...old.filter(item=>(item.kind==='error'&&!item.id.startsWith('history_'))||(item.kind==='tool'&&item.transient))]);for(const image of queryImages){URL.revokeObjectURL(image.url);imageURLsRef.current.delete(image.url)}}catch{/* polling or the next reload will recover state */}}
       if(!isAttached())return
       activeStreamRef.current=null
       void refreshSessions();void refresh()
@@ -770,17 +904,18 @@ function ChatPage({ hosts, approvals, runs, capabilities, imageTypes, agentAvail
     <ChatWorkspacePanel key={selectedWorkspace?.id||''} workspaces={capabilities.workspaces} workspaceID={selectedWorkspace?.id||''} switching={workspaceSwitching} disabled={sessionBusy||!!loadingSession} bound={!!selectedWorkspace&&boundWorkspaceID===selectedWorkspace.id} onSelect={id=>void switchWorkspace(id)}/>
     <div className="chat-main panel">
 	  <div className="panel-header"><div><Bot size={18}/><span>{t('chat.session')}</span></div><div className="chat-header-actions"><span className="session-id">{sessionId ? sessionId.slice(0, 20) : t('chat.newSession')}</span><button className="mobile-history-button" onClick={()=>setHistoryOpen(true)} title={t('chat.conversations')} aria-label={t('chat.openConversations')}><History size={15}/>{activeSessionCount>0&&<em>{activeSessionCount}</em>}</button></div></div>
-      <div className="session-approval-slot">{currentApprovals.length>0&&<ApprovalDialog key={currentApprovals[0].id} approval={currentApprovals[0]} pendingCount={currentApprovals.length} hosts={hosts} running={sessionBusy} stopping={stopping} onStop={()=>void stopAgent()} refresh={refresh} onNotice={setApprovalNotice}/>} {approvalNotice&&currentApprovals.length===0&&<div className="approval-toast"><ShieldCheck size={14}/><span>{approvalNotice}</span><button onClick={()=>setApprovalNotice('')}><X size={13}/></button></div>}</div>
+      <div className="session-approval-slot">{currentApprovals.length>0&&<ApprovalDialog key={currentApprovals[0].id} approval={currentApprovals[0]} pendingCount={currentApprovals.length} hosts={hosts} running={sessionBusy} stopping={stopping} onStop={()=>void stopAgent()} refresh={refresh} refreshApprovals={refreshApprovals} onApproved={result=>setEntries(old=>updateToolRunStatus(old,result.run_id,result.status==='running'?'in_progress':result.status))} onNotice={setApprovalNotice}/>} {approvalNotice&&currentApprovals.length===0&&<div className="approval-toast"><ShieldCheck size={14}/><span>{approvalNotice}</span><button onClick={()=>setApprovalNotice('')}><X size={13}/></button></div>}</div>
       <div className="session-plan-slot">{plan&&<SessionPlan plan={plan}/>}</div>
       <div className="messages" ref={messagesRef} onScroll={event=>{const element=event.currentTarget;stickToLatest.current=element.scrollHeight-element.scrollTop-element.clientHeight<90}}>
 		{entries.length === 0 && <div className="empty-chat"><div className="radar"><Activity size={35}/></div><h2>{t('chat.emptyTitle')}</h2></div>}
         {entries.map((entry) => <ChatBubble key={entry.id} entry={entry} runs={runs} hosts={hosts}/>) }
-		{running && !reasoningSeen && !streamingResponseStarted && <div className="thinking"><span/><span/><span/> {t('chat.waitingModel')}</div>}
+		{running&&modelRetrying&&<div className="thinking"><span/><span/><span/> {t('chat.retryingModel')}</div>}
+		{running&&!modelRetrying&&!reasoningSeen&&!streamingResponseStarted&&<div className="thinking"><span/><span/><span/> {t('chat.waitingModel')}</div>}
 		{detachedRunning&&!running&&<div className="thinking background-agent"><span/><span/><span/> {t('chat.backgroundRunning')}</div>}
       </div>
 		  <form className="composer" onSubmit={submit}>
-			  {sessionBusy&&<div className="llm-work-status" role="status" aria-live="polite"><LoaderCircle className="spin" size={13}/><b>{stopping?t('chat.stopping'):t('chat.running')}</b><button type="button" className="agent-stop-button" onClick={()=>void stopAgent()} disabled={stopping||!(activeStreamRef.current?.sessionId||sessionId)} title={t('chat.stopTitle')}><Square size={11} fill="currentColor"/>{t('chat.stop')}</button></div>}
-			  <div className="context-line"><span><Server size={13}/>{hosts.length?t('chat.hostsCount',{count:hosts.length,names:hostNames}):t('chat.noHosts')}</span><span className="composer-workspace"><FolderOpen size={13}/>{selectedWorkspace?t('chat.workspaceSelected',{id:selectedWorkspace.id}):t('chat.noWorkspace')}</span>{selectedWorkspace?.access==='read_write'&&<QuickWorkspaceUpload workspace={selectedWorkspace}/>}<span><Cpu size={13}/>{modelName || t('chat.noModel')}</span></div>
+			  {sessionBusy&&<div className="llm-work-status" role="status" aria-live="polite"><LoaderCircle className="spin" size={13}/><b>{stopping?t('chat.stopping'):modelRetrying?t('chat.retryingModel'):t('chat.running')}</b><button type="button" className="agent-stop-button" onClick={()=>void stopAgent()} disabled={stopping||!(activeStreamRef.current?.sessionId||sessionId)} title={t('chat.stopTitle')}><Square size={11} fill="currentColor"/>{t('chat.stop')}</button></div>}
+			  <div className="context-line"><span><Server size={13}/>{hosts.length?t('chat.hostsCount',{count:hosts.length,names:hostNames}):t('chat.noHosts')}</span><span className={`composer-tunnels ${tunnels.length?'active':''}`} title={tunnelSummary}><Cable size={13}/><code>{tunnelSummary}</code></span><span><Cpu size={13}/>{modelName || t('chat.noModel')}</span></div>
 			  {pendingImages.length>0&&<div className="composer-images">{pendingImages.map(image=><div key={image.id}><img src={image.url} alt={image.file.name}/><span title={image.file.name}>{image.file.name}</span><button type="button" onClick={()=>removePendingImage(image.id)} title={t('chat.removeImage')}><X size={11}/></button></div>)}</div>}
 			  {imageNotice&&<div className="composer-image-notice">{imageNotice}<button type="button" onClick={()=>setImageNotice('')}><X size={11}/></button></div>}
 			  <div className="input-row"><label className="image-attach-button" title={t('chat.addImages')}><ImagePlus size={18}/><input key={imageInputKey} type="file" accept={imageTypes.join(',')} multiple disabled={!agentAvailable||sessionBusy||workspaceSwitching||!!loadingSession} onChange={event=>addImages(Array.from(event.target.files||[]))}/></label><textarea value={message} onChange={(event) => setMessage(event.target.value)} onPaste={event=>{const files=Array.from(event.clipboardData.files).filter(file=>file.type.startsWith('image/'));if(files.length)addImages(files)}} placeholder={!agentAvailable?t('chat.configureModel'):loadingSession?t('chat.loadingConversation'):sessionBusy?t('chat.busyPlaceholder'):t('chat.prompt')} disabled={!agentAvailable||sessionBusy||workspaceSwitching||!!loadingSession} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }}/><button aria-label={t('common.next')} disabled={!agentAvailable || sessionBusy || workspaceSwitching || !!loadingSession || (!message.trim()&&!pendingImages.length)}><Send size={18}/></button></div>
@@ -918,14 +1053,6 @@ function ChatWorkspacePanel({workspaces,workspaceID,switching,disabled,bound,onS
 	</>
 }
 
-function QuickWorkspaceUpload({workspace}:{workspace:WorkspaceCapability}){
-	const {t}=useTranslation()
-	const [busy,setBusy]=useState(false),[status,setStatus]=useState(''),[inputKey,setInputKey]=useState(0)
-	useEffect(()=>{if(status!=='uploaded')return;const timer=window.setTimeout(()=>setStatus(''),3000);return()=>window.clearTimeout(timer)},[status])
-	const choose=async(event:React.ChangeEvent<HTMLInputElement>)=>{const file=event.target.files?.[0];if(!file)return;setBusy(true);setStatus('');try{await api.uploadWorkspaceFile(workspace.id,file,file.name);setStatus('uploaded')}catch(err){setStatus(errorText(err))}finally{setBusy(false);setInputKey(value=>value+1)}}
-	return <label className={`quick-workspace-upload ${busy?'busy':''} ${status&&status!=='uploaded'?'error':''}`} title={status&&status!=='uploaded'?status:t('workspace.uploadTo',{id:workspace.id})}><UploadCloud size={12}/><b>{busy?t('common.uploading'):status==='uploaded'?t('workspace.uploadedShort'):status?t('workspace.uploadFailed'):t('workspace.uploadFile')}</b><input key={inputKey} type="file" disabled={busy} onChange={event=>void choose(event)}/></label>
-}
-
 function SessionPlan({plan}:{plan:AgentPlan}){
 	const {t}=useTranslation()
   const [expanded,setExpanded]=useState(plan.status==='active')
@@ -941,7 +1068,7 @@ const ChatBubble=memo(function ChatBubble({ entry, runs, hosts }: {entry: ChatEn
   if (entry.kind === 'tool') return <ToolEventCard entry={entry} runs={runs} hosts={hosts}/>
   if (entry.kind === 'reasoning') return <ReasoningCard content={entry.content} active={!!entry.active}/>
   if (entry.kind === 'assistant' && !entry.content) return null
-	return <div className={`bubble ${entry.kind} ${entry.status||''}`}><div className="avatar">{entry.kind === 'user' ? 'YOU' : entry.kind === 'error' ? '!' : <Bot size={17}/>}</div><div><span className="bubble-label">{entry.kind === 'user' ? <>{t('chat.operator')}{entry.status==='failed'&&<em>{t('chat.failedContext')}</em>}{entry.status==='pending'&&<em>{t('chat.processing')}</em>}</> : entry.kind === 'error' ? t('common.error') : 'OpsPilot'}</span>{entry.images&&entry.images.length>0&&<div className="message-images">{entry.images.map(image=><a href={image.url} target="_blank" rel="noopener noreferrer" title={`${image.name} · ${formatFileSize(image.sizeBytes)}`} key={image.id}><img src={image.url} alt={image.name}/><span>{image.name}</span></a>)}</div>}{entry.content&&<div className={`bubble-copy ${entry.kind==='assistant'&&!entry.streaming?'markdown-body':''}`}>{entry.kind==='assistant'&&!entry.streaming?<Markdown skipHtml remarkPlugins={[remarkGfm]} components={{a:({href,children})=><a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,img:({alt})=><span className="markdown-image-blocked">{t('chat.blockedImage',{alt:alt||t('common.image')})}</span>}}>{entry.content}</Markdown>:entry.content}</div>}</div></div>
+	return <div className={`bubble ${entry.kind} ${entry.status||''}`}><div className="avatar">{entry.kind === 'user' ? <UserRound size={17}/> : entry.kind === 'error' ? '!' : <Bot size={17}/>}</div><div><span className="bubble-label">{entry.kind === 'user' ? <>{t('chat.operator')}{entry.status==='failed'&&<em>{t('chat.responseFailed')}</em>}{entry.status==='pending'&&<em>{t('chat.processing')}</em>}</> : entry.kind === 'error' ? t('common.error') : 'OpsPilot'}</span>{entry.images&&entry.images.length>0&&<div className="message-images">{entry.images.map(image=><a href={image.url} target="_blank" rel="noopener noreferrer" title={`${image.name} · ${formatFileSize(image.sizeBytes)}`} key={image.id}><img src={image.url} alt={image.name}/><span>{image.name}</span></a>)}</div>}{entry.content&&<div className={`bubble-copy ${entry.kind==='assistant'&&!entry.streaming?'markdown-body':''}`}>{entry.kind==='assistant'&&!entry.streaming?<Markdown skipHtml remarkPlugins={[remarkGfm]} components={{a:({href,children})=><a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,img:({alt})=><span className="markdown-image-blocked">{t('chat.blockedImage',{alt:alt||t('common.image')})}</span>}}>{entry.content}</Markdown>:entry.content}</div>}</div></div>
 })
 
 function latestReasoningLine(content:string){
@@ -972,6 +1099,9 @@ function compactScript(script:string){const lines=script.split(/\r?\n/).map(line
 function latestOutput(value:string,limit=3){return value.trimEnd().split(/\r?\n/).filter(line=>line.trim()!=='').slice(-limit).map(line=>Array.from(line).length>180?`${Array.from(line).slice(0,180).join('')}…`:line).join('\n')}
 function formatDuration(value:unknown,run?:Run){if(typeof value==='number'&&Number.isFinite(value))return value>=1e9?`${(value/1e9).toFixed(2)} s`:`${(value/1e6).toFixed(1)} ms`;if(run?.completed_at){const ms=Date.parse(run.completed_at)-Date.parse(run.started_at);if(Number.isFinite(ms))return ms>=1000?`${(ms/1000).toFixed(2)} s`:`${ms} ms`}return'—'}
 function numberValue(value:unknown){return typeof value==='number'&&Number.isFinite(value)?value:0}
+function sshTunnelRoute(host:string,remoteHost:string,remotePort:number,localPort:number,automatic='auto'){
+	return `${host}:${remoteHost}:${remotePort} → localhost:${localPort||automatic}`
+}
 function cleanFileChangeOutput(value:string){const lines=value.split(/\r?\n/),result:string[]=[];for(let index=0;index<lines.length;index++){if(lines[index]==='__OPS_FILE_VALIDATION_OK__')continue;if(lines[index]==='__OPS_FILE_AFTER__'){index++;continue}result.push(lines[index])}return result.join('\n').trim()}
 
 type ToolTarget={kind:'host'|'workspace'|'scope';label:string;name:string;id?:string}
@@ -1005,25 +1135,34 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
   const payload=parseRecord(entry.content)
 	const taskPayload=jsonRecord(payload.task)
 	const resultPayload=jsonRecord(payload.result)
-  const runID=textValue(payload.run_id)||textValue(taskPayload?.run_id)||textValue(resultPayload?.run_id)
-  const run=runs.find(item=>item.id===runID)
-  const display=jsonRecord(payload._display)
+  const runID=entry.runId||textValue(payload.run_id)||textValue(taskPayload?.run_id)||textValue(resultPayload?.run_id)
+	const run=runs.find(item=>item.id===runID)
+	const display=jsonRecord(payload._display)
 	const toolArguments=jsonRecord(display?.arguments)
 	const request=jsonRecord(display?.request)||requestFromRun(run)
 	const destinationHostID=textValue(display?.host_id)||run?.host_id||textValue(request?.host_id)||textValue(toolArguments?.host_id)||textValue(toolArguments?.destination_host_id)
 	const destinationHost=hostIdentity(hosts,destinationHostID)
   const hostID=destinationHost.id
   const hostName=destinationHost.name||hostID||'—'
-  const status=textValue(payload.status)||textValue(taskPayload?.status)||textValue(resultPayload?.status)||run?.status||'completed'
+  const payloadStatus=textValue(payload.status)||textValue(taskPayload?.status)||textValue(resultPayload?.status)
+  const runStatus=run?.status==='running'?'in_progress':run?.status
+  const status=payloadStatus==='approval_required'&&runStatus&&runStatus!=='approval_required'?runStatus:payloadStatus||runStatus||'completed'
   const risk=textValue(display?.risk)||textValue(resultPayload?.risk)||run?.risk||''
 	const program=request?fullProgram(request):''
 	const script=request?textValue(request.script):''
 	const change=jsonRecord(request?.change)||jsonRecord(payload.change)||jsonRecord(resultPayload?.change)
-  const remotePath=request?textValue(request.remote_path):''
+  const remotePath=request?(textValue(request.remote_path)||(!entry.tool?.startsWith('workspace_')?textValue(request.path):'')):''
 	const workspaceID=textValue(display?.workspace_id)||(request?textValue(request.workspace_id):'')
-	const relativePath=request?textValue(request.relative_path):''
-	const requestMode=request?textValue(request.mode):''
+	const relativePath=request?(textValue(request.relative_path)||(entry.tool?.startsWith('workspace_')?textValue(request.path):'')):''
 	const unifiedFileRead=entry.tool==='ssh_file_read'||entry.tool==='workspace_file_read'
+	const requestMode=(request?textValue(request.mode):'')||(unifiedFileRead?(request&&textValue(request.pattern)?`${entry.tool==='workspace_file_read'?'workspace':'remote'}_search`:`${entry.tool==='workspace_file_read'?'workspace':'remote'}_read`):'')
+	const tunnelOperation=entry.tool==='ssh_tunnel'
+	const tunnelAction=textValue(toolArguments?.action)||(requestMode==='ssh_tunnel_start'?'start':'')
+	const tunnel=jsonRecord(payload.tunnel)||jsonRecord(resultPayload?.tunnel)
+	const tunnelRemoteHost=(request?textValue(request.remote_host):'')||textValue(tunnel?.remote_host)||textValue(toolArguments?.remote_host)
+	const tunnelRemotePort=(request?numberValue(request.remote_port):0)||numberValue(tunnel?.remote_port)||numberValue(toolArguments?.remote_port)
+	const tunnelLocalPort=(request?numberValue(request.local_port):0)||numberValue(tunnel?.local_port)||numberValue(toolArguments?.local_port)
+	const tunnelRoute=tunnelAction==='start'?sshTunnelRoute(hostName,tunnelRemoteHost,tunnelRemotePort,tunnelLocalPort,t('tunnels.automaticPort')):tunnelAction==='stop'?textValue(toolArguments?.tunnel_id):''
 	const fileSearchMode=unifiedFileRead&&(requestMode==='remote_search'||requestMode==='workspace_search')
 	const fileReadMode=unifiedFileRead&&(requestMode==='remote_read'||requestMode==='workspace_read')
 	const structuredFileOperation=fileReadMode||fileSearchMode
@@ -1055,15 +1194,15 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
 		]),
 		...(workspaceID?[]:[["elevated",request.elevated===true]])
 	]:[]
-	const transferSummary=workspaceTransfer?`${workspaceID}:${relativePath} → ${remotePath}`:sshTransfer?`${sourceHostName}:${sourcePath} → ${hostName}:${remotePath}`:''
+	const transferSummary=tunnelRoute||(workspaceTransfer?`${workspaceID}:${relativePath} → ${remotePath}`:sshTransfer?`${sourceHostName}:${sourcePath} → ${hostName}:${remotePath}`:'')
   const planSteps=Array.isArray(payload.steps)?payload.steps.map(jsonRecord).filter((step):step is JsonRecord=>!!step):[]
   const planSummary=textValue(payload.goal)||textValue(planSteps.find(step=>textValue(step.status)==='in_progress'||textValue(step.status)==='blocked')?.title)
 	const operation=filePath||(script?t('tool.bashScript'):program||eventToolLabel||t('tool.result'))
   const args=request&&Array.isArray(request.args)?request.args.map(value=>String(value)):[]
   const env=request?jsonRecord(request.env):undefined
-	const rawStdout=textValue(payload.stdout)||textValue(resultPayload?.stdout)||run?.stdout_redacted||''
+	const rawStdout=textValue(payload.stdout)||textValue(resultPayload?.stdout)||entry.liveStdout||run?.stdout_redacted||''
 	const stdout=change?cleanFileChangeOutput(rawStdout):rawStdout
-  const stderr=textValue(payload.stderr)||textValue(resultPayload?.stderr)||run?.stderr_redacted||run?.error||''
+  const stderr=textValue(payload.stderr)||textValue(resultPayload?.stderr)||entry.liveStderr||run?.stderr_redacted||run?.error||''
   const stdoutPreview=latestOutput(stdout)
 	const commandSummary=transferSummary||(fileSearchMode?`${fileTarget} · ${searchMatchModeLabel} pattern=${JSON.stringify(searchPattern)}`:filePath)||program||(script?compactScript(script):'')||planSummary||operation
 	const historyRuns=[...recordArray(payload.runs),...recordArray(resultPayload?.runs)]
@@ -1098,28 +1237,36 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
     <div className="tool-event-body">
       {request?<div className="tool-execution-layout">
         <section className="tool-command-pane">
-		  <div className="tool-command-head"><span>{structuredFileOperation?t(fileSearchMode?'tool.searchOperation':'tool.readOperation'):filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}{request.elevated===true&&<em><ShieldAlert size={12}/>sudo / root</em>}</div>
-			  <div className="tool-command-block">{workspaceTransfer?<pre>workspace_upload {workspaceID}:{relativePath} → {remotePath}</pre>:sshTransfer?<pre>{sourceHostName}:{sourcePath} → {hostName}:{remotePath}</pre>:structuredFileOperation?<pre>{fileSearchMode?'search':'read'} {fileTarget}</pre>:filePath?<pre>{requestMode} {workspaceID?`${workspaceID}:`:''}{filePath}</pre>:script?<pre>{script}</pre>:program?<pre><span className="prompt-sign">$</span> {program}</pre>:<pre>{requestMode} {remotePath}</pre>}</div>
+		  <div className="tool-command-head"><span>{tunnelOperation?t('tunnels.forwarding'):structuredFileOperation?t(fileSearchMode?'tool.searchOperation':'tool.readOperation'):filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}{request.elevated===true&&<em><ShieldAlert size={12}/>sudo / root</em>}</div>
+			  <div className="tool-command-block">{tunnelOperation?<pre>{tunnelRoute||requestMode}</pre>:workspaceTransfer?<pre>workspace_upload {workspaceID}:{relativePath} → {remotePath}</pre>:sshTransfer?<pre>{sourceHostName}:{sourcePath} → {hostName}:{remotePath}</pre>:structuredFileOperation?<pre>{fileSearchMode?'search':'read'} {fileTarget}</pre>:filePath?<pre>{requestMode} {workspaceID?`${workspaceID}:`:''}{filePath}</pre>:script?<pre>{script}</pre>:program?<pre><span className="prompt-sign">$</span> {program}</pre>:<pre>{requestMode} {remotePath}</pre>}</div>
 		  {fileOperationParameters.length>0&&<CompactTable title={t('tool.actualParameters')} columns={[t('tool.parameter'),t('tool.value')]} rows={fileOperationParameters}/>}
 		  {change&&textValue(change.diff)&&<DiffViewer change={change}/>}
 		  {program&&<CompactTable title={t('tool.originalArgs')} columns={[t('tool.index'),t('tool.value')]} rows={[[0,textValue(request.program)],...args.map((arg,index)=>[index+1,JSON.stringify(arg)])]}/>}
 		  {env&&Object.keys(env).length>0&&<CompactTable title={t('tool.environment')} columns={[t('tool.key'),t('tool.value')]} rows={Object.entries(env).map(([key,value])=>[key,String(value)])}/>}
         </section>
         <aside className="tool-context-pane">
-			  <dl className="tool-context-grid"><div><dt>{workspaceTransfer||sshTransfer?t('tool.targetHost'):workspaceID?t('common.workspace'):t('tool.targetHost')}</dt><dd>{workspaceTransfer||sshTransfer?[destinationHost.name,hostID].filter(Boolean).join(' · '):workspaceID||[destinationHost.name,hostID].filter(Boolean).join(' · ')||'—'}</dd></div><div><dt>{workspaceTransfer||sshTransfer?t('tool.sourceFile'):filePath?t('tool.filePath'):t('tool.workingDirectory')}</dt><dd>{workspaceTransfer?`${workspaceID}:${relativePath}`:sshTransfer?`${[sourceHost.name,sourceHost.id].filter(Boolean).join(' · ')}:${sourcePath}`:filePath||textValue(request.cwd)||t('tool.defaultDirectory')}</dd></div><div><dt>{t('tool.permission')}</dt><dd>{workspaceShellBackend==='host'?t('tool.hostAuthority'):workspaceShellBackend==='sandbox'?t('tool.sandbox'):request.elevated===true?t('tool.managedSudo'):t('tool.normalUser')}</dd></div><div><dt>{t('common.risk')}</dt><dd>{risk?t(`riskLabels.${risk}`,{defaultValue:risk}):'—'}</dd></div><div><dt>{t('common.status')}</dt><dd>{t(`statusLabels.${status}`,{defaultValue:status})}</dd></div><div><dt>{t('tool.exitCode')}</dt><dd>{exitCode}</dd></div><div><dt>{t('tool.duration')}</dt><dd>{formatDuration(payload.duration??resultPayload?.duration,run)}</dd></div><div><dt>{t('tool.runId')}</dt><dd>{runID||'—'}</dd></div></dl>
+			  <dl className="tool-context-grid"><div><dt>{workspaceTransfer||sshTransfer?t('tool.targetHost'):workspaceID?t('common.workspace'):t('tool.targetHost')}</dt><dd>{workspaceTransfer||sshTransfer?[destinationHost.name,hostID].filter(Boolean).join(' · '):workspaceID||[destinationHost.name,hostID].filter(Boolean).join(' · ')||'—'}</dd></div><div><dt>{tunnelOperation?t('tunnels.remoteEndpoint'):workspaceTransfer||sshTransfer?t('tool.sourceFile'):filePath?t('tool.filePath'):t('tool.workingDirectory')}</dt><dd>{tunnelOperation?`${tunnelRemoteHost}:${tunnelRemotePort}`:workspaceTransfer?`${workspaceID}:${relativePath}`:sshTransfer?`${[sourceHost.name,sourceHost.id].filter(Boolean).join(' · ')}:${sourcePath}`:filePath||textValue(request.cwd)||t('tool.defaultDirectory')}</dd></div><div><dt>{t('tool.permission')}</dt><dd>{workspaceShellBackend==='host'?t('tool.hostAuthority'):workspaceShellBackend==='sandbox'?t('tool.sandbox'):request.elevated===true?t('tool.managedSudo'):t('tool.normalUser')}</dd></div><div><dt>{t('common.risk')}</dt><dd>{risk?t(`riskLabels.${risk}`,{defaultValue:risk}):'—'}</dd></div><div><dt>{t('common.status')}</dt><dd>{t(`statusLabels.${status}`,{defaultValue:status})}</dd></div><div><dt>{t('tool.exitCode')}</dt><dd>{exitCode}</dd></div><div><dt>{t('tool.duration')}</dt><dd>{formatDuration(payload.duration??resultPayload?.duration,run)}</dd></div><div><dt>{t('tool.runId')}</dt><dd>{runID||'—'}</dd></div></dl>
 		  {textValue(request.reason)&&<div className="tool-reason"><span>{t('tool.reason')}</span><p>{textValue(request.reason)}</p></div>}
-		  {textValue(request.expected_changes)&&<div className="tool-reason change"><span>{t('tool.expectedChanges')}</span><p>{textValue(request.expected_changes)}</p></div>}
-		  {textValue(request.rollback)&&<div className="tool-reason rollback"><span>{t('tool.rollback')}</span><p>{textValue(request.rollback)}</p></div>}
         </aside>
       </div>:<GenericToolResult payload={payload}/>} 
 	  {file&&<FileMetadataPanel file={file}/>}
 	  {fileSearchMode&&searchResult&&<div className={`file-search-result ${searchFound?'found':'empty'}`}><Search size={15}/><div><b>{t(searchFound?'tool.searchMatched':'tool.searchNoMatches')}</b><span>{searchMatchModeLabel} · {searchPattern}</span></div></div>}
 	  {(textValue(payload.message)||textValue(payload.next_action))&&<div className={`tool-guidance ${payload.ok===false?'error':''}`}><ShieldAlert size={15}/><div><b>{textValue(payload.code)||t('tool.result')}</b>{textValue(payload.message)&&<p>{textValue(payload.message)}</p>}{textValue(payload.next_action)&&<small>{t('common.next')} · {textValue(payload.next_action)}</small>}</div></div>}
 	  {instruction&&<div className="tool-instruction"><ShieldAlert size={15}/><div><b>{t('tool.operatorInstruction')}</b><p>{instruction}</p></div></div>}
-      {(stdout||stderr)&&<div className="tool-output-grid">{stdout&&<div className="tool-output stdout"><span>STDOUT</span><pre>{stdout}</pre></div>}{stderr&&<div className="tool-output stderr"><span>{t('tool.stderrResult')}</span><pre>{stderr}</pre></div>}</div>}
+      {(stdout||stderr)&&<div className="tool-output-grid">{stdout&&<ToolOutputPanel kind="stdout" label="STDOUT" content={stdout} live={status==='in_progress'}/>} {stderr&&<ToolOutputPanel kind="stderr" label={t('tool.stderrResult')} content={stderr} live={status==='in_progress'}/>}</div>}
 	  <details className="tool-raw"><summary>{t('tool.rawJson')}</summary><pre>{JSON.stringify(rawPayload,null,2)}</pre></details>
     </div>
   </details>
+}
+
+function ToolOutputPanel({kind,label,content,live}:{kind:'stdout'|'stderr';label:string;content:string;live:boolean}){
+	const outputRef=useRef<HTMLPreElement>(null)
+	const stickToBottom=useRef(true)
+	useEffect(()=>{
+		const output=outputRef.current
+		if(live&&output&&stickToBottom.current)output.scrollTop=output.scrollHeight
+	},[content,live])
+	return <div className={`tool-output ${kind} ${live?'live':''}`}><span>{label}</span><pre ref={outputRef} onScroll={event=>{const output=event.currentTarget;stickToBottom.current=output.scrollHeight-output.scrollTop-output.clientHeight<32}}>{content}</pre></div>
 }
 
 function FileMetadataPanel({file}:{file:JsonRecord}){
@@ -1175,7 +1322,7 @@ function CommandExplanationPanel({review}:{review?:CommandReview}){
   if(!review)return null
 			if(review.status==='pending')return <div className="command-review-panel pending" role="status" aria-live="polite"><div className="command-review-pending"><span className="review-agent-icon"><LoaderCircle className="spin" size={17}/></span><b>{t('approval.explanationWorking')}</b></div></div>
   const explanation=review.explanation
-	  return <details className={`command-review-panel ${review.status}`}><summary><span className="review-agent-icon"><BrainCircuit size={17}/></span><span><b>{t('approval.explanationAgent')}</b><small>{review.status==='completed'?t('approval.explanationCompleted'):review.status==='degraded'?t('approval.explanationPartial'):t('approval.explanationUnavailable')}</small></span><em>{t(`riskLabels.${review.deterministic_risk}`,{defaultValue:review.deterministic_risk.replace('_',' ')})}</em><ChevronRight size={14}/></summary><div className="command-review-body">{explanation&&<section className="review-explanation"><div className="review-section-title"><span>AI</span><div><b>{t('approval.plainExplanation')}</b><small>{explanation.summary}</small></div></div><p>{explanation.mechanism}</p><div className="review-list-grid"><ReviewList title={t('approval.effects')} items={explanation.effects}/><ReviewList title={t('approval.risks')} items={explanation.risks} tone="warn"/><ReviewList title={t('approval.tips')} items={explanation.beginner_tips}/></div>{explanation.rollback_guide&&<div className="review-rollback"><b>{t('approval.rollbackGuide')}</b><p>{explanation.rollback_guide}</p></div>}</section>}{review.errors&&review.errors.length>0&&<div className="review-errors"><b>{t('approval.degradedInfo')}</b>{review.errors.map((item,index)=><code key={index}>{item}</code>)}</div>}<div className="review-meta">{t('common.model')} {review.model||t('common.unavailable')} · {new Date(review.reviewed_at).toLocaleString(localeFor(instance.language))}</div></div></details>
+	  return <details className={`command-review-panel ${review.status}`}><summary><span className="review-agent-icon"><BrainCircuit size={17}/></span><span><b>{t('approval.explanationAgent')}</b><small>{review.status==='completed'?t('approval.explanationCompleted'):review.status==='degraded'?t('approval.explanationPartial'):t('approval.explanationUnavailable')}</small></span><em>{t(`riskLabels.${review.deterministic_risk}`,{defaultValue:review.deterministic_risk.replace('_',' ')})}</em><ChevronRight size={14}/></summary><div className="command-review-body">{explanation&&<section className="review-explanation"><div className="review-section-title"><span>AI</span><div><b>{t('approval.plainExplanation')}</b><small>{explanation.summary}</small></div></div><p>{explanation.mechanism}</p><div className="review-list-grid"><ReviewList title={t('approval.risks')} items={explanation.risks} tone="warn"/></div></section>}{review.errors&&review.errors.length>0&&<div className="review-errors"><b>{t('approval.degradedInfo')}</b>{review.errors.map((item,index)=><code key={index}>{item}</code>)}</div>}<div className="review-meta">{t('common.model')} {review.model||t('common.unavailable')} · {new Date(review.reviewed_at).toLocaleString(localeFor(instance.language))}</div></div></details>
 }
 
 function ApprovalDialog({
@@ -1186,6 +1333,8 @@ function ApprovalDialog({
   stopping,
   onStop,
   refresh,
+  refreshApprovals,
+  onApproved,
   onNotice,
 }: {
   approval: Approval;
@@ -1195,6 +1344,8 @@ function ApprovalDialog({
   stopping: boolean;
   onStop: () => void;
   refresh: () => Promise<void>;
+  refreshApprovals: (decidedID?: string) => Promise<void>;
+  onApproved: (result: ApprovalExecutionResult) => void;
   onNotice: (message: string) => void;
 }) {
   const { t, i18n: instance } = useTranslation();
@@ -1227,6 +1378,7 @@ function ApprovalDialog({
   const workspaceShellBackend = textValue(request.workspace_shell_backend);
   const hostWorkspaceShell =
     requestMode === "workspace_shell" && workspaceShellBackend === "host";
+  const tunnelApproval = requestMode === "ssh_tunnel_start";
   const fileReadApproval = [
     "remote_read",
     "remote_search",
@@ -1245,7 +1397,7 @@ function ApprovalDialog({
       /(?:^|[\n;&|])\s*(?:\/[\w./-]+\/)?(?:cat|cut|grep|head|less|more|tail)(?:\s|$)/m.test(
         script,
       ));
-  const oneTimeFileAccess = fileReadApproval || directFileReadApproval;
+  const oneTimeFileAccess = fileReadApproval || directFileReadApproval || tunnelApproval;
   const workspaceTransfer = requestMode === "workspace_upload";
   const sshTransfer = requestMode === "ssh_file_transfer";
   const sourceHostID = textValue(request.source_host_id);
@@ -1258,10 +1410,14 @@ function ApprovalDialog({
     ? elevated
       ? t(fileSearchApproval ? "approval.sudoSearchTitle" : "approval.sudoReadTitle")
       : t(fileSearchApproval ? "approval.searchTitle" : "approval.readTitle")
+    : tunnelApproval
+      ? t("approval.tunnelTitle")
     : elevated
     ? filePath
       ? t("approval.sudoFileTitle")
       : t("approval.sudoTitle", { kind: actionKind })
+    : tunnelApproval
+    ? t("approval.tunnelLabel")
     : sshTransfer
       ? t("approval.transferTitle")
       : workspaceTransfer
@@ -1290,7 +1446,13 @@ function ApprovalDialog({
   const targetHost = target?.name || approval.host_id;
   const source = hosts.find((host) => host.id === sourceHostID);
   const sourceHost = source?.name || sourceHostID;
-  const operation = sshTransfer
+  const tunnelLocalPort = numberValue(request.local_port);
+  const tunnelRemoteHost = textValue(request.remote_host);
+  const tunnelRemotePort = numberValue(request.remote_port);
+  const tunnelOperation = sshTunnelRoute(targetHost,tunnelRemoteHost,tunnelRemotePort,tunnelLocalPort,t('tunnels.automaticPort'));
+  const operation = tunnelApproval
+    ? tunnelOperation
+    : sshTransfer
     ? `${sourceHost}:${sourcePath} → ${targetHost}:${remotePath}`
     : workspaceTransfer
       ? `${workspaceID}:${relativePath} → ${remotePath}`
@@ -1346,6 +1508,7 @@ function ApprovalDialog({
         note.trim() || "Reviewed and approved in the current Agent session.",
         scope,
       );
+      onApproved(result);
       onNotice(
         t("approval.approved", {
           status: t(`statusLabels.${result.status}`, {
@@ -1354,7 +1517,8 @@ function ApprovalDialog({
           run: result.run_id,
         }),
       );
-      await refresh();
+      void refreshApprovals(approval.id);
+      void refresh();
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -1372,7 +1536,8 @@ function ApprovalDialog({
     try {
       await api.reject(approval.id, instruction);
       onNotice(t("approval.rejected"));
-      await refresh();
+      void refreshApprovals(approval.id);
+      void refresh();
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -1476,7 +1641,7 @@ function ApprovalDialog({
               rows={fileApprovalParameters}
             />
           )}
-          {change&&textValue(change.diff)?<DiffViewer change={change}/>:<pre className="approval-command-preview">{script || `$ ${operation}`}</pre>}
+          {change&&textValue(change.diff)?<DiffViewer change={change}/>:<pre className="approval-command-preview">{script || `${tunnelApproval?'':'$ '}${operation}`}</pre>}
           <dl>
             <div>
               <dt>
@@ -1595,7 +1760,7 @@ function ApprovalDialog({
             onClick={() => decide("session")}
             title={
               oneTimeFileAccess
-                ? t("approval.fileReadUnavailable")
+                ? t(tunnelApproval?"approval.tunnelSessionUnavailable":"approval.fileReadUnavailable")
                 : hostWorkspaceShell
                 ? t("approval.hostUnavailable")
                 : approval.risk === "critical"
@@ -1656,9 +1821,7 @@ const emptyHostForm: HostInput = {
   private_key: "",
   known_hosts_file: "",
   proxy_jump_host_id: "",
-  proxy_url: "",
-  proxy_username: "",
-  proxy_password: "",
+  proxy_id: "",
   password: "",
   sudo_mode: "none",
   sudo_password: "",
@@ -1666,7 +1829,7 @@ const emptyHostForm: HostInput = {
 function authLabel(value:HostAuthType){return i18n.t(value==='agent'?'hosts.authAgent':value==='key'?'hosts.authKey':'hosts.authPassword')}
 function sudoLabel(value:HostSudoMode){return i18n.t(value==='none'?'hosts.sudoNone':value==='nopasswd'?'hosts.sudoNopasswd':'hosts.sudoPassword')}
 
-function HostsPage({ hosts, refresh }: {hosts:Host[];refresh:()=>Promise<void>}) {
+function HostsPage({ hosts, proxies, refresh }: {hosts:Host[];proxies:Proxy[];refresh:()=>Promise<void>}) {
 	const {t}=useTranslation()
   const [showForm, setShowForm] = useState(false); const [notice, setNotice] = useState(''); const [saving,setSaving]=useState(false);const [deletingHost,setDeletingHost]=useState('')
 	const [deleteCandidate,setDeleteCandidate]=useState<Host|null>(null)
@@ -1676,7 +1839,7 @@ function HostsPage({ hosts, refresh }: {hosts:Host[];refresh:()=>Promise<void>})
   const editing=!!form.id
 	const resetPrivateKey=()=>{setPrivateKeyName('');setPrivateKeyError('');setExistingPrivateKey(false);setPrivateKeyInputKey(value=>value+1)}
 	const openCreate=()=>{setForm(emptyHostForm);resetPrivateKey();setShowForm(true);setNotice('')}
-	const openEdit=(host:Host)=>{setForm({id:host.id,name:host.name,address:host.address,port:host.port,user:host.user,auth_type:host.auth_type||'agent',private_key:'',known_hosts_file:host.known_hosts_file||'',proxy_jump_host_id:host.proxy_jump_host_id||'',proxy_url:host.proxy_url||'',proxy_username:host.proxy_username||'',proxy_password:'',password:'',sudo_mode:host.sudo_mode||'none',sudo_password:''});setPrivateKeyName('');setPrivateKeyError('');setExistingPrivateKey(host.auth_type==='key'&&host.has_private_key);setPrivateKeyInputKey(value=>value+1);setShowForm(true);setNotice('')}
+	const openEdit=(host:Host)=>{setForm({id:host.id,name:host.name,address:host.address,port:host.port,user:host.user,auth_type:host.auth_type||'agent',private_key:'',known_hosts_file:host.known_hosts_file||'',proxy_jump_host_id:host.proxy_jump_host_id||'',proxy_id:host.proxy_id||'',password:'',sudo_mode:host.sudo_mode||'none',sudo_password:''});setPrivateKeyName('');setPrivateKeyError('');setExistingPrivateKey(host.auth_type==='key'&&host.has_private_key);setPrivateKeyInputKey(value=>value+1);setShowForm(true);setNotice('')}
 	const setAuthType=(auth_type:HostAuthType)=>{setForm(current=>({...current,auth_type,password:'',private_key:auth_type==='key'?current.private_key:''}));if(auth_type!=='key'){setPrivateKeyName('');setPrivateKeyError('');setPrivateKeyInputKey(value=>value+1)}}
 	const choosePrivateKey=async(event:React.ChangeEvent<HTMLInputElement>)=>{const selected=event.target.files?.[0];setPrivateKeyError('');if(!selected){setPrivateKeyName('');setForm(current=>({...current,private_key:''}));return}if(selected.size<=0||selected.size>maxPrivateKeyBytes){setPrivateKeyName('');setForm(current=>({...current,private_key:''}));setPrivateKeyError(t('hosts.keySizeError'));return}try{const content=await selected.text();setPrivateKeyName(selected.name);setForm(current=>({...current,private_key:content}))}catch(err){setPrivateKeyName('');setForm(current=>({...current,private_key:''}));setPrivateKeyError(errorText(err))}}
 	const missingPrivateKey=form.auth_type==='key'&&!form.private_key&&!existingPrivateKey
@@ -1685,31 +1848,56 @@ function HostsPage({ hosts, refresh }: {hosts:Host[];refresh:()=>Promise<void>})
 	const save = async (event:FormEvent) => { event.preventDefault(); if(missingPrivateKey)return;setSaving(true); try { const saved=await api.saveHost(form); setShowForm(false); setForm(emptyHostForm);resetPrivateKey();setHostKeys(current=>{const next={...current};delete next[saved.id];return next});setHostKeyErrors(current=>{const next={...current};delete next[saved.id];return next}); setNotice(t('hosts.saved',{name:saved.name,action:editing?t('hosts.updated'):t('hosts.registered')})); await refresh();void scan(saved) } catch(err){setNotice(errorText(err))} finally{setSaving(false)} }
   const probe = async (host:Host) => { try { const info = await api.probe(host.id); setNotice(`${host.name}: ${Object.values(info).join(' · ')}`) } catch(err){setNotice(errorText(err))} }
 	const remove=async()=>{const host=deleteCandidate;if(!host)return;setDeletingHost(host.id);setNotice('');try{await api.deleteHost(host.id);setNotice(t('hosts.deleted',{name:host.name}));await refresh()}catch(err){setNotice(errorText(err))}finally{setDeletingHost('');setDeleteCandidate(null)}}
-		return <div className="page-stack"><div className="page-actions"><div/><button className="primary" onClick={openCreate}><Plus size={16}/>{t('hosts.add')}</button></div>
+		return <div className="page-stack">{!showForm&&<div className="page-actions"><div/><button className="primary" onClick={openCreate}><Plus size={16}/>{t('hosts.add')}</button></div>}
     {notice && <div className="notice">{notice}<button onClick={()=>setNotice('')}><X size={14}/></button></div>}
-		{showForm && <form className="host-form panel" onSubmit={save}><div className="host-form-head"><div><h3>{editing?t('hosts.editTitle'):t('hosts.createTitle')}</h3></div><button type="button" className="close-button" title={t('common.close')} onClick={()=>setShowForm(false)}><X size={16}/></button></div><div className="form-grid host-fields">
+		{showForm && <ConfigurationEditorPage icon={<Server size={22}/>} title={editing?t('hosts.editTitle'):t('hosts.createTitle')} busy={saving} onBack={()=>setShowForm(false)}><form className="host-form configuration-editor-form panel" onSubmit={save}><div className="form-grid host-fields">
 	  <label><span>{t('hosts.name')}</span><input value={form.name} onChange={event=>setForm({...form,name:event.target.value})} required/></label>
 	  <label><span>{t('hosts.address')}</span><input value={form.address} onChange={event=>setForm({...form,address:event.target.value})} required/></label>
 	  <label><span>{t('hosts.port')}</span><input type="number" min="1" max="65535" value={form.port} onChange={event=>setForm({...form,port:Number(event.target.value)})} required/></label>
 	  <label><span>{t('hosts.user')}</span><input value={form.user} onChange={event=>setForm({...form,user:event.target.value})} required/></label>
 	  <label><span>{t('hosts.authentication')}</span><select value={form.auth_type} onChange={event=>setAuthType(event.target.value as HostAuthType)}>{(['agent','key','password'] as HostAuthType[]).map(mode=><option value={mode} key={mode}>{authLabel(mode)}</option>)}</select></label>
 	  {form.auth_type==='password'&&<label><span>{t('hosts.sshPassword')}</span><PasswordInput autoComplete="new-password" value={form.password} onChange={event=>setForm({...form,password:event.target.value})} placeholder={editing?t('hosts.keepPassword'):t('common.required')} required={!editing}/></label>}
-		  {form.auth_type==='key'&&<div className="private-key-field"><span>{t('hosts.privateKey')}</span><label className={`private-key-picker ${privateKeyError||missingPrivateKey?'invalid':''}`} title={privateKeyName||t('hosts.chooseKey')}><UploadCloud size={15}/><span><b>{privateKeyName||(existingPrivateKey?t('hosts.storedKey'):t('hosts.choosePrivateKey'))}</b>{!privateKeyName&&!existingPrivateKey&&<small>{t('hosts.keyLimit')}</small>}</span><input key={privateKeyInputKey} type="file" onChange={event=>void choosePrivateKey(event)}/></label>{(privateKeyError||missingPrivateKey)&&<small className="private-key-error">{privateKeyError||t('hosts.keyRequired')}</small>}</div>}
+	  {form.auth_type==='key'&&<div className="private-key-field"><span>{t('hosts.privateKey')}</span><label className={`private-key-picker ${privateKeyError||missingPrivateKey?'invalid':''}`} title={privateKeyName||t('hosts.chooseKey')}><UploadCloud size={15}/><span><b>{privateKeyName||(existingPrivateKey?t('hosts.storedKey'):t('hosts.choosePrivateKey'))}</b>{!privateKeyName&&!existingPrivateKey&&<small>{t('hosts.keyLimit')}</small>}</span><input key={privateKeyInputKey} type="file" onChange={event=>void choosePrivateKey(event)}/></label>{(privateKeyError||missingPrivateKey)&&<small className="private-key-error">{privateKeyError||t('hosts.keyRequired')}</small>}</div>}
 	  <label><span>{t('hosts.proxyJump')}</span><select value={form.proxy_jump_host_id} onChange={event=>setForm({...form,proxy_jump_host_id:event.target.value})}><option value="">{t('hosts.direct')}</option>{hosts.filter(host=>host.id!==form.id).map(host=><option value={host.id} key={host.id}>{host.name} · {host.user}@{host.address}:{host.port}</option>)}</select></label>
-	  <label><span>{t('hosts.proxyURL')}</span><input value={form.proxy_url} onChange={event=>setForm({...form,proxy_url:event.target.value,...(!event.target.value?{proxy_username:'',proxy_password:''}:{})})}/></label>
-	  {form.proxy_url&&<label><span>{t('hosts.proxyUsername')}</span><input autoComplete="off" value={form.proxy_username} onChange={event=>setForm({...form,proxy_username:event.target.value,proxy_password:event.target.value?form.proxy_password:''})}/></label>}
-	  {form.proxy_url&&form.proxy_username&&<label><span>{t('hosts.proxyPassword')}</span><PasswordInput autoComplete="new-password" value={form.proxy_password} onChange={event=>setForm({...form,proxy_password:event.target.value})} placeholder={editing?t('hosts.keepPassword'):''}/></label>}
+	  <label><span>{t('common.proxy')}</span><select value={form.proxy_id} onChange={event=>setForm({...form,proxy_id:event.target.value})}><option value="">{t('hosts.direct')}</option>{proxies.filter(proxy=>proxy.ssh_compatible).map(proxy=><option value={proxy.id} key={proxy.id}>{proxy.name} · {proxy.url}</option>)}</select></label>
 	  <label><span>{t('hosts.knownHosts')}</span><input value={form.known_hosts_file} onChange={event=>setForm({...form,known_hosts_file:event.target.value})} placeholder={t('hosts.useDefault')}/></label>
 	  <label><span>{t('hosts.sudoPolicy')}</span><select value={form.sudo_mode} onChange={event=>setForm({...form,sudo_mode:event.target.value as HostSudoMode,sudo_password:''})}>{(['none','nopasswd','password'] as HostSudoMode[]).map(mode=><option value={mode} key={mode}>{sudoLabel(mode)}</option>)}</select></label>
 	  {form.sudo_mode==='password'&&<label><span>{t('hosts.sudoPasswordLabel')}</span><PasswordInput autoComplete="new-password" value={form.sudo_password} onChange={event=>setForm({...form,sudo_password:event.target.value})} placeholder={editing?t('hosts.keepPassword'):t('common.required')} required={!editing}/></label>}
-		</div><div className="form-actions"><button type="button" onClick={()=>setShowForm(false)}>{t('common.cancel')}</button><button className="primary" disabled={saving||!!privateKeyError||missingPrivateKey}>{saving?t('common.saving'):editing?t('hosts.update'):t('hosts.save')}</button></div></form>}
-		<div className="host-grid">{hosts.map(host=>{const key=hostKeys[host.id],keyError=hostKeyErrors[host.id],scanning=hostKeyBusy===`scan-${host.id}`,trusting=hostKeyBusy===`trust-${host.id}`;return <article className="host-card panel" key={host.id}><div className="host-top"><div className="server-glyph"><Server size={22}/></div><div><h3>{host.name}</h3><span>{`${host.user}@${host.address}:${host.port}`}</span></div><span className={`host-key-state ${key?.trusted?'trusted':key?'untrusted':'unchecked'}`}>{scanning?t('hosts.checkingKey'):key?.trusted?t('hosts.trustedKey'):key?t('hosts.untrustedKey'):t('hosts.uncheckedKey')}</span></div><dl><div><dt>{t('hosts.authentication')}</dt><dd>{authLabel(host.auth_type||'agent')}</dd></div>{host.proxy_url&&<div><dt>{t('hosts.proxy')}</dt><dd>{host.proxy_url}</dd></div>}<div><dt>Sudo</dt><dd>{sudoLabel(host.sudo_mode||'none')}</dd></div><div><dt>{t('hosts.hostId')}</dt><dd>{host.id}</dd></div></dl>{(key||keyError)&&<div className={`host-key-review ${key?.trusted?'trusted':'untrusted'}`}>{key&&<><div><KeyRound size={14}/><span><b>{key.algorithm||t('hosts.hostKey')}</b><code title={key.fingerprint}>{key.fingerprint}</code></span></div>{!key.trusted&&<button className="trust" disabled={trusting} onClick={()=>void trust(host)}>{trusting?<LoaderCircle className="spin" size={13}/>:<ShieldCheck size={13}/>} {trusting?t('hosts.trustingKey'):t('hosts.trustKey')}</button>}</>}{keyError&&<span className="host-key-error">{keyError}</span>}</div>}<div className="card-actions"><button onClick={()=>void probe(host)}><Activity size={15}/>{t('hosts.probe')}</button><button disabled={scanning||trusting} onClick={()=>void scan(host)}>{scanning?<LoaderCircle className="spin" size={15}/>:<KeyRound size={15}/>} {t('hosts.checkKey')}</button><button onClick={()=>openEdit(host)}><Edit3 size={15}/>{t('common.edit')}</button><button className="danger" disabled={deletingHost===host.id} title={t('common.delete')} onClick={()=>setDeleteCandidate(host)}>{deletingHost===host.id?<LoaderCircle className="spin" size={15}/>:<Trash2 size={15}/>}</button></div></article>})}</div>
-	{!hosts.length && <Empty icon={<Server/>} title={t('hosts.emptyTitle')}/>}
+		</div><div className="form-actions"><button type="button" onClick={()=>setShowForm(false)}>{t('common.cancel')}</button><button className="primary" disabled={saving||!!privateKeyError||missingPrivateKey}>{saving?t('common.saving'):editing?t('hosts.update'):t('hosts.save')}</button></div></form></ConfigurationEditorPage>}
+		{!showForm&&<div className="host-grid">{hosts.map(host=>{const key=hostKeys[host.id],keyError=hostKeyErrors[host.id],scanning=hostKeyBusy===`scan-${host.id}`,trusting=hostKeyBusy===`trust-${host.id}`,proxy=proxies.find(item=>item.id===host.proxy_id);return <article className="host-card panel" key={host.id}><div className="host-top"><div className="server-glyph"><Server size={22}/></div><div><h3>{host.name}</h3><span>{`${host.user}@${host.address}:${host.port}`}</span></div><span className={`host-key-state ${key?.trusted?'trusted':key?'untrusted':'unchecked'}`}>{scanning?t('hosts.checkingKey'):key?.trusted?t('hosts.trustedKey'):key?t('hosts.untrustedKey'):t('hosts.uncheckedKey')}</span></div><dl><div><dt>{t('hosts.authentication')}</dt><dd>{authLabel(host.auth_type||'agent')}</dd></div>{proxy&&<div><dt>{t('hosts.proxy')}</dt><dd title={proxy.url}>{proxy.name}</dd></div>}<div><dt>Sudo</dt><dd>{sudoLabel(host.sudo_mode||'none')}</dd></div><div><dt>{t('hosts.hostId')}</dt><dd>{host.id}</dd></div></dl>{(key||keyError)&&<div className={`host-key-review ${key?.trusted?'trusted':'untrusted'}`}>{key&&<><div><KeyRound size={14}/><span><b>{key.algorithm||t('hosts.hostKey')}</b><code title={key.fingerprint}>{key.fingerprint}</code></span></div>{!key.trusted&&<button className="trust" disabled={trusting} onClick={()=>void trust(host)}>{trusting?<LoaderCircle className="spin" size={13}/>:<ShieldCheck size={13}/>} {trusting?t('hosts.trustingKey'):t('hosts.trustKey')}</button>}</>}{keyError&&<span className="host-key-error">{keyError}</span>}</div>}<div className="card-actions"><button onClick={()=>void probe(host)}><Activity size={15}/>{t('hosts.probe')}</button><button disabled={scanning||trusting} onClick={()=>void scan(host)}>{scanning?<LoaderCircle className="spin" size={15}/>:<KeyRound size={15}/>} {t('hosts.checkKey')}</button><button onClick={()=>openEdit(host)}><Edit3 size={15}/>{t('common.edit')}</button><button className="danger" disabled={deletingHost===host.id} title={t('common.delete')} onClick={()=>setDeleteCandidate(host)}>{deletingHost===host.id?<LoaderCircle className="spin" size={15}/>:<Trash2 size={15}/>}</button></div></article>})}</div>}
+	{!showForm&&!hosts.length && <Empty icon={<Server/>} title={t('hosts.emptyTitle')}/>}
 	{deleteCandidate&&<DestructiveConfirmDialog label={t('hosts.deleteDialogLabel')} title={t('hosts.deleteTitle',{name:deleteCandidate.name})} description={t('hosts.deleteText')} busy={deletingHost===deleteCandidate.id} onCancel={()=>setDeleteCandidate(null)} onConfirm={()=>void remove()}/>}
   </div>
 }
 
-const emptyProviderForm: ModelProviderInput = {name:'',kind:'openai',base_url:'',model:'gpt-4o-mini',api_key:'',proxy_url:'',proxy_username:'',proxy_password:'',user_agent:''}
+const emptyProxyForm:ProxyInput={name:'',url:'',username:'',password:''}
+
+function ProxiesPage({proxies,refresh}:{proxies:Proxy[];refresh:()=>Promise<void>}){
+	const {t,i18n:instance}=useTranslation()
+	const [form,setForm]=useState<ProxyInput>(emptyProxyForm)
+	const [showForm,setShowForm]=useState(false)
+	const [busy,setBusy]=useState('')
+	const [notice,setNotice]=useState('')
+	const [deleteCandidate,setDeleteCandidate]=useState<Proxy|null>(null)
+	const editing=!!form.id
+	const editingProxy=proxies.find(proxy=>proxy.id===form.id)
+	const preservesPassword=!!editingProxy?.has_password&&form.username===(editingProxy.username||'')&&!form.clear_password
+	const openCreate=()=>{setForm(emptyProxyForm);setShowForm(true);setNotice('')}
+	const openEdit=(proxy:Proxy)=>{setForm({id:proxy.id,name:proxy.name,url:proxy.url,username:proxy.username||'',password:''});setShowForm(true);setNotice('')}
+	const save=async(event:FormEvent)=>{event.preventDefault();setBusy('save');setNotice('');try{const saved=await api.saveProxy(form);setNotice(t('proxies.saved',{name:saved.name}));setForm(emptyProxyForm);setShowForm(false);await refresh()}catch(err){setNotice(errorText(err))}finally{setBusy('')}}
+	const test=async(proxy:Proxy)=>{setBusy(`test-${proxy.id}`);setNotice('');try{const result=await api.testProxy(proxy.id);setNotice(t('proxies.testPassed',{name:proxy.name,status:result.status_code||0,latency:result.latency_ms}))}catch(err){setNotice(errorText(err))}finally{setBusy('')}}
+	const remove=async()=>{const proxy=deleteCandidate;if(!proxy)return;setBusy(`delete-${proxy.id}`);setNotice('');try{await api.deleteProxy(proxy.id);setNotice(t('proxies.deleted',{name:proxy.name}));if(form.id===proxy.id){setForm(emptyProxyForm);setShowForm(false)}await refresh()}catch(err){setNotice(errorText(err))}finally{setBusy('');setDeleteCandidate(null)}}
+	return <div className="page-stack">
+		{!showForm&&<div className="page-actions"><div><p>{t('proxies.title')}</p><span>{t('proxies.description')}</span></div><button className="primary" onClick={openCreate}><Plus size={16}/>{t('proxies.add')}</button></div>}
+		{notice&&<div className="notice">{notice}<button onClick={()=>setNotice('')}><X size={14}/></button></div>}
+		{showForm&&<ConfigurationEditorPage icon={<Cable size={22}/>} title={editing?t('proxies.editTitle'):t('proxies.createTitle')} busy={busy==='save'} onBack={()=>setShowForm(false)}><form className="proxy-form configuration-editor-form panel" onSubmit={save}><div className="form-grid proxy-fields"><label><span>{t('proxies.name')}</span><input value={form.name} maxLength={128} onChange={event=>setForm({...form,name:event.target.value})} required/></label><label className="proxy-address-field"><span>{t('proxies.url')}</span><input value={form.url} onChange={event=>setForm({...form,url:event.target.value})} placeholder="socks5://127.0.0.1:1080" required/></label><label><span>{t('proxies.username')}</span><input autoComplete="off" value={form.username} onChange={event=>setForm({...form,username:event.target.value,password:event.target.value?form.password:'',clear_password:false})}/></label><label><span>{t('proxies.password')}</span><PasswordInput autoComplete="new-password" value={form.password} disabled={!form.username} onChange={event=>setForm({...form,password:event.target.value,clear_password:false})} placeholder={preservesPassword?t('proxies.keepPassword'):''}/>{preservesPassword&&<small><button type="button" onClick={()=>setForm({...form,password:'',clear_password:true})}>{t('proxies.clearPassword')}</button></small>}</label></div><div className="form-actions"><button type="button" onClick={()=>setShowForm(false)}>{t('common.cancel')}</button><button className="primary" disabled={busy==='save'}>{busy==='save'?t('common.saving'):t('common.save')}</button></div></form></ConfigurationEditorPage>}
+		{!showForm&&<div className="proxy-grid">{proxies.map(proxy=><article className="proxy-card panel" key={proxy.id}><div className="proxy-card-head"><div><Cable size={20}/></div><span><h3>{proxy.name}</h3><code>{proxy.url}</code></span>{proxy.ssh_compatible&&<em>SSH</em>}</div><dl><div><dt>{t('proxies.authentication')}</dt><dd>{proxy.username?`${proxy.username}${proxy.has_password?` · ${t('proxies.passwordSaved')}`:''}`:t('proxies.noAuthentication')}</dd></div><div><dt>{t('common.updated')}</dt><dd>{new Date(proxy.updated_at).toLocaleString(localeFor(instance.language))}</dd></div></dl><div className="card-actions"><button disabled={!!busy} onClick={()=>void test(proxy)}>{busy===`test-${proxy.id}`?<LoaderCircle className="spin" size={14}/>:<Activity size={14}/>} {t('common.test')}</button><button disabled={!!busy} onClick={()=>openEdit(proxy)}><Edit3 size={14}/>{t('common.edit')}</button><button className="danger" disabled={!!busy} title={t('common.delete')} onClick={()=>setDeleteCandidate(proxy)}><Trash2 size={14}/></button></div></article>)}</div>}
+		{!showForm&&!proxies.length&&<Empty icon={<Cable/>} title={t('proxies.emptyTitle')}/>}
+		{deleteCandidate&&<DestructiveConfirmDialog label={t('proxies.deleteDialogLabel')} title={t('proxies.deleteTitle',{name:deleteCandidate.name})} description={t('proxies.deleteText')} busy={busy===`delete-${deleteCandidate.id}`} onCancel={()=>setDeleteCandidate(null)} onConfirm={()=>void remove()}/>}
+	</div>
+}
+
+const emptyProviderForm: ModelProviderInput = {name:'',kind:'openai',base_url:'',model:'gpt-4o-mini',api_key:'',proxy_id:'',user_agent:''}
 const providerLabels: Record<ModelProviderKind,string> = {
   openai: 'OpenAI', deepseek: 'DeepSeek', anthropic: 'Anthropic', openai_compatible: 'OpenAI-compatible', ollama: 'Ollama',
 }
@@ -1721,7 +1909,7 @@ const providerDefaults: Record<ModelProviderKind,Pick<ModelProviderInput,'base_u
   ollama: {base_url:'http://127.0.0.1:11434/v1',model:''},
 }
 
-function ModelsPage({providers,health,refresh}:{providers:ModelProvider[];health:Health|null;refresh:()=>Promise<void>}) {
+function ModelsPage({providers,proxies,health,refresh}:{providers:ModelProvider[];proxies:Proxy[];health:Health|null;refresh:()=>Promise<void>}) {
 	const {t,i18n:instance}=useTranslation()
   const [showForm,setShowForm]=useState(false)
   const [form,setForm]=useState<ModelProviderInput>(emptyProviderForm)
@@ -1731,10 +1919,9 @@ function ModelsPage({providers,health,refresh}:{providers:ModelProvider[];health
   const [catalog,setCatalog]=useState<string[]>([])
   const [discovering,setDiscovering]=useState(false)
   const editing=!!form.id
-	const editingProvider=providers.find(provider=>provider.id===form.id)
 
   const openCreate=()=>{setForm(emptyProviderForm);setCatalog([]);setShowForm(true);setNotice('')}
-  const openEdit=(provider:ModelProvider)=>{setForm({id:provider.id,name:provider.name,kind:provider.kind,base_url:provider.base_url||'',model:provider.model,api_key:'',proxy_url:provider.proxy_url||'',proxy_username:provider.proxy_username||'',proxy_password:'',user_agent:provider.user_agent||''});setCatalog([]);setShowForm(true);setNotice('')}
+  const openEdit=(provider:ModelProvider)=>{setForm({id:provider.id,name:provider.name,kind:provider.kind,base_url:provider.base_url||'',model:provider.model,api_key:'',proxy_id:provider.proxy_id||'',user_agent:provider.user_agent||''});setCatalog([]);setShowForm(true);setNotice('')}
   const changeKind=(kind:ModelProviderKind)=>{setCatalog([]);setForm({...form,kind,...providerDefaults[kind]})}
 	const discover=async()=>{setDiscovering(true);try{const {name:_name,model:_model,...payload}=form;const result=await api.discoverModels(payload);setCatalog(result.models);setForm(current=>({...current,model:result.models.includes(current.model)?current.model:''}));setNotice(t('models.found',{count:result.count}))}catch(err){setCatalog([]);setNotice(errorText(err))}finally{setDiscovering(false)}}
 	const testForm=async()=>{setBusy('test-form');try{const {name:_name,...payload}=form;const result=await api.testModelConfiguration(payload);setNotice(t('models.healthy',{name:result.model,response:result.response,latency:result.latency_ms}))}catch(err){setNotice(errorText(err))}finally{setBusy('')}}
@@ -1744,11 +1931,10 @@ function ModelsPage({providers,health,refresh}:{providers:ModelProvider[];health
 	const remove=async()=>{const provider=deleteCandidate;if(!provider)return;setBusy(`delete-${provider.id}`);setNotice('');try{await api.deleteModelProvider(provider.id);setNotice(t('models.deleted',{name:provider.name}));await refresh()}catch(err){setNotice(errorText(err))}finally{setBusy('');setDeleteCandidate(null)}}
 
   return <div className="page-stack">
-	<div className="page-actions"><div/><button className="primary" onClick={openCreate}><Plus size={16}/>{t('models.add')}</button></div>
+	{!showForm&&<div className="page-actions"><div/><button className="primary" onClick={openCreate}><Plus size={16}/>{t('models.add')}</button></div>}
     {notice&&<div className="notice">{notice}<button onClick={()=>setNotice('')}><X size={14}/></button></div>}
-	<div className="model-summary panel"><div><span>{t('models.activeRoute')}</span><b>{health?.model?.name||t('models.noModel')}</b>{health?.model?.model&&<small>{health.model.model}</small>}</div><div className={`model-signal ${health?.agent_available?'ready':''}`}><CircleDot size={16}/>{health?.agent_available?t('models.ready'):t('models.offline')}</div></div>
-    {showForm&&<form className="model-form panel" onSubmit={save}>
-		  <div className="model-form-head"><div><h3>{editing?t('models.editTitle'):t('models.newTitle')}</h3></div><button type="button" className="close-button" title={t('common.close')} onClick={()=>setShowForm(false)}><X size={16}/></button></div>
+	{!showForm&&<div className="model-summary panel"><div><span>{t('models.activeRoute')}</span><b>{health?.model?.name||t('models.noModel')}</b>{health?.model?.model&&<small>{health.model.model}</small>}</div><div className={`model-signal ${health?.agent_available?'ready':''}`}><CircleDot size={16}/>{health?.agent_available?t('models.ready'):t('models.offline')}</div></div>}
+    {showForm&&<ConfigurationEditorPage icon={<Cpu size={22}/>} title={editing?t('models.editTitle'):t('models.newTitle')} busy={!!busy} onBack={()=>setShowForm(false)}><form className="model-form configuration-editor-form panel" onSubmit={save}>
       <div className="form-grid model-fields">
 		<label><span>{t('models.displayName')}</span><input value={form.name} onChange={event=>setForm({...form,name:event.target.value})} required/></label>
 		<label><span>{t('models.providerType')}</span><select value={form.kind} onChange={event=>changeKind(event.target.value as ModelProviderKind)}>{(Object.keys(providerLabels) as ModelProviderKind[]).map(kind=><option key={kind} value={kind}>{providerLabels[kind]}</option>)}</select></label>
@@ -1756,19 +1942,17 @@ function ModelsPage({providers,health,refresh}:{providers:ModelProvider[];health
 			<label><span>{t('models.apiKey')}</span><PasswordInput autoComplete="new-password" value={form.api_key} onChange={event=>{setCatalog([]);setForm({...form,api_key:event.target.value})}} placeholder={editing?t('models.keepKey'):''}/></label>
 			<label className="base-url-field"><span>{t('models.baseUrl')}</span><input value={form.base_url} onChange={event=>{setCatalog([]);setForm({...form,base_url:event.target.value})}} placeholder={form.kind==='openai'?t('models.officialEndpoint'):''}/></label>
 			<label><span>{t('models.userAgent')}</span><input value={form.user_agent} onChange={event=>{setCatalog([]);setForm({...form,user_agent:event.target.value})}} placeholder={t('models.userAgentHint')}/></label>
-			<label className="proxy-url-field"><span>{t('models.proxyUrl')}</span><input value={form.proxy_url} onChange={event=>{setCatalog([]);setForm({...form,proxy_url:event.target.value,clear_proxy_password:false})}}/></label>
-		<label className="proxy-credential-field"><span>{t('models.proxyUsername')}</span><input value={form.proxy_username} onChange={event=>{setCatalog([]);setForm({...form,proxy_username:event.target.value,clear_proxy_password:false})}}/></label>
-			<label className="proxy-credential-field"><span>{t('models.proxyPassword')}</span><PasswordInput autoComplete="new-password" value={form.proxy_password} onChange={event=>{setCatalog([]);setForm({...form,proxy_password:event.target.value,clear_proxy_password:false})}} placeholder={editingProvider?.has_proxy_password&&!form.clear_proxy_password?t('models.keepProxyPassword'):''}/>{editingProvider?.has_proxy_password&&!form.clear_proxy_password&&<small><button type="button" onClick={()=>setForm({...form,proxy_password:'',clear_proxy_password:true})}>{t('models.clearProxyPassword')}</button></small>}</label>
+			<label className="proxy-select-field"><span>{t('common.proxy')}</span><select value={form.proxy_id} onChange={event=>{setCatalog([]);setForm({...form,proxy_id:event.target.value})}}><option value="">{t('common.direct')}</option>{proxies.map(proxy=><option value={proxy.id} key={proxy.id}>{proxy.name} · {proxy.url}</option>)}</select></label>
       </div>
 	  <div className="form-actions"><button type="button" onClick={()=>setShowForm(false)}>{t('common.cancel')}</button><button type="button" className="test-config" onClick={testForm} disabled={!!busy||!form.model}><Activity size={14}/>{busy==='test-form'?t('models.sendingHello'):t('models.testModel')}</button><button className="primary" disabled={!!busy}>{busy==='save'?t('common.saving'):t('models.saveProvider')}</button></div>
-    </form>}
-    <div className="model-grid">{providers.map(provider=><article className={`model-card panel ${provider.active?'active':''}`} key={provider.id}>
+    </form></ConfigurationEditorPage>}
+    {!showForm&&<div className="model-grid">{providers.map(provider=>{const proxy=proxies.find(item=>item.id===provider.proxy_id);return <article className={`model-card panel ${provider.active?'active':''}`} key={provider.id}>
 	  <div className="model-card-head"><div className="provider-glyph"><Cpu size={21}/></div><div><h3>{provider.name}</h3><span>{providerLabels[provider.kind]}</span></div>{provider.active&&<em><Zap size={12}/>{t('models.active')}</em>}</div>
       <div className="model-name">{provider.model}</div>
-	  <dl><div><dt>{t('models.endpoint')}</dt><dd>{provider.base_url||t('models.providerDefault')}</dd></div><div><dt>{t('models.proxy')}</dt><dd>{provider.proxy_url||t('models.noProxy')}{provider.has_proxy_password?` · ${t('models.proxyAuth')}`:''}</dd></div>{provider.user_agent&&<div><dt>{t('models.userAgent')}</dt><dd>{provider.user_agent}</dd></div>}<div><dt>{t('models.credential')}</dt><dd>{provider.has_api_key?t('models.encryptedKey'):t('models.noApiKey')}</dd></div><div><dt>{t('common.updated')}</dt><dd>{new Date(provider.updated_at).toLocaleString(localeFor(instance.language))}</dd></div></dl>
+	  <dl><div><dt>{t('models.endpoint')}</dt><dd>{provider.base_url||t('models.providerDefault')}</dd></div><div><dt>{t('models.proxy')}</dt><dd title={proxy?.url}>{proxy?.name||t('models.noProxy')}</dd></div>{provider.user_agent&&<div><dt>{t('models.userAgent')}</dt><dd>{provider.user_agent}</dd></div>}<div><dt>{t('models.credential')}</dt><dd>{provider.has_api_key?t('models.encryptedKey'):t('models.noApiKey')}</dd></div><div><dt>{t('common.updated')}</dt><dd>{new Date(provider.updated_at).toLocaleString(localeFor(instance.language))}</dd></div></dl>
 	  <div className="model-actions"><button onClick={()=>test(provider)} disabled={!!busy}><Activity size={14}/>{busy===`test-${provider.id}`?t('common.testing'):t('common.test')}</button><button onClick={()=>openEdit(provider)} disabled={!!busy}><Edit3 size={14}/>{t('common.edit')}</button>{!provider.active&&<button className="use-model" onClick={()=>activate(provider)} disabled={!!busy}><Zap size={14}/>{busy===provider.id?t('models.switching'):t('models.useModel')}</button>}<button className="danger" title={t('common.delete')} onClick={()=>setDeleteCandidate(provider)} disabled={!!busy}><Trash2 size={14}/></button></div>
-    </article>)}</div>
-		{!providers.length&&<Empty icon={<Cpu/>} title={t('models.emptyTitle')}/>}
+    </article>})}</div>}
+		{!showForm&&!providers.length&&<Empty icon={<Cpu/>} title={t('models.emptyTitle')}/>}
 		{deleteCandidate&&<DestructiveConfirmDialog
 			label={t('models.deleteDialogLabel')}
 			title={t('models.deleteTitle',{name:deleteCandidate.name})}
@@ -1800,14 +1984,16 @@ function AuditRunDetail({run,req,hosts}:{run:Run;req:JsonRecord;hosts:Host[]}){
 	const readMode=mode==='remote_read'||mode==='workspace_read'
 	const workspaceTransfer=mode==='workspace_upload'
 	const sshTransfer=mode==='ssh_file_transfer'
+	const tunnelMode=mode==='ssh_tunnel_start'
+	const tunnelRoute=tunnelMode?sshTunnelRoute(destinationHost.name||destinationHost.id,textValue(req.remote_host),numberValue(req.remote_port),numberValue(req.local_port),t('tunnels.automaticPort')):''
 	const fileTarget=`${workspaceID?`${workspaceID}:`:''}${filePath}`
-	const consumed=new Set(['program','args','script','cwd','reason','expected_changes','rollback','change','env','host_id','workspace_id','remote_path','relative_path','source_path','source_host_id','mode','elevated','workspace_shell_backend'])
+	const consumed=new Set(['program','args','script','cwd','reason','change','env','host_id','workspace_id','remote_path','relative_path','source_path','source_host_id','mode','elevated','workspace_shell_backend','remote_host','remote_port','local_port'])
 	const extras=Object.entries(req).filter(([key,value])=>!consumed.has(key)&&value!==undefined&&value!==null&&value!==''&&!(Array.isArray(value)&&!value.length))
 	return <>
 		<div className="tool-execution-layout">
 			<section className="tool-command-pane">
-				<div className="tool-command-head"><span>{searchMode?t('tool.searchOperation'):readMode?t('tool.readOperation'):workspaceTransfer||sshTransfer||filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}{req.elevated===true&&<em><ShieldAlert size={12}/>sudo / root</em>}</div>
-				<div className="tool-command-block">{workspaceTransfer?<pre>workspace_upload {workspaceID}:{relativePath} → {remotePath}</pre>:sshTransfer?<pre>{[sourceHost.name||sourceHost.id,sourcePath].filter(Boolean).join(':')} → {destinationHost.name||destinationHost.id}:{remotePath}</pre>:searchMode||readMode?<pre>{searchMode?'search':'read'} {fileTarget}</pre>:script?<pre>{script}</pre>:program?<pre><span className="prompt-sign">$</span> {program}</pre>:filePath?<pre>{mode} {fileTarget}</pre>:<pre>{JSON.stringify(req,null,2)}</pre>}</div>
+				<div className="tool-command-head"><span>{tunnelMode?t('tunnels.forwarding'):searchMode?t('tool.searchOperation'):readMode?t('tool.readOperation'):workspaceTransfer||sshTransfer||filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}{req.elevated===true&&<em><ShieldAlert size={12}/>sudo / root</em>}</div>
+				<div className="tool-command-block">{tunnelMode?<pre>{tunnelRoute}</pre>:workspaceTransfer?<pre>workspace_upload {workspaceID}:{relativePath} → {remotePath}</pre>:sshTransfer?<pre>{[sourceHost.name||sourceHost.id,sourcePath].filter(Boolean).join(':')} → {destinationHost.name||destinationHost.id}:{remotePath}</pre>:searchMode||readMode?<pre>{searchMode?'search':'read'} {fileTarget}</pre>:script?<pre>{script}</pre>:program?<pre><span className="prompt-sign">$</span> {program}</pre>:filePath?<pre>{mode} {fileTarget}</pre>:<pre>{JSON.stringify(req,null,2)}</pre>}</div>
 				{change&&textValue(change.diff)&&<DiffViewer change={change}/>}
 				{program&&args.length>0&&<CompactTable title={t('tool.originalArgs')} columns={[t('tool.index'),t('tool.value')]} rows={[[0,textValue(req.program)],...args.map((arg,index)=>[index+1,JSON.stringify(arg)])]}/>}
 				{env&&Object.keys(env).length>0&&<CompactTable title={t('tool.environment')} columns={[t('tool.key'),t('tool.value')]} rows={Object.entries(env).map(([key,value])=>[key,String(value)])}/>}
@@ -1817,14 +2003,12 @@ function AuditRunDetail({run,req,hosts}:{run:Run;req:JsonRecord;hosts:Host[]}){
 				<dl className="tool-context-grid">
 					<div><dt>{workspaceID&&!sshTransfer?t('common.workspace'):t('tool.targetHost')}</dt><dd>{workspaceID&&!sshTransfer?workspaceID:[destinationHost.name,destinationHost.id].filter(Boolean).join(' · ')||'—'}</dd></div>
 					{sshTransfer&&<div><dt>{t('tool.sourceHost')}</dt><dd>{[sourceHost.name,sourceHost.id].filter(Boolean).join(' · ')||'—'}</dd></div>}
-					<div><dt>{filePath?t('tool.filePath'):t('tool.workingDirectory')}</dt><dd>{filePath||textValue(req.cwd)||t('tool.defaultDirectory')}</dd></div>
+					<div><dt>{tunnelMode?t('tunnels.remoteEndpoint'):filePath?t('tool.filePath'):t('tool.workingDirectory')}</dt><dd>{tunnelMode?`${textValue(req.remote_host)}:${numberValue(req.remote_port)}`:filePath||textValue(req.cwd)||t('tool.defaultDirectory')}</dd></div>
 					<div><dt>{t('tool.permission')}</dt><dd>{workspaceShellBackend==='host'?t('tool.hostAuthority'):workspaceShellBackend==='sandbox'?t('tool.sandbox'):req.elevated===true?t('tool.managedSudo'):t('tool.normalUser')}</dd></div>
 					<div><dt>{t('tool.duration')}</dt><dd>{formatDuration(undefined,run)}</dd></div>
 					<div><dt>{t('tool.runId')}</dt><dd>{run.id}</dd></div>
 				</dl>
 				{textValue(req.reason)&&<div className="tool-reason"><span>{t('tool.reason')}</span><p>{textValue(req.reason)}</p></div>}
-				{textValue(req.expected_changes)&&<div className="tool-reason change"><span>{t('tool.expectedChanges')}</span><p>{textValue(req.expected_changes)}</p></div>}
-				{textValue(req.rollback)&&<div className="tool-reason rollback"><span>{t('tool.rollback')}</span><p>{textValue(req.rollback)}</p></div>}
 			</aside>
 		</div>
 		{(run.stdout_redacted||run.stderr_redacted||run.error)&&<div className="tool-output-grid">{run.stdout_redacted&&<div className="tool-output stdout"><span>STDOUT · REDACTED</span><pre>{run.stdout_redacted}</pre></div>}{run.stderr_redacted&&<div className="tool-output stderr"><span>STDERR · REDACTED</span><pre>{run.stderr_redacted}</pre></div>}{run.error&&!run.stderr_redacted&&<div className="tool-output stderr"><span>{t('common.error')}</span><pre>{run.error}</pre></div>}</div>}
@@ -1844,7 +2028,7 @@ function AuditPage({runs,hosts}:{runs:Run[];hosts:Host[]}) {
     for(const run of filtered){const key=run.session_id||'__direct__';grouped.set(key,[...(grouped.get(key)||[]),run])}
 	return [...grouped.entries()].map(([id,items])=>{items.sort((a,b)=>Date.parse(b.started_at)-Date.parse(a.started_at));return{id,title:id==='__direct__'?t('audit.direct'):titles.get(id)||t('audit.missingConversation'),runs:items,latest:items[0]?.started_at,critical:items.filter(run=>run.risk==='critical'||run.risk==='forbidden').length,pending:items.filter(run=>run.status==='approval_required').length}}).sort((a,b)=>Date.parse(b.latest||'')-Date.parse(a.latest||''))
 	},[filtered,sessions,t,instance.language])
-	return <div className="page-stack"><div className="audit-toolbar"><div className="search-box"><Search size={16}/><input aria-label={t('common.search')} value={query} onChange={event=>setQuery(event.target.value)}/></div><span>{t('audit.counts',{sessions:groups.length,runs:filtered.length})}</span></div><div className="audit-groups">{groups.map(group=><details className="audit-session panel" key={group.id}><summary className="audit-session-summary"><div className="audit-session-glyph"><History size={17}/></div><div className="audit-session-name"><b>{group.title}</b><span>{group.id==='__direct__'?t('audit.noSession'):group.id} · {t('audit.lastRun',{date:new Date(group.latest).toLocaleString(localeFor(instance.language))})}</span></div><div className="audit-session-stats"><span><b>{group.runs.length}</b> {t('audit.runs')}</span>{group.critical>0&&<span className="critical-count"><b>{group.critical}</b> {t('audit.critical')}</span>}{group.pending>0&&<span className="pending-count"><b>{group.pending}</b> {t('audit.pending')}</span>}</div><ChevronRight className="audit-session-chevron" size={17}/></summary><div className="audit-table"><div className="audit-row audit-head"><span>{t('audit.columns.time')}</span><span>{t('audit.columns.operation')}</span><span>{t('audit.columns.risk')}</span><span>{t('audit.columns.status')}</span><span>{t('audit.columns.host')}</span><span>{t('audit.columns.exit')}</span></div>{group.runs.map(run=>{let req:Record<string,unknown>={};try{req=JSON.parse(run.request_json)}catch{req={request:run.request_json}};const args=Array.isArray(req.args)?req.args.join(' '):'';return <details key={run.id}><summary className="audit-row"><span>{new Date(run.started_at).toLocaleString(localeFor(instance.language))}</span><span className="command">{typeof req.program==='string'?`${req.program} ${args}`.trim():t('audit.bashScript')}</span><span><i className={`risk-dot ${run.risk}`}/>{t(`riskLabels.${run.risk}`,{defaultValue:run.risk})}</span><span className={`run-status ${run.status}`}>{t(`statusLabels.${run.status}`,{defaultValue:run.status})}</span><span>{run.host_id.slice(0,16)}</span><span>{run.exit_code}</span></summary><div className="run-detail"><AuditRunDetail run={run} req={req} hosts={hosts}/></div></details>})}</div></details>)}</div>{!runs.length&&<Empty icon={<History/>} title={t('audit.emptyTitle')}/>} {runs.length>0&&!groups.length&&<Empty icon={<Search/>} title={t('audit.noMatch')}/>}</div>
+	return <div className="page-stack"><div className="audit-toolbar"><div className="search-box"><Search size={16}/><input aria-label={t('common.search')} value={query} onChange={event=>setQuery(event.target.value)}/></div><span>{t('audit.counts',{sessions:groups.length,runs:filtered.length})}</span></div><div className="audit-groups">{groups.map(group=><details className="audit-session panel" key={group.id}><summary className="audit-session-summary"><div className="audit-session-glyph"><History size={17}/></div><div className="audit-session-name"><b>{group.title}</b><span>{group.id==='__direct__'?t('audit.noSession'):group.id} · {t('audit.lastRun',{date:new Date(group.latest).toLocaleString(localeFor(instance.language))})}</span></div><div className="audit-session-stats"><span><b>{group.runs.length}</b> {t('audit.runs')}</span>{group.critical>0&&<span className="critical-count"><b>{group.critical}</b> {t('audit.critical')}</span>}{group.pending>0&&<span className="pending-count"><b>{group.pending}</b> {t('audit.pending')}</span>}</div><ChevronRight className="audit-session-chevron" size={17}/></summary><div className="audit-table"><div className="audit-row audit-head"><span>{t('audit.columns.time')}</span><span>{t('audit.columns.operation')}</span><span>{t('audit.columns.risk')}</span><span>{t('audit.columns.status')}</span><span>{t('audit.columns.host')}</span><span>{t('audit.columns.exit')}</span></div>{group.runs.map(run=>{let req:Record<string,unknown>={};try{req=JSON.parse(run.request_json)}catch{req={request:run.request_json}};const args=Array.isArray(req.args)?req.args.join(' '):'';const mode=textValue(req.mode);const auditHost=hostIdentity(hosts,run.host_id);const operation=mode==='ssh_tunnel_start'?sshTunnelRoute(auditHost.name||auditHost.id,textValue(req.remote_host),numberValue(req.remote_port),numberValue(req.local_port),t('tunnels.automaticPort')):typeof req.program==='string'?`${req.program} ${args}`.trim():t('audit.bashScript');return <details key={run.id}><summary className="audit-row"><span>{new Date(run.started_at).toLocaleString(localeFor(instance.language))}</span><span className="command">{operation}</span><span><i className={`risk-dot ${run.risk}`}/>{t(`riskLabels.${run.risk}`,{defaultValue:run.risk})}</span><span className={`run-status ${run.status}`}>{t(`statusLabels.${run.status}`,{defaultValue:run.status})}</span><span>{run.host_id.slice(0,16)}</span><span>{run.exit_code}</span></summary><div className="run-detail"><AuditRunDetail run={run} req={req} hosts={hosts}/></div></details>})}</div></details>)}</div>{!runs.length&&<Empty icon={<History/>} title={t('audit.emptyTitle')}/>} {runs.length>0&&!groups.length&&<Empty icon={<Search/>} title={t('audit.noMatch')}/>}</div>
 }
 
 function logFieldValue(value:unknown){

@@ -25,7 +25,7 @@ func TestSSHFileTransferBindsBothHostsAndFileVersionsToApproval(t *testing.T) {
 	}
 	sourceSHA := strings.Repeat("a", 64)
 	destinationSHA := strings.Repeat("b", 64)
-	pending, err := svc.TransferFileBetweenHosts(ctx, source.ID, "/srv/releases/app.tar", sourceSHA, destination.ID, "/srv/releases/app.tar", true, destinationSHA, 300, "migrate the reviewed release artifact", "restore the destination artifact from backup", "test")
+	pending, err := svc.TransferFileBetweenHosts(ctx, source.ID, "/srv/releases/app.tar", sourceSHA, destination.ID, "/srv/releases/app.tar", true, destinationSHA, 300, "migrate the reviewed release artifact", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestSSHFileTransferRejectsChangedSourceConnectionAfterApproval(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := svc.TransferFileBetweenHosts(ctx, source.ID, "/tmp/source.bin", strings.Repeat("c", 64), destination.ID, "/tmp/destination.bin", false, "", 60, "move a versioned artifact", "remove the created destination", "test")
+	pending, err := svc.TransferFileBetweenHosts(ctx, source.ID, "/tmp/source.bin", strings.Repeat("c", 64), destination.ID, "/tmp/destination.bin", false, "", 60, "move a versioned artifact", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestSSHFileTransferRequiresDestinationVersionForOverwrite(t *testing.T) {
 	ctx := context.Background()
 	source, _ := svc.SaveHost(ctx, domain.HostInput{Name: "source", Address: "192.0.2.51", Port: 22, User: "ops", AuthType: "agent", SudoMode: "none"}, "test")
 	destination, _ := svc.SaveHost(ctx, domain.HostInput{Name: "destination", Address: "192.0.2.52", Port: 22, User: "ops", AuthType: "agent", SudoMode: "none"}, "test")
-	_, err := svc.TransferFileBetweenHosts(ctx, source.ID, "/tmp/source", strings.Repeat("d", 64), destination.ID, "/tmp/destination", true, "", 60, "replace destination", "restore destination", "test")
+	_, err := svc.TransferFileBetweenHosts(ctx, source.ID, "/tmp/source", strings.Repeat("d", 64), destination.ID, "/tmp/destination", true, "", 60, "replace destination", "test")
 	if err == nil || !strings.Contains(err.Error(), "expected_destination_sha256") {
 		t.Fatalf("overwrite without destination version was accepted: %v", err)
 	}

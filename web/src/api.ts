@@ -1,4 +1,4 @@
-import type { AgentEvent, Approval, ApprovalExecutionResult, AuthSession, ChatSession, ChatState, Health, Host, HostInput, LLMToolCatalog, ManagedSkill, MCPServer, MCPServerInput, MCPTestResult, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestResult, Run, ServerLogResponse, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchResponse, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceInput, WorkspaceUploadResult } from './types'
+import type { AgentEvent, Approval, ApprovalExecutionResult, AuthSession, ChatSession, ChatState, Health, Host, HostInput, LLMToolCatalog, ManagedSkill, MCPServer, MCPServerInput, MCPTestResult, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestResult, Proxy, ProxyInput, ProxyTestResult, Run, ServerLogResponse, SSHTunnel, SSHTunnelList, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchResponse, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceInput, WorkspaceUploadResult } from './types'
 
 let csrfToken = ''
 
@@ -64,6 +64,10 @@ export const api = {
   webSearchSettings: () => request<WebSearchSettings>('/api/v1/web-search/settings'),
   saveWebSearchSettings: (settings: WebSearchSettingsInput) => request<WebSearchSettings>('/api/v1/web-search/settings', { method: 'PUT', body: JSON.stringify(settings) }),
   testWebSearch: (query='Tavily Search API') => request<WebSearchResponse>('/api/v1/web-search/test', { method: 'POST', body: JSON.stringify({query}) }),
+	proxies: () => requestList<Proxy>('/api/v1/proxies'),
+	saveProxy: (proxy:ProxyInput) => request<Proxy>('/api/v1/proxies',{method:'POST',body:JSON.stringify(proxy)}),
+	deleteProxy: (id:string) => request<void>(`/api/v1/proxies/${encodeURIComponent(id)}`,{method:'DELETE'}),
+	testProxy: (id:string) => request<ProxyTestResult>(`/api/v1/proxies/${encodeURIComponent(id)}/test`,{method:'POST',body:'{}'}),
   modelProviders: () => requestList<ModelProvider>('/api/v1/model-providers'),
   discoverModels: (input: ModelDiscoveryInput) => request<ModelCatalog>('/api/v1/model-providers/discover', { method: 'POST', body: JSON.stringify(input) }),
   testModelConfiguration: (input: ModelTestInput) => request<ModelTestResult>('/api/v1/model-providers/test', { method: 'POST', body: JSON.stringify(input) }),
@@ -72,6 +76,8 @@ export const api = {
   deleteModelProvider: (id: string) => request<void>(`/api/v1/model-providers/${id}`, { method: 'DELETE' }),
   testModelProvider: (id: string) => request<ModelTestResult>(`/api/v1/model-providers/${id}/test`, { method: 'POST', body: '{}' }),
   hosts: () => requestList<Host>('/api/v1/hosts'),
+  sshTunnels: () => request<SSHTunnelList>('/api/v1/ssh-tunnels'),
+  stopSSHTunnel: (id:string) => request<SSHTunnel>(`/api/v1/ssh-tunnels/${encodeURIComponent(id)}`, { method:'DELETE' }),
   saveHost: (host: HostInput) => request<Host>('/api/v1/hosts', { method: 'POST', body: JSON.stringify(host) }),
   deleteHost: (id: string) => request<void>(`/api/v1/hosts/${id}`, { method: 'DELETE' }),
 	  scanKey: (id: string) => request<{ fingerprint: string; algorithm?: string; trusted: boolean }>(`/api/v1/hosts/${id}/scan-key`, { method: 'POST', body: '{}' }),
@@ -137,10 +143,12 @@ export async function streamChat(sessionId: string, workspaceId:string, message:
     for (const event of events) onEvent(event)
   }
   const isContentDelta = (event: AgentEvent) =>
-    !!event.content && (event.type === 'reasoning' || (event.type === 'message' && event.role !== 'tool'))
+    !!event.content && (event.type === 'reasoning' || event.type === 'tool_output' || (event.type === 'message' && event.role !== 'tool'))
   const sameContentStream = (left: AgentEvent, right: AgentEvent) =>
     left.type === right.type && left.role === right.role && left.tool_name === right.tool_name &&
-    left.segment_id === right.segment_id && left.session_id === right.session_id
+    left.tool_call_id === right.tool_call_id && left.segment_id === right.segment_id &&
+    left.session_id === right.session_id && left.run_id === right.run_id && left.stream === right.stream &&
+    left.status === right.status
   const dispatch = (event: AgentEvent) => {
     if (event.type === 'done' || event.type === 'error' || event.type === 'interrupted') terminalEventReceived = true
     if (!isContentDelta(event)) {

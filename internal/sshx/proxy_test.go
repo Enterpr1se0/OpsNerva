@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"eino-ops-agent/internal/config"
 	"eino-ops-agent/internal/domain"
@@ -240,6 +241,57 @@ func TestNativeSSHNetworkProxyWithJumpHost(t *testing.T) {
 	}
 	if result.ExitCode != 0 || string(result.Stdout) != "native-ok\n" {
 		t.Fatalf("unexpected proxy plus ProxyJump result: %#v", result)
+	}
+
+	echoListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echoListener.Close()
+	echoDone := make(chan struct{})
+	go func() {
+		defer close(echoDone)
+		connection, acceptErr := echoListener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer connection.Close()
+		_, _ = io.Copy(connection, connection)
+	}()
+	tunnel, err := transport.OpenTunnel(t.Context(), connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tunnel.Close()
+	forwarded, err := tunnel.Dial("tcp", echoListener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(forwarded, "through-proxy-and-jump"); err != nil {
+		t.Fatal(err)
+	}
+	reply := make([]byte, len("through-proxy-and-jump"))
+	readDone := make(chan error, 1)
+	go func() {
+		_, readErr := io.ReadFull(forwarded, reply)
+		readDone <- readErr
+	}()
+	select {
+	case err := <-readDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out reading tunnel reply")
+	}
+	_ = forwarded.Close()
+	if string(reply) != "through-proxy-and-jump" {
+		t.Fatalf("unexpected tunnel reply %q", reply)
+	}
+	select {
+	case <-echoDone:
+	case <-time.After(time.Second):
+		t.Fatal("tunnel forwarding connection did not close")
 	}
 }
 

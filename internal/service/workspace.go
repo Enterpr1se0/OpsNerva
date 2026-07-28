@@ -777,7 +777,7 @@ func (s *Service) EditWorkspaceFile(ctx context.Context, workspaceID, relativePa
 	}
 	result, submitErr := s.Submit(ctx, domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecWorkspaceEdit, WorkspaceID: workspaceID, RelativePath: relativePath,
-		Change: &change, Validator: validatorID, Reason: reason, ExpectedChanges: "apply reviewed diff to workspace file " + relativePath,
+		Change: &change, Validator: validatorID, Reason: reason,
 	}, actor)
 	result.Change = &change
 	if result.Stdout != "" {
@@ -793,17 +793,16 @@ func (s *Service) EditWorkspaceFile(ctx context.Context, workspaceID, relativePa
 // UploadWorkspaceFileToHost transfers one allowlisted Workspace file directly
 // to a registered host. The model provides only the Workspace-relative path;
 // the absolute local path is resolved after approval and is never serialized.
-func (s *Service) UploadWorkspaceFileToHost(ctx context.Context, hostID, workspaceID, relativePath, expectedSHA256, remotePath, reason, rollback, actor string) (domain.ExecResult, error) {
+func (s *Service) UploadWorkspaceFileToHost(ctx context.Context, hostID, workspaceID, relativePath, expectedSHA256, remotePath, reason, actor string) (domain.ExecResult, error) {
 	return s.Submit(ctx, domain.ExecRequest{
 		HostID: hostID, Mode: domain.ExecWorkspaceUpload, WorkspaceID: workspaceID, RelativePath: relativePath,
 		ExpectedSHA256: strings.ToLower(strings.TrimSpace(expectedSHA256)), RemotePath: remotePath, Reason: reason,
-		ExpectedChanges: "upload Workspace file to " + remotePath, Rollback: rollback,
 	}, actor)
 }
 
 // RunWorkspaceShell resolves the administrator-selected backend before
 // submission so the exact host or sandbox boundary is approval-bound.
-func (s *Service) RunWorkspaceShell(ctx context.Context, workspaceID, script, cwd string, env map[string]string, timeoutSeconds int, reason, expectedChanges, rollback, actor string) (domain.ExecResult, error) {
+func (s *Service) RunWorkspaceShell(ctx context.Context, workspaceID, script, cwd string, env map[string]string, timeoutSeconds int, reason, actor string) (domain.ExecResult, error) {
 	workspaceID = strings.TrimSpace(workspaceID)
 	workspace, ok := s.workspaceByID(workspaceID)
 	if !ok {
@@ -835,7 +834,7 @@ func (s *Service) RunWorkspaceShell(ctx context.Context, workspaceID, script, cw
 		HostID: host.ID, Mode: domain.ExecWorkspaceShell, WorkspaceID: workspaceID,
 		WorkspaceShellBackend: backend,
 		Script:                script, Cwd: cwd, Env: env, TimeoutSeconds: timeoutSeconds,
-		Reason: reason, ExpectedChanges: expectedChanges, Rollback: rollback,
+		Reason: reason,
 	}, actor)
 }
 

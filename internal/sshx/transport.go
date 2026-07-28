@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net"
 	posixpath "path"
 	"regexp"
 	"strings"
@@ -58,6 +59,18 @@ type StreamingTransport interface {
 
 type HostFileTransferTransport interface {
 	TransferFile(context.Context, ConnectionSpec, ConnectionSpec, domain.ExecRequest) (RawResult, error)
+}
+
+// TunnelClient is one authenticated SSH connection that can open direct TCP
+// channels through the configured target, ProxyJump chain, and network proxy.
+type TunnelClient interface {
+	Dial(network, address string) (net.Conn, error)
+	Wait() error
+	Close() error
+}
+
+type TunnelTransport interface {
+	OpenTunnel(context.Context, ConnectionSpec) (TunnelClient, error)
 }
 
 const probeScript = `probe_hostname=""

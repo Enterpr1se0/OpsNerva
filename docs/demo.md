@@ -30,9 +30,9 @@
 
 输入：
 
-> 根据证据重启 demo-api，说明影响、验证和回滚。
+> 检查并重启 demo-api。
 
-展示 Agent 的 Tool 调用停在审批点且服务尚未重启。审批对话框会直接覆盖当前会话；先展开“双 SubAgent 审查”，查看小白解释、风险依据、缺失证据、控制措施和置信度，再检查精确命令、主机、原因、摘要和回滚。强调这两位 Agent 没有 Tool、不能批准，只能辅助用户判断，较高风险会单向升级到 break-glass。随后选择“仅允许本次”或“本会话允许相同操作”。批准后原 Tool Call 获得执行结果并继续推理。也可以在说明框输入替代方案并选择“拒绝并告诉 LLM”，替代方案会返回被暂停的 Tool，让 Agent 在同一次运行中自动改走更安全的方案。
+展示 Agent 的 Tool 调用停在审批点且服务尚未重启。审批对话框会直接覆盖当前会话；展开命令说明查看命令作用和具体风险，再检查精确命令、目标主机和操作目的。命令说明 Agent 没有 Tool、不能批准，只辅助用户判断。随后选择“仅允许本次”或“本会话允许相同操作”。批准后原 Tool Call 获得执行结果并继续推理。也可以在说明框输入替代方案并选择“拒绝并告诉 LLM”，替代方案会返回被暂停的 Tool，让 Agent 在同一次运行中自动改走更安全的方案。
 
 ## 4. Critical 破窗
 
@@ -40,7 +40,7 @@
 
 ```bash
 ./bin/ops-agent exec --host demo --program rm --arg -rf --arg /tmp/opspilot-demo \
-  --reason "remove disposable demo directory" --rollback "restore VM snapshot"
+  --reason "remove disposable demo directory"
 ```
 
 展示 Critical 操作必须逐次人工审批并填写原因，不能创建会话级授权。

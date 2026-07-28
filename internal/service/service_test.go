@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -27,13 +28,67 @@ import (
 )
 
 type fakeTransport struct {
-	mu       sync.Mutex
-	calls    []domain.ExecRequest
-	hosts    []domain.Host
-	stdout   []byte
-	stderr   []byte
-	exitCode int
-	execErr  error
+	mu            sync.Mutex
+	calls         []domain.ExecRequest
+	hosts         []domain.Host
+	stdout        []byte
+	stderr        []byte
+	exitCode      int
+	execErr       error
+	execStarted   chan struct{}
+	execRelease   <-chan struct{}
+	execStartOnce sync.Once
+	tunnelClients []*fakeTunnelClient
+	tunnelSpecs   []sshx.ConnectionSpec
+}
+
+type fakeTunnelClient struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newFakeTunnelClient() *fakeTunnelClient {
+	return &fakeTunnelClient{closed: make(chan struct{})}
+}
+
+func (client *fakeTunnelClient) Dial(_ string, address string) (net.Conn, error) {
+	return net.DialTimeout("tcp", address, time.Second)
+}
+
+func (client *fakeTunnelClient) Wait() error {
+	<-client.closed
+	return nil
+}
+
+func (client *fakeTunnelClient) Close() error {
+	client.once.Do(func() { close(client.closed) })
+	return nil
+}
+
+func (f *fakeTransport) OpenTunnel(_ context.Context, connection sshx.ConnectionSpec) (sshx.TunnelClient, error) {
+	client := newFakeTunnelClient()
+	f.mu.Lock()
+	f.tunnelClients = append(f.tunnelClients, client)
+	f.tunnelSpecs = append(f.tunnelSpecs, connection)
+	f.mu.Unlock()
+	return client, nil
+}
+
+type fakeStreamChunk struct {
+	stream string
+	data   string
+}
+
+type streamingFakeTransport struct {
+	*fakeTransport
+	chunks []fakeStreamChunk
+}
+
+func (f *streamingFakeTransport) ExecStream(ctx context.Context, connection sshx.ConnectionSpec, req domain.ExecRequest, emit func(string, []byte)) (sshx.RawResult, error) {
+	for _, chunk := range f.chunks {
+		emit(chunk.stream, []byte(chunk.data))
+	}
+	return f.fakeTransport.Exec(ctx, connection, req)
 }
 
 type fakeCommandExplainer struct {
@@ -103,12 +158,23 @@ func (r *trackingCommandExplainer) maxActive() int {
 	return r.maximum
 }
 
-func (f *fakeTransport) Exec(_ context.Context, connection sshx.ConnectionSpec, req domain.ExecRequest) (sshx.RawResult, error) {
+func (f *fakeTransport) Exec(ctx context.Context, connection sshx.ConnectionSpec, req domain.ExecRequest) (sshx.RawResult, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, req)
 	f.hosts = append(f.hosts, connection.Target)
 	stdout, stderr, exitCode, execErr := f.stdout, f.stderr, f.exitCode, f.execErr
+	started, release := f.execStarted, f.execRelease
 	f.mu.Unlock()
+	if started != nil {
+		f.execStartOnce.Do(func() { close(started) })
+	}
+	if release != nil {
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return sshx.RawResult{Duration: time.Millisecond}, ctx.Err()
+		}
+	}
 	if stdout == nil {
 		stdout = []byte("password=secret-value\nok\n")
 	}
@@ -153,23 +219,33 @@ func (f *fakeTransport) TransferFile(_ context.Context, source, destination sshx
 func TestHostCredentialsAreEncryptedPreservedAndNeverSerialized(t *testing.T) {
 	svc, _, _ := newTestService(t)
 	ctx := context.Background()
-	host, err := svc.SaveHost(ctx, domain.HostInput{
-		Name: "password-host", Address: "192.0.2.10", Port: 22, User: "ops", AuthType: "password",
-		Password: "ssh-super-secret", SudoMode: "password", SudoPassword: "sudo-super-secret",
-		ProxyURL: "SOCKS5://127.0.0.1:1080/", ProxyUsername: "proxy-user", ProxyPassword: "proxy-super-secret",
+	proxy, err := svc.SaveProxy(ctx, domain.ProxyInput{
+		Name: "host-proxy", URL: "SOCKS5://127.0.0.1:1080/", Username: "proxy-user", Password: "proxy-super-secret",
 	}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !host.HasPassword || !host.HasSudoPassword || !host.HasProxyPassword || host.ProxyURL != "socks5://127.0.0.1:1080" {
+	host, err := svc.SaveHost(ctx, domain.HostInput{
+		Name: "password-host", Address: "192.0.2.10", Port: 22, User: "ops", AuthType: "password",
+		Password: "ssh-super-secret", SudoMode: "password", SudoPassword: "sudo-super-secret",
+		ProxyID: proxy.ID,
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !host.HasPassword || !host.HasSudoPassword || host.ProxyID != proxy.ID {
 		t.Fatalf("credential capability flags missing: %#v", host)
 	}
 	stored, err := svc.store.GetHost(ctx, host.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.PasswordCipher == "" || stored.SudoCipher == "" || stored.ProxyPasswordCipher == "" || strings.Contains(stored.PasswordCipher, "super-secret") || strings.Contains(stored.SudoCipher, "super-secret") || strings.Contains(stored.ProxyPasswordCipher, "super-secret") {
+	if stored.PasswordCipher == "" || stored.SudoCipher == "" || strings.Contains(stored.PasswordCipher, "super-secret") || strings.Contains(stored.SudoCipher, "super-secret") {
 		t.Fatalf("host credentials were not encrypted: %#v", stored)
+	}
+	storedProxy, err := svc.store.GetProxy(ctx, proxy.ID)
+	if err != nil || storedProxy.PasswordCipher == "" || strings.Contains(storedProxy.PasswordCipher, "super-secret") {
+		t.Fatalf("proxy credentials were not encrypted separately: proxy=%#v err=%v", storedProxy, err)
 	}
 	publicJSON, _ := json.Marshal(host)
 	if strings.Contains(string(publicJSON), "super-secret") || strings.Contains(string(publicJSON), "cipher") {
@@ -178,15 +254,19 @@ func TestHostCredentialsAreEncryptedPreservedAndNeverSerialized(t *testing.T) {
 
 	updated, err := svc.SaveHost(ctx, domain.HostInput{
 		ID: host.ID, Name: "password-host-renamed", Address: host.Address, Port: host.Port, User: host.User,
-		AuthType: "password", SudoMode: "password", ProxyURL: host.ProxyURL, ProxyUsername: host.ProxyUsername,
+		AuthType: "password", SudoMode: "password", ProxyID: host.ProxyID,
 	}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !updated.HasPassword || !updated.HasSudoPassword || !updated.HasProxyPassword {
+	if !updated.HasPassword || !updated.HasSudoPassword || updated.ProxyID != proxy.ID {
 		t.Fatalf("blank edit erased stored credentials: %#v", updated)
 	}
-	hydrated, err := svc.hydrateHostSecrets(updated, true)
+	connection, _, err := svc.resolveSSHConnection(ctx, updated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hydrated, err := svc.hydrateHostSecrets(connection.Target, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,8 +393,8 @@ func TestInteractiveCommandsAndPackagePromptsAreRejected(t *testing.T) {
 	svc, transport, host := newTestService(t)
 	requests := []domain.ExecRequest{
 		{HostID: host.ID, Mode: domain.ExecProgram, Program: "bash", Reason: "open shell"},
-		{HostID: host.ID, Mode: domain.ExecProgram, Program: "pacman", Args: []string{"-S", "nginx"}, Reason: "install nginx", Rollback: "remove nginx"},
-		{HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"edit", "nginx"}, Reason: "edit unit", Rollback: "remove override"},
+		{HostID: host.ID, Mode: domain.ExecProgram, Program: "pacman", Args: []string{"-S", "nginx"}, Reason: "install nginx"},
+		{HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"edit", "nginx"}, Reason: "edit unit"},
 	}
 	for _, request := range requests {
 		if _, err := svc.Submit(context.Background(), request, "test"); err == nil {
@@ -330,7 +410,7 @@ func TestApprovedRequestRejectsChangedSSHConnection(t *testing.T) {
 	svc, transport, host := newTestService(t)
 	result, err := svc.Submit(context.Background(), domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "example.service"},
-		Reason: "restart the example service", ExpectedChanges: "service restarts", Rollback: "restart the previous service version",
+		Reason: "restart the example service",
 	}, "test")
 	if err != nil {
 		t.Fatal(err)
@@ -424,6 +504,13 @@ func newTestService(t *testing.T) (*Service, *fakeTransport, domain.Host) {
 	limits := config.Default().Limits
 	svc := New(st, engine, transport, encryptor, security.NewRedactor(), limits)
 	t.Cleanup(func() { svc.explainWG.Wait() })
+	t.Cleanup(func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := svc.Shutdown(shutdownCtx); err != nil {
+			t.Errorf("shutdown service: %v", err)
+		}
+	})
 	host, err := svc.AddHost(ctx, domain.Host{Name: "fixture", Address: "127.0.0.1", Port: 22, User: "test"}, "test")
 	if err != nil {
 		t.Fatal(err)
@@ -547,7 +634,7 @@ func TestCommandExplainerPersistsAdviceWithoutChangingPolicyRisk(t *testing.T) {
 	svc.SetCommandExplainer(explainer)
 	result, err := svc.Submit(context.Background(), domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
-		Reason: "recover demo", Rollback: "restart the previous release",
+		Reason: "recover demo",
 	}, "test")
 	if err != nil {
 		t.Fatal(err)
@@ -595,7 +682,7 @@ func TestApprovalIsCreatedWithoutWaitingForCommandExplanation(t *testing.T) {
 	go func() {
 		result, err := svc.Submit(context.Background(), domain.ExecRequest{
 			HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
-			Reason: "recover demo", Rollback: "restart the previous release",
+			Reason: "recover demo",
 		}, "test")
 		done <- outcome{result: result, err: err}
 	}()
@@ -642,7 +729,7 @@ func TestApprovalDecisionCancelsCommandExplanation(t *testing.T) {
 	svc.SetCommandExplainer(explainer)
 	pending, err := svc.Submit(context.Background(), domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
-		Reason: "recover demo", Rollback: "restart the previous release",
+		Reason: "recover demo",
 	}, "test")
 	if err != nil {
 		t.Fatal(err)
@@ -684,7 +771,7 @@ func TestCommandExplanationConcurrencyIsBounded(t *testing.T) {
 	for index := 0; index < 3; index++ {
 		result, err := svc.Submit(context.Background(), domain.ExecRequest{
 			HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", fmt.Sprintf("demo-%d", index)},
-			Reason: "recover demo", Rollback: "restart the previous release",
+			Reason: "recover demo",
 		}, "test")
 		if err != nil {
 			t.Fatal(err)
@@ -730,7 +817,7 @@ func TestCommandExplanationQueueIsBounded(t *testing.T) {
 	svc.SetCommandExplainer(explainer)
 	first, err := svc.Submit(context.Background(), domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo-one"},
-		Reason: "recover demo", Rollback: "restart the previous release",
+		Reason: "recover demo",
 	}, "test")
 	if err != nil {
 		t.Fatal(err)
@@ -742,7 +829,7 @@ func TestCommandExplanationQueueIsBounded(t *testing.T) {
 	}
 	second, err := svc.Submit(context.Background(), domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo-two"},
-		Reason: "recover demo", Rollback: "restart the previous release",
+		Reason: "recover demo",
 	}, "test")
 	if err != nil {
 		t.Fatal(err)
@@ -767,7 +854,7 @@ func TestRetryApprovalExplanationKeepsPolicyRiskAndDoesNotExecute(t *testing.T) 
 	ctx := context.Background()
 	pending, err := svc.Submit(ctx, domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
-		Reason: "recover demo", Rollback: "restart the previous release",
+		Reason: "recover demo",
 	}, "test")
 	if err != nil {
 		t.Fatal(err)
@@ -810,7 +897,7 @@ func TestRetryApprovalExplanationPersistsDegradedResultAndKeepsPending(t *testin
 	ctx := context.Background()
 	pending, err := svc.Submit(ctx, domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
-		Reason: "recover demo", Rollback: "restart the previous release",
+		Reason: "recover demo",
 	}, "test")
 	if err != nil {
 		t.Fatal(err)
@@ -841,7 +928,7 @@ func TestApprovalDecisionCancelsRetriedCommandExplanation(t *testing.T) {
 	svc.SetCommandExplainer(explainer)
 	pending, err := svc.Submit(context.Background(), domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
-		Reason: "recover demo", Rollback: "restart the previous release",
+		Reason: "recover demo",
 	}, "test")
 	if err != nil {
 		t.Fatal(err)
@@ -879,7 +966,7 @@ func TestAgentPlanAdvancesStrictlyOneStepAtATime(t *testing.T) {
 	svc, _, _ := newTestService(t)
 	ctx := WithSessionID(context.Background(), "session_plan_test")
 	plan, err := svc.CreateAgentPlan(ctx, "Deploy and verify the service", []string{
-		"Inspect the project and host", "Deploy the service", "Verify health and rollback readiness",
+		"Inspect the project and host", "Deploy the service", "Verify health",
 	}, "test")
 	if err != nil {
 		t.Fatal(err)
@@ -954,7 +1041,7 @@ func TestRunCapturesAgentSessionFromContext(t *testing.T) {
 
 func TestChangeRequiresApprovalThenExecutes(t *testing.T) {
 	svc, transport, host := newTestService(t)
-	result, err := svc.Submit(context.Background(), domain.ExecRequest{HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"}, Reason: "recover service", Rollback: "restart previous version"}, "test")
+	result, err := svc.Submit(context.Background(), domain.ExecRequest{HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"}, Reason: "recover service"}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1003,7 +1090,7 @@ func TestBlockingApprovalSuspendsToolAndResumesWithExecutionResult(t *testing.T)
 	go func() {
 		result, err := svc.Submit(ctx, domain.ExecRequest{
 			HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
-			Reason: "recover demo service", Rollback: "restart previous version",
+			Reason: "recover demo service",
 		}, "eino-agent")
 		done <- outcome{result: result, err: err}
 	}()
@@ -1058,7 +1145,7 @@ func TestBlockingApprovalReturnsRejectedOperatorInstructionToTool(t *testing.T) 
 	go func() {
 		result, err := svc.Submit(ctx, domain.ExecRequest{
 			HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
-			Reason: "recover demo service", Rollback: "restart previous version",
+			Reason: "recover demo service",
 		}, "eino-agent")
 		done <- outcome{result: result, err: err}
 	}()
@@ -1112,7 +1199,7 @@ func TestBlockingApprovalAlsoSuspendsMutatingTaskStart(t *testing.T) {
 	go func() {
 		task, err := svc.StartTask(ctx, domain.ExecRequest{
 			HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
-			Reason: "restart demo as a managed task", Rollback: "restart previous version",
+			Reason: "restart demo as a managed task",
 		}, "eino-agent")
 		done <- outcome{task: task, err: err}
 	}()
@@ -1149,7 +1236,7 @@ func TestBlockingApprovalAlsoSuspendsMutatingTaskStart(t *testing.T) {
 func TestSessionApprovalGrantMatchesOnlyTheExactOperation(t *testing.T) {
 	svc, transport, host := newTestService(t)
 	ctx := WithSessionID(context.Background(), "session_grant_test")
-	req := domain.ExecRequest{HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"}, Reason: "restart reviewed service", Rollback: "restart previous version"}
+	req := domain.ExecRequest{HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"}, Reason: "restart reviewed service"}
 	result, err := svc.Submit(ctx, req, "test")
 	if err != nil {
 		t.Fatal(err)
@@ -1179,10 +1266,238 @@ func TestSessionApprovalGrantMatchesOnlyTheExactOperation(t *testing.T) {
 	}
 }
 
+func TestApproveWithScopeAsyncReturnsBeforeExecutionAndSurvivesRequestCancellation(t *testing.T) {
+	svc, transport, host := newTestService(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	transport.mu.Lock()
+	transport.execStarted = started
+	transport.execRelease = release
+	transport.mu.Unlock()
+
+	pending, err := svc.Submit(WithSessionID(context.Background(), "async_approval"), domain.ExecRequest{
+		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"}, Reason: "restart demo service",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	approveCtx, cancelApprove := context.WithCancel(context.Background())
+	type approvalOutcome struct {
+		result domain.ExecResult
+		err    error
+	}
+	decision := make(chan approvalOutcome, 1)
+	go func() {
+		result, approveErr := svc.ApproveWithScopeAsync(approveCtx, pending.ApprovalID, "reviewed", "once", "operator")
+		decision <- approvalOutcome{result: result, err: approveErr}
+	}()
+
+	var approved approvalOutcome
+	select {
+	case approved = <-decision:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("async approval waited for command execution")
+	}
+	if approved.err != nil || approved.result.Status != "running" || approved.result.RunID != pending.RunID {
+		t.Fatalf("unexpected async approval result: %#v err=%v", approved.result, approved.err)
+	}
+	cancelApprove()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("approved execution did not start")
+	}
+	time.Sleep(25 * time.Millisecond)
+	run, err := svc.store.GetRun(context.Background(), pending.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != "running" {
+		t.Fatalf("request cancellation stopped approved execution: status=%s error=%s", run.Status, run.Error)
+	}
+
+	releaseOnce.Do(func() { close(release) })
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		run, err = svc.store.GetRun(context.Background(), pending.RunID)
+		if err == nil && run.Status == "completed" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("approved execution did not complete after release: status=%s error=%s", run.Status, run.Error)
+}
+
+func TestApprovedExecutionStreamsRedactedOutputToAgentSession(t *testing.T) {
+	svc, transport, host := newTestService(t)
+	transport.mu.Lock()
+	transport.stdout = []byte("password=split-secret\nready\n")
+	transport.stderr = []byte("warning\n")
+	transport.mu.Unlock()
+	svc.transport = &streamingFakeTransport{
+		fakeTransport: transport,
+		chunks: []fakeStreamChunk{
+			{stream: "stdout", data: "password=split-"},
+			{stream: "stderr", data: "warning\n"},
+			{stream: "stdout", data: "secret\nready\n"},
+		},
+	}
+
+	const sessionID = "streaming_approval"
+	const toolCallID = "call_streaming_approval"
+	events, unsubscribe := svc.SubscribeExecutionEvents(sessionID)
+	defer unsubscribe()
+	runCtx := WithExecutionOwner(WithSessionID(context.Background(), sessionID), toolCallID, "ssh_exec")
+	pending, err := svc.Submit(runCtx, domain.ExecRequest{
+		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"}, Reason: "restart demo service",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status != "approval_required" {
+		t.Fatalf("expected approval, got %#v", pending)
+	}
+	if _, err := svc.ApproveWithScopeAsync(context.Background(), pending.ApprovalID, "reviewed", "once", "operator"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr string
+	started := false
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case event := <-events:
+			if event.RunID != pending.RunID || event.SessionID != sessionID || event.ToolCallID != toolCallID || event.ToolName != "ssh_exec" || event.Sequence == 0 {
+				t.Fatalf("stream event lost its run identity: %#v", event)
+			}
+			switch event.Status {
+			case "running":
+				started = true
+			case "completed":
+				if !started {
+					t.Fatal("completion arrived without a running event")
+				}
+				if stdout != "password=[REDACTED]\nready\n" || stderr != "warning\n" {
+					t.Fatalf("unexpected streamed output: stdout=%q stderr=%q", stdout, stderr)
+				}
+				if strings.Contains(stdout, "split-secret") {
+					t.Fatalf("stream exposed a split secret: %q", stdout)
+				}
+				return
+			}
+			if event.Stream == "stdout" {
+				stdout += event.Content
+			}
+			if event.Stream == "stderr" {
+				stderr += event.Content
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for approved execution stream")
+		}
+	}
+}
+
+func TestBackgroundTaskKeepsItsToolCallForStreamEvents(t *testing.T) {
+	svc, transport, host := newTestService(t)
+	transport.mu.Lock()
+	transport.stdout = []byte("first\nsecond\n")
+	transport.mu.Unlock()
+	svc.transport = &streamingFakeTransport{
+		fakeTransport: transport,
+		chunks: []fakeStreamChunk{
+			{stream: "stdout", data: "first\n"},
+			{stream: "stdout", data: "second\n"},
+		},
+	}
+
+	const sessionID = "streaming_background"
+	const toolCallID = "call_streaming_background"
+	events, unsubscribe := svc.SubscribeExecutionEvents(sessionID)
+	defer unsubscribe()
+	taskCtx := WithExecutionOwner(WithSessionID(context.Background(), sessionID), toolCallID, "ssh_exec")
+	task, err := svc.StartTask(taskCtx, domain.ExecRequest{
+		HostID: host.ID, Mode: domain.ExecProgram, Program: "uname", Args: []string{"-a"}, Reason: "inspect the host kernel",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Status != "running" {
+		t.Fatalf("background task did not start: %#v", task)
+	}
+
+	var output string
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case event := <-events:
+			if event.ToolCallID != toolCallID || event.ToolName != "ssh_exec" {
+				t.Fatalf("background stream was attached to the wrong tool: %#v", event)
+			}
+			if event.Stream == "stdout" {
+				output += event.Content
+			}
+			if event.Status == "completed" {
+				if output != "first\nsecond\n" {
+					t.Fatalf("unexpected background output: %q", output)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for background stream")
+		}
+	}
+}
+
+func TestApproveWithScopeAsyncExecutesConcurrentDecisionOnlyOnce(t *testing.T) {
+	svc, transport, host := newTestService(t)
+	pending, err := svc.Submit(WithSessionID(context.Background(), "concurrent_approval"), domain.ExecRequest{
+		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"}, Reason: "restart demo service",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			_, approveErr := svc.ApproveWithScopeAsync(context.Background(), pending.ApprovalID, "reviewed", "once", "operator")
+			results <- approveErr
+		}()
+	}
+	close(start)
+	successes := 0
+	for range 2 {
+		if err := <-results; err == nil {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("concurrent approval decisions succeeded %d times, want exactly once", successes)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		transport.mu.Lock()
+		callCount := len(transport.calls)
+		transport.mu.Unlock()
+		if callCount == 1 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	transport.mu.Lock()
+	callCount := len(transport.calls)
+	transport.mu.Unlock()
+	t.Fatalf("approved operation executed %d times, want once", callCount)
+}
+
 func TestCriticalApprovalCannotCreateSessionGrant(t *testing.T) {
 	svc, _, host := newTestService(t)
 	ctx := WithSessionID(context.Background(), "session_critical_test")
-	result, err := svc.Submit(ctx, domain.ExecRequest{HostID: host.ID, Mode: domain.ExecProgram, Program: "rm", Args: []string{"-rf", "/tmp/demo"}, Reason: "critical test", Rollback: "restore snapshot"}, "test")
+	result, err := svc.Submit(ctx, domain.ExecRequest{HostID: host.ID, Mode: domain.ExecProgram, Program: "rm", Args: []string{"-rf", "/tmp/demo"}, Reason: "critical test"}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1193,7 +1508,7 @@ func TestCriticalApprovalCannotCreateSessionGrant(t *testing.T) {
 
 func TestCriticalRequiresApprovalReason(t *testing.T) {
 	svc, transport, host := newTestService(t)
-	result, err := svc.Submit(context.Background(), domain.ExecRequest{HostID: host.ID, Mode: domain.ExecProgram, Program: "rm", Args: []string{"-rf", "/tmp/demo"}, Reason: "clean fixture", Rollback: "restore snapshot"}, "test")
+	result, err := svc.Submit(context.Background(), domain.ExecRequest{HostID: host.ID, Mode: domain.ExecProgram, Program: "rm", Args: []string{"-rf", "/tmp/demo"}, Reason: "clean fixture"}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1308,14 +1623,20 @@ func TestModelProviderProxyIsEncryptedPreservedAndUsedForDiscovery(t *testing.T)
 
 	svc, _, _ := newTestService(t)
 	ctx := context.Background()
-	provider, err := svc.SaveModelProvider(ctx, domain.ModelProviderInput{
-		Name: "proxied", Kind: "openai_compatible", BaseURL: "http://model.invalid/v1", Model: "proxied-model",
-		ProxyURL: proxy.URL + "/", ProxyUsername: "proxy-user", ProxyPassword: proxyPassword,
+	savedProxy, err := svc.SaveProxy(ctx, domain.ProxyInput{
+		Name: "model proxy", URL: proxy.URL + "/", Username: "proxy-user", Password: proxyPassword,
 	}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if provider.ProxyURL != proxy.URL || provider.ProxyUsername != "proxy-user" || !provider.HasProxyPassword {
+	provider, err := svc.SaveModelProvider(ctx, domain.ModelProviderInput{
+		Name: "proxied", Kind: "openai_compatible", BaseURL: "http://model.invalid/v1", Model: "proxied-model",
+		ProxyID: savedProxy.ID,
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.ProxyID != savedProxy.ID {
 		t.Fatalf("unexpected public proxy configuration: %#v", provider)
 	}
 	serialized, err := json.Marshal(provider)
@@ -1325,11 +1646,11 @@ func TestModelProviderProxyIsEncryptedPreservedAndUsedForDiscovery(t *testing.T)
 	if strings.Contains(string(serialized), proxyPassword) || strings.Contains(string(serialized), "cipher") {
 		t.Fatalf("provider JSON exposed proxy credentials: %s", serialized)
 	}
-	stored, err := svc.store.GetModelProvider(ctx, provider.ID)
+	stored, err := svc.store.GetProxy(ctx, savedProxy.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.ProxyPasswordCipher == "" || strings.Contains(stored.ProxyPasswordCipher, proxyPassword) {
+	if stored.PasswordCipher == "" || strings.Contains(stored.PasswordCipher, proxyPassword) {
 		t.Fatalf("proxy password was not encrypted: %#v", stored)
 	}
 	cfg, _, err := svc.ModelProviderConfig(ctx, provider.ID)
@@ -1350,17 +1671,16 @@ func TestModelProviderProxyIsEncryptedPreservedAndUsedForDiscovery(t *testing.T)
 
 	preserved, err := svc.SaveModelProvider(ctx, domain.ModelProviderInput{
 		ID: provider.ID, Name: provider.Name, Kind: provider.Kind, BaseURL: provider.BaseURL, Model: provider.Model,
-		ProxyURL: provider.ProxyURL, ProxyUsername: provider.ProxyUsername,
+		ProxyID: provider.ProxyID,
 	}, "test")
-	if err != nil || !preserved.HasProxyPassword {
-		t.Fatalf("blank proxy password did not preserve the stored password: provider=%#v err=%v", preserved, err)
+	if err != nil || preserved.ProxyID != savedProxy.ID {
+		t.Fatalf("proxy reference was not preserved: provider=%#v err=%v", preserved, err)
 	}
-	changed, err := svc.SaveModelProvider(ctx, domain.ModelProviderInput{
-		ID: provider.ID, Name: provider.Name, Kind: provider.Kind, BaseURL: provider.BaseURL, Model: provider.Model,
-		ProxyURL: provider.ProxyURL, ProxyUsername: "different-user",
+	changed, err := svc.SaveProxy(ctx, domain.ProxyInput{
+		ID: savedProxy.ID, Name: savedProxy.Name, URL: savedProxy.URL, Username: "different-user",
 	}, "test")
-	if err != nil || changed.HasProxyPassword {
-		t.Fatalf("changed proxy identity reused the stored password: provider=%#v err=%v", changed, err)
+	if err != nil || changed.HasPassword {
+		t.Fatalf("changed proxy identity reused the stored password: proxy=%#v err=%v", changed, err)
 	}
 }
 
@@ -1587,7 +1907,7 @@ func TestRejectPendingApprovalsForSession(t *testing.T) {
 	svc, transport, host := newTestService(t)
 	request := domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
-		Reason: "recover demo service", Rollback: "restart the previous version",
+		Reason: "recover demo service",
 	}
 	target, err := svc.Submit(WithSessionID(context.Background(), "session_stop"), request, "eino-agent")
 	if err != nil || target.ApprovalID == "" {

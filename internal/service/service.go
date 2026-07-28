@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"eino-ops-agent/internal/config"
@@ -21,7 +22,6 @@ import (
 	"eino-ops-agent/internal/ids"
 	"eino-ops-agent/internal/observability"
 	"eino-ops-agent/internal/policy"
-	"eino-ops-agent/internal/proxyx"
 	"eino-ops-agent/internal/security"
 	"eino-ops-agent/internal/skills"
 	"eino-ops-agent/internal/sshx"
@@ -43,20 +43,32 @@ type Service struct {
 	validators           map[string]config.Validator
 	skills               *skills.Registry
 
-	globalSem         chan struct{}
-	semMu             sync.Mutex
-	hostSems          map[string]chan struct{}
-	taskMu            sync.RWMutex
-	tasks             map[string]*taskState
-	explainerMu       sync.RWMutex
-	explainer         CommandExplainer
-	explainWG         sync.WaitGroup
-	explanationMu     sync.Mutex
-	explanationActive map[string]*approvalExplanationTask
-	explanationSem    chan struct{}
-	explanationSlots  chan struct{}
-	mcpMu             sync.RWMutex
-	mcpRuntime        map[string]*mcpRuntimeState
+	globalSem              chan struct{}
+	semMu                  sync.Mutex
+	hostSems               map[string]chan struct{}
+	taskMu                 sync.RWMutex
+	tasks                  map[string]*taskState
+	explainerMu            sync.RWMutex
+	explainer              CommandExplainer
+	explainWG              sync.WaitGroup
+	explanationMu          sync.Mutex
+	explanationActive      map[string]*approvalExplanationTask
+	explanationSem         chan struct{}
+	explanationSlots       chan struct{}
+	mcpMu                  sync.RWMutex
+	mcpRuntime             map[string]*mcpRuntimeState
+	executionCtx           context.Context
+	executionCancel        context.CancelFunc
+	executionMu            sync.Mutex
+	executionClosed        bool
+	executionWG            sync.WaitGroup
+	executionEventMu       sync.RWMutex
+	executionSubscribers   map[string]map[uint64]*executionSubscriber
+	executionOwners        map[string]executionOwner
+	executionSubscriberID  uint64
+	executionEventSequence atomic.Uint64
+	tunnelMu               sync.RWMutex
+	tunnels                map[string]*sshTunnelState
 }
 
 const (
@@ -94,11 +106,14 @@ func New(st *store.Store, engine *policy.Engine, transport sshx.Transport, encry
 	if global <= 0 {
 		global = 8
 	}
+	executionCtx, executionCancel := context.WithCancel(context.Background())
 	result := &Service{
 		store: st, policy: engine, transport: transport, encryptor: encryptor, redactor: redactor, limits: limits,
 		workspaceSandboxPath: config.Default().WorkspaceSandboxPath,
 		globalSem:            make(chan struct{}, global), hostSems: make(map[string]chan struct{}), tasks: make(map[string]*taskState), workspaces: make(map[string]config.Workspace), validators: make(map[string]config.Validator), mcpRuntime: make(map[string]*mcpRuntimeState),
 		explanationActive: make(map[string]*approvalExplanationTask), explanationSem: make(chan struct{}, maxConcurrentApprovalExplanations), explanationSlots: make(chan struct{}, maxQueuedApprovalExplanations),
+		executionCtx: executionCtx, executionCancel: executionCancel,
+		tunnels: make(map[string]*sshTunnelState),
 	}
 	if len(runtimeConfig) > 0 {
 		result.dataDir = runtimeConfig[0].DataDir
@@ -112,10 +127,35 @@ func New(st *store.Store, engine *policy.Engine, transport sshx.Transport, encry
 }
 
 func (s *Service) RecoverInterruptedTasks(ctx context.Context) error {
-	return s.store.InterruptActiveTasks(ctx)
+	if err := s.store.InterruptActiveTasks(ctx); err != nil {
+		return err
+	}
+	_, err := s.store.PruneChatTurnsExcludedFromContext(ctx, "")
+	return err
 }
 
 func (s *Service) Store() *store.Store { return s.store }
+
+func (s *Service) Shutdown(ctx context.Context) error {
+	s.executionMu.Lock()
+	if !s.executionClosed {
+		s.executionClosed = true
+		s.executionCancel()
+	}
+	s.executionMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		s.executionWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 func (s *Service) ListChatSessions(ctx context.Context, limit int) ([]domain.ChatSession, error) {
 	return s.store.ListChatSessions(ctx, limit)
@@ -304,7 +344,7 @@ func (s *Service) SaveModelProvider(ctx context.Context, input domain.ModelProvi
 	input.Kind = strings.TrimSpace(input.Kind)
 	input.BaseURL = strings.TrimSpace(input.BaseURL)
 	input.Model = strings.TrimSpace(input.Model)
-	input.ProxyUsername = strings.TrimSpace(input.ProxyUsername)
+	input.ProxyID = strings.TrimSpace(input.ProxyID)
 	userAgent := ""
 	if input.UserAgent != nil {
 		normalizedUserAgent, err := validateProviderUserAgent(*input.UserAgent)
@@ -332,27 +372,15 @@ func (s *Service) SaveModelProvider(ctx context.Context, input domain.ModelProvi
 		return domain.ModelProvider{}, err
 	}
 	input.BaseURL = normalizedBaseURL
-	input.ProxyURL, err = proxyx.NormalizeURL(input.ProxyURL)
-	if err != nil {
-		return domain.ModelProvider{}, err
-	}
-	if len(input.ProxyURL) > 2048 {
-		return domain.ModelProvider{}, fmt.Errorf("proxy URL is too long")
-	}
-	if containsCredentialControl(input.ProxyUsername) || containsCredentialControl(input.ProxyPassword) {
-		return domain.ModelProvider{}, fmt.Errorf("proxy credentials cannot contain NUL, carriage return, or newline characters")
-	}
-	if len(input.ProxyUsername) > 255 || len(input.ProxyPassword) > 255 {
-		return domain.ModelProvider{}, fmt.Errorf("proxy credentials are too long")
-	}
-	if input.ProxyURL == "" {
-		input.ProxyUsername = ""
-		input.ProxyPassword = ""
+	if input.ProxyID != "" {
+		if _, err := s.store.GetProxy(ctx, input.ProxyID); err != nil {
+			return domain.ModelProvider{}, fmt.Errorf("load proxy %q: %w", input.ProxyID, err)
+		}
 	}
 
 	provider := domain.ModelProvider{
 		ID: input.ID, Name: input.Name, Kind: input.Kind, BaseURL: input.BaseURL, Model: input.Model,
-		ProxyURL: input.ProxyURL, ProxyUsername: input.ProxyUsername, UserAgent: userAgent,
+		ProxyID: input.ProxyID, UserAgent: userAgent,
 	}
 	if input.ID != "" {
 		existing, err := s.store.GetModelProvider(ctx, input.ID)
@@ -365,9 +393,6 @@ func (s *Service) SaveModelProvider(ctx context.Context, input domain.ModelProvi
 		if input.UserAgent == nil {
 			provider.UserAgent = existing.UserAgent
 		}
-		if provider.ProxyURL == existing.ProxyURL && provider.ProxyUsername == existing.ProxyUsername {
-			provider.ProxyPasswordCipher = existing.ProxyPasswordCipher
-		}
 	}
 	if key := strings.TrimSpace(input.APIKey); key != "" {
 		cipher, err := s.encryptor.Encrypt([]byte(key))
@@ -379,15 +404,6 @@ func (s *Service) SaveModelProvider(ctx context.Context, input domain.ModelProvi
 	if providerKindRequiresAPIKey(provider.Kind) && provider.APIKeyCipher == "" {
 		return domain.ModelProvider{}, fmt.Errorf("api_key is required for %s", provider.Kind)
 	}
-	if input.ClearProxyPassword || provider.ProxyURL == "" || provider.ProxyUsername == "" {
-		provider.ProxyPasswordCipher = ""
-	} else if input.ProxyPassword != "" {
-		cipher, err := s.encryptor.Encrypt([]byte(input.ProxyPassword))
-		if err != nil {
-			return domain.ModelProvider{}, fmt.Errorf("encrypt model provider proxy password: %w", err)
-		}
-		provider.ProxyPasswordCipher = cipher
-	}
 	saved, err := s.store.UpsertModelProvider(ctx, provider)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique constraint") {
@@ -397,7 +413,7 @@ func (s *Service) SaveModelProvider(ctx context.Context, input domain.ModelProvi
 	}
 	s.audit(ctx, "", "model_provider_saved", actor, map[string]any{
 		"provider_id": saved.ID, "name": saved.Name, "kind": saved.Kind, "model": saved.Model,
-		"proxy_configured": saved.ProxyURL != "",
+		"proxy_id": saved.ProxyID,
 	})
 	return saved, nil
 }
@@ -550,13 +566,13 @@ func (s *Service) ModelProviderConfig(ctx context.Context, id string) (config.Mo
 	if err != nil {
 		return config.Model{}, domain.ModelProvider{}, fmt.Errorf("decrypt model provider API key: %w", err)
 	}
-	proxyPassword, err := s.encryptor.Decrypt(provider.ProxyPasswordCipher)
+	proxy, err := s.resolveProxy(ctx, provider.ProxyID)
 	if err != nil {
-		return config.Model{}, domain.ModelProvider{}, fmt.Errorf("decrypt model provider proxy password: %w", err)
+		return config.Model{}, domain.ModelProvider{}, err
 	}
 	return config.Model{
 		APIKey: string(key), Kind: provider.Kind, BaseURL: provider.BaseURL, Name: provider.Model, UserAgent: provider.UserAgent,
-		ProxyURL: provider.ProxyURL, ProxyUsername: provider.ProxyUsername, ProxyPassword: string(proxyPassword),
+		ProxyURL: proxy.URL, ProxyUsername: proxy.Username, ProxyPassword: proxy.Password,
 	}, provider, nil
 }
 
@@ -608,7 +624,7 @@ func (s *Service) AddHost(ctx context.Context, host domain.Host, actor string) (
 	return s.SaveHost(ctx, domain.HostInput{
 		ID: host.ID, Name: host.Name, Address: host.Address, Port: host.Port, User: host.User,
 		AuthType: host.AuthType, KnownHostsFile: host.KnownHostsFile, ProxyJumpHostID: host.ProxyJumpHostID,
-		ProxyURL: host.ProxyURL, ProxyUsername: host.ProxyUsername, SudoMode: host.SudoMode,
+		ProxyID: host.ProxyID, SudoMode: host.SudoMode,
 	}, actor)
 }
 
@@ -620,7 +636,7 @@ func (s *Service) SaveHost(ctx context.Context, input domain.HostInput, actor st
 	input.AuthType = strings.TrimSpace(input.AuthType)
 	input.KnownHostsFile = strings.TrimSpace(input.KnownHostsFile)
 	input.ProxyJumpHostID = strings.TrimSpace(input.ProxyJumpHostID)
-	input.ProxyUsername = strings.TrimSpace(input.ProxyUsername)
+	input.ProxyID = strings.TrimSpace(input.ProxyID)
 	input.SudoMode = strings.TrimSpace(input.SudoMode)
 	var existing domain.Host
 	hasExisting := false
@@ -650,14 +666,14 @@ func (s *Service) SaveHost(ctx context.Context, input domain.HostInput, actor st
 	if input.Address == "" || input.User == "" {
 		return domain.Host{}, fmt.Errorf("address and user are required")
 	}
-	proxyURL, err := sshx.NormalizeProxyURL(input.ProxyURL)
-	if err != nil {
-		return domain.Host{}, err
-	}
-	input.ProxyURL = proxyURL
-	if input.ProxyURL == "" {
-		input.ProxyUsername = ""
-		input.ProxyPassword = ""
+	if input.ProxyID != "" {
+		proxy, err := s.store.GetProxy(ctx, input.ProxyID)
+		if err != nil {
+			return domain.Host{}, fmt.Errorf("load proxy %q: %w", input.ProxyID, err)
+		}
+		if _, err := sshx.NormalizeProxyURL(proxy.URL); err != nil {
+			return domain.Host{}, fmt.Errorf("proxy %q is not compatible with SSH: %w", proxy.Name, err)
+		}
 	}
 	if input.AuthType == "key" && input.PrivateKey == "" && (!hasExisting || existing.PrivateKeyCipher == "") {
 		return domain.Host{}, fmt.Errorf("private_key upload is required for key authentication")
@@ -672,14 +688,11 @@ func (s *Service) SaveHost(ctx context.Context, input domain.HostInput, actor st
 	default:
 		return domain.Host{}, fmt.Errorf("invalid sudo mode %q", input.SudoMode)
 	}
-	if containsCredentialControl(input.Password) || containsCredentialControl(input.SudoPassword) || containsCredentialControl(input.ProxyUsername) || containsCredentialControl(input.ProxyPassword) {
+	if containsCredentialControl(input.Password) || containsCredentialControl(input.SudoPassword) {
 		return domain.Host{}, fmt.Errorf("credentials cannot contain NUL, carriage return, or newline characters")
 	}
 	if len(input.Password) > 1024 || len(input.SudoPassword) > 1024 {
 		return domain.Host{}, fmt.Errorf("password is too long")
-	}
-	if len(input.ProxyUsername) > 255 || len(input.ProxyPassword) > 255 {
-		return domain.Host{}, fmt.Errorf("proxy credentials are too long")
 	}
 	if input.AuthType != "key" {
 		input.PrivateKey = ""
@@ -688,16 +701,13 @@ func (s *Service) SaveHost(ctx context.Context, input domain.HostInput, actor st
 	host := domain.Host{
 		ID: input.ID, Name: input.Name, Address: input.Address, Port: input.Port, User: input.User,
 		AuthType: input.AuthType, KnownHostsFile: input.KnownHostsFile, ProxyJumpHostID: input.ProxyJumpHostID,
-		ProxyURL: input.ProxyURL, ProxyUsername: input.ProxyUsername, SudoMode: input.SudoMode,
+		ProxyID: input.ProxyID, SudoMode: input.SudoMode,
 	}
 	if hasExisting {
 		host.CreatedAt = existing.CreatedAt
 		host.PasswordCipher = existing.PasswordCipher
 		host.SudoCipher = existing.SudoCipher
 		host.PrivateKeyCipher = existing.PrivateKeyCipher
-		if input.ProxyURL == existing.ProxyURL && input.ProxyUsername == existing.ProxyUsername {
-			host.ProxyPasswordCipher = existing.ProxyPasswordCipher
-		}
 	}
 	if input.AuthType != "key" {
 		host.PrivateKeyCipher = ""
@@ -729,15 +739,6 @@ func (s *Service) SaveHost(ctx context.Context, input domain.HostInput, actor st
 			return domain.Host{}, fmt.Errorf("encrypt sudo password: %w", err)
 		}
 		host.SudoCipher = cipher
-	}
-	if input.ProxyURL == "" || input.ProxyUsername == "" {
-		host.ProxyPasswordCipher = ""
-	} else if input.ProxyPassword != "" {
-		cipher, err := s.encryptor.Encrypt([]byte(input.ProxyPassword))
-		if err != nil {
-			return domain.Host{}, fmt.Errorf("encrypt SSH proxy password: %w", err)
-		}
-		host.ProxyPasswordCipher = cipher
 	}
 	if input.AuthType == "password" && host.PasswordCipher == "" {
 		return domain.Host{}, fmt.Errorf("password is required for password authentication")
@@ -786,6 +787,9 @@ func (s *Service) ListHostCapabilities(ctx context.Context) ([]domain.HostCapabi
 }
 
 func (s *Service) DeleteHost(ctx context.Context, id, actor string) error {
+	if s.hasSSHTunnelForHost(id) {
+		return fmt.Errorf("%w: stop the tunnel before deleting host %q", ErrHostHasActiveTunnel, id)
+	}
 	hosts, err := s.store.ListHosts(ctx)
 	if err != nil {
 		return err
@@ -1047,12 +1051,16 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 		if err := s.store.CreateRun(ctx, run); err != nil {
 			return domain.ExecResult{}, err
 		}
+		if owner, ok := executionOwnerFromContext(ctx); ok {
+			s.bindExecutionOwner(run.ID, owner)
+		}
 		approval := domain.Approval{
 			ID: ids.New("approval"), RunID: run.ID, HostID: host.ID, RequestJSON: requestRedacted, RequestCipher: requestCipher,
 			RequestDigest: digest, Risk: decision.Risk, Status: "pending",
 			CreatedAt: now, ExpiresAt: now.Add(5 * time.Minute),
 		}
 		if err := s.store.CreateApproval(ctx, approval); err != nil {
+			s.clearExecutionOwner(run.ID)
 			return domain.ExecResult{}, err
 		}
 		s.audit(ctx, run.ID, "approval_requested", actor, map[string]any{"approval_id": approval.ID, "risk": decision.Risk, "hits": decision.RuleHits})
@@ -1065,6 +1073,9 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 		run.Status = "running"
 		if err := s.store.CreateRun(ctx, run); err != nil {
 			return domain.ExecResult{}, err
+		}
+		if owner, ok := executionOwnerFromContext(ctx); ok {
+			s.bindExecutionOwner(run.ID, owner)
 		}
 		if sessionGrantUsed {
 			s.audit(ctx, run.ID, "session_approval_grant_used", actor, map[string]any{"session_id": sessionID})
@@ -1222,84 +1233,174 @@ func (s *Service) Approve(ctx context.Context, approvalID, reason, actor string)
 }
 
 func (s *Service) ApproveWithScope(ctx context.Context, approvalID, reason, scope, actor string) (domain.ExecResult, error) {
+	approved, err := s.approveForExecution(ctx, approvalID, reason, scope, actor)
+	if err != nil {
+		return domain.ExecResult{}, err
+	}
+	return s.executeApproved(ctx, approved)
+}
+
+func (s *Service) ApproveWithScopeAsync(ctx context.Context, approvalID, reason, scope, actor string) (domain.ExecResult, error) {
+	approved, err := s.approveForExecution(ctx, approvalID, reason, scope, actor)
+	if err != nil {
+		return domain.ExecResult{}, err
+	}
+	if err := s.startApprovedExecution(ctx, approved); err != nil {
+		s.finishApprovedExecutionError(approved, err)
+		return domain.ExecResult{}, err
+	}
+	return execResultFromRun(approved.run, approved.approval.ID, ""), nil
+}
+
+type approvedExecution struct {
+	approval domain.Approval
+	request  domain.ExecRequest
+	run      domain.Run
+	host     domain.Host
+	actor    string
+}
+
+func (s *Service) approveForExecution(ctx context.Context, approvalID, reason, scope, actor string) (approvedExecution, error) {
 	logger := observability.FromContext(ctx).With("component", "approval", "approval_id", approvalID, "actor", actor)
 	if scope == "" {
 		scope = "once"
 	}
 	if scope != "once" && scope != "session" {
 		logger.WarnContext(ctx, "approval rejected by validation", "scope", scope)
-		return domain.ExecResult{}, fmt.Errorf("invalid approval scope %q", scope)
+		return approvedExecution{}, fmt.Errorf("invalid approval scope %q", scope)
 	}
 	approval, err := s.store.GetApproval(ctx, approvalID)
 	if err != nil {
-		return domain.ExecResult{}, err
+		return approvedExecution{}, err
 	}
 	if approval.Status != "pending" {
 		logger.WarnContext(ctx, "approval decision ignored", "status", approval.Status)
-		return domain.ExecResult{}, fmt.Errorf("approval is %s", approval.Status)
+		return approvedExecution{}, fmt.Errorf("approval is %s", approval.Status)
 	}
 	if time.Now().UTC().After(approval.ExpiresAt) {
 		_ = s.store.DecideApproval(ctx, approval.ID, "expired", "approval expired")
 		s.cancelApprovalExplanation(ctx, approval.ID, approval.RunID)
 		logger.WarnContext(ctx, "approval expired before decision", "run_id", approval.RunID)
-		return domain.ExecResult{}, fmt.Errorf("approval expired")
+		return approvedExecution{}, fmt.Errorf("approval expired")
 	}
 	if approval.Risk == domain.RiskCritical {
 		if scope == "session" {
-			return domain.ExecResult{}, fmt.Errorf("critical operations cannot be approved for an entire session")
+			return approvedExecution{}, fmt.Errorf("critical operations cannot be approved for an entire session")
 		}
 		if strings.TrimSpace(reason) == "" {
-			return domain.ExecResult{}, fmt.Errorf("approval reason is required for critical operations")
+			return approvedExecution{}, fmt.Errorf("approval reason is required for critical operations")
 		}
 	}
 	requestData, err := s.encryptor.Decrypt(approval.RequestCipher)
 	if err != nil {
-		return domain.ExecResult{}, err
+		return approvedExecution{}, err
 	}
 	if len(requestData) == 0 {
 		requestData = []byte(approval.RequestJSON)
 	}
 	var req domain.ExecRequest
 	if err := json.Unmarshal(requestData, &req); err != nil {
-		return domain.ExecResult{}, err
+		return approvedExecution{}, err
 	}
 	_, digest, err := canonicalRequest(req)
 	if err != nil || digest != approval.RequestDigest {
-		return domain.ExecResult{}, fmt.Errorf("approved request digest no longer matches")
+		return approvedExecution{}, fmt.Errorf("approved request digest no longer matches")
 	}
 	if scope == "session" && requiresOneTimeApproval(req) {
-		return domain.ExecResult{}, fmt.Errorf("this operation requires a fresh one-time approval for every invocation")
+		return approvedExecution{}, fmt.Errorf("this operation requires a fresh one-time approval for every invocation")
 	}
 	run, err := s.store.GetRun(ctx, approval.RunID)
 	if err != nil {
-		return domain.ExecResult{}, err
+		return approvedExecution{}, err
 	}
 	host, err := s.store.GetHost(ctx, approval.HostID)
 	if err != nil {
-		return domain.ExecResult{}, err
+		return approvedExecution{}, err
 	}
 	if scope == "session" {
 		if approval.SessionID == "" {
-			return domain.ExecResult{}, fmt.Errorf("approval has no Agent session and cannot create a session grant")
+			return approvedExecution{}, fmt.Errorf("approval has no Agent session and cannot create a session grant")
 		}
 		fingerprint, err := approvalFingerprint(req)
 		if err != nil {
-			return domain.ExecResult{}, err
+			return approvedExecution{}, err
 		}
-		if err := s.store.DecideApprovalWithSessionGrant(ctx, approval.ID, reason, approval.SessionID, fingerprint, time.Now().UTC().Add(8*time.Hour), approval.Risk); err != nil {
-			return domain.ExecResult{}, err
+		if err := s.store.ApprovePendingWithSessionGrantAndStartRun(ctx, approval.ID, run.ID, reason, approval.SessionID, fingerprint, time.Now().UTC().Add(8*time.Hour), approval.Risk); err != nil {
+			return approvedExecution{}, err
 		}
-	} else if err := s.store.ApprovePending(ctx, approval.ID, reason, approval.Risk); err != nil {
-		return domain.ExecResult{}, err
+	} else if err := s.store.ApprovePendingAndStartRun(ctx, approval.ID, run.ID, reason, approval.Risk); err != nil {
+		return approvedExecution{}, err
 	}
 	s.cancelApprovalExplanation(ctx, approval.ID, approval.RunID)
 	run.Status = "running"
-	if err := s.store.UpdateRun(ctx, run); err != nil {
-		return domain.ExecResult{}, err
-	}
 	s.audit(ctx, run.ID, "approval_granted", actor, map[string]any{"approval_id": approval.ID, "reason": reason, "scope": scope, "session_id": approval.SessionID})
 	logger.InfoContext(ctx, "approval granted", "run_id", run.ID, "scope", scope, "risk", approval.Risk, "session_id", approval.SessionID)
-	return s.execute(ctx, host, req, run, actor, nil, nil)
+	return approvedExecution{approval: approval, request: req, run: run, host: host, actor: actor}, nil
+}
+
+func (s *Service) startApprovedExecution(parent context.Context, approved approvedExecution) error {
+	s.executionMu.Lock()
+	if s.executionClosed {
+		s.executionMu.Unlock()
+		return fmt.Errorf("service is shutting down")
+	}
+	s.executionWG.Add(1)
+	s.executionMu.Unlock()
+
+	executionCtx, cancel := context.WithCancel(context.WithoutCancel(parent))
+	stopServiceCancellation := context.AfterFunc(s.executionCtx, cancel)
+	go func() {
+		defer s.executionWG.Done()
+		defer stopServiceCancellation()
+		defer cancel()
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				err := fmt.Errorf("approved execution stopped unexpectedly")
+				observability.FromContext(executionCtx).ErrorContext(executionCtx, "approved execution panicked", "run_id", approved.run.ID, "panic", s.redactor.Redact(fmt.Sprint(recovered)))
+				s.finishApprovedExecutionError(approved, err)
+			}
+		}()
+		_, _ = s.executeApproved(executionCtx, approved)
+	}()
+	return nil
+}
+
+func (s *Service) executeApproved(ctx context.Context, approved approvedExecution) (domain.ExecResult, error) {
+	result, err := s.execute(ctx, approved.host, approved.request, approved.run, approved.actor, nil, nil)
+	if err == nil {
+		return result, nil
+	}
+	s.finishApprovedExecutionError(approved, err)
+	if result.RunID != "" {
+		return result, err
+	}
+	run, loadErr := s.store.GetRun(context.WithoutCancel(ctx), approved.run.ID)
+	if loadErr == nil {
+		result = execResultFromRun(run, approved.approval.ID, "")
+	}
+	return result, err
+}
+
+func (s *Service) finishApprovedExecutionError(approved approvedExecution, cause error) {
+	defer s.clearExecutionOwner(approved.run.ID)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	run, err := s.store.GetRun(ctx, approved.run.ID)
+	if err != nil || (run.Status != "created" && run.Status != "approval_required" && run.Status != "running") {
+		return
+	}
+	run.Status = "failed"
+	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
+		run.Status = "interrupted"
+	}
+	run.Error = s.redactor.Redact(cause.Error())
+	run.CompletedAt = time.Now().UTC()
+	if err := s.store.UpdateRun(ctx, run); err != nil {
+		observability.FromContext(ctx).ErrorContext(ctx, "persist approved execution failure failed", "run_id", run.ID, "error", err)
+		return
+	}
+	s.audit(ctx, run.ID, "command_completed", approved.actor, map[string]any{"status": run.Status, "error": run.Error})
+	observability.FromContext(ctx).ErrorContext(ctx, "approved execution stopped before completion", "run_id", run.ID, "status", run.Status, "error", run.Error)
 }
 
 func (s *Service) Reject(ctx context.Context, approvalID, reason, actor string) error {
@@ -1322,6 +1423,7 @@ func (s *Service) Reject(ctx context.Context, approvalID, reason, actor string) 
 	if err := s.store.UpdateRun(ctx, run); err != nil {
 		return err
 	}
+	s.clearExecutionOwner(run.ID)
 	s.audit(ctx, run.ID, "approval_rejected", actor, map[string]any{"approval_id": approval.ID, "reason": reason})
 	logger.InfoContext(ctx, "approval rejected", "run_id", run.ID, "session_id", approval.SessionID)
 	return nil
@@ -1375,6 +1477,7 @@ func (s *Service) awaitApproval(ctx context.Context, initial domain.ExecResult) 
 				run.Error = "approval expired"
 				run.CompletedAt = time.Now().UTC()
 				_ = s.store.UpdateRun(ctx, run)
+				s.clearExecutionOwner(run.ID)
 				s.audit(ctx, run.ID, "approval_expired", "control-plane", map[string]any{"approval_id": approval.ID})
 			}
 			continue
@@ -1413,15 +1516,24 @@ func execResultFromRun(run domain.Run, approvalID, operatorInstruction string) d
 	if !run.CompletedAt.IsZero() {
 		duration = run.CompletedAt.Sub(run.StartedAt)
 	}
-	return domain.ExecResult{
+	result := domain.ExecResult{
 		RunID: run.ID, Status: run.Status, Risk: run.Risk, ApprovalID: approvalID,
 		OperatorInstruction: operatorInstruction, ExitCode: run.ExitCode,
 		Stdout: run.StdoutRedacted, Stderr: stderr,
 		Duration: duration, CompletedAt: run.CompletedAt,
 	}
+	var request domain.ExecRequest
+	if json.Unmarshal([]byte(run.RequestJSON), &request) == nil && request.Mode == domain.ExecSSHTunnelStart {
+		var tunnel domain.SSHTunnel
+		if json.Unmarshal([]byte(run.StdoutRedacted), &tunnel) == nil && tunnel.ID != "" {
+			result.Tunnel = &tunnel
+		}
+	}
+	return result
 }
 
 func (s *Service) execute(ctx context.Context, host domain.Host, req domain.ExecRequest, run domain.Run, actor string, hits []string, stream func(string, []byte)) (domain.ExecResult, error) {
+	defer s.clearExecutionOwner(run.ID)
 	logger := observability.FromContext(ctx).With(
 		"component", "ssh", "run_id", run.ID, "session_id", run.SessionID, "host_id", host.ID,
 		"mode", req.Mode, "program", req.Program, "elevated", req.Elevated, "risk", run.Risk,
@@ -1498,16 +1610,41 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 		return domain.ExecResult{RunID: run.ID, Status: run.Status, Risk: run.Risk, CompletedAt: run.CompletedAt}, err
 	}
 	s.audit(ctx, run.ID, "command_started", actor, map[string]any{"risk": run.Risk, "digest": run.RequestDigest})
+	s.publishExecutionEvent(ExecutionEvent{
+		SessionID: run.SessionID,
+		RunID:     run.ID,
+		Status:    "running",
+	})
 	var raw sshx.RawResult
 	var execErr error
-	if req.Mode == domain.ExecSSHFileTransfer {
+	var tunnel *domain.SSHTunnel
+	var outputSink *executionOutputSink
+	if stream != nil || s.hasExecutionSubscribers(run.SessionID) {
+		outputSink = s.newExecutionOutputSink(run, stream)
+	}
+	if req.Mode == domain.ExecSSHTunnelStart {
+		started := time.Now()
+		created, tunnelErr := s.openSSHTunnel(ctx, host, connection, req, actor)
+		execErr = tunnelErr
+		raw.Duration = time.Since(started)
+		if tunnelErr == nil {
+			tunnel = &created
+			raw.ExitCode = 0
+			raw.Stdout, execErr = marshalSSHTunnel(created)
+		} else {
+			raw.ExitCode = -1
+		}
+	} else if req.Mode == domain.ExecSSHFileTransfer {
 		raw, execErr = s.executeSSHFileTransfer(ctx, req)
 	} else if isWorkspaceMode(req.Mode) {
 		raw, execErr = s.executeWorkspace(ctx, req)
-	} else if streaming, ok := s.transport.(sshx.StreamingTransport); ok && stream != nil {
-		raw, execErr = streaming.ExecStream(ctx, connection, transportReq, stream)
+	} else if streaming, ok := s.transport.(sshx.StreamingTransport); ok && outputSink != nil {
+		raw, execErr = streaming.ExecStream(ctx, connection, transportReq, outputSink.Write)
 	} else {
 		raw, execErr = s.transport.Exec(ctx, connection, transportReq)
+	}
+	if outputSink != nil {
+		outputSink.Flush()
 	}
 	run.ExitCode = raw.ExitCode
 	run.StdoutRedacted = s.redactor.Redact(string(raw.Stdout))
@@ -1528,6 +1665,11 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 		logger.ErrorContext(ctx, "persist SSH execution result failed", "error", err)
 		return domain.ExecResult{}, err
 	}
+	s.publishExecutionEvent(ExecutionEvent{
+		SessionID: run.SessionID,
+		RunID:     run.ID,
+		Status:    run.Status,
+	})
 	s.audit(ctx, run.ID, "command_completed", actor, map[string]any{"status": run.Status, "exit_code": run.ExitCode, "duration_ms": raw.Duration.Milliseconds()})
 	completion := logger.InfoContext
 	if run.Status == "failed" {
@@ -1537,7 +1679,7 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 	result := domain.ExecResult{
 		RunID: run.ID, Status: run.Status, Risk: run.Risk, ExitCode: run.ExitCode,
 		Stdout: run.StdoutRedacted, Stderr: run.StderrRedacted,
-		Duration: raw.Duration, PolicyHits: hits, Change: approvedReq.Change, CompletedAt: run.CompletedAt,
+		Duration: raw.Duration, PolicyHits: hits, Change: approvedReq.Change, Tunnel: tunnel, CompletedAt: run.CompletedAt,
 	}
 	if run.Status == "completed" && (approvedReq.Mode == domain.ExecRemoteSearch || approvedReq.Mode == domain.ExecWorkspaceSearch) {
 		decorateFileSearchResult(&result, approvedReq.SearchPattern, approvedReq.SearchMatchMode, approvedReq.ContextLines)
@@ -1618,6 +1760,10 @@ func validateExecutionRequest(host domain.Host, req domain.ExecRequest) error {
 		if err := validateFileSearchInput(req.SearchPattern, req.SearchMatchMode, req.ContextLines); err != nil {
 			return fmt.Errorf("invalid remote file search: %w", err)
 		}
+	case domain.ExecSSHTunnelStart:
+		if err := validateSSHTunnelRequest(req); err != nil {
+			return err
+		}
 	}
 	if req.Mode == domain.ExecSSHFileTransfer && req.Elevated {
 		return fmt.Errorf("elevated mode is not supported for SFTP transfers")
@@ -1642,6 +1788,15 @@ func validateExecutionRequest(host domain.Host, req domain.ExecRequest) error {
 }
 
 func validateRequestLimits(req domain.ExecRequest, limits config.Limits, redactor *security.Redactor) error {
+	if req.Mode == domain.ExecSSHTunnelStart {
+		if req.Program != "" || len(req.Args) != 0 || req.Script != "" || req.Cwd != "" || len(req.Env) != 0 ||
+			req.RemotePath != "" || req.SourceHostID != "" || req.SourcePath != "" || req.WorkspaceID != "" ||
+			req.RelativePath != "" || req.Change != nil {
+			return fmt.Errorf("SSH tunnel requests cannot include command, file, transfer, or Workspace fields")
+		}
+	} else if req.TunnelRemoteHost != "" || req.TunnelRemotePort != 0 || req.TunnelLocalPort != 0 {
+		return fmt.Errorf("SSH tunnel fields are only valid for ssh_tunnel_start requests")
+	}
 	if req.Mode == domain.ExecWorkspaceShell {
 		switch req.WorkspaceShellBackend {
 		case domain.WorkspaceShellModeSandbox, domain.WorkspaceShellModeHost:
@@ -1733,7 +1888,7 @@ func requiresOneTimeApproval(req domain.ExecRequest) bool {
 		return true
 	}
 	switch req.Mode {
-	case domain.ExecRemoteRead, domain.ExecRemoteSearch, domain.ExecWorkspaceRead, domain.ExecWorkspaceSearch:
+	case domain.ExecRemoteRead, domain.ExecRemoteSearch, domain.ExecWorkspaceRead, domain.ExecWorkspaceSearch, domain.ExecSSHTunnelStart:
 		return true
 	}
 	for _, program := range []string{"cat", "cut", "grep", "head", "less", "more", "tail"} {
@@ -1797,6 +1952,9 @@ func (s *Service) StartTask(ctx context.Context, req domain.ExecRequest, actor s
 	background := context.Background()
 	if sessionID := SessionIDFromContext(ctx); sessionID != "" {
 		background = WithSessionID(background, sessionID)
+	}
+	if owner, ok := executionOwnerFromContext(ctx); ok {
+		background = WithExecutionOwner(background, owner.ToolCallID, owner.ToolName)
 	}
 	taskCtx, cancel := context.WithCancel(background)
 	task := domain.Task{ID: ids.New("task"), HostID: req.HostID, Status: "running", StartedAt: time.Now().UTC()}
@@ -1892,6 +2050,9 @@ func (s *Service) GetRun(ctx context.Context, id string, includeRaw bool) (Histo
 	if err != nil {
 		return HistoryResult{}, err
 	}
+	if sessionID := SessionIDFromContext(ctx); sessionID != "" && run.SessionID != sessionID {
+		return HistoryResult{}, store.ErrNotFound
+	}
 	result := HistoryResult{Run: run}
 	if includeRaw {
 		stdout, err := s.encryptor.Decrypt(run.StdoutCipher)
@@ -1909,7 +2070,7 @@ func (s *Service) GetRun(ctx context.Context, id string, includeRaw bool) (Histo
 }
 
 func (s *Service) SearchRuns(ctx context.Context, query, hostID string, limit int) ([]domain.Run, error) {
-	return s.store.SearchRuns(ctx, query, hostID, limit)
+	return s.store.SearchRuns(ctx, query, hostID, SessionIDFromContext(ctx), limit)
 }
 
 // RetryApprovalExplanation reruns the tool-free command explainer for an
@@ -2158,8 +2319,6 @@ func canonicalRequest(req domain.ExecRequest) (string, string, error) {
 
 func approvalFingerprint(req domain.ExecRequest) (string, error) {
 	req.Reason = ""
-	req.ExpectedChanges = ""
-	req.Rollback = ""
 	data, err := json.Marshal(req)
 	if err != nil {
 		return "", err

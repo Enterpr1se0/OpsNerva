@@ -2,6 +2,8 @@ package security
 
 import (
 	"regexp"
+	"strings"
+	"sync"
 )
 
 type Redactor struct {
@@ -12,6 +14,18 @@ type redactionRule struct {
 	pattern     *regexp.Regexp
 	replacement string
 }
+
+type StreamRedactor struct {
+	mu              sync.Mutex
+	redactor        *Redactor
+	pending         string
+	privateKeyBlock bool
+}
+
+var (
+	privateKeyBegin = regexp.MustCompile(`-----BEGIN (?:OPENSSH|RSA|EC|DSA)? ?PRIVATE KEY-----`)
+	privateKeyEnd   = regexp.MustCompile(`-----END (?:OPENSSH|RSA|EC|DSA)? ?PRIVATE KEY-----`)
+)
 
 func NewRedactor() *Redactor {
 	rules := []redactionRule{
@@ -34,4 +48,69 @@ func (r *Redactor) Redact(input string) string {
 		result = rule.pattern.ReplaceAllString(result, rule.replacement)
 	}
 	return result
+}
+
+// NewStreamRedactor buffers incomplete lines so secrets split across transport
+// chunks are never emitted before the complete value can be inspected.
+func (r *Redactor) NewStreamRedactor() *StreamRedactor {
+	return &StreamRedactor{redactor: r}
+}
+
+func (r *StreamRedactor) Write(data []byte) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(data) == 0 {
+		return ""
+	}
+	r.pending += string(data)
+	var output strings.Builder
+	for {
+		index := strings.IndexAny(r.pending, "\r\n")
+		if index < 0 {
+			break
+		}
+		end := index + 1
+		if r.pending[index] == '\r' && end < len(r.pending) && r.pending[end] == '\n' {
+			end++
+		}
+		line := r.pending[:end]
+		r.pending = r.pending[end:]
+		output.WriteString(r.redactLine(line))
+	}
+	return output.String()
+}
+
+func (r *StreamRedactor) Flush() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.pending == "" {
+		return ""
+	}
+	line := r.pending
+	r.pending = ""
+	return r.redactLine(line)
+}
+
+func (r *StreamRedactor) redactLine(line string) string {
+	if r.privateKeyBlock {
+		if privateKeyEnd.MatchString(line) {
+			r.privateKeyBlock = false
+		}
+		return ""
+	}
+	if privateKeyBegin.MatchString(line) {
+		if !privateKeyEnd.MatchString(line) {
+			r.privateKeyBlock = true
+		}
+		switch {
+		case strings.HasSuffix(line, "\r\n"):
+			return "[REDACTED]\r\n"
+		case strings.HasSuffix(line, "\n"):
+			return "[REDACTED]\n"
+		case strings.HasSuffix(line, "\r"):
+			return "[REDACTED]\r"
+		}
+		return "[REDACTED]"
+	}
+	return r.redactor.Redact(line)
 }

@@ -10,6 +10,12 @@ import (
 type sessionContextKey struct{}
 type blockingApprovalContextKey struct{}
 type approvalNotifierContextKey struct{}
+type executionOwnerContextKey struct{}
+
+type executionOwner struct {
+	ToolCallID string
+	ToolName   string
+}
 
 // WithSessionID binds an Agent conversation to all audited runs created by
 // tools below this context. Session IDs never come from model tool arguments.
@@ -27,6 +33,26 @@ func SessionIDFromContext(ctx context.Context) string {
 	}
 	value, _ := ctx.Value(sessionContextKey{}).(string)
 	return value
+}
+
+// WithExecutionOwner binds a service run to the Agent tool card that started
+// it. The binding is copied into approved and background execution events.
+func WithExecutionOwner(ctx context.Context, toolCallID, toolName string) context.Context {
+	if ctx == nil || (strings.TrimSpace(toolCallID) == "" && strings.TrimSpace(toolName) == "") {
+		return ctx
+	}
+	return context.WithValue(ctx, executionOwnerContextKey{}, executionOwner{
+		ToolCallID: strings.TrimSpace(toolCallID),
+		ToolName:   strings.TrimSpace(toolName),
+	})
+}
+
+func executionOwnerFromContext(ctx context.Context) (executionOwner, bool) {
+	if ctx == nil {
+		return executionOwner{}, false
+	}
+	owner, ok := ctx.Value(executionOwnerContextKey{}).(executionOwner)
+	return owner, ok && (owner.ToolCallID != "" || owner.ToolName != "")
 }
 
 // WithBlockingApprovals makes approval-producing Submit calls wait for the

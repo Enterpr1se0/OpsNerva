@@ -56,6 +56,33 @@ func (t *NativeSSHTransport) ExecStream(ctx context.Context, connection Connecti
 	return t.execWithCallback(ctx, connection, req, callback)
 }
 
+func (t *NativeSSHTransport) OpenTunnel(ctx context.Context, connection ConnectionSpec) (TunnelClient, error) {
+	if err := validateNativeConnection(connection); err != nil {
+		return nil, err
+	}
+	client, err := t.connect(ctx, connection, nil, false)
+	if err != nil {
+		return nil, fmt.Errorf("connect native SSH tunnel: %w", err)
+	}
+	return &nativeTunnelClient{client: client}, nil
+}
+
+type nativeTunnelClient struct {
+	client *nativeClient
+}
+
+func (c *nativeTunnelClient) Dial(network, address string) (net.Conn, error) {
+	return c.client.client.Dial(network, address)
+}
+
+func (c *nativeTunnelClient) Wait() error {
+	return c.client.client.Wait()
+}
+
+func (c *nativeTunnelClient) Close() error {
+	return c.client.Close()
+}
+
 func (t *NativeSSHTransport) execWithCallback(ctx context.Context, connection ConnectionSpec, req domain.ExecRequest, callback func(string, []byte)) (RawResult, error) {
 	if err := validateNativeConnection(connection); err != nil {
 		return RawResult{}, err

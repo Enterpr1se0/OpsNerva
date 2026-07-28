@@ -13,9 +13,7 @@ export interface Host {
   has_private_key: boolean
   known_hosts_file?: string
   proxy_jump_host_id?: string
-  proxy_url?: string
-  proxy_username?: string
-  has_proxy_password: boolean
+  proxy_id?: string
   has_password: boolean
   sudo_mode: HostSudoMode
   has_sudo_password: boolean
@@ -33,9 +31,7 @@ export interface HostInput {
   private_key: string
   known_hosts_file: string
   proxy_jump_host_id: string
-  proxy_url: string
-  proxy_username: string
-  proxy_password: string
+  proxy_id: string
   password: string
   sudo_mode: HostSudoMode
   sudo_password: string
@@ -82,13 +78,33 @@ export interface Run {
   completed_at?: string
 }
 
+export interface SSHTunnel {
+  id: string
+  host_id: string
+  host_name: string
+  local_host: string
+  local_port: number
+  remote_host: string
+  remote_port: number
+  status: 'running' | 'stopping' | 'stopped' | 'failed'
+  proxy_used: boolean
+  active_connections: number
+  total_connections: number
+  bytes_sent: number
+  bytes_received: number
+  error?: string
+  started_at: string
+}
+
+export interface SSHTunnelList {
+  tunnels: SSHTunnel[]
+  count: number
+}
+
 export interface CommandExplanation {
   summary: string
   mechanism: string
-  effects: string[]
   risks: string[]
-  beginner_tips: string[]
-  rollback_guide: string
 }
 
 export interface CommandReview {
@@ -119,9 +135,13 @@ export interface AgentEvent {
   type: string
   role?: string
   tool_name?: string
+  tool_call_id?: string
   content?: string
   segment_id?: string
   session_id?: string
+  run_id?: string
+  stream?: 'stdout' | 'stderr'
+  sequence?: number
   error?: string
   approval_id?: string
   status?: string
@@ -180,16 +200,41 @@ export interface ChatState {
 
 export type ModelProviderKind = 'openai' | 'deepseek' | 'anthropic' | 'openai_compatible' | 'ollama'
 
+export interface Proxy {
+	id: string
+	name: string
+	url: string
+	username?: string
+	has_password: boolean
+	ssh_compatible: boolean
+	created_at: string
+	updated_at: string
+}
+
+export interface ProxyInput {
+	id?: string
+	name: string
+	url: string
+	username: string
+	password: string
+	clear_password?: boolean
+}
+
+export interface ProxyTestResult {
+	ok: boolean
+	status_code?: number
+	latency_ms: number
+	target: string
+}
+
 export interface ModelProvider {
   id: string
   name: string
   kind: ModelProviderKind
   base_url?: string
-  model: string
-  has_api_key: boolean
-	proxy_url?: string
-	proxy_username?: string
-	has_proxy_password: boolean
+	model: string
+	has_api_key: boolean
+	proxy_id?: string
 	user_agent?: string
   active: boolean
   created_at: string
@@ -201,24 +246,18 @@ export interface ModelProviderInput {
   name: string
   kind: ModelProviderKind
   base_url: string
-  model: string
-  api_key: string
-	proxy_url: string
-	proxy_username: string
-	proxy_password: string
-	clear_proxy_password?: boolean
+	model: string
+	api_key: string
+	proxy_id: string
 	user_agent: string
 }
 
 export interface ModelDiscoveryInput {
   id?: string
   kind: ModelProviderKind
-  base_url: string
-  api_key: string
-	proxy_url: string
-	proxy_username: string
-	proxy_password: string
-	clear_proxy_password?: boolean
+	base_url: string
+	api_key: string
+	proxy_id: string
 	user_agent?: string
 }
 
@@ -295,9 +334,7 @@ export interface WebSearchSettings {
   provider: 'tavily'
   base_url: string
   has_api_key: boolean
-  proxy_url?: string
-  proxy_username?: string
-  has_proxy_password: boolean
+  proxy_id?: string
   timeout_seconds: number
   max_results: number
   updated_at?: string
@@ -308,10 +345,7 @@ export interface WebSearchSettingsInput {
   base_url: string
   api_key?: string
   clear_api_key?: boolean
-  proxy_url?: string
-  proxy_username?: string
-  proxy_password?: string
-  clear_proxy_password?: boolean
+  proxy_id?: string
   timeout_seconds: number
   max_results: number
 }

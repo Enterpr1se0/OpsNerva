@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"eino-ops-agent/internal/store"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -32,6 +34,27 @@ type scriptedAgentRunner struct {
 
 type blockingAgentRunner struct {
 	started chan struct{}
+}
+
+type toolActivityAgentRunner struct{}
+
+func (*toolActivityAgentRunner) Run(ctx context.Context, _ []*schema.Message, _ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+	iterator, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	go func() {
+		call := schema.ToolCall{
+			ID: "call-live", Type: "function",
+			Function: schema.FunctionCall{Name: "ssh_exec", Arguments: `{"host_id":"host-live","program":"uptime","reason":"inspect uptime"}`},
+		}
+		generator.Send(adk.EventFromMessage(schema.AssistantMessage("", []schema.ToolCall{call}), nil, schema.Assistant, ""))
+		notifyToolActivity(ctx, &compose.ToolInput{CallID: call.ID, Name: call.Function.Name, Arguments: call.Function.Arguments})
+		generator.Send(adk.EventFromMessage(
+			schema.ToolMessage(`{"status":"completed","stdout":"up 1 day"}`, call.ID, schema.WithToolName(call.Function.Name)),
+			nil, schema.Tool, call.Function.Name,
+		))
+		generator.Send(adk.EventFromMessage(schema.AssistantMessage("Host is available.", nil), nil, schema.Assistant, ""))
+		generator.Close()
+	}()
+	return iterator
 }
 
 func (r *blockingAgentRunner) Run(ctx context.Context, _ []*schema.Message, _ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
@@ -104,6 +127,33 @@ func TestProviderSendsHelloAndAcceptsNonEmptyResponse(t *testing.T) {
 	}
 	if result.Response != "Hello from fixture" || result.Model != "fixture-model" {
 		t.Fatalf("unexpected test result %#v", result)
+	}
+}
+
+func TestProviderRetriesTransientUpstreamFailure(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			http.Error(w, `{"error":{"message":"temporary upstream failure"}}`, http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+  "id":"chatcmpl-retry","object":"chat.completion","created":1,"model":"fixture-model",
+  "choices":[{"index":0,"message":{"role":"assistant","content":"recovered"},"finish_reason":"stop"}]
+}`))
+	}))
+	defer server.Close()
+
+	result, err := (&Runtime{}).TestProvider(context.Background(), config.Model{
+		APIKey: "fixture-key", BaseURL: server.URL + "/v1", Name: "fixture-model",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Response != "recovered" || requests.Load() != 2 {
+		t.Fatalf("result=%#v requests=%d", result, requests.Load())
 	}
 }
 
@@ -468,8 +518,8 @@ func TestCancelSessionStopsQueryAndPersistsInterruption(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 2 || messages[0].Role != "user" || messages[0].Status != "failed" || messages[1].Role != "assistant" || messages[1].Content != interruptedRunMessage {
-		t.Fatalf("stored interruption = %#v", messages)
+	if len(messages) != 0 {
+		t.Fatalf("interrupted prompt excluded from future context was retained: %#v", messages)
 	}
 }
 
@@ -583,8 +633,8 @@ func TestQueryRejectsRepeatedEmptyResponseAndExcludesFailedTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 1 || messages[0].Role != "user" || messages[0].Status != "failed" {
-		t.Fatalf("stored messages = %#v", messages)
+	if len(messages) != 0 {
+		t.Fatalf("failed prompt excluded from future context was retained: %#v", messages)
 	}
 	modelMessages, err := st.ListChatModelMessages(ctx, "session_empty", 10)
 	if err != nil {
@@ -774,6 +824,56 @@ func TestQueryPersistsOnlyTerminalAssistantOutput(t *testing.T) {
 	}
 	if len(messages) != 3 || messages[0].Status != "completed" || messages[1].Role != "tool" || messages[2].Role != "assistant" || messages[2].Content != answer {
 		t.Fatalf("stored messages = %#v", messages)
+	}
+}
+
+func TestQueryStreamsToolLifecycleWithStableCallID(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	runtime := &Runtime{runner: &toolActivityAgentRunner{}, store: st}
+	var emitted []Event
+
+	answer, err := runtime.Query(ctx, "session_tool_lifecycle", "inspect uptime", func(event Event) {
+		emitted = append(emitted, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "Host is available." {
+		t.Fatalf("answer = %q", answer)
+	}
+	var startedIndex, completedIndex = -1, -1
+	for index, event := range emitted {
+		if event.Type != "tool" || event.ToolCallID != "call-live" {
+			continue
+		}
+		if event.Status == "in_progress" {
+			startedIndex = index
+			var payload struct {
+				Status  string `json:"status"`
+				Display struct {
+					Arguments map[string]any `json:"arguments"`
+				} `json:"_display"`
+			}
+			if err := json.Unmarshal([]byte(event.Content), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.Status != "in_progress" || payload.Display.Arguments["host_id"] != "host-live" {
+				t.Fatalf("started tool payload = %#v", payload)
+			}
+		} else {
+			completedIndex = index
+			if !strings.Contains(event.Content, `"status":"completed"`) || !strings.Contains(event.Content, `"program":"uptime"`) {
+				t.Fatalf("completed tool payload = %s", event.Content)
+			}
+		}
+	}
+	if startedIndex < 0 || completedIndex <= startedIndex {
+		t.Fatalf("tool lifecycle order = %#v", emitted)
 	}
 }
 

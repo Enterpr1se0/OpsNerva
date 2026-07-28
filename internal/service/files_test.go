@@ -33,7 +33,7 @@ func TestRemoteFileEditApprovesDeclarativeDiffAndBuildsScriptAfterApproval(t *te
 	if err := json.Unmarshal([]byte(run.RequestJSON), &approved); err != nil {
 		t.Fatal(err)
 	}
-	if approved.Mode != domain.ExecRemoteEdit || approved.Script != "" || approved.Change == nil || approved.Change.Diff == "" || approved.ExpectedSHA256 != "" || approved.Rollback != "" {
+	if approved.Mode != domain.ExecRemoteEdit || approved.Script != "" || approved.Change == nil || approved.Change.Diff == "" || approved.ExpectedSHA256 != "" {
 		t.Fatalf("approval persisted execution internals or removed fields: %#v", approved)
 	}
 	if _, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed", "operator"); err != nil {

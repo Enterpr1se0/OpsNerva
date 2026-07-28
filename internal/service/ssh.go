@@ -27,12 +27,19 @@ type sshHostBinding struct {
 	AuthType        string `json:"auth_type"`
 	KnownHostsFile  string `json:"known_hosts_file,omitempty"`
 	ProxyJumpHostID string `json:"proxy_jump_host_id,omitempty"`
+	ProxyID         string `json:"proxy_id,omitempty"`
 	ProxyURL        string `json:"proxy_url,omitempty"`
 	ProxyUsername   string `json:"proxy_username,omitempty"`
+	ProxyUpdatedAt  string `json:"proxy_updated_at,omitempty"`
 	UpdatedAt       string `json:"updated_at"`
 }
 
 func (s *Service) resolveSSHConnection(ctx context.Context, target domain.Host) (sshx.ConnectionSpec, string, error) {
+	var err error
+	target, err = s.resolveSSHHostProxy(ctx, target)
+	if err != nil {
+		return sshx.ConnectionSpec{}, "", err
+	}
 	connection := sshx.ConnectionSpec{Target: target}
 	seen := map[string]struct{}{target.ID: {}}
 	current := target
@@ -47,6 +54,10 @@ func (s *Service) resolveSSHConnection(ctx context.Context, target domain.Host) 
 		}
 		if _, duplicate := seen[jump.ID]; duplicate {
 			return sshx.ConnectionSpec{}, "", fmt.Errorf("SSH ProxyJump chain contains a cycle at %q", jump.Name)
+		}
+		jump, err = s.resolveSSHHostProxy(ctx, jump)
+		if err != nil {
+			return sshx.ConnectionSpec{}, "", err
 		}
 		seen[jump.ID] = struct{}{}
 		nearestFirst = append(nearestFirst, jump)
@@ -68,15 +79,37 @@ func (s *Service) resolveSSHConnection(ctx context.Context, target domain.Host) 
 	return connection, hex.EncodeToString(digest[:]), nil
 }
 
+func (s *Service) resolveSSHHostProxy(ctx context.Context, host domain.Host) (domain.Host, error) {
+	if host.ProxyID == "" {
+		return host, nil
+	}
+	proxy, err := s.store.GetProxy(ctx, host.ProxyID)
+	if err != nil {
+		return domain.Host{}, fmt.Errorf("load proxy %q for SSH host %q: %w", host.ProxyID, host.Name, err)
+	}
+	if _, err := sshx.NormalizeProxyURL(proxy.URL); err != nil {
+		return domain.Host{}, fmt.Errorf("proxy %q is not compatible with SSH: %w", proxy.Name, err)
+	}
+	host.ProxyURL = proxy.URL
+	host.ProxyUsername = proxy.Username
+	host.ProxyPasswordCipher = proxy.PasswordCipher
+	host.ProxyUpdatedAt = proxy.UpdatedAt
+	return host, nil
+}
+
 func bindSSHHost(host domain.Host) sshHostBinding {
 	updated := ""
 	if !host.UpdatedAt.IsZero() {
 		updated = host.UpdatedAt.UTC().Format(time.RFC3339Nano)
 	}
+	proxyUpdated := ""
+	if !host.ProxyUpdatedAt.IsZero() {
+		proxyUpdated = host.ProxyUpdatedAt.UTC().Format(time.RFC3339Nano)
+	}
 	return sshHostBinding{
 		ID: host.ID, Address: host.Address, Port: host.Port, User: host.User,
 		AuthType: host.AuthType, KnownHostsFile: host.KnownHostsFile, ProxyURL: host.ProxyURL, ProxyUsername: host.ProxyUsername,
-		ProxyJumpHostID: host.ProxyJumpHostID, UpdatedAt: updated,
+		ProxyID: host.ProxyID, ProxyUpdatedAt: proxyUpdated, ProxyJumpHostID: host.ProxyJumpHostID, UpdatedAt: updated,
 	}
 }
 

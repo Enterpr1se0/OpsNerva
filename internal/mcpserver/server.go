@@ -63,7 +63,7 @@ func New(svc *service.Service, version string) *Server {
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_transfer", Description: "Transfer one SHA256-bound regular file between two registered SSH hosts through the control plane after human approval."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.SSHFileTransferInput) (*mcp.CallToolResult, domain.ExecResult, error) {
-			output, err := svc.TransferFileBetweenHosts(ctx, input.SourceHostID, input.SourcePath, input.ExpectedSHA256, input.DestinationHostID, input.DestinationPath, input.Overwrite, input.ExpectedDestinationSHA256, input.TimeoutSeconds, input.Reason, input.Rollback, "mcp-client")
+			output, err := svc.TransferFileBetweenHosts(ctx, input.SourceHostID, input.SourcePath, input.ExpectedSHA256, input.DestinationHostID, input.DestinationPath, input.Overwrite, input.ExpectedDestinationSHA256, input.TimeoutSeconds, input.Reason, "mcp-client")
 			output, err = agent.NormalizeExecToolResult(output, err)
 			return nil, output, err
 		})
@@ -98,9 +98,9 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 func execRequest(input agent.ExecInput) domain.ExecRequest {
-	return domain.ExecRequest{HostID: input.HostID, Mode: domain.ExecProgram, Program: input.Program, Args: input.Args, Cwd: input.Cwd, Env: input.Env, Elevated: input.Elevated, TimeoutSeconds: input.TimeoutSeconds, Reason: input.Reason, ExpectedChanges: input.ExpectedChanges, Rollback: input.Rollback}
+	return domain.ExecRequest{HostID: input.HostID, Mode: domain.ExecProgram, Program: input.Program, Args: input.Args, Cwd: input.Cwd, Env: input.Env, Elevated: input.Elevated, TimeoutSeconds: input.TimeoutSeconds, Reason: input.Reason}
 }
 
 func scriptRequest(input agent.ScriptInput) domain.ExecRequest {
-	return domain.ExecRequest{HostID: input.HostID, Mode: domain.ExecScript, Script: input.Script, Cwd: input.Cwd, Env: input.Env, Elevated: input.Elevated, TimeoutSeconds: input.TimeoutSeconds, Reason: input.Reason, ExpectedChanges: input.ExpectedChanges, Rollback: input.Rollback}
+	return domain.ExecRequest{HostID: input.HostID, Mode: domain.ExecScript, Script: input.Script, Cwd: input.Cwd, Env: input.Env, Elevated: input.Elevated, TimeoutSeconds: input.TimeoutSeconds, Reason: input.Reason}
 }

@@ -59,6 +59,10 @@ func TestStreamAgentEventsFlushesHeartbeatsAndTerminalEvent(t *testing.T) {
 	response := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
 
 	streamAgentEvents(response, request, 5*time.Millisecond, func(emit func(agent.Event)) {
+		emit(agent.Event{
+			Type: "tool", ToolName: "ssh_exec", ToolCallID: "call-live",
+			Status: "in_progress", Content: `{"status":"in_progress"}`, SessionID: "session_test",
+		})
 		time.Sleep(12 * time.Millisecond)
 		emit(agent.Event{Type: "done", SessionID: "session_test", Content: "complete"})
 	})
@@ -76,10 +80,13 @@ func TestStreamAgentEventsFlushesHeartbeatsAndTerminalEvent(t *testing.T) {
 	if strings.Count(body, ": heartbeat\n\n") < 2 {
 		t.Fatalf("heartbeats were not emitted while the Agent was quiet: %q", body)
 	}
+	if !strings.Contains(body, "event: tool\ndata: ") || !strings.Contains(body, `"tool_call_id":"call-live"`) || !strings.Contains(body, `"status":"in_progress"`) {
+		t.Fatalf("tool lifecycle event missing: %q", body)
+	}
 	if !strings.Contains(body, "event: done\ndata: ") || !strings.Contains(body, `"session_id":"session_test"`) {
 		t.Fatalf("terminal event missing: %q", body)
 	}
-	if response.flushes < 4 {
-		t.Fatalf("flush count = %d, want connected + heartbeats + event", response.flushes)
+	if response.flushes < 5 {
+		t.Fatalf("flush count = %d, want connected + tool + heartbeats + terminal event", response.flushes)
 	}
 }

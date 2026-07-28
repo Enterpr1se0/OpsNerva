@@ -79,6 +79,7 @@ type AgentDiagnostics struct {
 
 type ResourceDiagnostics struct {
 	Hosts              int            `json:"hosts"`
+	Proxies            int            `json:"proxies"`
 	ModelProviders     int            `json:"model_providers"`
 	ActiveProviders    int            `json:"active_providers"`
 	MCPServers         int            `json:"mcp_servers"`

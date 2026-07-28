@@ -50,14 +50,20 @@ func TestTavilyWebSearchUsesConfiguredProxyAndKeepsCredentialsEncrypted(t *testi
 	}))
 	defer proxy.Close()
 
-	saved, err := svc.SaveWebSearchSettings(ctx, domain.WebSearchSettingsInput{
-		Enabled: true, BaseURL: target.URL, APIKey: "tvly-test-secret", ProxyURL: proxy.URL,
-		ProxyUsername: "proxy-user", ProxyPassword: "proxy-secret", TimeoutSeconds: 10, MaxResults: 4,
+	sharedProxy, err := svc.SaveProxy(ctx, domain.ProxyInput{
+		Name: "Tavily proxy", URL: proxy.URL, Username: "proxy-user", Password: "proxy-secret",
 	}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !saved.HasAPIKey || !saved.HasProxyPassword || saved.APIKeyCipher != "" || saved.ProxyPasswordCipher != "" {
+	saved, err := svc.SaveWebSearchSettings(ctx, domain.WebSearchSettingsInput{
+		Enabled: true, BaseURL: target.URL, APIKey: "tvly-test-secret", ProxyID: sharedProxy.ID,
+		TimeoutSeconds: 10, MaxResults: 4,
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !saved.HasAPIKey || saved.ProxyID != sharedProxy.ID || saved.APIKeyCipher != "" {
 		t.Fatalf("public settings exposed or lost credential state: %#v", saved)
 	}
 	serialized, err := json.Marshal(saved)
@@ -71,8 +77,12 @@ func TestTavilyWebSearchUsesConfiguredProxyAndKeepsCredentialsEncrypted(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.APIKeyCipher == "" || stored.APIKeyCipher == "tvly-test-secret" || stored.ProxyPasswordCipher == "" || stored.ProxyPasswordCipher == "proxy-secret" {
+	if stored.APIKeyCipher == "" || stored.APIKeyCipher == "tvly-test-secret" {
 		t.Fatalf("credentials were not encrypted at rest: %#v", stored)
+	}
+	storedProxy, err := svc.store.GetProxy(ctx, sharedProxy.ID)
+	if err != nil || storedProxy.PasswordCipher == "" || storedProxy.PasswordCipher == "proxy-secret" {
+		t.Fatalf("proxy credentials were not encrypted at rest: proxy=%#v err=%v", storedProxy, err)
 	}
 
 	result, err := svc.SearchWeb(ctx, domain.WebSearchRequest{
@@ -92,18 +102,17 @@ func TestTavilyWebSearchUsesConfiguredProxyAndKeepsCredentialsEncrypted(t *testi
 	}
 
 	preserved, err := svc.SaveWebSearchSettings(ctx, domain.WebSearchSettingsInput{
-		Enabled: false, BaseURL: target.URL, ProxyURL: proxy.URL, ProxyUsername: "proxy-user",
+		Enabled: false, BaseURL: target.URL, ProxyID: sharedProxy.ID,
 		TimeoutSeconds: 10, MaxResults: 4,
 	}, "test")
-	if err != nil || !preserved.HasAPIKey || !preserved.HasProxyPassword {
+	if err != nil || !preserved.HasAPIKey || preserved.ProxyID != sharedProxy.ID {
 		t.Fatalf("blank secret input did not preserve credentials: settings=%#v err=%v", preserved, err)
 	}
-	cleared, err := svc.SaveWebSearchSettings(ctx, domain.WebSearchSettingsInput{
-		Enabled: false, BaseURL: target.URL, ProxyURL: proxy.URL, ProxyUsername: "proxy-user", ClearProxyPassword: true,
-		TimeoutSeconds: 10, MaxResults: 4,
+	cleared, err := svc.SaveProxy(ctx, domain.ProxyInput{
+		ID: sharedProxy.ID, Name: sharedProxy.Name, URL: sharedProxy.URL, Username: sharedProxy.Username, ClearPassword: true,
 	}, "test")
-	if err != nil || !cleared.HasAPIKey || cleared.HasProxyPassword {
-		t.Fatalf("proxy password was not cleared independently: settings=%#v err=%v", cleared, err)
+	if err != nil || cleared.HasPassword {
+		t.Fatalf("proxy password was not cleared independently: proxy=%#v err=%v", cleared, err)
 	}
 }
 
@@ -131,11 +140,11 @@ func TestWebSearchValidatesConfigurationAndInput(t *testing.T) {
 	for _, proxyURL := range []string{
 		"http://127.0.0.1:7890", "https://proxy.example:8443", "socks5://127.0.0.1:1080", "socks5h://proxy.example:1080",
 	} {
-		if normalized, err := normalizeWebSearchProxyURL(proxyURL); err != nil || normalized != proxyURL {
-			t.Errorf("proxy URL %q normalized to %q with error %v", proxyURL, normalized, err)
+		if saved, err := svc.SaveProxy(ctx, domain.ProxyInput{Name: proxyURL, URL: proxyURL}, "test"); err != nil || saved.URL != proxyURL {
+			t.Errorf("proxy URL %q normalized to %q with error %v", proxyURL, saved.URL, err)
 		}
 	}
-	if _, err := normalizeWebSearchProxyURL("ftp://proxy.example:21"); err == nil {
+	if _, err := svc.SaveProxy(ctx, domain.ProxyInput{Name: "invalid", URL: "ftp://proxy.example:21"}, "test"); err == nil {
 		t.Fatal("unsupported proxy scheme was accepted")
 	}
 	if normalized, err := normalizeTavilyBaseURL("https://api.tavily.com/extract"); err != nil || normalized != "https://api.tavily.com" {
@@ -174,9 +183,15 @@ func TestTavilyWebExtractUsesConfiguredProxyAndReturnsPartialResults(t *testing.
 	}))
 	defer proxy.Close()
 
-	_, err := svc.SaveWebSearchSettings(ctx, domain.WebSearchSettingsInput{
-		Enabled: true, BaseURL: target.URL, APIKey: "tvly-extract-secret", ProxyURL: proxy.URL,
-		ProxyUsername: "proxy-user", ProxyPassword: "proxy-extract-secret", TimeoutSeconds: 10, MaxResults: 4,
+	sharedProxy, err := svc.SaveProxy(ctx, domain.ProxyInput{
+		Name: "Tavily extract proxy", URL: proxy.URL, Username: "proxy-user", Password: "proxy-extract-secret",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.SaveWebSearchSettings(ctx, domain.WebSearchSettingsInput{
+		Enabled: true, BaseURL: target.URL, APIKey: "tvly-extract-secret", ProxyID: sharedProxy.ID,
+		TimeoutSeconds: 10, MaxResults: 4,
 	}, "test")
 	if err != nil {
 		t.Fatal(err)

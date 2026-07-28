@@ -33,6 +33,8 @@ var (
 
 type resolvedWebSearchSettings struct {
 	domain.WebSearchSettings
+	ProxyURL      string
+	ProxyUsername string
 	APIKey        string
 	ProxyPassword string
 }
@@ -83,9 +85,11 @@ func (s *Service) SaveWebSearchSettings(ctx context.Context, input domain.WebSea
 	if err != nil {
 		return domain.WebSearchSettings{}, err
 	}
-	proxyURL, err := normalizeWebSearchProxyURL(input.ProxyURL)
-	if err != nil {
-		return domain.WebSearchSettings{}, err
+	input.ProxyID = strings.TrimSpace(input.ProxyID)
+	if input.ProxyID != "" {
+		if _, err := s.store.GetProxy(ctx, input.ProxyID); err != nil {
+			return domain.WebSearchSettings{}, fmt.Errorf("load proxy %q: %w", input.ProxyID, err)
+		}
 	}
 	if input.TimeoutSeconds < domain.MinWebSearchTimeoutSeconds || input.TimeoutSeconds > domain.MaxWebSearchTimeoutSeconds {
 		return domain.WebSearchSettings{}, fmt.Errorf("timeout_seconds must be between %d and %d", domain.MinWebSearchTimeoutSeconds, domain.MaxWebSearchTimeoutSeconds)
@@ -107,24 +111,9 @@ func (s *Service) SaveWebSearchSettings(ctx context.Context, input domain.WebSea
 		return domain.WebSearchSettings{}, fmt.Errorf("Tavily API key is required when Tavily Web is enabled")
 	}
 
-	proxyUsername := strings.TrimSpace(input.ProxyUsername)
-	proxyPasswordCipher := current.ProxyPasswordCipher
-	if input.ClearProxyPassword {
-		proxyPasswordCipher = ""
-	}
-	if proxyURL == "" || proxyUsername == "" {
-		proxyUsername = ""
-		proxyPasswordCipher = ""
-	} else if input.ProxyPassword != "" {
-		proxyPasswordCipher, err = s.encryptor.Encrypt([]byte(input.ProxyPassword))
-		if err != nil {
-			return domain.WebSearchSettings{}, err
-		}
-	}
-
 	saved, err := s.store.SaveWebSearchSettings(ctx, domain.WebSearchSettings{
 		Enabled: input.Enabled, Provider: "tavily", BaseURL: baseURL, APIKeyCipher: apiKeyCipher,
-		ProxyURL: proxyURL, ProxyUsername: proxyUsername, ProxyPasswordCipher: proxyPasswordCipher,
+		ProxyID:        input.ProxyID,
 		TimeoutSeconds: input.TimeoutSeconds, MaxResults: input.MaxResults,
 	})
 	if err != nil {
@@ -132,7 +121,7 @@ func (s *Service) SaveWebSearchSettings(ctx context.Context, input domain.WebSea
 	}
 	s.audit(ctx, "", "web_search_settings_updated", actor, map[string]any{
 		"enabled": saved.Enabled, "provider": saved.Provider, "base_url": saved.BaseURL,
-		"proxy_configured": saved.ProxyURL != "", "timeout_seconds": saved.TimeoutSeconds, "max_results": saved.MaxResults,
+		"proxy_id": saved.ProxyID, "timeout_seconds": saved.TimeoutSeconds, "max_results": saved.MaxResults,
 	})
 	return publicWebSearchSettings(saved), nil
 }
@@ -151,14 +140,12 @@ func decorateWebSearchSettings(settings domain.WebSearchSettings) domain.WebSear
 		settings.MaxResults = domain.DefaultWebSearchMaxResults
 	}
 	settings.HasAPIKey = settings.APIKeyCipher != ""
-	settings.HasProxyPassword = settings.ProxyPasswordCipher != ""
 	return settings
 }
 
 func publicWebSearchSettings(settings domain.WebSearchSettings) domain.WebSearchSettings {
 	settings = decorateWebSearchSettings(settings)
 	settings.APIKeyCipher = ""
-	settings.ProxyPasswordCipher = ""
 	return settings
 }
 
@@ -178,11 +165,14 @@ func (s *Service) resolveWebSearchSettings(ctx context.Context) (resolvedWebSear
 	if err != nil {
 		return resolvedWebSearchSettings{}, fmt.Errorf("decrypt Tavily API key: %w", err)
 	}
-	proxyPassword, err := s.encryptor.Decrypt(settings.ProxyPasswordCipher)
+	proxy, err := s.resolveProxy(ctx, settings.ProxyID)
 	if err != nil {
-		return resolvedWebSearchSettings{}, fmt.Errorf("decrypt Tavily Web proxy password: %w", err)
+		return resolvedWebSearchSettings{}, err
 	}
-	return resolvedWebSearchSettings{WebSearchSettings: settings, APIKey: string(apiKey), ProxyPassword: string(proxyPassword)}, nil
+	return resolvedWebSearchSettings{
+		WebSearchSettings: settings, APIKey: string(apiKey),
+		ProxyURL: proxy.URL, ProxyUsername: proxy.Username, ProxyPassword: proxy.Password,
+	}, nil
 }
 
 func (s *Service) SearchWeb(ctx context.Context, input domain.WebSearchRequest, actor string) (domain.WebSearchResponse, error) {
@@ -379,14 +369,6 @@ func normalizeTavilyBaseURL(value string) (string, error) {
 	parsed.Path = strings.TrimSuffix(strings.TrimSuffix(parsed.Path, "/search"), "/extract")
 	parsed.RawPath = ""
 	return strings.TrimRight(parsed.String(), "/"), nil
-}
-
-func normalizeWebSearchProxyURL(value string) (string, error) {
-	normalized, err := proxyx.NormalizeURL(value)
-	if err != nil {
-		return "", fmt.Errorf("invalid Tavily Web proxy URL: %w", err)
-	}
-	return normalized, nil
 }
 
 func webSearchHTTPClient(settings resolvedWebSearchSettings) (*http.Client, error) {

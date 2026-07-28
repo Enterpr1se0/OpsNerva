@@ -137,8 +137,8 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 	if len(descriptors) != len(loaded) || len(descriptors) < 20 {
 		t.Fatalf("catalog=%d loaded=%d", len(descriptors), len(loaded))
 	}
-	if len(descriptors) != 20 {
-		t.Fatalf("built-in catalog size=%d, want 20", len(descriptors))
+	if len(descriptors) != 21 {
+		t.Fatalf("built-in catalog size=%d, want 21", len(descriptors))
 	}
 
 	seen := make(map[string]bool, len(descriptors))
@@ -152,6 +152,10 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 		seen[descriptor.Name] = true
 		if !json.Valid(descriptor.InputSchema) {
 			t.Fatalf("invalid schema for %s: %s", descriptor.Name, descriptor.InputSchema)
+		}
+		schemaText := string(descriptor.InputSchema)
+		if strings.Contains(schemaText, `"expected_changes"`) || strings.Contains(schemaText, `"rollback"`) {
+			t.Fatalf("%s still exposes retired verbose fields: %s", descriptor.Name, descriptor.InputSchema)
 		}
 		if descriptor.Name == "ssh_exec" {
 			if descriptor.Guard != "policy_checked" || !strings.Contains(string(descriptor.InputSchema), `"host_id"`) || !strings.Contains(string(descriptor.InputSchema), `"program"`) || !strings.Contains(string(descriptor.InputSchema), `"background"`) {
@@ -189,13 +193,13 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 		}
 		if descriptor.Name == "ssh_file_edit" {
 			schema := string(descriptor.InputSchema)
-			if !strings.Contains(schema, `"diff"`) || strings.Contains(schema, `"expected_sha256"`) || strings.Contains(schema, `"rollback"`) || strings.Contains(schema, `"content"`) {
+			if !strings.Contains(schema, `"diff"`) || strings.Contains(schema, `"expected_sha256"`) || strings.Contains(schema, `"content"`) {
 				t.Fatalf("ssh_file_edit still exposes the retired edit contract: %s", schema)
 			}
 		}
 		if descriptor.Name == "workspace_file_edit" {
 			schema := string(descriptor.InputSchema)
-			if !strings.Contains(schema, `"diff"`) || strings.Contains(schema, `"expected_sha256"`) || strings.Contains(schema, `"rollback"`) || strings.Contains(schema, `"content"`) {
+			if !strings.Contains(schema, `"diff"`) || strings.Contains(schema, `"expected_sha256"`) || strings.Contains(schema, `"content"`) {
 				t.Fatalf("workspace_file_edit still exposes the retired edit contract: %s", schema)
 			}
 		}
@@ -204,6 +208,12 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 		}
 		if descriptor.Name == "ssh_task" && descriptor.Category != "tasks" {
 			t.Fatalf("ssh_task category = %q, want tasks", descriptor.Category)
+		}
+		if descriptor.Name == "ssh_tunnel" {
+			schema := string(descriptor.InputSchema)
+			if descriptor.Guard != "approval_required" || !strings.Contains(schema, `"action"`) || !strings.Contains(schema, `"remote_host"`) || !strings.Contains(schema, `"remote_port"`) || !strings.Contains(schema, `"local_port"`) || !strings.Contains(schema, `"tunnel_id"`) {
+				t.Fatalf("ssh_tunnel metadata does not reflect its runtime schema: %#v", descriptor)
+			}
 		}
 		if descriptor.Name == "ssh_history" && descriptor.Category != "history" {
 			t.Fatalf("ssh_history category = %q, want history", descriptor.Category)
@@ -226,8 +236,68 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 			t.Fatalf("removed %s tool remains in the Agent catalog", retired)
 		}
 	}
-	if !seen["ops_plan_create"] || !seen["ops_plan_step_update"] || !seen["ssh_file_edit"] || !seen["ssh_file_transfer"] || !seen["workspace_file_edit"] || !seen["workspace_file_upload"] || !seen["workspace_shell"] || !seen["web_search"] || !seen["web_extract"] || !seen["ssh_task"] || !seen["ssh_history"] || !seen["ops_skill"] {
+	if !seen["ops_plan_create"] || !seen["ops_plan_step_update"] || !seen["ssh_file_edit"] || !seen["ssh_file_transfer"] || !seen["ssh_tunnel"] || !seen["workspace_file_edit"] || !seen["workspace_file_upload"] || !seen["workspace_shell"] || !seen["web_search"] || !seen["web_extract"] || !seen["ssh_task"] || !seen["ssh_history"] || !seen["ops_skill"] {
 		t.Fatalf("representative functions missing: %#v", seen)
+	}
+}
+
+func TestSSHTunnelListAllowsReasonWithoutHidingRealInputErrors(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/tunnel-tools.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	engine, err := policy.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encryptor, err := security.NewEncryptor("", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := service.New(st, engine, nil, encryptor, security.NewRedactor(), config.Default().Limits)
+	loaded, err := BuildTools(svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tunnelTool tool.InvokableTool
+	for _, candidate := range loaded {
+		info, infoErr := candidate.Info(ctx)
+		if infoErr != nil {
+			t.Fatal(infoErr)
+		}
+		if info.Name == "ssh_tunnel" {
+			tunnelTool = candidate.(tool.InvokableTool)
+			break
+		}
+	}
+	if tunnelTool == nil {
+		t.Fatal("ssh_tunnel tool was not loaded")
+	}
+
+	resultJSON, err := tunnelTool.InvokableRun(ctx, `{"action":" LIST ","reason":"check existing tunnels before starting one"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tunnels domain.SSHTunnelList
+	if err := json.Unmarshal([]byte(resultJSON), &tunnels); err != nil {
+		t.Fatal(err)
+	}
+	if tunnels.Count != 0 || tunnels.Tunnels == nil {
+		t.Fatalf("unexpected tunnel list: %#v", tunnels)
+	}
+
+	failureJSON, err := tunnelTool.InvokableRun(ctx, `{"action":"list","host_id":"host-unexpected"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var failure domain.ToolFailure
+	if err := json.Unmarshal([]byte(failureJSON), &failure); err != nil {
+		t.Fatal(err)
+	}
+	if failure.OK || failure.Code != "validation_failed" || !strings.Contains(failure.Message, "host_id") {
+		t.Fatalf("unexpected invalid list result: %#v", failure)
 	}
 }
 
@@ -629,8 +699,8 @@ func TestUnifiedHistoryToolSearchesAndReadsExactRun(t *testing.T) {
 		}
 	}
 	for _, run := range []domain.Run{
-		{ID: "run-nginx", HostID: "host-a", RequestJSON: `{"program":"nginx"}`, RequestDigest: "digest-a", Risk: domain.RiskReadOnly, Status: "completed", StartedAt: now.Add(-time.Minute)},
-		{ID: "run-disk", HostID: "host-b", RequestJSON: `{"program":"df"}`, RequestDigest: "digest-b", Risk: domain.RiskReadOnly, Status: "completed", StartedAt: now},
+		{ID: "run-nginx", SessionID: "session-a", HostID: "host-a", RequestJSON: `{"program":"nginx"}`, RequestDigest: "digest-a", Risk: domain.RiskReadOnly, Status: "completed", StartedAt: now.Add(-time.Minute)},
+		{ID: "run-disk", SessionID: "session-b", HostID: "host-b", RequestJSON: `{"program":"df"}`, RequestDigest: "digest-b", Risk: domain.RiskReadOnly, Status: "completed", StartedAt: now},
 	} {
 		if err := st.CreateRun(ctx, run); err != nil {
 			t.Fatal(err)
@@ -655,6 +725,21 @@ func TestUnifiedHistoryToolSearchesAndReadsExactRun(t *testing.T) {
 	}
 	if len(exact.Runs) != 1 || exact.Runs[0].ID != "run-disk" {
 		t.Fatalf("exact history result = %#v", exact)
+	}
+	sessionCtx := service.WithSessionID(ctx, "session-a")
+	sessionRuns, err := ReadHistoryTool(sessionCtx, svc, HistorySearchInput{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessionRuns.Runs) != 1 || sessionRuns.Runs[0].ID != "run-nginx" {
+		t.Fatalf("session history leaked another conversation: %#v", sessionRuns)
+	}
+	if _, err := ReadHistoryTool(sessionCtx, svc, HistorySearchInput{RunID: "run-disk"}); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("exact history read crossed session boundary: %v", err)
+	}
+	sessionExact, err := ReadHistoryTool(sessionCtx, svc, HistorySearchInput{RunID: "run-nginx"})
+	if err != nil || len(sessionExact.Runs) != 1 || sessionExact.Runs[0].ID != "run-nginx" {
+		t.Fatalf("current-session exact history failed: %#v err=%v", sessionExact, err)
 	}
 
 	loaded, err := BuildTools(svc)

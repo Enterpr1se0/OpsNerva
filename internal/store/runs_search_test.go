@@ -54,15 +54,15 @@ func TestSearchRunsMatchesCommandTextLiterally(t *testing.T) {
 	}, now)
 
 	for _, query := range []string{
-		`grep "error"`,      // quotes exactly as typed
-		`> /tmp/out`,        // redirection stored as > in request_json
-		`&& echo`,           // ampersands stored as &&
-		`C:\logs`,           // literal backslash must not act as ESCAPE
-		`read_percent`,      // literal underscore must not act as wildcard
-		`100%`,              // literal percent must not act as wildcard
+		`grep "error"`,       // quotes exactly as typed
+		`> /tmp/out`,         // redirection stored as > in request_json
+		`&& echo`,            // ampersands stored as &&
+		`C:\logs`,            // literal backslash must not act as ESCAPE
+		`read_percent`,       // literal underscore must not act as wildcard
+		`100%`,               // literal percent must not act as wildcard
 		`inspect app errors`, // reason text
 	} {
-		runs, err := st.SearchRuns(ctx, query, "", 0)
+		runs, err := st.SearchRuns(ctx, query, "", "", 0)
 		if err != nil {
 			t.Fatalf("query %q: %v", query, err)
 		}
@@ -71,11 +71,11 @@ func TestSearchRunsMatchesCommandTextLiterally(t *testing.T) {
 		}
 	}
 
-	if runs, err := st.SearchRuns(ctx, `rm -rf`, "", 0); err != nil || len(runs) != 0 {
+	if runs, err := st.SearchRuns(ctx, `rm -rf`, "", "", 0); err != nil || len(runs) != 0 {
 		t.Fatalf("unrelated query: expected no results, got %d (err=%v)", len(runs), err)
 	}
 	// A literal underscore query must not wildcard-match "readapercent".
-	if runs, err := st.SearchRuns(ctx, `readapercent`, "", 0); err != nil || len(runs) != 0 {
+	if runs, err := st.SearchRuns(ctx, `readapercent`, "", "", 0); err != nil || len(runs) != 0 {
 		t.Fatalf("sanity: unexpected match for readapercent: %d (err=%v)", len(runs), err)
 	}
 }
@@ -91,12 +91,12 @@ func TestSearchRunsFiltersAndFallbacks(t *testing.T) {
 	}, now)
 
 	// Host filter narrows results.
-	runs, err := st.SearchRuns(ctx, "systemctl", "host-a", 0)
+	runs, err := st.SearchRuns(ctx, "systemctl", "host-a", "", 0)
 	if err != nil || len(runs) != 1 || runs[0].ID != "run-a" {
 		t.Fatalf("host filter: expected run-a, got %d result(s) (err=%v)", len(runs), err)
 	}
 	// Limit caps results, newest first.
-	runs, err = st.SearchRuns(ctx, "systemctl", "", 1)
+	runs, err = st.SearchRuns(ctx, "systemctl", "", "", 1)
 	if err != nil || len(runs) != 1 || runs[0].ID != "run-b" {
 		t.Fatalf("limit: expected newest run-b, got %d result(s) (err=%v)", len(runs), err)
 	}
@@ -106,7 +106,7 @@ func TestSearchRunsFiltersAndFallbacks(t *testing.T) {
 	if err := st.UpdateRun(ctx, run); err != nil {
 		t.Fatal(err)
 	}
-	runs, err = st.SearchRuns(ctx, "active (running)", "", 0)
+	runs, err = st.SearchRuns(ctx, "active (running)", "", "", 0)
 	if err != nil || len(runs) != 1 || runs[0].ID != "run-a" {
 		t.Fatalf("stdout search: expected run-a, got %d result(s) (err=%v)", len(runs), err)
 	}
@@ -119,7 +119,7 @@ func TestSearchRunsFiltersAndFallbacks(t *testing.T) {
 	if err := st.CreateRun(ctx, legacy); err != nil {
 		t.Fatal(err)
 	}
-	runs, err = st.SearchRuns(ctx, "nginx", "", 0)
+	runs, err = st.SearchRuns(ctx, "nginx", "", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,6 +129,42 @@ func TestSearchRunsFiltersAndFallbacks(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("request_json fallback: run-legacy missing from %d result(s)", len(runs))
+	}
+}
+
+func TestSearchRunsFiltersBySession(t *testing.T) {
+	st, ctx := newSearchStore(t)
+	now := time.Now().UTC()
+	for _, run := range []domain.Run{
+		{
+			ID: "run-session-a", SessionID: "session-a", HostID: "host-a",
+			RequestJSON: `{"program":"uptime"}`, SearchText: "uptime",
+			RequestDigest: "digest-session-a", Risk: domain.RiskReadOnly, Status: "completed", StartedAt: now.Add(-time.Minute),
+		},
+		{
+			ID: "run-session-b", SessionID: "session-b", HostID: "host-a",
+			RequestJSON: `{"program":"uptime"}`, SearchText: "uptime",
+			RequestDigest: "digest-session-b", Risk: domain.RiskReadOnly, Status: "completed", StartedAt: now,
+		},
+	} {
+		if err := st.CreateRun(ctx, run); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	runs, err := st.SearchRuns(ctx, "uptime", "", "session-a", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].ID != "run-session-a" {
+		t.Fatalf("session-a search leaked other sessions: %#v", runs)
+	}
+	allRuns, err := st.SearchRuns(ctx, "uptime", "", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(allRuns) != 2 {
+		t.Fatalf("global audit search lost runs: %#v", allRuns)
 	}
 }
 
@@ -181,7 +217,7 @@ func TestMigrationBackfillsRunSearchText(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	runs, err := st.SearchRuns(ctx, `> /tmp/tail.out`, "", 0)
+	runs, err := st.SearchRuns(ctx, `> /tmp/tail.out`, "", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}

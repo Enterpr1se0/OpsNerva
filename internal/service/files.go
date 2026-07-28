@@ -191,7 +191,7 @@ func (s *Service) EditRemoteFile(ctx context.Context, hostID, path, diff, valida
 	}
 	result, submitErr := s.Submit(ctx, domain.ExecRequest{
 		HostID: hostID, Mode: domain.ExecRemoteEdit, Change: &change, Elevated: elevated, Reason: reason,
-		ExpectedChanges: "apply reviewed diff to " + path, RemotePath: path, Validator: validatorID,
+		RemotePath: path, Validator: validatorID,
 	}, actor)
 	result.Change = &change
 	if result.Stdout != "" {

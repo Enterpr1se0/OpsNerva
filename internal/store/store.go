@@ -20,6 +20,7 @@ import (
 var (
 	ErrNotFound              = errors.New("not found")
 	ErrAlreadyExists         = errors.New("already exists")
+	ErrInUse                 = errors.New("in use")
 	ErrInvalidPlanTransition = errors.New("invalid plan transition")
 )
 
@@ -302,12 +303,10 @@ CREATE TABLE IF NOT EXISTS hosts (
   port INTEGER NOT NULL,
   username TEXT NOT NULL,
   auth_type TEXT NOT NULL DEFAULT 'agent',
-	private_key_cipher TEXT NOT NULL DEFAULT '',
+	  private_key_cipher TEXT NOT NULL DEFAULT '',
   known_hosts_file TEXT NOT NULL DEFAULT '',
 	  proxy_jump_host_id TEXT NOT NULL DEFAULT '',
-	  proxy_url TEXT NOT NULL DEFAULT '',
-	  proxy_username TEXT NOT NULL DEFAULT '',
-	  proxy_password_cipher TEXT NOT NULL DEFAULT '',
+	  proxy_id TEXT NOT NULL DEFAULT '',
 	  password_cipher TEXT NOT NULL DEFAULT '',
 	  sudo_mode TEXT NOT NULL DEFAULT 'none',
 	  sudo_password_cipher TEXT NOT NULL DEFAULT '',
@@ -445,6 +444,15 @@ CREATE TABLE IF NOT EXISTS checkpoints (
   data BLOB NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS proxies (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  url TEXT NOT NULL,
+  username TEXT NOT NULL DEFAULT '',
+  password_cipher TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS model_providers (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
@@ -452,9 +460,7 @@ CREATE TABLE IF NOT EXISTS model_providers (
   base_url TEXT NOT NULL DEFAULT '',
   model TEXT NOT NULL,
   api_key_cipher TEXT NOT NULL DEFAULT '',
-  proxy_url TEXT NOT NULL DEFAULT '',
-  proxy_username TEXT NOT NULL DEFAULT '',
-  proxy_password_cipher TEXT NOT NULL DEFAULT '',
+  proxy_id TEXT NOT NULL DEFAULT '',
   user_agent TEXT NOT NULL DEFAULT '',
   active INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
@@ -509,9 +515,7 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
   provider TEXT NOT NULL DEFAULT 'tavily',
   base_url TEXT NOT NULL DEFAULT 'https://api.tavily.com',
   api_key_cipher TEXT NOT NULL DEFAULT '',
-  proxy_url TEXT NOT NULL DEFAULT '',
-  proxy_username TEXT NOT NULL DEFAULT '',
-  proxy_password_cipher TEXT NOT NULL DEFAULT '',
+  proxy_id TEXT NOT NULL DEFAULT '',
   timeout_seconds INTEGER NOT NULL DEFAULT 20,
   max_results INTEGER NOT NULL DEFAULT 10,
   updated_at TEXT NOT NULL
@@ -542,19 +546,16 @@ SELECT session_id,'',min(created_at),max(created_at) FROM chat_messages GROUP BY
 		`ALTER TABLE approvals ADD COLUMN request_cipher TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE hosts ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'agent'`,
 		`ALTER TABLE hosts ADD COLUMN proxy_jump_host_id TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE hosts ADD COLUMN proxy_url TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE hosts ADD COLUMN proxy_username TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE hosts ADD COLUMN proxy_password_cipher TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE hosts ADD COLUMN proxy_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE hosts ADD COLUMN password_cipher TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE hosts ADD COLUMN sudo_mode TEXT NOT NULL DEFAULT 'none'`,
 		`ALTER TABLE hosts ADD COLUMN sudo_password_cipher TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE chat_messages ADD COLUMN tool_name TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE chat_messages ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'`,
 		`ALTER TABLE runs ADD COLUMN ai_review_json TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE model_providers ADD COLUMN proxy_url TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE model_providers ADD COLUMN proxy_username TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE model_providers ADD COLUMN proxy_password_cipher TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE model_providers ADD COLUMN proxy_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE model_providers ADD COLUMN user_agent TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE web_search_settings ADD COLUMN proxy_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE system_settings ADD COLUMN chat_image_allowed_types_json TEXT NOT NULL DEFAULT '["image/png","image/jpeg","image/webp","image/gif"]'`,
 		`ALTER TABLE system_settings ADD COLUMN system_prompt TEXT DEFAULT NULL`,
 	} {
@@ -605,7 +606,162 @@ CASE WHEN subagent_reviews_enabled<>0 AND beginner_explanations_enabled<>0 THEN 
 	if _, err := s.db.ExecContext(ctx, `ALTER TABLE hosts ADD COLUMN private_key_cipher TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 		return err
 	}
+	if err := s.migrateSharedProxies(ctx); err != nil {
+		return err
+	}
 	return s.migrateNativeOnlyHosts(ctx)
+}
+
+func (s *Store) migrateSharedProxies(ctx context.Context) error {
+	tableColumns := make(map[string]map[string]bool)
+	for _, table := range []string{"hosts", "model_providers", "web_search_settings"} {
+		rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+		if err != nil {
+			return err
+		}
+		columns := make(map[string]bool)
+		for rows.Next() {
+			var cid, notNull, primaryKey int
+			var name, columnType string
+			var defaultValue any
+			if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+				rows.Close()
+				return err
+			}
+			columns[name] = true
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		tableColumns[table] = columns
+	}
+	hasLegacy := false
+	for _, columns := range tableColumns {
+		hasLegacy = hasLegacy || columns["proxy_url"] || columns["proxy_username"] || columns["proxy_password_cipher"]
+	}
+	if !hasLegacy {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := formatTime(time.Now().UTC())
+	insertProxy := func(name, proxyURL, username, passwordCipher string) (string, error) {
+		baseName := strings.TrimSpace(name)
+		if baseName == "" {
+			baseName = "Proxy"
+		}
+		candidate := baseName
+		for suffix := 2; ; suffix++ {
+			var count int
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM proxies WHERE name=?`, candidate).Scan(&count); err != nil {
+				return "", err
+			}
+			if count == 0 {
+				break
+			}
+			candidate = fmt.Sprintf("%s (%d)", baseName, suffix)
+		}
+		proxyID := ids.New("proxy")
+		if _, err := tx.ExecContext(ctx, `INSERT INTO proxies(id,name,url,username,password_cipher,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`,
+			proxyID, candidate, proxyURL, username, passwordCipher, now, now); err != nil {
+			return "", err
+		}
+		return proxyID, nil
+	}
+
+	if tableColumns["hosts"]["proxy_url"] {
+		rows, err := tx.QueryContext(ctx, `SELECT id,name,proxy_id,proxy_url,proxy_username,proxy_password_cipher FROM hosts WHERE proxy_url<>''`)
+		if err != nil {
+			return err
+		}
+		type legacyHostProxy struct{ id, name, proxyID, url, username, passwordCipher string }
+		values := make([]legacyHostProxy, 0)
+		for rows.Next() {
+			var value legacyHostProxy
+			if err := rows.Scan(&value.id, &value.name, &value.proxyID, &value.url, &value.username, &value.passwordCipher); err != nil {
+				rows.Close()
+				return err
+			}
+			values = append(values, value)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, value := range values {
+			if value.proxyID != "" {
+				continue
+			}
+			proxyID, err := insertProxy("SSH · "+value.name, value.url, value.username, value.passwordCipher)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE hosts SET proxy_id=? WHERE id=?`, proxyID, value.id); err != nil {
+				return err
+			}
+		}
+	}
+	if tableColumns["model_providers"]["proxy_url"] {
+		rows, err := tx.QueryContext(ctx, `SELECT id,name,proxy_id,proxy_url,proxy_username,proxy_password_cipher FROM model_providers WHERE proxy_url<>''`)
+		if err != nil {
+			return err
+		}
+		type legacyModelProxy struct{ id, name, proxyID, url, username, passwordCipher string }
+		values := make([]legacyModelProxy, 0)
+		for rows.Next() {
+			var value legacyModelProxy
+			if err := rows.Scan(&value.id, &value.name, &value.proxyID, &value.url, &value.username, &value.passwordCipher); err != nil {
+				rows.Close()
+				return err
+			}
+			values = append(values, value)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, value := range values {
+			if value.proxyID != "" {
+				continue
+			}
+			proxyID, err := insertProxy("Model · "+value.name, value.url, value.username, value.passwordCipher)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE model_providers SET proxy_id=? WHERE id=?`, proxyID, value.id); err != nil {
+				return err
+			}
+		}
+	}
+	if tableColumns["web_search_settings"]["proxy_url"] {
+		var proxyID, proxyURL, username, passwordCipher string
+		err := tx.QueryRowContext(ctx, `SELECT proxy_id,proxy_url,proxy_username,proxy_password_cipher FROM web_search_settings WHERE id=1 AND proxy_url<>''`).
+			Scan(&proxyID, &proxyURL, &username, &passwordCipher)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if err == nil && proxyID == "" {
+			proxyID, err = insertProxy("Tavily", proxyURL, username, passwordCipher)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE web_search_settings SET proxy_id=? WHERE id=1`, proxyID); err != nil {
+				return err
+			}
+		}
+	}
+	for table, columns := range tableColumns {
+		for _, column := range []string{"proxy_url", "proxy_username", "proxy_password_cipher"} {
+			if columns[column] {
+				if _, err := tx.ExecContext(ctx, `ALTER TABLE `+table+` DROP COLUMN `+column); err != nil {
+					return fmt.Errorf("drop legacy %s.%s: %w", table, column, err)
+				}
+			}
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) migrateManagedWorkspaces(ctx context.Context) error {
@@ -717,15 +873,15 @@ func (s *Store) UpsertHost(ctx context.Context, host domain.Host) (domain.Host, 
 	}
 	host.UpdatedAt = now
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO hosts(id,name,address,port,username,auth_type,private_key_cipher,known_hosts_file,proxy_jump_host_id,proxy_url,proxy_username,proxy_password_cipher,password_cipher,sudo_mode,sudo_password_cipher,created_at,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+INSERT INTO hosts(id,name,address,port,username,auth_type,private_key_cipher,known_hosts_file,proxy_jump_host_id,proxy_id,password_cipher,sudo_mode,sudo_password_cipher,created_at,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET name=excluded.name,address=excluded.address,port=excluded.port,
 username=excluded.username,auth_type=excluded.auth_type,private_key_cipher=excluded.private_key_cipher,
 known_hosts_file=excluded.known_hosts_file,proxy_jump_host_id=excluded.proxy_jump_host_id,
-proxy_url=excluded.proxy_url,proxy_username=excluded.proxy_username,proxy_password_cipher=excluded.proxy_password_cipher,password_cipher=excluded.password_cipher,
+proxy_id=excluded.proxy_id,password_cipher=excluded.password_cipher,
 sudo_mode=excluded.sudo_mode,sudo_password_cipher=excluded.sudo_password_cipher,updated_at=excluded.updated_at`,
 		host.ID, host.Name, host.Address, host.Port, host.User, host.AuthType, host.PrivateKeyCipher,
-		host.KnownHostsFile, host.ProxyJumpHostID, host.ProxyURL, host.ProxyUsername, host.ProxyPasswordCipher,
+		host.KnownHostsFile, host.ProxyJumpHostID, host.ProxyID,
 		host.PasswordCipher, host.SudoMode, host.SudoCipher,
 		formatTime(host.CreatedAt), formatTime(host.UpdatedAt))
 	if err != nil {
@@ -736,9 +892,89 @@ sudo_mode=excluded.sudo_mode,sudo_password_cipher=excluded.sudo_password_cipher,
 
 func (s *Store) GetHost(ctx context.Context, id string) (domain.Host, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT id,name,address,port,username,auth_type,private_key_cipher,
-known_hosts_file,proxy_jump_host_id,proxy_url,proxy_username,proxy_password_cipher,password_cipher,
+known_hosts_file,proxy_jump_host_id,proxy_id,password_cipher,
 sudo_mode,sudo_password_cipher,created_at,updated_at FROM hosts WHERE id=? OR name=?`, id, id)
 	return scanHost(row)
+}
+
+func (s *Store) UpsertProxy(ctx context.Context, proxy domain.Proxy) (domain.Proxy, error) {
+	now := time.Now().UTC()
+	if proxy.ID == "" {
+		proxy.ID = ids.New("proxy")
+		proxy.CreatedAt = now
+	}
+	proxy.UpdatedAt = now
+	_, err := s.db.ExecContext(ctx, `INSERT INTO proxies(id,name,url,username,password_cipher,created_at,updated_at)
+VALUES(?,?,?,?,?,?,?)
+ON CONFLICT(id) DO UPDATE SET name=excluded.name,url=excluded.url,username=excluded.username,
+password_cipher=excluded.password_cipher,updated_at=excluded.updated_at`,
+		proxy.ID, proxy.Name, proxy.URL, proxy.Username, proxy.PasswordCipher,
+		formatTime(proxy.CreatedAt), formatTime(proxy.UpdatedAt))
+	if err != nil {
+		return domain.Proxy{}, err
+	}
+	return s.GetProxy(ctx, proxy.ID)
+}
+
+func (s *Store) GetProxy(ctx context.Context, id string) (domain.Proxy, error) {
+	return scanProxy(s.db.QueryRowContext(ctx, `SELECT id,name,url,username,password_cipher,created_at,updated_at FROM proxies WHERE id=?`, id))
+}
+
+func (s *Store) ListProxies(ctx context.Context) ([]domain.Proxy, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,url,username,password_cipher,created_at,updated_at FROM proxies ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]domain.Proxy, 0)
+	for rows.Next() {
+		proxy, err := scanProxy(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, proxy)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) DeleteProxy(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM proxies WHERE id=?
+AND NOT EXISTS(SELECT 1 FROM model_providers WHERE proxy_id=?)
+AND NOT EXISTS(SELECT 1 FROM hosts WHERE proxy_id=?)
+AND NOT EXISTS(SELECT 1 FROM web_search_settings WHERE id=1 AND proxy_id=?)`, id, id, id, id)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count == 0 {
+		var exists int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM proxies WHERE id=?`, id).Scan(&exists); err != nil {
+			return err
+		}
+		if exists == 0 {
+			return ErrNotFound
+		}
+		return ErrInUse
+	}
+	return nil
+}
+
+func (s *Store) ProxyReferences(ctx context.Context, id string) ([]string, error) {
+	result := make([]string, 0)
+	rows, err := s.db.QueryContext(ctx, `SELECT 'model provider: '||name FROM model_providers WHERE proxy_id=?
+UNION ALL SELECT 'SSH host: '||name FROM hosts WHERE proxy_id=?
+UNION ALL SELECT 'Tavily Web' FROM web_search_settings WHERE id=1 AND proxy_id=?`, id, id, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var reference string
+		if err := rows.Scan(&reference); err != nil {
+			return nil, err
+		}
+		result = append(result, reference)
+	}
+	return result, rows.Err()
 }
 
 func (s *Store) UpsertModelProvider(ctx context.Context, provider domain.ModelProvider) (domain.ModelProvider, error) {
@@ -749,13 +985,13 @@ func (s *Store) UpsertModelProvider(ctx context.Context, provider domain.ModelPr
 	}
 	provider.UpdatedAt = now
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO model_providers(id,name,kind,base_url,model,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,user_agent,active,created_at,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+INSERT INTO model_providers(id,name,kind,base_url,model,api_key_cipher,proxy_id,user_agent,active,created_at,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET name=excluded.name,kind=excluded.kind,base_url=excluded.base_url,
-model=excluded.model,api_key_cipher=excluded.api_key_cipher,proxy_url=excluded.proxy_url,proxy_username=excluded.proxy_username,
-proxy_password_cipher=excluded.proxy_password_cipher,user_agent=excluded.user_agent,updated_at=excluded.updated_at`,
+model=excluded.model,api_key_cipher=excluded.api_key_cipher,proxy_id=excluded.proxy_id,
+user_agent=excluded.user_agent,updated_at=excluded.updated_at`,
 		provider.ID, provider.Name, provider.Kind, provider.BaseURL, provider.Model, provider.APIKeyCipher,
-		provider.ProxyURL, provider.ProxyUsername, provider.ProxyPasswordCipher, provider.UserAgent,
+		provider.ProxyID, provider.UserAgent,
 		boolInt(provider.Active), formatTime(provider.CreatedAt), formatTime(provider.UpdatedAt))
 	if err != nil {
 		return domain.ModelProvider{}, err
@@ -764,19 +1000,19 @@ proxy_password_cipher=excluded.proxy_password_cipher,user_agent=excluded.user_ag
 }
 
 func (s *Store) GetModelProvider(ctx context.Context, id string) (domain.ModelProvider, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id,name,kind,base_url,model,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,user_agent,active,created_at,updated_at
+	row := s.db.QueryRowContext(ctx, `SELECT id,name,kind,base_url,model,api_key_cipher,proxy_id,user_agent,active,created_at,updated_at
 FROM model_providers WHERE id=?`, id)
 	return scanModelProvider(row)
 }
 
 func (s *Store) ActiveModelProvider(ctx context.Context) (domain.ModelProvider, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id,name,kind,base_url,model,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,user_agent,active,created_at,updated_at
+	row := s.db.QueryRowContext(ctx, `SELECT id,name,kind,base_url,model,api_key_cipher,proxy_id,user_agent,active,created_at,updated_at
 FROM model_providers WHERE active=1 LIMIT 1`)
 	return scanModelProvider(row)
 }
 
 func (s *Store) ListModelProviders(ctx context.Context) ([]domain.ModelProvider, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,kind,base_url,model,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,user_agent,active,created_at,updated_at
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,kind,base_url,model,api_key_cipher,proxy_id,user_agent,active,created_at,updated_at
 FROM model_providers ORDER BY active DESC,name`)
 	if err != nil {
 		return nil, err
@@ -993,10 +1229,10 @@ func (s *Store) GetWebSearchSettings(ctx context.Context) (domain.WebSearchSetti
 	var settings domain.WebSearchSettings
 	var enabled int
 	var updated string
-	err := s.db.QueryRowContext(ctx, `SELECT enabled,provider,base_url,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,timeout_seconds,max_results,updated_at
+	err := s.db.QueryRowContext(ctx, `SELECT enabled,provider,base_url,api_key_cipher,proxy_id,timeout_seconds,max_results,updated_at
 FROM web_search_settings WHERE id=1`).Scan(
-		&enabled, &settings.Provider, &settings.BaseURL, &settings.APIKeyCipher, &settings.ProxyURL, &settings.ProxyUsername,
-		&settings.ProxyPasswordCipher, &settings.TimeoutSeconds, &settings.MaxResults, &updated,
+		&enabled, &settings.Provider, &settings.BaseURL, &settings.APIKeyCipher, &settings.ProxyID,
+		&settings.TimeoutSeconds, &settings.MaxResults, &updated,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.WebSearchSettings{
@@ -1014,14 +1250,14 @@ FROM web_search_settings WHERE id=1`).Scan(
 
 func (s *Store) SaveWebSearchSettings(ctx context.Context, settings domain.WebSearchSettings) (domain.WebSearchSettings, error) {
 	settings.UpdatedAt = time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `INSERT INTO web_search_settings(id,enabled,provider,base_url,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,timeout_seconds,max_results,updated_at)
-VALUES(1,?,?,?,?,?,?,?,?,?,?)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO web_search_settings(id,enabled,provider,base_url,api_key_cipher,proxy_id,timeout_seconds,max_results,updated_at)
+VALUES(1,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,provider=excluded.provider,base_url=excluded.base_url,
-api_key_cipher=excluded.api_key_cipher,proxy_url=excluded.proxy_url,proxy_username=excluded.proxy_username,
-proxy_password_cipher=excluded.proxy_password_cipher,timeout_seconds=excluded.timeout_seconds,max_results=excluded.max_results,
+api_key_cipher=excluded.api_key_cipher,proxy_id=excluded.proxy_id,
+timeout_seconds=excluded.timeout_seconds,max_results=excluded.max_results,
 updated_at=excluded.updated_at`,
-		boolInt(settings.Enabled), settings.Provider, settings.BaseURL, settings.APIKeyCipher, settings.ProxyURL, settings.ProxyUsername,
-		settings.ProxyPasswordCipher, settings.TimeoutSeconds, settings.MaxResults, formatTime(settings.UpdatedAt))
+		boolInt(settings.Enabled), settings.Provider, settings.BaseURL, settings.APIKeyCipher, settings.ProxyID,
+		settings.TimeoutSeconds, settings.MaxResults, formatTime(settings.UpdatedAt))
 	if err != nil {
 		return domain.WebSearchSettings{}, err
 	}
@@ -1033,7 +1269,7 @@ func scanModelProvider(row scanner) (domain.ModelProvider, error) {
 	var active int
 	var created, updated string
 	err := row.Scan(&provider.ID, &provider.Name, &provider.Kind, &provider.BaseURL, &provider.Model,
-		&provider.APIKeyCipher, &provider.ProxyURL, &provider.ProxyUsername, &provider.ProxyPasswordCipher, &provider.UserAgent, &active, &created, &updated)
+		&provider.APIKeyCipher, &provider.ProxyID, &provider.UserAgent, &active, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.ModelProvider{}, ErrNotFound
 	}
@@ -1041,7 +1277,6 @@ func scanModelProvider(row scanner) (domain.ModelProvider, error) {
 		return domain.ModelProvider{}, err
 	}
 	provider.HasAPIKey = provider.APIKeyCipher != ""
-	provider.HasProxyPassword = provider.ProxyPasswordCipher != ""
 	provider.Active = active != 0
 	provider.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 	provider.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
@@ -1050,7 +1285,7 @@ func scanModelProvider(row scanner) (domain.ModelProvider, error) {
 
 func (s *Store) ListHosts(ctx context.Context) ([]domain.Host, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id,name,address,port,username,auth_type,private_key_cipher,
-known_hosts_file,proxy_jump_host_id,proxy_url,proxy_username,proxy_password_cipher,password_cipher,
+known_hosts_file,proxy_jump_host_id,proxy_id,password_cipher,
 sudo_mode,sudo_password_cipher,created_at,updated_at FROM hosts WHERE auth_type<>'workspace' ORDER BY name`)
 	if err != nil {
 		return nil, err
@@ -1106,8 +1341,8 @@ func scanHost(row scanner) (domain.Host, error) {
 	var host domain.Host
 	var created, updated string
 	err := row.Scan(&host.ID, &host.Name, &host.Address, &host.Port, &host.User, &host.AuthType,
-		&host.PrivateKeyCipher, &host.KnownHostsFile, &host.ProxyJumpHostID, &host.ProxyURL, &host.ProxyUsername,
-		&host.ProxyPasswordCipher, &host.PasswordCipher, &host.SudoMode, &host.SudoCipher, &created, &updated)
+		&host.PrivateKeyCipher, &host.KnownHostsFile, &host.ProxyJumpHostID, &host.ProxyID,
+		&host.PasswordCipher, &host.SudoMode, &host.SudoCipher, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Host{}, ErrNotFound
 	}
@@ -1116,8 +1351,23 @@ func scanHost(row scanner) (domain.Host, error) {
 	host.HasPassword = host.PasswordCipher != ""
 	host.HasSudoPassword = host.SudoCipher != ""
 	host.HasPrivateKey = host.PrivateKeyCipher != ""
-	host.HasProxyPassword = host.ProxyPasswordCipher != ""
 	return host, err
+}
+
+func scanProxy(row scanner) (domain.Proxy, error) {
+	var proxy domain.Proxy
+	var created, updated string
+	err := row.Scan(&proxy.ID, &proxy.Name, &proxy.URL, &proxy.Username, &proxy.PasswordCipher, &created, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Proxy{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.Proxy{}, err
+	}
+	proxy.HasPassword = proxy.PasswordCipher != ""
+	proxy.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	proxy.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	return proxy, nil
 }
 
 func (s *Store) backfillRunSearchText(ctx context.Context) error {
@@ -1185,13 +1435,13 @@ func likePattern(query string) string {
 	return "%" + escaped + "%"
 }
 
-func (s *Store) SearchRuns(ctx context.Context, query, hostID string, limit int) ([]domain.Run, error) {
+func (s *Store) SearchRuns(ctx context.Context, query, hostID, sessionID string, limit int) ([]domain.Run, error) {
 	pattern := likePattern(query)
 	statement := `SELECT id,session_id,host_id,request_json,request_cipher,request_digest,risk,status,
 exit_code,stdout_redacted,stderr_redacted,stdout_cipher,stderr_cipher,error,ai_review_json,started_at,completed_at
-FROM runs WHERE (?='' OR host_id=?) AND (?='' OR search_text LIKE ? ESCAPE '\' OR request_json LIKE ? ESCAPE '\'
+FROM runs WHERE (?='' OR session_id=?) AND (?='' OR host_id=?) AND (?='' OR search_text LIKE ? ESCAPE '\' OR request_json LIKE ? ESCAPE '\'
 		OR stdout_redacted LIKE ? ESCAPE '\' OR stderr_redacted LIKE ? ESCAPE '\') ORDER BY started_at DESC`
-	arguments := []any{hostID, hostID, query, pattern, pattern, pattern, pattern}
+	arguments := []any{sessionID, sessionID, hostID, hostID, query, pattern, pattern, pattern, pattern}
 	if limit > 0 {
 		statement += " LIMIT ?"
 		arguments = append(arguments, limit)
@@ -1317,9 +1567,14 @@ func (s *Store) DecideApproval(ctx context.Context, id, status, reason string) e
 	return nil
 }
 
-func (s *Store) ApprovePending(ctx context.Context, id, reason string, expectedRisk domain.RiskLevel) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE approvals SET status='approved',reason=?,decided_at=?
-WHERE id=? AND status='pending' AND risk=?`, reason, formatTime(time.Now().UTC()), id, expectedRisk)
+func (s *Store) ApprovePendingAndStartRun(ctx context.Context, id, runID, reason string, expectedRisk domain.RiskLevel) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE approvals SET status='approved',reason=?,decided_at=?
+WHERE id=? AND run_id=? AND status='pending' AND risk=?`, reason, formatTime(time.Now().UTC()), id, runID, expectedRisk)
 	if err != nil {
 		return err
 	}
@@ -1327,7 +1582,15 @@ WHERE id=? AND status='pending' AND risk=?`, reason, formatTime(time.Now().UTC()
 	if count == 0 {
 		return fmt.Errorf("approval changed or is no longer pending; refresh and review the latest risk")
 	}
-	return nil
+	result, err = tx.ExecContext(ctx, `UPDATE runs SET status='running' WHERE id=? AND status='approval_required'`, runID)
+	if err != nil {
+		return err
+	}
+	count, _ = result.RowsAffected()
+	if count == 0 {
+		return fmt.Errorf("approval run changed or is no longer awaiting approval")
+	}
+	return tx.Commit()
 }
 
 func (s *Store) UpdatePendingApprovalExplanation(ctx context.Context, approvalID, runID, reviewJSON string) error {
@@ -1357,20 +1620,28 @@ func (s *Store) UpdateRunAIReview(ctx context.Context, runID, reviewJSON string)
 	return nil
 }
 
-func (s *Store) DecideApprovalWithSessionGrant(ctx context.Context, id, reason, sessionID, fingerprint string, expiresAt time.Time, expectedRisk domain.RiskLevel) error {
+func (s *Store) ApprovePendingWithSessionGrantAndStartRun(ctx context.Context, id, runID, reason, sessionID, fingerprint string, expiresAt time.Time, expectedRisk domain.RiskLevel) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	result, err := tx.ExecContext(ctx, `UPDATE approvals SET status='approved',reason=?,decided_at=?
-WHERE id=? AND status='pending' AND risk=?`, reason, formatTime(time.Now().UTC()), id, expectedRisk)
+WHERE id=? AND run_id=? AND status='pending' AND risk=?`, reason, formatTime(time.Now().UTC()), id, runID, expectedRisk)
 	if err != nil {
 		return err
 	}
 	count, _ := result.RowsAffected()
 	if count == 0 {
 		return fmt.Errorf("approval changed or is no longer pending; refresh and review the latest risk")
+	}
+	result, err = tx.ExecContext(ctx, `UPDATE runs SET status='running' WHERE id=? AND status='approval_required'`, runID)
+	if err != nil {
+		return err
+	}
+	count, _ = result.RowsAffected()
+	if count == 0 {
+		return fmt.Errorf("approval run changed or is no longer awaiting approval")
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO session_approval_grants(session_id,request_fingerprint,created_at,expires_at)
 VALUES(?,?,?,?) ON CONFLICT(session_id,request_fingerprint) DO UPDATE SET expires_at=excluded.expires_at`,
@@ -1522,6 +1793,74 @@ func (s *Store) SetChatMessageStatus(ctx context.Context, id, status string) err
 		return ErrNotFound
 	}
 	return nil
+}
+
+// PruneChatTurnsExcludedFromContext removes failed user turns that have no
+// assistant response or Tool result. Reasoning and the transient interruption
+// marker are not model context, so they are removed with the user message.
+func (s *Store) PruneChatTurnsExcludedFromContext(ctx context.Context, sessionID string) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `
+SELECT users.session_id, users.rowid,
+  COALESCE((SELECT min(next_user.rowid) FROM chat_messages AS next_user
+    WHERE next_user.session_id=users.session_id AND next_user.role='user' AND next_user.rowid>users.rowid),0)
+FROM chat_messages AS users
+WHERE users.role='user' AND users.status='failed' AND (?='' OR users.session_id=?)
+AND NOT EXISTS (
+  SELECT 1 FROM chat_messages AS turn_message
+  WHERE turn_message.session_id=users.session_id
+    AND turn_message.rowid>users.rowid
+    AND turn_message.rowid<COALESCE((SELECT min(next_user.rowid) FROM chat_messages AS next_user
+      WHERE next_user.session_id=users.session_id AND next_user.role='user' AND next_user.rowid>users.rowid),9223372036854775807)
+    AND (
+      turn_message.role='tool'
+      OR (turn_message.role='assistant' AND trim(turn_message.content)<>'' AND trim(turn_message.content)<>?)
+    )
+)`, sessionID, sessionID, domain.AgentInterruptedMessage)
+	if err != nil {
+		return 0, err
+	}
+	type excludedTurn struct {
+		sessionID string
+		firstRow  int64
+		nextRow   int64
+	}
+	turns := make([]excludedTurn, 0)
+	for rows.Next() {
+		var turn excludedTurn
+		if err := rows.Scan(&turn.sessionID, &turn.firstRow, &turn.nextRow); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		turns = append(turns, turn)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	for _, turn := range turns {
+		if turn.nextRow > 0 {
+			_, err = tx.ExecContext(ctx, `DELETE FROM chat_messages WHERE session_id=? AND rowid>=? AND rowid<?`,
+				turn.sessionID, turn.firstRow, turn.nextRow)
+		} else {
+			_, err = tx.ExecContext(ctx, `DELETE FROM chat_messages WHERE session_id=? AND rowid>=?`,
+				turn.sessionID, turn.firstRow)
+		}
+		if err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return len(turns), nil
 }
 
 func (s *Store) ReplaceAgentPlan(ctx context.Context, plan domain.AgentPlan) (domain.AgentPlan, error) {

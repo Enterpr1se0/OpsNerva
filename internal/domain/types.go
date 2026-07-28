@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"strconv"
 	"strings"
 	"time"
 )
@@ -46,10 +47,11 @@ type Host struct {
 	HasPrivateKey       bool      `json:"has_private_key"`
 	KnownHostsFile      string    `json:"known_hosts_file,omitempty"`
 	ProxyJumpHostID     string    `json:"proxy_jump_host_id,omitempty"`
-	ProxyURL            string    `json:"proxy_url,omitempty"`
-	ProxyUsername       string    `json:"proxy_username,omitempty"`
+	ProxyID             string    `json:"proxy_id,omitempty"`
+	ProxyURL            string    `json:"-"`
+	ProxyUsername       string    `json:"-"`
 	ProxyPasswordCipher string    `json:"-"`
-	HasProxyPassword    bool      `json:"has_proxy_password"`
+	ProxyUpdatedAt      time.Time `json:"-"`
 	PasswordCipher      string    `json:"-"`
 	HasPassword         bool      `json:"has_password"`
 	SudoMode            string    `json:"sudo_mode"`
@@ -73,9 +75,7 @@ type HostInput struct {
 	PrivateKey      string `json:"private_key,omitempty"`
 	KnownHostsFile  string `json:"known_hosts_file,omitempty"`
 	ProxyJumpHostID string `json:"proxy_jump_host_id,omitempty"`
-	ProxyURL        string `json:"proxy_url,omitempty"`
-	ProxyUsername   string `json:"proxy_username,omitempty"`
-	ProxyPassword   string `json:"proxy_password,omitempty"`
+	ProxyID         string `json:"proxy_id,omitempty"`
 	Password        string `json:"password,omitempty"`
 	SudoMode        string `json:"sudo_mode"`
 	SudoPassword    string `json:"sudo_password,omitempty"`
@@ -89,62 +89,78 @@ type HostCapability struct {
 }
 
 type ModelProvider struct {
-	ID                  string    `json:"id"`
-	Name                string    `json:"name"`
-	Kind                string    `json:"kind"`
-	BaseURL             string    `json:"base_url,omitempty"`
-	Model               string    `json:"model"`
-	APIKeyCipher        string    `json:"-"`
-	HasAPIKey           bool      `json:"has_api_key"`
-	ProxyURL            string    `json:"proxy_url,omitempty"`
-	ProxyUsername       string    `json:"proxy_username,omitempty"`
-	ProxyPasswordCipher string    `json:"-"`
-	HasProxyPassword    bool      `json:"has_proxy_password"`
-	UserAgent           string    `json:"user_agent,omitempty"`
-	Active              bool      `json:"active"`
-	CreatedAt           time.Time `json:"created_at"`
-	UpdatedAt           time.Time `json:"updated_at"`
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	Kind         string    `json:"kind"`
+	BaseURL      string    `json:"base_url,omitempty"`
+	Model        string    `json:"model"`
+	APIKeyCipher string    `json:"-"`
+	HasAPIKey    bool      `json:"has_api_key"`
+	ProxyID      string    `json:"proxy_id,omitempty"`
+	UserAgent    string    `json:"user_agent,omitempty"`
+	Active       bool      `json:"active"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 type ModelProviderInput struct {
-	ID                 string `json:"id,omitempty"`
-	Name               string `json:"name"`
-	Kind               string `json:"kind"`
-	BaseURL            string `json:"base_url,omitempty"`
-	Model              string `json:"model"`
-	APIKey             string `json:"api_key,omitempty"`
-	ProxyURL           string `json:"proxy_url,omitempty"`
-	ProxyUsername      string `json:"proxy_username,omitempty"`
-	ProxyPassword      string `json:"proxy_password,omitempty"`
-	ClearProxyPassword bool   `json:"clear_proxy_password,omitempty"`
+	ID      string `json:"id,omitempty"`
+	Name    string `json:"name"`
+	Kind    string `json:"kind"`
+	BaseURL string `json:"base_url,omitempty"`
+	Model   string `json:"model"`
+	APIKey  string `json:"api_key,omitempty"`
+	ProxyID string `json:"proxy_id,omitempty"`
 	// UserAgent is a pointer so an omitted field keeps the stored value while
 	// an explicit empty string clears it, matching the test/discovery inputs.
 	UserAgent *string `json:"user_agent,omitempty"`
 }
 
 type ModelDiscoveryInput struct {
-	ID                 string  `json:"id,omitempty"`
-	Kind               string  `json:"kind,omitempty"`
-	BaseURL            *string `json:"base_url,omitempty"`
-	APIKey             string  `json:"api_key,omitempty"`
-	ProxyURL           *string `json:"proxy_url,omitempty"`
-	ProxyUsername      *string `json:"proxy_username,omitempty"`
-	ProxyPassword      string  `json:"proxy_password,omitempty"`
-	ClearProxyPassword bool    `json:"clear_proxy_password,omitempty"`
-	UserAgent          *string `json:"user_agent,omitempty"`
+	ID        string  `json:"id,omitempty"`
+	Kind      string  `json:"kind,omitempty"`
+	BaseURL   *string `json:"base_url,omitempty"`
+	APIKey    string  `json:"api_key,omitempty"`
+	ProxyID   *string `json:"proxy_id,omitempty"`
+	UserAgent *string `json:"user_agent,omitempty"`
 }
 
 type ModelTestInput struct {
-	ID                 string  `json:"id,omitempty"`
-	Kind               string  `json:"kind,omitempty"`
-	BaseURL            *string `json:"base_url,omitempty"`
-	Model              string  `json:"model"`
-	APIKey             string  `json:"api_key,omitempty"`
-	ProxyURL           *string `json:"proxy_url,omitempty"`
-	ProxyUsername      *string `json:"proxy_username,omitempty"`
-	ProxyPassword      string  `json:"proxy_password,omitempty"`
-	ClearProxyPassword bool    `json:"clear_proxy_password,omitempty"`
-	UserAgent          *string `json:"user_agent,omitempty"`
+	ID        string  `json:"id,omitempty"`
+	Kind      string  `json:"kind,omitempty"`
+	BaseURL   *string `json:"base_url,omitempty"`
+	Model     string  `json:"model"`
+	APIKey    string  `json:"api_key,omitempty"`
+	ProxyID   *string `json:"proxy_id,omitempty"`
+	UserAgent *string `json:"user_agent,omitempty"`
+}
+
+type Proxy struct {
+	ID             string    `json:"id"`
+	Name           string    `json:"name"`
+	URL            string    `json:"url"`
+	Username       string    `json:"username,omitempty"`
+	PasswordCipher string    `json:"-"`
+	HasPassword    bool      `json:"has_password"`
+	SSHCompatible  bool      `json:"ssh_compatible"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+type ProxyInput struct {
+	ID            string `json:"id,omitempty"`
+	Name          string `json:"name"`
+	URL           string `json:"url"`
+	Username      string `json:"username,omitempty"`
+	Password      string `json:"password,omitempty"`
+	ClearPassword bool   `json:"clear_password,omitempty"`
+}
+
+type ProxyTestResult struct {
+	OK         bool   `json:"ok"`
+	StatusCode int    `json:"status_code,omitempty"`
+	LatencyMS  int64  `json:"latency_ms"`
+	Target     string `json:"target"`
 }
 
 type ModelCatalog struct {
@@ -160,6 +176,8 @@ const (
 	MinSubagentTimeoutSeconds     = 5
 	MaxSubagentTimeoutSeconds     = 120
 )
+
+const AgentInterruptedMessage = "Agent run stopped by the operator before completion."
 
 var DefaultChatImageAllowedTypes = []string{"image/png", "image/jpeg", "image/webp", "image/gif"}
 
@@ -207,31 +225,25 @@ const (
 )
 
 type WebSearchSettings struct {
-	Enabled             bool      `json:"enabled"`
-	Provider            string    `json:"provider"`
-	BaseURL             string    `json:"base_url"`
-	APIKeyCipher        string    `json:"-"`
-	HasAPIKey           bool      `json:"has_api_key"`
-	ProxyURL            string    `json:"proxy_url,omitempty"`
-	ProxyUsername       string    `json:"proxy_username,omitempty"`
-	ProxyPasswordCipher string    `json:"-"`
-	HasProxyPassword    bool      `json:"has_proxy_password"`
-	TimeoutSeconds      int       `json:"timeout_seconds"`
-	MaxResults          int       `json:"max_results"`
-	UpdatedAt           time.Time `json:"updated_at"`
+	Enabled        bool      `json:"enabled"`
+	Provider       string    `json:"provider"`
+	BaseURL        string    `json:"base_url"`
+	APIKeyCipher   string    `json:"-"`
+	HasAPIKey      bool      `json:"has_api_key"`
+	ProxyID        string    `json:"proxy_id,omitempty"`
+	TimeoutSeconds int       `json:"timeout_seconds"`
+	MaxResults     int       `json:"max_results"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type WebSearchSettingsInput struct {
-	Enabled            bool   `json:"enabled"`
-	BaseURL            string `json:"base_url"`
-	APIKey             string `json:"api_key,omitempty"`
-	ClearAPIKey        bool   `json:"clear_api_key,omitempty"`
-	ProxyURL           string `json:"proxy_url,omitempty"`
-	ProxyUsername      string `json:"proxy_username,omitempty"`
-	ProxyPassword      string `json:"proxy_password,omitempty"`
-	ClearProxyPassword bool   `json:"clear_proxy_password,omitempty"`
-	TimeoutSeconds     int    `json:"timeout_seconds"`
-	MaxResults         int    `json:"max_results"`
+	Enabled        bool   `json:"enabled"`
+	BaseURL        string `json:"base_url"`
+	APIKey         string `json:"api_key,omitempty"`
+	ClearAPIKey    bool   `json:"clear_api_key,omitempty"`
+	ProxyID        string `json:"proxy_id,omitempty"`
+	TimeoutSeconds int    `json:"timeout_seconds"`
+	MaxResults     int    `json:"max_results"`
 }
 
 type WebSearchRequest struct {
@@ -403,6 +415,7 @@ const (
 	ExecWorkspaceUpload        ExecMode = "workspace_upload"
 	ExecWorkspaceShell         ExecMode = "workspace_shell"
 	ExecSSHFileTransfer        ExecMode = "ssh_file_transfer"
+	ExecSSHTunnelStart         ExecMode = "ssh_tunnel_start"
 )
 
 type FileSearchMatchMode string
@@ -423,9 +436,7 @@ type ExecRequest struct {
 	Env                       map[string]string   `json:"env,omitempty" jsonschema:"non-secret environment values"`
 	Elevated                  bool                `json:"elevated,omitempty" jsonschema:"request root through the host sudo policy; never pass sudo or a password as a program or argument"`
 	TimeoutSeconds            int                 `json:"timeout_seconds,omitempty" jsonschema:"1-600 seconds for synchronous execution"`
-	Reason                    string              `json:"reason" jsonschema:"why this command is necessary"`
-	ExpectedChanges           string              `json:"expected_changes,omitempty" jsonschema:"expected server changes"`
-	Rollback                  string              `json:"rollback,omitempty" jsonschema:"rollback instructions for mutations"`
+	Reason                    string              `json:"reason" jsonschema:"concise one-sentence purpose of this operation"`
 	RemotePath                string              `json:"remote_path,omitempty" jsonschema:"absolute remote file path for transfers"`
 	SourceHostID              string              `json:"source_host_id,omitempty" jsonschema:"registered source host identifier for host-to-host transfers"`
 	SourcePath                string              `json:"source_path,omitempty" jsonschema:"absolute source path for host-to-host transfers"`
@@ -445,6 +456,9 @@ type ExecRequest struct {
 	TailLines                 int                 `json:"tail_lines,omitempty" jsonschema:"number of final remote file lines to return"`
 	OffsetBytes               int64               `json:"offset_bytes,omitempty" jsonschema:"file read offset; negative values count from the end"`
 	MaxBytes                  int                 `json:"max_bytes,omitempty" jsonschema:"bounded file read length"`
+	TunnelRemoteHost          string              `json:"remote_host,omitempty" jsonschema:"host reached from the SSH target"`
+	TunnelRemotePort          int                 `json:"remote_port,omitempty" jsonschema:"port reached from the SSH target"`
+	TunnelLocalPort           int                 `json:"local_port,omitempty" jsonschema:"local loopback port; zero selects an available port"`
 	LocalPath                 string              `json:"-"`
 }
 
@@ -454,8 +468,14 @@ type ExecRequest struct {
 func (r ExecRequest) SearchText() string {
 	parts := []string{r.Program}
 	parts = append(parts, r.Args...)
-	parts = append(parts, r.Script, r.Cwd, r.Reason, r.ExpectedChanges, r.Rollback,
-		r.RemotePath, r.SourcePath, r.RelativePath, r.SearchPattern)
+	parts = append(parts, r.Script, r.Cwd, r.Reason,
+		r.RemotePath, r.SourcePath, r.RelativePath, r.SearchPattern, r.TunnelRemoteHost)
+	if r.TunnelRemotePort != 0 {
+		parts = append(parts, strconv.Itoa(r.TunnelRemotePort))
+	}
+	if r.TunnelLocalPort != 0 {
+		parts = append(parts, strconv.Itoa(r.TunnelLocalPort))
+	}
 	if r.Change != nil {
 		parts = append(parts, r.Change.Diff)
 	}
@@ -499,6 +519,30 @@ type ExecResult struct {
 	File                *FileMetadata     `json:"file,omitempty"`
 	Change              *FileChange       `json:"change,omitempty"`
 	Search              *FileSearchResult `json:"search,omitempty"`
+	Tunnel              *SSHTunnel        `json:"tunnel,omitempty"`
+}
+
+type SSHTunnel struct {
+	ID                string    `json:"id"`
+	HostID            string    `json:"host_id"`
+	HostName          string    `json:"host_name"`
+	LocalHost         string    `json:"local_host"`
+	LocalPort         int       `json:"local_port"`
+	RemoteHost        string    `json:"remote_host"`
+	RemotePort        int       `json:"remote_port"`
+	Status            string    `json:"status"`
+	ProxyUsed         bool      `json:"proxy_used"`
+	ActiveConnections int64     `json:"active_connections"`
+	TotalConnections  int64     `json:"total_connections"`
+	BytesSent         int64     `json:"bytes_sent"`
+	BytesReceived     int64     `json:"bytes_received"`
+	Error             string    `json:"error,omitempty"`
+	StartedAt         time.Time `json:"started_at"`
+}
+
+type SSHTunnelList struct {
+	Tunnels []SSHTunnel `json:"tunnels"`
+	Count   int         `json:"count"`
 }
 
 type FileSearchResult struct {
@@ -545,12 +589,9 @@ type CommandReviewInput struct {
 }
 
 type CommandExplanation struct {
-	Summary       string   `json:"summary"`
-	Mechanism     string   `json:"mechanism"`
-	Effects       []string `json:"effects"`
-	Risks         []string `json:"risks"`
-	BeginnerTips  []string `json:"beginner_tips"`
-	RollbackGuide string   `json:"rollback_guide"`
+	Summary   string   `json:"summary"`
+	Mechanism string   `json:"mechanism"`
+	Risks     []string `json:"risks"`
 }
 
 type CommandReview struct {

@@ -98,6 +98,13 @@ func run(ctx context.Context, args []string) error {
 	}
 	defer app.store.Close()
 	defer app.service.CloseMCPServers()
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := app.service.Shutdown(shutdownCtx); err != nil {
+			slog.Warn("service shutdown timed out", "component", "server", "error", err)
+		}
+	}()
 	switch args[0] {
 	case "serve":
 		return serve(ctx, app, serveOptions{
@@ -414,8 +421,6 @@ func execCommand(ctx context.Context, app *application, args []string) error {
 	fs.StringVar(&req.Cwd, "cwd", "", "remote working directory")
 	fs.IntVar(&req.TimeoutSeconds, "timeout", 60, "timeout seconds")
 	fs.StringVar(&req.Reason, "reason", "local operator request", "operational reason")
-	fs.StringVar(&req.ExpectedChanges, "changes", "", "expected changes")
-	fs.StringVar(&req.Rollback, "rollback", "", "rollback instructions")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

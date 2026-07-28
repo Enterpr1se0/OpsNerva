@@ -48,6 +48,8 @@ stdio 通过 `exec.Command(command,args...)` 启动，不解析 Shell；Streamab
 
 `ssh_run_script` 将脚本通过 stdin 传给远端 `bash -se`。脚本先由 `mvdan.cc/sh` 完整解析；解析失败、命令替换、动态执行、下载后管道到 shell 等模式会升级为 Critical。
 
+`ssh_tunnel` 的 `start` 进入同一套 Run、Policy、一次性审批和加密审计状态机；`list` 与 `stop` 直接操作进程内 Tunnel Registry。启动后控制面在 `127.0.0.1` 建立 TCP Listener，使用已解析的 `ConnectionSpec` 创建持久 SSH Client，再以 `direct-tcpip` channel 转发每个本机连接。因此网络代理、ProxyJump 链、认证与严格 Host Key 校验和普通 SSH 操作完全共用一条连接实现。Registry 记录活动连接和双向流量，Service Shutdown 会关闭 Listener、SSH Client 及全部已接受连接并等待 worker 退出；不把隧道恢复为跨重启持久状态。
+
 无 PTY 的交互式 Shell、编辑器与 `systemctl edit` 会在 Service 层拒绝；apt/dnf/yum/pacman 的变更操作必须显式提供对应非交互参数。脚本、argv、环境和路径还有独立大小与格式上限，检测到秘密的环境变量不会进入执行请求。
 
 ## Transactional files and Workspace
@@ -60,7 +62,7 @@ Workspace 在 `workspace_dir` 下按 ID 托管；SQLite 的 Workspace 登记只�
 
 `workspace_shell` 是唯一开放给模型的本地 Shell。管理员在 SQLite 持久化的 System 设置中明确选择 `sandbox`、`host` 或 `disabled`，默认 `sandbox`。提交时解析出的实际后端写入 `ExecRequest.workspace_shell_backend`，和完整脚本、Workspace ID、相对 cwd、环境与超时一起进入加密审批摘要；执行前再次读取设置，后端不一致即拒绝，从而避免审批后切换权限边界。它复用确定性 Policy、Run、Approval 与 Audit，每个请求最低风险固定为 Change，危险脚本仍升级为 Critical。
 
-`web_search` 和 `web_extract` 共用管理员保存在 `web_search_settings` 中的 Tavily 配置，但可由 func 管理分别启停。API Key 和代理密码用主密钥加密，HTTP API 与 Tool schema 均不暴露密文。请求禁用环境代理，只使用设置中明确选择的 HTTP、HTTPS、SOCKS5 或 SOCKS5H 代理；查询、域名过滤条件和待提取 URL 会离开本机。`web_extract` 一次接受最多五个公开 HTTP/HTTPS URL，拒绝凭据、localhost、私网和链路本地地址，固定使用 basic Markdown 提取。提供方响应限制为 2 MiB；正文上限可配置为单页 8-128 KiB、单次总计 32-512 KiB，默认分别为 32 KiB 和 128 KiB，且总上限不能小于单页上限。全部外部内容都会执行当前凭据精确脱敏并标记为不可信。审计只保存查询或规范化 URL 列表的 SHA256，不保存正文、凭据或完整 URL。
+`web_search` 和 `web_extract` 共用管理员保存在 `web_search_settings` 中的 Tavily 配置，但可由 func 管理分别启停。Tavily 设置只保存共享 `proxy_id`，运行时从 `proxies` 解析 HTTP、HTTPS、SOCKS5 或 SOCKS5H 地址及加密凭据；请求禁用环境代理，选中的代理失败时不会回退直连。查询、域名过滤条件和待提取 URL 会离开本机。`web_extract` 一次接受最多五个公开 HTTP/HTTPS URL，拒绝凭据、localhost、私网和链路本地地址，固定使用 basic Markdown 提取。提供方响应限制为 2 MiB；全部外部内容都会执行当前凭据精确脱敏并标记为不可信。审计只保存查询或规范化 URL 列表的 SHA256，不保存正文、凭据或完整 URL。
 
 Sandbox 后端仅在 Linux 使用配置的 Bubblewrap；不存在或 namespace 创建失败时关闭失败，绝不回退到 Host Shell。沙箱新建 user/mount/PID/network namespace、丢弃 capabilities、禁用嵌套 user namespace 和网络，只读挂载 `/usr` 与动态链接库目录，创建独立 `/proc`、`/dev`、`/tmp`，并按 Workspace access 只读或读写挂载到 `/workspace`。预存的 `.env*`、`.ssh`、`.opspilot-*`、`.data`、`master.key` 与 credential 命名路径，以及 socket、FIFO 和 device 等特殊文件，在 mount namespace 内被遮蔽。
 
@@ -68,7 +70,7 @@ Host 后端直接以服务账户执行，拥有宿主机文件系统与网络权
 
 目标主机和最多四级跳板链的非秘密连接字段及更新时间组成 `ssh_connection_digest`，与命令一起进入审批和会话授权摘要；批准后修改地址、用户、认证方式、known_hosts、网络代理或跳板链会导致执行失败。主机间文件传输对源端和目标端分别计算并校验该摘要。
 
-内置实现使用 `golang.org/x/crypto/ssh`、`knownhosts` 和 `github.com/pkg/sftp`。密码只作为进程内 AuthMethod；Keyboard Interactive 只回答一次无回显的密码提示。Unix Agent 连接 `SSH_AUTH_SOCK`，Windows Agent 通过 named pipe 连接系统 OpenSSH Agent。Web/CLI 上传的未加密 OpenSSH 格式私钥限制为 1 MiB，使用 AES-256-GCM 写入 `private_key_cipher`，对外只返回 `has_private_key` 并只在内存解析；不接受或保存宿主机私钥路径。首段 TCP 拨号支持 SOCKS5、SOCKS5H 和 HTTP CONNECT；代理 URL 是公开连接元数据，账号独立存储，密码加密后只通过 `has_proxy_password` 暴露状态。ProxyJump 只能引用注册主机，逐跳验证 host key、检测环路并限制最大深度；与网络代理组合时，代理只负责连接第一台跳板机。
+内置实现使用 `golang.org/x/crypto/ssh`、`knownhosts` 和 `github.com/pkg/sftp`。密码只作为进程内 AuthMethod；Keyboard Interactive 只回答一次无回显的密码提示。Unix Agent 连接 `SSH_AUTH_SOCK`，Windows Agent 通过 named pipe 连接系统 OpenSSH Agent。Web/CLI 上传的未加密 OpenSSH 格式私钥限制为 1 MiB，使用 AES-256-GCM 写入 `private_key_cipher`，对外只返回 `has_private_key` 并只在内存解析；不接受或保存宿主机私钥路径。主机只保存共享 `proxy_id`，连接时解析 SOCKS5、SOCKS5H 或 HTTP CONNECT 参数；代理密码只在内存解密。ProxyJump 只能引用注册主机，逐跳验证 host key、检测环路并限制最大深度；与网络代理组合时，代理只负责连接第一台跳板机。
 
 内置实现通过未认证握手扫描协商出的 host key，信任时重新扫描并精确比较 SHA256 指纹，再以 `0600` 追加和同步 known_hosts。未知 key 与 key mismatch 均关闭失败。命令和 SFTP 每次建立独立连接，连接/命令取消会关闭完整跳板链；15 秒 keepalive 连续超时会断开。
 
@@ -122,7 +124,7 @@ Runner 在调用工具前通过 Go context 绑定当前 session ID，Service 创
 
 ## Model provider routing
 
-模型提供商按 kind 映射为 Eino ChatModel：Anthropic 走 Claude 组件（原生 Anthropic API，`x-api-key` 认证），其余（OpenAI、DeepSeek、Ollama 和自定义兼容端点）走 OpenAI-compatible 组件。每条提供商记录可选配置 User-Agent 改写，对该提供商的聊天、连接测试和模型发现请求统一生效，用于兼容按 UA 过滤请求的网关（SDK 默认 UA 形如 `Anthropic/Go x.y.z`，可能被部分中转站拒绝）。API Key 在进入 SQLite 前使用与审计数据相同的 AES-256-GCM 主密钥加密，对外只返回 `has_api_key`。每条提供商记录还可独立保存 HTTP、HTTPS、SOCKS5 或 SOCKS5H 代理；代理密码加密后只通过 `has_proxy_password` 暴露状态。模型发现、配置测试、主 Agent 和选择该记录的 subagent 共用同一显式代理客户端，不从其他提供商继承代理。
+模型提供商按 kind 映射为 Eino ChatModel：Anthropic 走 Claude 组件（原生 Anthropic API，`x-api-key` 认证），其余（OpenAI、DeepSeek、Ollama 和自定义兼容端点）走 OpenAI-compatible 组件。每条提供商记录可选配置 User-Agent 改写，对该提供商的聊天、连接测试和模型发现请求统一生效，用于兼容按 UA 过滤请求的网关（SDK 默认 UA 形如 `Anthropic/Go x.y.z`，可能被部分中转站拒绝）。API Key 在进入 SQLite 前使用与审计数据相同的 AES-256-GCM 主密钥加密，对外只返回 `has_api_key`。提供商只保存共享 `proxy_id`；模型发现、配置测试、主 Agent 和选择该记录的 subagent 在每次构建配置时解析同一个显式代理。修改代理会触发 Runtime 重载，代理失败不会静默回退直连。
 
 SQLite 使用部分唯一索引保证最多只有一个 active provider。切换时服务更新 active route，构建新的 ChatModelAgent 与 Runner，再通过互斥锁原子替换运行时指针；已经取得旧 Runner 的请求可以正常结束，新请求使用新配置。没有 active provider 时才回退到 `OPENAI_*` 环境变量。
 
@@ -136,4 +138,4 @@ SQLite 使用部分唯一索引保证最多只有一个 active provider。切换
 
 ## Runtime settings
 
-Web 配置中心把模型提供商、SSH 主机和系统设置收敛到同一入口。`system_settings` 单行表保存完整 System Prompt、Agent 最大模型迭代数、命令解释开关、独立 provider、请求超时、聊天图片格式和 Workspace Shell 模式；每次修改都会写入 `system_settings_updated` 审计事件。未显式保存 Prompt 时读取内置模板，显式空字符串则保持为空。保存后的 Prompt 直接作为 ChatModelAgent Instruction，不拼接内置内容。Runtime 构建新的 ChatModelAgent/Runner 并原子替换指针，因此所有会话的新请求立即使用新的 Prompt、循环预算和解释模型路由，已经取得旧 Runner 的执行不会被中断。
+Web 配置中心把模型提供商、SSH 主机、代理和系统设置收敛到同一入口。`proxies` 保存可复用的名称、规范化 URL、用户名和加密密码；模型、Tavily 和主机只保存 `proxy_id`。被引用的代理禁止删除，HTTPS 代理禁止分配给 SSH 主机。旧的三套内嵌代理字段会在一次性迁移中复制到独立代理记录后直接删除，不保留双轨运行逻辑。`system_settings` 单行表保存完整 System Prompt、Agent 最大模型迭代数、命令解释开关、独立 provider、请求超时、聊天图片格式和 Workspace Shell 模式；每次修改都会写入 `system_settings_updated` 审计事件。未显式保存 Prompt 时读取内置模板，显式空字符串则保持为空。保存后的 Prompt 直接作为 ChatModelAgent Instruction，不拼接内置内容。Runtime 构建新的 ChatModelAgent/Runner 并原子替换指针，因此所有会话的新请求立即使用新的 Prompt、循环预算和解释模型路由，已经取得旧 Runner 的执行不会被中断。

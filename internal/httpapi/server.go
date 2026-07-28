@@ -81,6 +81,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/auth/login", s.login)
 	s.mux.HandleFunc("POST /api/v1/auth/logout", s.logout)
 	s.mux.HandleFunc("PUT /api/v1/auth/password", s.changePassword)
+	s.mux.HandleFunc("GET /api/v1/proxies", s.listProxies)
+	s.mux.HandleFunc("POST /api/v1/proxies", s.saveProxy)
+	s.mux.HandleFunc("DELETE /api/v1/proxies/{id}", s.deleteProxy)
+	s.mux.HandleFunc("POST /api/v1/proxies/{id}/test", s.testProxy)
 	s.mux.HandleFunc("GET /api/v1/model-providers", s.listModelProviders)
 	s.mux.HandleFunc("POST /api/v1/model-providers", s.saveModelProvider)
 	s.mux.HandleFunc("POST /api/v1/model-providers/discover", s.discoverModels)
@@ -128,6 +132,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/hosts/{id}/scan-key", s.scanHostKey)
 	s.mux.HandleFunc("POST /api/v1/hosts/{id}/trust-key", s.trustHostKey)
 	s.mux.HandleFunc("POST /api/v1/hosts/{id}/probe", s.probeHost)
+	s.mux.HandleFunc("GET /api/v1/ssh-tunnels", s.listSSHTunnels)
+	s.mux.HandleFunc("DELETE /api/v1/ssh-tunnels/{id}", s.stopSSHTunnel)
 	s.mux.HandleFunc("POST /api/v1/policy/evaluate", s.evaluate)
 	s.mux.HandleFunc("POST /api/v1/exec", s.exec)
 	s.mux.HandleFunc("POST /api/v1/tasks", s.startTask)
@@ -785,6 +791,9 @@ func (s *Server) diagnostics(ctx context.Context) observability.Diagnostics {
 	hosts, err := s.service.ListHosts(ctx)
 	addError("hosts", err)
 	result.Resources.Hosts = len(hosts)
+	proxies, err := s.service.ListProxies(ctx)
+	addError("proxies", err)
+	result.Resources.Proxies = len(proxies)
 	providers, err := s.service.ListModelProviders(ctx)
 	addError("model_providers", err)
 	result.Resources.ModelProviders = len(providers)
@@ -858,6 +867,52 @@ func (s *Server) saveSystemSettings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) webSearchSettings(w http.ResponseWriter, r *http.Request) {
 	result, err := s.service.WebSearchSettings(r.Context())
 	respond(w, result, err)
+}
+
+func (s *Server) listProxies(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.ListProxies(r.Context())
+	respond(w, result, err)
+}
+
+func (s *Server) saveProxy(w http.ResponseWriter, r *http.Request) {
+	var input domain.ProxyInput
+	if !decode(w, r, &input) {
+		return
+	}
+	result, err := s.service.SaveProxy(r.Context(), input, actor(r))
+	if err != nil {
+		writeErrorStatus(w, err, http.StatusBadRequest)
+		return
+	}
+	if s.agent != nil {
+		if err := s.agent.Reload(r.Context()); err != nil {
+			writeError(w, err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusCreated, result)
+}
+
+func (s *Server) deleteProxy(w http.ResponseWriter, r *http.Request) {
+	err := s.service.DeleteProxy(r.Context(), r.PathValue("id"), actor(r))
+	if errors.Is(err, service.ErrProxyInUse) {
+		writeErrorStatus(w, err, http.StatusConflict)
+		return
+	}
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) testProxy(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.TestProxy(r.Context(), r.PathValue("id"), actor(r))
+	if err != nil {
+		writeErrorStatus(w, err, http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) saveWebSearchSettings(w http.ResponseWriter, r *http.Request) {
@@ -1033,6 +1088,19 @@ func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) {
 	respond(w, hosts, err)
 }
 
+func (s *Server) listSSHTunnels(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.service.ListSSHTunnels())
+}
+
+func (s *Server) stopSSHTunnel(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.StopSSHTunnel(r.Context(), r.PathValue("id"), actor(r))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (s *Server) saveHost(w http.ResponseWriter, r *http.Request) {
 	var host domain.HostInput
 	if !decodeLimit(w, r, &host, 3<<20) {
@@ -1149,8 +1217,12 @@ func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &input) {
 		return
 	}
-	result, err := s.service.ApproveWithScope(r.Context(), r.PathValue("id"), input.Reason, input.Scope, actor(r))
-	respond(w, result, err)
+	result, err := s.service.ApproveWithScopeAsync(r.Context(), r.PathValue("id"), input.Reason, input.Scope, actor(r))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, result)
 }
 
 func (s *Server) reject(w http.ResponseWriter, r *http.Request) {
@@ -1516,6 +1588,8 @@ func writeError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
 	if errors.Is(err, store.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
 		status = http.StatusNotFound
+	} else if errors.Is(err, service.ErrHostHasActiveTunnel) {
+		status = http.StatusConflict
 	} else if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "expired") || strings.Contains(err.Error(), "mismatch") || strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "not a regular file") || strings.Contains(err.Error(), "can be deleted") {
 		status = http.StatusBadRequest
 	}

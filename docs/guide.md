@@ -4,8 +4,9 @@
 
 ## 功能总览
 
-- 支持多个 OpenAI 兼容模型提供商、独立代理、连接测试和运行时切换。
+- 支持多个 OpenAI 兼容模型提供商、共享代理配置、连接测试和运行时切换。
 - 内置跨平台 SSH，支持 `ssh-agent`、上传私钥、密码、网络代理、ProxyJump、sudo 和严格 Host Key 校验。
+- Agent 可建立仅监听本机的 SSH 端口转发，Web 全局显示活动链路、连接数和流量。
 - 命令由确定性策略分级；变更和高风险操作在执行前由用户审批。
 - 会话、工具结果、任务和审批状态持久化，刷新页面不会中断正在运行的 Agent。
 - 支持在会话中选择或粘贴图片，并把文字和图片一起发送给支持视觉输入的模型。
@@ -159,7 +160,7 @@ export OPENAI_BASE_URL="https://your-openai-compatible-endpoint/v1"
 export OPENAI_MODEL="your-tool-calling-model"
 ```
 
-Web 保存的 API Key 使用本机主密钥加密，不会在列表、健康检查或审计中回显。每个模型提供商可以单独配置 HTTP、HTTPS、SOCKS5 或 SOCKS5H 代理。保存或启用提供商后，新请求会立即使用新配置，无需重启服务。
+Web 保存的 API Key 使用本机主密钥加密，不会在列表、健康检查或审计中回显。配置中心的“代理”分组可以保存多个 HTTP、HTTPS、SOCKS5 或 SOCKS5H 代理，模型提供商只需选择“直连”或一个已保存代理。保存或启用提供商后，新请求会立即使用新配置，无需重启服务。
 
 Base URL 可以填写完整 URL，也可以省略协议，例如 `127.0.0.1:11434/v1` 或 `api.example.com/v1`。本机、私网 IP 和单标签主机自动使用 HTTP，公网域名自动使用 HTTPS；误粘贴以 `/models` 或 `/chat/completions` 结尾的完整接口地址也会自动还原为 Base URL。
 
@@ -178,11 +179,11 @@ make dev-web
 
 ## Tavily Web
 
-系统设置中的 Tavily Web 可配置 API 地址、API Key、超时、搜索结果上限、网页提取内容上限和独立网络代理。`web_search` 用于发现来源，`web_extract` 从最多五个指定公开 URL 提取 Markdown；单页默认上限为 32 KiB，单次总量默认上限为 128 KiB。两个 func 可在 Loaded functions 中分别启停。API Key 与代理密码使用 AES-256-GCM 加密保存，只对外返回是否已配置。查询和 URL 会发送给 Tavily，返回内容按不可信外部证据交给模型。审计只保存查询或 URL 列表的 SHA256、耗时、数量和代理使用状态，不保存正文或凭据。
+系统设置中的 Tavily Web 可配置 API 地址、API Key、超时和搜索结果上限，并选择“直连”或配置中心已有的代理。`web_search` 用于发现来源，`web_extract` 从最多五个指定公开 URL 提取 Markdown。两个 func 可在 Loaded functions 中分别启停。API Key 与代理密码使用 AES-256-GCM 分别加密保存在 Tavily 设置和共享代理记录中，只对外返回是否已配置。查询和 URL 会发送给 Tavily，返回内容按不可信外部证据交给模型。审计只保存查询或 URL 列表的 SHA256、耗时、数量和代理使用状态，不保存正文或凭据。
 
 ## 会话与上下文
 
-Agent 页面右侧的 Conversations 会列出最近会话，标题取首条用户消息。刷新页面会恢复上次选择的会话并自动定位到最新消息；向上查看旧内容后，新增内容不会强制抢走滚动位置。可以新建、切换或删除历史会话。用户消息、最终 Assistant 回复、模型提供商实际返回的 reasoning 和工具结果卡片都保存在 SQLite；reasoning 卡片默认折叠并只显示最新一行，展开后查看该次模型调用的完整思考过程。不支持 reasoning 的模型不会显示伪造内容。reasoning 仅用于界面历史，不会作为新消息重复发送给模型。跨轮模型上下文按完整用户轮次恢复：脱敏工具结果会作为明确标记的不可信历史证据回放，失败或中断轮次只要已经执行过工具也会保留；较长会话按最近完整轮次和 256 KiB 总预算裁剪。执行真实性仍以审计 Run 为权威记录。命令类 Tool 卡片会直接展示服务端标准化后的完整 program/argv 或完整 Bash 脚本，以及目标主机、工作目录、环境、提权、风险、退出码和分离的 stdout/stderr；原始 JSON 只作为折叠的排错信息。受控操作的审批不会再堆在独立页面中，而是只在发起它的当前会话上方弹出，并同样直接显示 LLM 请求执行的完整命令或脚本。
+Agent 页面右侧的 Conversations 会列出最近会话，标题取首条用户消息。刷新页面会恢复上次选择的会话并自动定位到最新消息；向上查看旧内容后，新增内容不会强制抢走滚动位置。可以新建、切换或删除历史会话。用户消息、最终 Assistant 回复、模型提供商实际返回的 reasoning 和工具结果卡片都保存在 SQLite；reasoning 卡片默认折叠并只显示最新一行，展开后查看该次模型调用的完整思考过程。不支持 reasoning 的模型不会显示伪造内容。reasoning 仅用于界面历史，不会作为新消息重复发送给模型。跨轮模型上下文按完整用户轮次恢复：脱敏工具结果会作为明确标记的不可信历史证据回放，失败或中断轮次只要已经执行过工具也会保留；较长会话按最近完整轮次和 256 KiB 总预算裁剪。执行真实性仍以审计 Run 为权威记录。工具真正开始执行时，当前 SSE 会立即显示带实际参数的“执行中”卡片；待审批、完成或失败都按同一个 Tool Call ID 原位更新，不会等待最终结果后才出现，也不会生成重复卡片。命令类 Tool 卡片会直接展示服务端标准化后的完整 program/argv 或完整 Bash 脚本，以及目标主机、工作目录、环境、提权、风险、退出码和分离的 stdout/stderr；原始 JSON 只作为折叠的排错信息。受控操作的审批不会再堆在独立页面中，而是只在发起它的当前会话上方弹出，并同样直接显示 LLM 请求执行的完整命令或脚本。
 
 聊天框支持多选和粘贴图片，也允许只发送图片。管理员可在 Agent 设置中选择 PNG、JPEG、WebP 和 GIF 格式；服务端不设置图片张数、单张大小或模型上下文图片预算。图片原始数据随消息保存在 SQLite，历史页面通过鉴权接口读取；被文本上下文规则选中的历史轮次会携带该轮全部图片重新发送给模型。活动模型必须兼容 OpenAI 风格的 `image_url` 内容块，否则提供商会返回不支持多模态的错误。
 
@@ -230,7 +231,9 @@ OpsPilot 默认不接受未知 host key。先注册、扫描并人工核对指�
 ./bin/ops-agent host probe HOST_ID
 ```
 
-主机可选择当前 `ssh-agent`、上传未加密 OpenSSH 格式私钥或账号密码；Windows Agent 使用系统 OpenSSH Agent named pipe。上传私钥限制为 1 MiB，与 SSH、sudo 和代理密码一样使用 AES-256-GCM 加密保存，API 只返回是否已配置，不返回内容或宿主机路径。执行时只在内存中解密和解析，密钥和密码都不会发送给模型。SSH 首段 TCP 连接可使用带可选认证的 SOCKS5、SOCKS5H 或 HTTP CONNECT 代理；ProxyJump 必须引用另一个已注册且已信任 host key 的主机，每一级都会独立认证并校验 host key，最多四级且拒绝环路。两者同时配置时，代理用于连接第一台跳板机。
+主机可选择当前 `ssh-agent`、上传未加密 OpenSSH 格式私钥或账号密码；Windows Agent 使用系统 OpenSSH Agent named pipe。上传私钥限制为 1 MiB，与 SSH、sudo 和代理密码一样使用 AES-256-GCM 加密保存，API 只返回是否已配置，不返回内容或宿主机路径。执行时只在内存中解密和解析，密钥和密码都不会发送给模型。SSH 主机可选择共享代理中的 SOCKS5、SOCKS5H 或 HTTP CONNECT 代理；HTTPS 代理不会出现在 SSH 选择器中，也会被服务端拒绝。ProxyJump 必须引用另一个已注册且已信任 host key 的主机，每一级都会独立认证并校验 host key，最多四级且拒绝环路。两者同时配置时，代理用于连接第一台跳板机。
+
+Eino Agent 的 `ssh_tunnel` 支持 `start`、`list` 和 `stop`。`start` 把目标主机能够访问的 `remote_host:remote_port` 转发到运行 OpsPilot 的机器，并固定只监听 `127.0.0.1`；`local_port=0` 自动选择空闲端口。建立链路每次都需单独人工审批，审批框显示本机端口、SSH 主机和远程端点。连接自动复用该主机已有的网络代理、ProxyJump、认证和 Host Key 校验。Web 顶栏显示当前链路、活动/累计连接、流量和故障，可直接停止。隧道只存在于当前服务进程中，停止服务或关闭桌面 App 会立即关闭监听和活动连接。
 
 从双后端版本升级时会执行一次破坏性 SSH schema 迁移：旧主机及其关联的运行、审批、任务和文件操作记录会被删除，同时移除 System OpenSSH、`ssh_config` 别名和自由格式 ProxyJump 字段。聊天记录、模型设置和 Workspace 文件不受影响。
 
@@ -247,9 +250,9 @@ OpsPilot 默认不接受未知 host key。先注册、扫描并人工核对指�
 
 审批绑定主机、目录、命令/脚本、参数、环境和文件内容的 SHA-256。审批后任何修改都会使摘要失效。模型只能查询审批状态，不能调用批准接口。
 
-Web 会话审批框提供三个明确选择：仅允许本次、本会话允许完全相同的操作、拒绝并告诉 LLM 改做什么。确定性 Policy 会立即创建审批，命令解释 Agent 随后在后台用结构化卡片补充作用、影响、常见风险、操作提示和回滚建议；结果随 Run 持久化。解释 Agent 没有 Tool，也不拥有审批 API，调用失败不会阻塞审批，更不能修改风险等级或审批要求。
+Web 会话审批框提供三个明确选择：仅允许本次、本会话允许完全相同的操作、拒绝并告诉 LLM 改做什么。确定性 Policy 会立即创建审批，命令解释 Agent 随后在后台用精简卡片补充命令作用和具体风险；结果随 Run 持久化。解释 Agent 没有 Tool，也不拥有审批 API，调用失败不会阻塞审批，更不能修改风险等级或审批要求。
 
-Agent 的原始 Tool 调用会在 Service 层真正暂停；HTTP 运行上下文与浏览器 SSE 连接解耦，因此刷新页面或临时断网不会取消 Agent Loop。页面恢复后通过会话 state 接口同步后台状态和新增历史，在运行结束前禁止同一会话重复发送或删除。批准并执行完成后，真实结果返回同一个 Tool Call，Eino 从原调用位置继续。后台运行设有 30 分钟上限；服务进程重启仍会终止内存中的 Agent Loop，但审批和审计记录继续保留。会话级授权最长保留 8 小时，并且只忽略说明、预期变化和回滚文案的差异；主机、命令、参数、工作目录、环境、文件路径、脚本内容、超时或提权标记有任何变化都会重新审批。Critical 操作始终要求当次人工审批并填写原因，不能使用会话级授权。拒绝时必须填写替代方案，该内容会作为 `operator_instruction` 返回被暂停的 Tool，模型必须在同一次运行中按新方案继续。
+Agent 的原始 Tool 调用会在 Service 层真正暂停；HTTP 运行上下文与浏览器 SSE 连接解耦，因此刷新页面或临时断网不会取消 Agent Loop。页面恢复后通过会话 state 接口同步后台状态和新增历史，在运行结束前禁止同一会话重复发送或删除。批准并执行完成后，真实结果返回同一个 Tool Call，Eino 从原调用位置继续。后台运行设有 30 分钟上限；服务进程重启仍会终止内存中的 Agent Loop，但审批和审计记录继续保留。会话级授权最长保留 8 小时，并且只忽略简短操作目的的差异；主机、命令、参数、工作目录、环境、文件路径、脚本内容、超时或提权标记有任何变化都会重新审批。Critical 操作始终要求当次人工审批并填写原因，不能使用会话级授权。拒绝时必须填写替代方案，该内容会作为 `operator_instruction` 返回被暂停的 Tool，模型必须在同一次运行中按新方案继续。
 
 如果主 Agent 已产生 Tool 结果却以空正文结束，Runtime 不会重跑原 Agent Loop。它会把本轮已持久化的脱敏 Tool 结果和最新计划交给一个 `MaxIterations=1`、无 Tool、无 checkpoint 的独立总结 Agent，仅补生成最终回复；该路径不能再次执行操作。总结仍失败时会返回明确错误，并保留原 Tool 结果供下一轮继续。
 
@@ -259,7 +262,7 @@ CLI 审批示例：
 
 ```bash
 ./bin/ops-agent approval list
-./bin/ops-agent approval approve APPROVAL_ID --reason "reviewed command and rollback"
+./bin/ops-agent approval approve APPROVAL_ID --reason "reviewed command"
 ```
 
 自定义规则位于 [configs/policy.yaml](../configs/policy.yaml)，可以按主机、程序、命令片段和路径配置 `allow`、`approval`、`critical` 或 `deny`。
@@ -294,11 +297,12 @@ Web 的 **Extensions / MCP Servers** 还支持反向角色：让 OpsPilot 作为
 
 - `ssh_host_list` / `ssh_host_inspect`
 - `ssh_exec` / `ssh_run_script`（可选 `background: true` 启动后台任务，默认同步执行）
+- `ssh_tunnel`（Eino Agent 专用，`action=start|list|stop`；本机监听固定为 `127.0.0.1`）
 - `ssh_task`（`action=status|cancel`）
 - `ssh_file_read`（可选 `metadata_only=true` 或 `pattern` 搜索模式）/ `ssh_file_list`
 - `ssh_file_edit` / `ssh_file_transfer`
 - `workspace_file_list` / `workspace_file_read`（可选 `pattern` 搜索模式）/ `workspace_file_edit` / `workspace_file_upload` / `workspace_shell`。这些工具只在 Eino Agent 中提供，Workspace 由 Web 会话绑定，模型不能列出或自行选择其他 Workspace；无会话语义的 MCP Server 不暴露这组工具。
-- `ssh_history`（按字面子串搜索命令明文与脱敏输出，或按 `run_id` 精确读取；密文以 `[REDACTED]` 存储）
+- `ssh_history`（Agent 仅搜索当前会话的命令与脱敏输出，或按 `run_id` 精确读取当前会话记录；密文以 `[REDACTED]` 存储）
 - `ops_skill`（列出或按 `name` 加载）
 
 ## 数据安全

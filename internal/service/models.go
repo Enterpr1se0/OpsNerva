@@ -36,6 +36,7 @@ type resolvedModelProvider struct {
 	Kind          string
 	BaseURL       string
 	APIKey        string
+	ProxyID       string
 	ProxyURL      string
 	ProxyUsername string
 	ProxyPassword string
@@ -126,16 +127,12 @@ func (s *Service) resolveModelProvider(
 	providerID, kind string,
 	inputBaseURL *string,
 	inputAPIKey string,
-	inputProxyURL, inputProxyUsername *string,
-	inputProxyPassword string,
-	clearProxyPassword bool,
+	inputProxyID *string,
 	inputUserAgent *string,
 ) (resolvedModelProvider, error) {
 	result := resolvedModelProvider{
 		ID: strings.TrimSpace(providerID), Kind: strings.TrimSpace(kind), APIKey: strings.TrimSpace(inputAPIKey),
 	}
-	storedProxyURL := ""
-	storedProxyUsername := ""
 	providerID = result.ID
 	if providerID != "" {
 		cfg, provider, err := s.ModelProviderConfig(ctx, providerID)
@@ -146,12 +143,8 @@ func (s *Service) resolveModelProvider(
 			result.Kind = provider.Kind
 		}
 		result.BaseURL = cfg.BaseURL
-		result.ProxyURL = cfg.ProxyURL
-		result.ProxyUsername = cfg.ProxyUsername
-		result.ProxyPassword = cfg.ProxyPassword
+		result.ProxyID = provider.ProxyID
 		result.UserAgent = cfg.UserAgent
-		storedProxyURL = cfg.ProxyURL
-		storedProxyUsername = cfg.ProxyUsername
 		if result.APIKey == "" {
 			result.APIKey = cfg.APIKey
 		}
@@ -159,11 +152,8 @@ func (s *Service) resolveModelProvider(
 	if inputBaseURL != nil {
 		result.BaseURL = strings.TrimSpace(*inputBaseURL)
 	}
-	if inputProxyURL != nil {
-		result.ProxyURL = strings.TrimSpace(*inputProxyURL)
-	}
-	if inputProxyUsername != nil {
-		result.ProxyUsername = strings.TrimSpace(*inputProxyUsername)
+	if inputProxyID != nil {
+		result.ProxyID = strings.TrimSpace(*inputProxyID)
 	}
 	if inputUserAgent != nil {
 		result.UserAgent = *inputUserAgent
@@ -173,21 +163,6 @@ func (s *Service) resolveModelProvider(
 		return resolvedModelProvider{}, err
 	}
 	result.UserAgent = normalizedUserAgent
-	normalizedProxyURL, err := proxyx.NormalizeURL(result.ProxyURL)
-	if err != nil {
-		return resolvedModelProvider{}, err
-	}
-	result.ProxyURL = normalizedProxyURL
-	if len(result.ProxyURL) > 2048 {
-		return resolvedModelProvider{}, fmt.Errorf("proxy URL is too long")
-	}
-	if clearProxyPassword {
-		result.ProxyPassword = ""
-	} else if inputProxyPassword != "" {
-		result.ProxyPassword = inputProxyPassword
-	} else if result.ProxyURL != storedProxyURL || result.ProxyUsername != storedProxyUsername {
-		result.ProxyPassword = ""
-	}
 	if result.Kind == "" {
 		result.Kind = "openai_compatible"
 	}
@@ -199,25 +174,20 @@ func (s *Service) resolveModelProvider(
 		return resolvedModelProvider{}, err
 	}
 	result.BaseURL = normalizedBaseURL
-	if containsCredentialControl(result.ProxyUsername) || containsCredentialControl(result.ProxyPassword) {
-		return resolvedModelProvider{}, fmt.Errorf("proxy credentials cannot contain NUL, carriage return, or newline characters")
+	proxy, err := s.resolveProxy(ctx, result.ProxyID)
+	if err != nil {
+		return resolvedModelProvider{}, err
 	}
-	if len(result.ProxyUsername) > 255 || len(result.ProxyPassword) > 255 {
-		return resolvedModelProvider{}, fmt.Errorf("proxy credentials are too long")
-	}
-	if result.ProxyURL == "" {
-		result.ProxyUsername = ""
-		result.ProxyPassword = ""
-	} else if result.ProxyUsername == "" {
-		result.ProxyPassword = ""
-	}
+	result.ProxyURL = proxy.URL
+	result.ProxyUsername = proxy.Username
+	result.ProxyPassword = proxy.Password
 	return result, nil
 }
 
 func (s *Service) ModelTestConfig(ctx context.Context, input domain.ModelTestInput) (config.Model, error) {
 	resolved, err := s.resolveModelProvider(
 		ctx, input.ID, input.Kind, input.BaseURL, input.APIKey,
-		input.ProxyURL, input.ProxyUsername, input.ProxyPassword, input.ClearProxyPassword,
+		input.ProxyID,
 		input.UserAgent,
 	)
 	if err != nil {
@@ -236,7 +206,7 @@ func (s *Service) ModelTestConfig(ctx context.Context, input domain.ModelTestInp
 func (s *Service) DiscoverModels(ctx context.Context, input domain.ModelDiscoveryInput, actor string) (domain.ModelCatalog, error) {
 	resolved, err := s.resolveModelProvider(
 		ctx, input.ID, input.Kind, input.BaseURL, input.APIKey,
-		input.ProxyURL, input.ProxyUsername, input.ProxyPassword, input.ClearProxyPassword,
+		input.ProxyID,
 		input.UserAgent,
 	)
 	if err != nil {

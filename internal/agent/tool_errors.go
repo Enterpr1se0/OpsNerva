@@ -18,6 +18,44 @@ import (
 	"github.com/cloudwego/eino/compose"
 )
 
+type toolActivityContextKey struct{}
+
+type toolCallActivity struct {
+	CallID    string
+	Name      string
+	Arguments string
+}
+
+type toolInputValidationError struct {
+	message string
+}
+
+func (err *toolInputValidationError) Error() string {
+	return err.message
+}
+
+func invalidToolInput(format string, arguments ...any) error {
+	return &toolInputValidationError{message: fmt.Sprintf(format, arguments...)}
+}
+
+func withToolActivityNotifier(ctx context.Context, notify func(toolCallActivity)) context.Context {
+	if notify == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, toolActivityContextKey{}, notify)
+}
+
+func notifyToolActivity(ctx context.Context, input *compose.ToolInput) {
+	if ctx == nil || input == nil {
+		return
+	}
+	notify, ok := ctx.Value(toolActivityContextKey{}).(func(toolCallActivity))
+	if !ok || notify == nil {
+		return
+	}
+	notify(toolCallActivity{CallID: input.CallID, Name: input.Name, Arguments: input.Arguments})
+}
+
 type planToolResult struct {
 	domain.ToolFailure
 	Plan *domain.AgentPlan `json:"plan,omitempty"`
@@ -96,9 +134,12 @@ func classifyAgentToolError(toolName string, err error) (code, message string, r
 	messageLower := strings.ToLower(err.Error())
 	rootMessage := rootToolError(err).Error()
 	var transition *store.PlanTransitionError
+	var inputValidation *toolInputValidationError
 	switch {
 	case errors.As(err, &transition):
 		return "invalid_state", transition.Error(), false, "continue or finish the current in-progress plan step before updating another step"
+	case errors.As(err, &inputValidation):
+		return "validation_failed", inputValidation.Error(), false, "correct the function tool input using this error; do not repeat unchanged input"
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, skills.ErrNotFound):
 		return "not_found", rootMessage, false, "list or read the available resources and use a valid identifier"
 	case errors.Is(err, skills.ErrDisabled):
@@ -156,6 +197,8 @@ func normalizeToolCallErrors(next compose.InvokableToolEndpoint) compose.Invokab
 	return func(ctx context.Context, input *compose.ToolInput) (output *compose.ToolOutput, err error) {
 		started := time.Now()
 		logger := observability.FromContext(ctx).With("component", "agent", "tool_name", input.Name, "tool_call_id", input.CallID)
+		notifyToolActivity(ctx, input)
+		ctx = service.WithExecutionOwner(ctx, input.CallID, input.Name)
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				if ctx.Err() != nil {

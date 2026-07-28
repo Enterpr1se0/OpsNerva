@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net"
 	"os"
 	posixpath "path"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"eino-ops-agent/internal/domain"
@@ -155,6 +157,10 @@ func (e *Engine) Evaluate(_ context.Context, host domain.Host, req domain.ExecRe
 	if req.Mode == domain.ExecSSHFileTransfer {
 		risk = maxRisk(risk, domain.RiskChange)
 		hits = append(hits, "ssh_host_file_transfer")
+	}
+	if req.Mode == domain.ExecSSHTunnelStart {
+		risk = maxRisk(risk, domain.RiskChange)
+		hits = append(hits, "ssh_local_port_forward")
 	}
 	fileContentAccess := isFileContentAccess(req.Mode) || hasFileContentProgram(hits)
 	if fileContentAccess {
@@ -350,6 +356,12 @@ func shellSource(req domain.ExecRequest) (string, error) {
 			return "", fmt.Errorf("SSH file transfer requires source and destination hosts, paths, and source SHA256")
 		}
 		return "sftp get " + shellQuote(req.SourceHostID+":"+req.SourcePath) + " && sftp put " + shellQuote(req.HostID+":"+req.RemotePath), nil
+	case domain.ExecSSHTunnelStart:
+		if req.HostID == "" || req.TunnelRemoteHost == "" || req.TunnelRemotePort < 1 {
+			return "", fmt.Errorf("SSH tunnel requires a host and remote endpoint")
+		}
+		return "ssh-tunnel --local " + shellQuote(fmt.Sprintf("127.0.0.1:%d", req.TunnelLocalPort)) +
+			" --remote " + shellQuote(net.JoinHostPort(req.TunnelRemoteHost, strconv.Itoa(req.TunnelRemotePort))), nil
 	default:
 		return "", fmt.Errorf("unsupported execution mode %q", req.Mode)
 	}

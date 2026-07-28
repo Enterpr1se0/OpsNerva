@@ -103,7 +103,7 @@ func toolGuard(name string) string {
 		return "agent_state"
 	case "ssh_exec", "ssh_run_script":
 		return "policy_checked"
-	case "ssh_file_read", "workspace_file_read", "ssh_file_edit", "ssh_file_transfer", "workspace_file_edit", "workspace_file_upload", "workspace_shell":
+	case "ssh_tunnel", "ssh_file_read", "workspace_file_read", "ssh_file_edit", "ssh_file_transfer", "workspace_file_edit", "workspace_file_upload", "workspace_shell":
 		return "approval_required"
 	case "ssh_task":
 		return "audited_control"
@@ -124,30 +124,36 @@ type HostListOutput struct {
 }
 
 type ExecInput struct {
-	HostID          string            `json:"host_id" jsonschema:"registered host identifier"`
-	Program         string            `json:"program" jsonschema:"remote executable; arguments must be separate"`
-	Args            []string          `json:"args,omitempty" jsonschema:"argument vector without shell quoting"`
-	Background      bool              `json:"background,omitempty" jsonschema:"run as a cancellable background task; defaults to false"`
-	Cwd             string            `json:"cwd,omitempty" jsonschema:"absolute remote working directory"`
-	Env             map[string]string `json:"env,omitempty" jsonschema:"non-secret environment variables"`
-	Elevated        bool              `json:"elevated,omitempty" jsonschema:"request root through the host managed sudo policy; never invoke sudo directly or provide a password"`
-	TimeoutSeconds  int               `json:"timeout_seconds,omitempty" jsonschema:"timeout from 1 to 600 seconds"`
-	Reason          string            `json:"reason" jsonschema:"specific operational reason supported by evidence"`
-	ExpectedChanges string            `json:"expected_changes,omitempty" jsonschema:"state changes expected from this command"`
-	Rollback        string            `json:"rollback,omitempty" jsonschema:"how to undo the change"`
+	HostID         string            `json:"host_id" jsonschema:"registered host identifier"`
+	Program        string            `json:"program" jsonschema:"remote executable; arguments must be separate"`
+	Args           []string          `json:"args,omitempty" jsonschema:"argument vector without shell quoting"`
+	Background     bool              `json:"background,omitempty" jsonschema:"run as a cancellable background task; defaults to false"`
+	Cwd            string            `json:"cwd,omitempty" jsonschema:"absolute remote working directory"`
+	Env            map[string]string `json:"env,omitempty" jsonschema:"non-secret environment variables"`
+	Elevated       bool              `json:"elevated,omitempty" jsonschema:"request root through the host managed sudo policy; never invoke sudo directly or provide a password"`
+	TimeoutSeconds int               `json:"timeout_seconds,omitempty" jsonschema:"timeout from 1 to 600 seconds"`
+	Reason         string            `json:"reason" jsonschema:"concise one-sentence purpose of this operation"`
 }
 
 type ScriptInput struct {
-	HostID          string            `json:"host_id" jsonschema:"registered host identifier"`
-	Script          string            `json:"script" jsonschema:"complete bash script to analyze and execute"`
-	Background      bool              `json:"background,omitempty" jsonschema:"run as a cancellable background task; defaults to false"`
-	Cwd             string            `json:"cwd,omitempty" jsonschema:"absolute remote working directory"`
-	Env             map[string]string `json:"env,omitempty" jsonschema:"non-secret environment variables"`
-	Elevated        bool              `json:"elevated,omitempty" jsonschema:"request root through the host managed sudo policy; never put sudo or a password in the script"`
-	TimeoutSeconds  int               `json:"timeout_seconds,omitempty" jsonschema:"timeout from 1 to 600 seconds"`
-	Reason          string            `json:"reason" jsonschema:"specific operational reason supported by evidence"`
-	ExpectedChanges string            `json:"expected_changes,omitempty" jsonschema:"state changes expected from this script"`
-	Rollback        string            `json:"rollback,omitempty" jsonschema:"how to undo the changes"`
+	HostID         string            `json:"host_id" jsonschema:"registered host identifier"`
+	Script         string            `json:"script" jsonschema:"complete bash script to analyze and execute"`
+	Background     bool              `json:"background,omitempty" jsonschema:"run as a cancellable background task; defaults to false"`
+	Cwd            string            `json:"cwd,omitempty" jsonschema:"absolute remote working directory"`
+	Env            map[string]string `json:"env,omitempty" jsonschema:"non-secret environment variables"`
+	Elevated       bool              `json:"elevated,omitempty" jsonschema:"request root through the host managed sudo policy; never put sudo or a password in the script"`
+	TimeoutSeconds int               `json:"timeout_seconds,omitempty" jsonschema:"timeout from 1 to 600 seconds"`
+	Reason         string            `json:"reason" jsonschema:"concise one-sentence purpose of this operation"`
+}
+
+type SSHTunnelInput struct {
+	Action     string `json:"action" jsonschema:"tunnel operation: start, list, or stop"`
+	HostID     string `json:"host_id,omitempty" jsonschema:"start only: registered SSH host identifier"`
+	RemoteHost string `json:"remote_host,omitempty" jsonschema:"start only: host reached from the SSH target; defaults to 127.0.0.1"`
+	RemotePort int    `json:"remote_port,omitempty" jsonschema:"start only: port reached from the SSH target"`
+	LocalPort  int    `json:"local_port,omitempty" jsonschema:"start only: local 127.0.0.1 port; zero selects an available port"`
+	TunnelID   string `json:"tunnel_id,omitempty" jsonschema:"stop only: active tunnel identifier"`
+	Reason     string `json:"reason,omitempty" jsonschema:"optional concise purpose; used when starting a tunnel"`
 }
 
 type FileReadInput struct {
@@ -174,7 +180,7 @@ type FileEditInput struct {
 	Diff      string `json:"diff" jsonschema:"complete unified diff containing one or more hunks for this file"`
 	Validator string `json:"validator,omitempty" jsonschema:"optional registered remote validator id"`
 	Elevated  bool   `json:"elevated,omitempty" jsonschema:"edit through the host managed sudo policy; never include sudo or credentials"`
-	Reason    string `json:"reason" jsonschema:"why the edit is needed"`
+	Reason    string `json:"reason" jsonschema:"concise one-sentence purpose of this operation"`
 }
 
 type SSHFileTransferInput struct {
@@ -186,8 +192,7 @@ type SSHFileTransferInput struct {
 	Overwrite                 bool   `json:"overwrite,omitempty" jsonschema:"replace an existing destination; defaults to false"`
 	ExpectedDestinationSHA256 string `json:"expected_destination_sha256,omitempty" jsonschema:"destination SHA256 from ssh_file_read with metadata_only=true; required when overwrite is true"`
 	TimeoutSeconds            int    `json:"timeout_seconds,omitempty" jsonschema:"transfer timeout from 1 to 600 seconds"`
-	Reason                    string `json:"reason" jsonschema:"why this file migration is needed"`
-	Rollback                  string `json:"rollback" jsonschema:"how to remove or restore the destination file"`
+	Reason                    string `json:"reason" jsonschema:"concise one-sentence purpose of this operation"`
 }
 
 type WorkspacePathInput struct {
@@ -207,7 +212,7 @@ type WorkspaceFileEditInput struct {
 	Path      string `json:"path" jsonschema:"existing clean file path relative to the conversation-bound Workspace root"`
 	Diff      string `json:"diff" jsonschema:"complete unified diff containing one or more hunks for this file"`
 	Validator string `json:"validator,omitempty" jsonschema:"allowlisted workspace validator id"`
-	Reason    string `json:"reason" jsonschema:"evidence-based reason for the change"`
+	Reason    string `json:"reason" jsonschema:"concise one-sentence purpose of this operation"`
 }
 
 func fileSearchSchemaOption() toolutils.Option {
@@ -223,18 +228,15 @@ type WorkspaceUploadInput struct {
 	Path           string `json:"path" jsonschema:"clean source path relative to the conversation-bound Workspace root"`
 	ExpectedSHA256 string `json:"expected_sha256" jsonschema:"sha256 returned by workspace_file_read; upload is rejected if the source changed"`
 	RemotePath     string `json:"remote_path" jsonschema:"absolute destination path on the remote host"`
-	Reason         string `json:"reason" jsonschema:"why this transfer is needed"`
-	Rollback       string `json:"rollback" jsonschema:"how to remove or restore the remote destination"`
+	Reason         string `json:"reason" jsonschema:"concise one-sentence purpose of this operation"`
 }
 
 type WorkspaceShellInput struct {
-	Script          string            `json:"script" jsonschema:"complete non-interactive script for the operator-selected Workspace Shell backend; Bash on Unix and PowerShell on Windows Host Shell"`
-	Cwd             string            `json:"cwd,omitempty" jsonschema:"clean directory relative to the workspace root; defaults to the root"`
-	Env             map[string]string `json:"env,omitempty" jsonschema:"non-secret environment variables passed to the selected Workspace Shell backend"`
-	TimeoutSeconds  int               `json:"timeout_seconds,omitempty" jsonschema:"timeout from 1 to 600 seconds"`
-	Reason          string            `json:"reason" jsonschema:"specific reason this local shell execution is necessary"`
-	ExpectedChanges string            `json:"expected_changes,omitempty" jsonschema:"workspace changes expected from the script"`
-	Rollback        string            `json:"rollback,omitempty" jsonschema:"how to undo workspace mutations"`
+	Script         string            `json:"script" jsonschema:"complete non-interactive script for the operator-selected Workspace Shell backend; Bash on Unix and PowerShell on Windows Host Shell"`
+	Cwd            string            `json:"cwd,omitempty" jsonschema:"clean directory relative to the workspace root; defaults to the root"`
+	Env            map[string]string `json:"env,omitempty" jsonschema:"non-secret environment variables passed to the selected Workspace Shell backend"`
+	TimeoutSeconds int               `json:"timeout_seconds,omitempty" jsonschema:"timeout from 1 to 600 seconds"`
+	Reason         string            `json:"reason" jsonschema:"concise one-sentence purpose of this operation"`
 }
 
 type HistorySearchInput struct {
@@ -595,14 +597,39 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 		return nil, err
 	}
 	if err := appendTool(toolutils.InferTool("ssh_exec", "Execute one remote program with a separate argument vector. Set background=true only for a long-running command that must be polled or cancelled; omitted background defaults to false. Set elevated=true when root is required; credentials are injected by the control plane and all elevated requests require human approval.", func(ctx context.Context, input ExecInput) (domain.ExecResult, error) {
-		request := domain.ExecRequest{HostID: input.HostID, Mode: domain.ExecProgram, Program: input.Program, Args: input.Args, Cwd: input.Cwd, Env: input.Env, Elevated: input.Elevated, TimeoutSeconds: input.TimeoutSeconds, Reason: input.Reason, ExpectedChanges: input.ExpectedChanges, Rollback: input.Rollback}
+		request := domain.ExecRequest{HostID: input.HostID, Mode: domain.ExecProgram, Program: input.Program, Args: input.Args, Cwd: input.Cwd, Env: input.Env, Elevated: input.Elevated, TimeoutSeconds: input.TimeoutSeconds, Reason: input.Reason}
 		return RunExecutionTool(ctx, svc, request, input.Background, "eino-agent")
 	})); err != nil {
 		return nil, err
 	}
 	if err := appendTool(toolutils.InferTool("ssh_run_script", "Run a complete Bash script after deterministic AST risk analysis. Set background=true only for a long-running script that must be polled or cancelled; omitted background defaults to false. Set elevated=true for control-plane-managed sudo; never embed sudo or credentials in the script.", func(ctx context.Context, input ScriptInput) (domain.ExecResult, error) {
-		request := domain.ExecRequest{HostID: input.HostID, Mode: domain.ExecScript, Script: input.Script, Cwd: input.Cwd, Env: input.Env, Elevated: input.Elevated, TimeoutSeconds: input.TimeoutSeconds, Reason: input.Reason, ExpectedChanges: input.ExpectedChanges, Rollback: input.Rollback}
+		request := domain.ExecRequest{HostID: input.HostID, Mode: domain.ExecScript, Script: input.Script, Cwd: input.Cwd, Env: input.Env, Elevated: input.Elevated, TimeoutSeconds: input.TimeoutSeconds, Reason: input.Reason}
 		return RunExecutionTool(ctx, svc, request, input.Background, "eino-agent")
+	})); err != nil {
+		return nil, err
+	}
+	if err := appendTool(toolutils.InferTool("ssh_tunnel", "Manage local SSH port forwarding through registered hosts. start forwards one remote endpoint to local 127.0.0.1 and requires one-time human approval; the registered host's network proxy and ProxyJump chain are reused automatically. list returns all current tunnels. stop closes one tunnel by tunnel_id. Tunnels are process-local and end when OpsPilot stops.", func(ctx context.Context, input SSHTunnelInput) (any, error) {
+		switch strings.ToLower(strings.TrimSpace(input.Action)) {
+		case "start":
+			if input.TunnelID != "" {
+				return normalizeValueToolResult(ctx, "ssh_tunnel", domain.SSHTunnel{}, invalidToolInput("tunnel_id is only valid with action=stop"))
+			}
+			result, err := svc.StartSSHTunnel(ctx, input.HostID, input.RemoteHost, input.RemotePort, input.LocalPort, input.Reason, "eino-agent")
+			return NormalizeExecToolResult(result, err)
+		case "list":
+			if input.HostID != "" || input.RemoteHost != "" || input.RemotePort != 0 || input.LocalPort != 0 || input.TunnelID != "" {
+				return normalizeValueToolResult(ctx, "ssh_tunnel", domain.SSHTunnelList{}, invalidToolInput("action=list does not accept host_id, remote_host, remote_port, local_port, or tunnel_id"))
+			}
+			return svc.ListSSHTunnels(), nil
+		case "stop":
+			if input.HostID != "" || input.RemoteHost != "" || input.RemotePort != 0 || input.LocalPort != 0 {
+				return normalizeValueToolResult(ctx, "ssh_tunnel", domain.SSHTunnel{}, invalidToolInput("action=stop accepts tunnel_id and optional reason only"))
+			}
+			tunnel, err := svc.StopSSHTunnel(ctx, input.TunnelID, "eino-agent")
+			return normalizeValueToolResult(ctx, "ssh_tunnel", tunnel, err)
+		default:
+			return normalizeValueToolResult(ctx, "ssh_tunnel", domain.SSHTunnel{}, invalidToolInput("invalid action: use start, list, or stop"))
+		}
 	})); err != nil {
 		return nil, err
 	}
@@ -629,7 +656,7 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 		return nil, err
 	}
 	if err := appendTool(toolutils.InferTool("ssh_file_transfer", "Transfer one regular file between two registered SSH hosts through the control plane. The hosts do not need network access to each other. Call ssh_file_read with metadata_only=true on the source first and bind its SHA256. Existing destinations are rejected unless overwrite=true and their current SHA256 is also bound. The exact transfer requires human approval.", func(ctx context.Context, input SSHFileTransferInput) (domain.ExecResult, error) {
-		result, err := svc.TransferFileBetweenHosts(ctx, input.SourceHostID, input.SourcePath, input.ExpectedSHA256, input.DestinationHostID, input.DestinationPath, input.Overwrite, input.ExpectedDestinationSHA256, input.TimeoutSeconds, input.Reason, input.Rollback, "eino-agent")
+		result, err := svc.TransferFileBetweenHosts(ctx, input.SourceHostID, input.SourcePath, input.ExpectedSHA256, input.DestinationHostID, input.DestinationPath, input.Overwrite, input.ExpectedDestinationSHA256, input.TimeoutSeconds, input.Reason, "eino-agent")
 		return NormalizeExecToolResult(result, err)
 	})); err != nil {
 		return nil, err
@@ -664,7 +691,7 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 		if err != nil {
 			return NormalizeExecToolResult(domain.ExecResult{}, err)
 		}
-		result, err := svc.UploadWorkspaceFileToHost(ctx, input.HostID, workspace.ID, input.Path, input.ExpectedSHA256, input.RemotePath, input.Reason, input.Rollback, "eino-agent")
+		result, err := svc.UploadWorkspaceFileToHost(ctx, input.HostID, workspace.ID, input.Path, input.ExpectedSHA256, input.RemotePath, input.Reason, "eino-agent")
 		return NormalizeExecToolResult(result, err)
 	})); err != nil {
 		return nil, err
@@ -674,7 +701,7 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 		if err != nil {
 			return NormalizeExecToolResult(domain.ExecResult{}, err)
 		}
-		result, err := svc.RunWorkspaceShell(ctx, workspace.ID, input.Script, input.Cwd, input.Env, input.TimeoutSeconds, input.Reason, input.ExpectedChanges, input.Rollback, "eino-agent")
+		result, err := svc.RunWorkspaceShell(ctx, workspace.ID, input.Script, input.Cwd, input.Env, input.TimeoutSeconds, input.Reason, "eino-agent")
 		return NormalizeExecToolResult(result, err)
 	})); err != nil {
 		return nil, err
@@ -703,7 +730,7 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_history", "Search audited commands and redacted results by literal substring, or provide run_id to get one exact run. Secrets are stored as [REDACTED], so search with short distinctive keywords instead of full command lines. Raw encrypted output is never exposed to the model.", func(ctx context.Context, input HistorySearchInput) (any, error) {
+	if err := appendTool(toolutils.InferTool("ssh_history", "Search only this conversation's audited commands and redacted results by literal substring, or provide run_id to get one exact run from this conversation. Secrets are stored as [REDACTED], so search with short distinctive keywords instead of full command lines. Raw encrypted output is never exposed to the model.", func(ctx context.Context, input HistorySearchInput) (any, error) {
 		result, err := ReadHistoryTool(ctx, svc, input)
 		return normalizeValueToolResult(ctx, "ssh_history", result, err)
 	})); err != nil {

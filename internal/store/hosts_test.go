@@ -143,7 +143,7 @@ func TestDeleteHostRemovesRelatedRecords(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.DecideApprovalWithSessionGrant(ctx, approval.ID, "reviewed", run.SessionID, "fingerprint", now.Add(time.Hour), approval.Risk); err != nil {
+	if err := st.ApprovePendingWithSessionGrantAndStartRun(ctx, approval.ID, run.ID, "reviewed", run.SessionID, "fingerprint", now.Add(time.Hour), approval.Risk); err != nil {
 		t.Fatal(err)
 	}
 
