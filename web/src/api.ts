@@ -1,4 +1,4 @@
-import type { AgentEvent, Approval, ApprovalExecutionResult, AuthSession, ChatSession, ChatState, Health, Host, HostInput, LLMToolCatalog, ManagedSkill, MCPServer, MCPServerInput, MCPTestResult, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestResult, Proxy, ProxyInput, ProxyTestResult, Run, ServerLogResponse, SSHTunnel, SSHTunnelList, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchResponse, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceInput, WorkspaceUploadResult } from './types'
+import type { AgentEvent, Approval, ApprovalExecutionResult, AuthSession, ChatSession, ChatState, Health, Host, HostInput, LLMToolCatalog, ManagedSkill, MCPServer, MCPServerInput, MCPTestResult, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestResult, Proxy, ProxyInput, ProxyTestResult, Run, ServerLogResponse, SFTPFileList, SFTPMutationResult, SSHShell, SSHShellList, SSHShellSnapshot, SSHShellStartInput, SSHTunnel, SSHTunnelList, SSHTunnelStartInput, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchResponse, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceInput, WorkspaceUploadResult } from './types'
 
 let csrfToken = ''
 
@@ -58,6 +58,7 @@ export const api = {
 	deleteWorkspace: (id:string) => request<void>(`/api/v1/workspaces/${encodeURIComponent(id)}`,{method:'DELETE'}),
 	workspaceFiles: (workspaceId:string,path='.') => request<WorkspaceFileList>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files?path=${encodeURIComponent(path)}`),
 	previewWorkspaceFile: (workspaceId:string,path:string) => request<WorkspaceFilePreview>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/preview?path=${encodeURIComponent(path)}`),
+	saveWorkspaceTextFile: (workspaceId:string,path:string,content:string) => request<WorkspaceUploadResult>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files`,{method:'PUT',body:JSON.stringify({path,content})}),
 	uploadWorkspaceFile: (workspaceId:string,file:File,path:string) => {const body=new FormData();body.set('file',file);body.set('path',path);return request<WorkspaceUploadResult>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files`,{method:'POST',body})},
 	deleteWorkspaceEntry: (workspaceId:string,path:string) => request<WorkspaceDeleteResult>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files?path=${encodeURIComponent(path)}`,{method:'DELETE'}),
   saveSystemSettings: (settings: SystemSettingsInput) => request<SystemSettings>('/api/v1/settings', { method: 'PUT', body: JSON.stringify(settings) }),
@@ -77,7 +78,26 @@ export const api = {
   testModelProvider: (id: string) => request<ModelTestResult>(`/api/v1/model-providers/${id}/test`, { method: 'POST', body: '{}' }),
   hosts: () => requestList<Host>('/api/v1/hosts'),
   sshTunnels: () => request<SSHTunnelList>('/api/v1/ssh-tunnels'),
+  startSSHTunnel: (input:SSHTunnelStartInput) => request<SSHTunnel>('/api/v1/ssh-tunnels', { method:'POST', body:JSON.stringify(input) }),
   stopSSHTunnel: (id:string) => request<SSHTunnel>(`/api/v1/ssh-tunnels/${encodeURIComponent(id)}`, { method:'DELETE' }),
+  sshShells: (sessionId='') => request<SSHShellList>(`/api/v1/ssh-shells?session_id=${encodeURIComponent(sessionId)}`),
+  startSSHShell: (input:SSHShellStartInput) => request<SSHShell>('/api/v1/ssh-shells', { method:'POST', body:JSON.stringify(input) }),
+  sshShell: (id:string,after=0,coalesce=false) => request<SSHShellSnapshot>(`/api/v1/ssh-shells/${encodeURIComponent(id)}?after=${after}&coalesce=${coalesce}`),
+  sshShellInput: (id:string,input:string,sensitive=false,submit=false,reason='') => request<void>(`/api/v1/ssh-shells/${encodeURIComponent(id)}/input`, { method:'POST', body:JSON.stringify({input,sensitive,submit,reason}) }),
+  resizeSSHShell: (id:string,cols:number,rows:number) => request<SSHShell>(`/api/v1/ssh-shells/${encodeURIComponent(id)}/resize`, { method:'POST', body:JSON.stringify({cols,rows}) }),
+  interruptSSHShell: (id:string) => request<SSHShell>(`/api/v1/ssh-shells/${encodeURIComponent(id)}/interrupt`, { method:'POST', body:'{}' }),
+  closeSSHShell: (id:string) => request<SSHShell>(`/api/v1/ssh-shells/${encodeURIComponent(id)}`, { method:'DELETE' }),
+  sftpEntries: (hostId:string,path='') => request<SFTPFileList>(`/api/v1/hosts/${encodeURIComponent(hostId)}/sftp/entries?path=${encodeURIComponent(path)}`),
+  sftpFile: async(hostId:string,path:string) => {
+		const response=await fetch(sftpDownloadURL(hostId,path),{credentials:'same-origin',headers:{Accept:'application/octet-stream'}})
+		if(!response.ok){const body=await response.json().catch(()=>({error:response.statusText}));throw new Error(body.error||response.statusText)}
+		return response.arrayBuffer()
+	},
+  uploadSFTPFile: (hostId:string,path:string,file:File,overwrite=false) => request<SFTPMutationResult>(`/api/v1/hosts/${encodeURIComponent(hostId)}/sftp/files?path=${encodeURIComponent(path)}&overwrite=${overwrite}`, { method:'PUT', body:file, headers:{'Content-Type':file.type||'application/octet-stream'} }),
+  uploadSFTPTextFile: (hostId:string,path:string,content:string,encoding:'utf-8'|'utf-16le'|'utf-16be'|'gb18030') => request<SFTPMutationResult>(`/api/v1/hosts/${encodeURIComponent(hostId)}/sftp/files?path=${encodeURIComponent(path)}&overwrite=true&encoding=${encodeURIComponent(encoding)}`, { method:'PUT', body:content, headers:{'Content-Type':'text/plain;charset=utf-8'} }),
+  createSFTPDirectory: (hostId:string,path:string) => request<SFTPMutationResult>(`/api/v1/hosts/${encodeURIComponent(hostId)}/sftp/directories`, { method:'POST', body:JSON.stringify({path}) }),
+  renameSFTPEntry: (hostId:string,sourcePath:string,destinationPath:string) => request<SFTPMutationResult>(`/api/v1/hosts/${encodeURIComponent(hostId)}/sftp/entries`, { method:'PATCH', body:JSON.stringify({source_path:sourcePath,destination_path:destinationPath}) }),
+  deleteSFTPEntry: (hostId:string,path:string,recursive=false) => request<SFTPMutationResult>(`/api/v1/hosts/${encodeURIComponent(hostId)}/sftp/entries?path=${encodeURIComponent(path)}&recursive=${recursive}`, { method:'DELETE' }),
   saveHost: (host: HostInput) => request<Host>('/api/v1/hosts', { method: 'POST', body: JSON.stringify(host) }),
   deleteHost: (id: string) => request<void>(`/api/v1/hosts/${id}`, { method: 'DELETE' }),
 	  scanKey: (id: string) => request<{ fingerprint: string; algorithm?: string; trusted: boolean }>(`/api/v1/hosts/${id}/scan-key`, { method: 'POST', body: '{}' }),
@@ -85,7 +105,7 @@ export const api = {
   probe: (id: string) => request<Record<string, string>>(`/api/v1/hosts/${id}/probe`, { method: 'POST', body: '{}' }),
   approvals: () => requestList<Approval>('/api/v1/approvals?status=pending&limit=100'),
   retryApprovalExplanation: (id: string) => request<Approval>(`/api/v1/approvals/${id}/explanation/retry`, { method: 'POST', body: '{}' }),
-  approve: (id: string, reason: string, scope: 'once'|'session' = 'once') => request<ApprovalExecutionResult>(`/api/v1/approvals/${id}/approve`, { method: 'POST', body: JSON.stringify({ reason, scope }) }),
+  approve: (id: string, reason: string) => request<ApprovalExecutionResult>(`/api/v1/approvals/${id}/approve`, { method: 'POST', body: JSON.stringify({ reason }) }),
   reject: (id: string, reason: string) => request(`/api/v1/approvals/${id}/reject`, { method: 'POST', body: JSON.stringify({ reason }) }),
   runs: (query = '') => requestList<Run>(`/api/v1/runs?limit=100&q=${encodeURIComponent(query)}`),
   logs: (filters: {level?:string;component?:string;q?:string;limit?:number} = {}) => {
@@ -109,6 +129,14 @@ export function chatAttachmentURL(sessionId:string,attachmentId:string){
 
 export function workspaceFileEventsURL(workspaceId:string,path:string){
 	return `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/events?path=${encodeURIComponent(path)}`
+}
+
+export function sshShellEventsURL(shellId:string,after=0){
+	return `/api/v1/ssh-shells/${encodeURIComponent(shellId)}/events?after=${after}`
+}
+
+export function sftpDownloadURL(hostId:string,path:string){
+	return `/api/v1/hosts/${encodeURIComponent(hostId)}/sftp/files?path=${encodeURIComponent(path)}`
 }
 
 export async function streamChat(sessionId: string, workspaceId:string, message: string, images:File[], onEvent: (event: AgentEvent) => void, signal?: AbortSignal) {

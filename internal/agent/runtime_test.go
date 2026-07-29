@@ -534,7 +534,7 @@ func TestQueryRetriesEmptyResponseWithoutDuplicatingUserMessage(t *testing.T) {
 		nil,
 		{adk.EventFromMessage(schema.AssistantMessage("recovered", nil), nil, schema.Assistant, "")},
 	}}
-	runtime := &Runtime{runner: runner, store: st}
+	runtime := &Runtime{runner: runner, store: st, retryWait: func(context.Context, time.Duration) error { return nil }}
 	var emitted []Event
 	answer, err := runtime.Query(ctx, "session_retry", "continue", func(event Event) {
 		emitted = append(emitted, event)
@@ -564,6 +564,15 @@ func TestQueryRetriesEmptyResponseWithoutDuplicatingUserMessage(t *testing.T) {
 	}
 	if done != 1 {
 		t.Fatalf("done events = %d, events = %#v", done, emitted)
+	}
+	retries := make([]Event, 0, 1)
+	for _, event := range emitted {
+		if event.Type == "retry" {
+			retries = append(retries, event)
+		}
+	}
+	if len(retries) != 1 || retries[0].RetryAttempt != 1 || retries[0].RetryMax != modelRequestMaxRetries || retries[0].RetryDelayMS != 1000 {
+		t.Fatalf("retry events = %#v", retries)
 	}
 }
 
@@ -617,7 +626,7 @@ func TestQueryRejectsRepeatedEmptyResponseAndExcludesFailedTurn(t *testing.T) {
 	}
 	defer st.Close()
 	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{nil, nil}}
-	runtime := &Runtime{runner: runner, store: st}
+	runtime := &Runtime{runner: runner, store: st, retryWait: func(context.Context, time.Duration) error { return nil }}
 	var emitted []Event
 	_, err = runtime.Query(ctx, "session_empty", "continue", func(event Event) {
 		emitted = append(emitted, event)
@@ -754,6 +763,57 @@ func TestQueryUsesNoToolFinalizerAfterToolActivityWithoutFinalAnswer(t *testing.
 	}
 	if messageEvents != 1 || doneEvents != 1 {
 		t.Fatalf("final answer events = %#v", emitted)
+	}
+}
+
+func TestQueryBlocksPersistedToolEvidenceLeakAndUsesFinalizer(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	leaked := "temporary preamble\n" + persistedToolEvidenceHeader + "\n\nTool: ssh_shell\nResult:\n{\"status\":\"completed\",\"stdout\":\"private-shell-output\"}\n\n" + persistedToolEvidenceTrailer
+	split := len("temporary preamble\n") + 30
+	leakedStream := schema.StreamReaderFromArray([]*schema.Message{
+		{Role: schema.Assistant, Content: leaked[:split]},
+		{Role: schema.Assistant, Content: leaked[split:], ResponseMeta: &schema.ResponseMeta{FinishReason: "stop"}},
+	})
+	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{{
+		adk.EventFromMessage(schema.ToolMessage(`{"status":"completed"}`, "call-1", schema.WithToolName("ssh_shell")), nil, schema.Tool, "ssh_shell"),
+		adk.EventFromMessage(nil, leakedStream, schema.Assistant, ""),
+	}}}
+	finalizer := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{{
+		adk.EventFromMessage(schema.AssistantMessage("终端已创建。", nil), nil, schema.Assistant, ""),
+	}}}
+	runtime := &Runtime{runner: runner, finalizer: finalizer, store: st}
+	var emitted []Event
+
+	answer, err := runtime.Query(ctx, "session_context_leak", "创建终端", func(event Event) {
+		emitted = append(emitted, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "终端已创建。" {
+		t.Fatalf("answer = %q", answer)
+	}
+	for _, event := range emitted {
+		if containsInternalContextMarker(event.Content) || strings.Contains(event.Content, "private-shell-output") {
+			t.Fatalf("internal context reached the event stream: %#v", emitted)
+		}
+	}
+	runnerCalls, _ := runner.snapshot()
+	finalizerCalls, _ := finalizer.snapshot()
+	if runnerCalls != 1 || finalizerCalls != 1 {
+		t.Fatalf("calls: runner=%d finalizer=%d", runnerCalls, finalizerCalls)
+	}
+	messages, err := st.ListChatMessages(ctx, "session_context_leak", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 3 || messages[0].Status != "completed" || messages[1].Role != "tool" || messages[2].Role != "assistant" || messages[2].Content != answer {
+		t.Fatalf("stored messages = %#v", messages)
 	}
 }
 
@@ -1058,6 +1118,24 @@ func TestBuildModelContextPreservesCompleteToolEvidence(t *testing.T) {
 	}
 }
 
+func TestBuildModelContextUsesFinalAnswerInsteadOfRepeatingCompletedToolResults(t *testing.T) {
+	history := []domain.ChatMessage{
+		{Role: "user", Content: "inspect host", Status: "completed"},
+		{Role: "tool", ToolName: "ssh_exec", Content: `{"status":"completed","stdout":"complete output"}`, Status: "completed"},
+		{Role: "assistant", Content: "The host is healthy.", Status: "completed"},
+	}
+	messages, stats := buildModelContext(history, "continue")
+	if len(messages) != 3 || messages[1].Role != schema.Assistant || messages[1].Content != "The host is healthy." {
+		t.Fatalf("model messages = %#v", messages)
+	}
+	if strings.Contains(messages[1].Content, "complete output") || containsInternalContextMarker(messages[1].Content) {
+		t.Fatalf("completed Tool results were repeated in Assistant context: %q", messages[1].Content)
+	}
+	if stats.ToolResults != 0 {
+		t.Fatalf("context stats = %#v", stats)
+	}
+}
+
 func TestBuildModelContextExcludesUIToolDisplayMetadata(t *testing.T) {
 	history := []domain.ChatMessage{
 		{Role: "user", Content: "inspect host", Status: "completed"},
@@ -1066,6 +1144,28 @@ func TestBuildModelContextExcludesUIToolDisplayMetadata(t *testing.T) {
 	messages, _ := buildModelContext(history, "continue")
 	if len(messages) != 3 || strings.Contains(messages[1].Content, "_display") || strings.Contains(messages[1].Content, "arguments") || !strings.Contains(messages[1].Content, `"hostname":"demo"`) {
 		t.Fatalf("UI-only Tool display metadata leaked into model context: %#v", messages)
+	}
+}
+
+func TestBuildModelContextExcludesCommandExplainerDataFromStoredSSHHistory(t *testing.T) {
+	history := []domain.ChatMessage{
+		{Role: "user", Content: "inspect prior commands", Status: "completed"},
+		{Role: "tool", ToolName: "ssh_history", Content: `{"runs":[{"id":"run-demo","request_json":"{\"program\":\"uname\"}","stdout_redacted":"Linux","ai_review":{"status":"completed","model":"PRIVATE_REVIEW_MODEL","explanation":{"summary":"PRIVATE_REVIEW_SUMMARY","mechanism":"PRIVATE_REVIEW_MECHANISM","risks":["PRIVATE_REVIEW_RISK"]}}}],"_display":{"arguments":{"query":"uname"}}}`, Status: "completed"},
+	}
+	messages, _ := buildModelContext(history, "continue")
+	if len(messages) != 3 {
+		t.Fatalf("model messages = %#v", messages)
+	}
+	evidence := messages[1].Content
+	for _, leaked := range []string{"ai_review", "PRIVATE_REVIEW_MODEL", "PRIVATE_REVIEW_SUMMARY", "PRIVATE_REVIEW_MECHANISM", "PRIVATE_REVIEW_RISK", "_display"} {
+		if strings.Contains(evidence, leaked) {
+			t.Fatalf("stored SSH history leaked private metadata %q: %s", leaked, evidence)
+		}
+	}
+	for _, retained := range []string{"run-demo", `\"program\":\"uname\"`, "Linux"} {
+		if !strings.Contains(evidence, retained) {
+			t.Fatalf("stored SSH history lost operational field %q: %s", retained, evidence)
+		}
 	}
 }
 

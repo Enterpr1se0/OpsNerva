@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -48,8 +49,8 @@ type Service struct {
 	hostSems               map[string]chan struct{}
 	taskMu                 sync.RWMutex
 	tasks                  map[string]*taskState
-	explainerMu            sync.RWMutex
-	explainer              CommandExplainer
+	reviewerMu             sync.RWMutex
+	reviewer               ApprovalReviewer
 	explainWG              sync.WaitGroup
 	explanationMu          sync.Mutex
 	explanationActive      map[string]*approvalExplanationTask
@@ -61,6 +62,8 @@ type Service struct {
 	executionCancel        context.CancelFunc
 	executionMu            sync.Mutex
 	executionClosed        bool
+	executionCancels       map[string]context.CancelFunc
+	cancelledExecutions    map[string]struct{}
 	executionWG            sync.WaitGroup
 	executionEventMu       sync.RWMutex
 	executionSubscribers   map[string]map[uint64]*executionSubscriber
@@ -69,6 +72,8 @@ type Service struct {
 	executionEventSequence atomic.Uint64
 	tunnelMu               sync.RWMutex
 	tunnels                map[string]*sshTunnelState
+	shellMu                sync.RWMutex
+	shells                 map[string]*sshShellState
 }
 
 const (
@@ -80,19 +85,20 @@ type approvalExplanationTask struct {
 	cancel context.CancelFunc
 }
 
-type CommandExplainer interface {
+type ApprovalReviewer interface {
 	Review(context.Context, domain.CommandReviewInput) (domain.CommandReview, error)
 }
 
-type FreshCommandExplainer interface {
+type FreshApprovalReviewer interface {
 	ReviewFresh(context.Context, domain.CommandReviewInput) (domain.CommandReview, error)
 }
 
 type taskState struct {
-	task   domain.Task
-	result domain.ExecResult
-	err    string
-	cancel context.CancelFunc
+	task       domain.Task
+	result     domain.ExecResult
+	err        string
+	cancel     context.CancelFunc
+	approvalID string
 }
 
 type HistoryResult struct {
@@ -113,7 +119,9 @@ func New(st *store.Store, engine *policy.Engine, transport sshx.Transport, encry
 		globalSem:            make(chan struct{}, global), hostSems: make(map[string]chan struct{}), tasks: make(map[string]*taskState), workspaces: make(map[string]config.Workspace), validators: make(map[string]config.Validator), mcpRuntime: make(map[string]*mcpRuntimeState),
 		explanationActive: make(map[string]*approvalExplanationTask), explanationSem: make(chan struct{}, maxConcurrentApprovalExplanations), explanationSlots: make(chan struct{}, maxQueuedApprovalExplanations),
 		executionCtx: executionCtx, executionCancel: executionCancel,
+		executionCancels: make(map[string]context.CancelFunc), cancelledExecutions: make(map[string]struct{}),
 		tunnels: make(map[string]*sshTunnelState),
+		shells:  make(map[string]*sshShellState),
 	}
 	if len(runtimeConfig) > 0 {
 		result.dataDir = runtimeConfig[0].DataDir
@@ -128,6 +136,9 @@ func New(st *store.Store, engine *policy.Engine, transport sshx.Transport, encry
 
 func (s *Service) RecoverInterruptedTasks(ctx context.Context) error {
 	if err := s.store.InterruptActiveTasks(ctx); err != nil {
+		return err
+	}
+	if err := s.store.InterruptActiveSSHShells(ctx); err != nil {
 		return err
 	}
 	_, err := s.store.PruneChatTurnsExcludedFromContext(ctx, "")
@@ -255,6 +266,9 @@ func (s *Service) GetChatAttachment(ctx context.Context, sessionID, attachmentID
 }
 
 func (s *Service) DeleteChatSession(ctx context.Context, sessionID, actor string) error {
+	if s.hasActiveSSHShellForSession(sessionID) {
+		return fmt.Errorf("conversation %q has an active SSH shell; close it before deleting the conversation", sessionID)
+	}
 	if err := s.store.DeleteChatSession(ctx, sessionID); err != nil {
 		return err
 	}
@@ -444,6 +458,15 @@ func (s *Service) SaveSystemSettings(ctx context.Context, input domain.SystemSet
 		systemPromptChanged = current.SystemPrompt != *input.SystemPrompt
 		current.SystemPrompt = *input.SystemPrompt
 	}
+	if input.ApprovalMode != nil {
+		mode := strings.ToLower(strings.TrimSpace(*input.ApprovalMode))
+		switch mode {
+		case domain.ApprovalModeManual, domain.ApprovalModeAuto, domain.ApprovalModeFullAccess:
+			current.ApprovalMode = mode
+		default:
+			return domain.SystemSettings{}, fmt.Errorf("approval_mode must be manual, auto, or full_access")
+		}
+	}
 	if input.ApprovalExplanationsEnabled != nil {
 		current.ApprovalExplanationsEnabled = *input.ApprovalExplanationsEnabled
 	}
@@ -501,8 +524,9 @@ func (s *Service) SaveSystemSettings(ctx context.Context, input domain.SystemSet
 		return domain.SystemSettings{}, err
 	}
 	s.audit(ctx, "", "system_settings_updated", actor, map[string]any{
-		"agent_max_iterations": saved.AgentMaxIterations, "approval_explanations_enabled": saved.ApprovalExplanationsEnabled,
-		"system_prompt_changed": systemPromptChanged, "system_prompt_bytes": len(saved.SystemPrompt),
+		"agent_max_iterations": saved.AgentMaxIterations, "approval_mode": saved.ApprovalMode,
+		"approval_explanations_enabled": saved.ApprovalExplanationsEnabled,
+		"system_prompt_changed":         systemPromptChanged, "system_prompt_bytes": len(saved.SystemPrompt),
 		"subagent_model_provider_id": saved.SubagentModelProviderID, "subagent_timeout_seconds": saved.SubagentTimeoutSeconds,
 		"chat_image_allowed_types": saved.ChatImageAllowedTypes,
 		"workspace_shell_mode":     saved.WorkspaceShellMode,
@@ -510,16 +534,16 @@ func (s *Service) SaveSystemSettings(ctx context.Context, input domain.SystemSet
 	return s.decorateWorkspaceShellSettings(saved), nil
 }
 
-func (s *Service) SetCommandExplainer(explainer CommandExplainer) {
-	s.explainerMu.Lock()
-	s.explainer = explainer
-	s.explainerMu.Unlock()
+func (s *Service) SetApprovalReviewer(reviewer ApprovalReviewer) {
+	s.reviewerMu.Lock()
+	s.reviewer = reviewer
+	s.reviewerMu.Unlock()
 }
 
-func (s *Service) commandExplainer() CommandExplainer {
-	s.explainerMu.RLock()
-	defer s.explainerMu.RUnlock()
-	return s.explainer
+func (s *Service) approvalReviewer() ApprovalReviewer {
+	s.reviewerMu.RLock()
+	defer s.reviewerMu.RUnlock()
+	return s.reviewer
 }
 
 func (s *Service) registerApprovalExplanation(approvalID string, task *approvalExplanationTask) {
@@ -609,7 +633,7 @@ func (s *Service) DeleteModelProvider(ctx context.Context, id, actor string) (bo
 		return false, err
 	}
 	if settings.SubagentModelProviderID == provider.ID {
-		return false, fmt.Errorf("%w: %q is selected for the subagent; choose another provider in system settings before deleting it", ErrModelProviderInUse, provider.Name)
+		return false, fmt.Errorf("%w: %q is selected for the approval Agent; choose another provider in system settings before deleting it", ErrModelProviderInUse, provider.Name)
 	}
 	if err := s.store.DeleteModelProvider(ctx, id); err != nil {
 		return false, err
@@ -621,9 +645,11 @@ func (s *Service) DeleteModelProvider(ctx context.Context, id, actor string) (bo
 }
 
 func (s *Service) AddHost(ctx context.Context, host domain.Host, actor string) (domain.Host, error) {
+	agentEnabled := host.AgentEnabled
 	return s.SaveHost(ctx, domain.HostInput{
 		ID: host.ID, Name: host.Name, Address: host.Address, Port: host.Port, User: host.User,
-		AuthType: host.AuthType, KnownHostsFile: host.KnownHostsFile, ProxyJumpHostID: host.ProxyJumpHostID,
+		AgentEnabled: &agentEnabled,
+		AuthType:     host.AuthType, KnownHostsFile: host.KnownHostsFile, ProxyJumpHostID: host.ProxyJumpHostID,
 		ProxyID: host.ProxyID, SudoMode: host.SudoMode,
 	}, actor)
 }
@@ -697,10 +723,18 @@ func (s *Service) SaveHost(ctx context.Context, input domain.HostInput, actor st
 	if input.AuthType != "key" {
 		input.PrivateKey = ""
 	}
+	agentEnabled := true
+	if hasExisting {
+		agentEnabled = existing.AgentEnabled
+	}
+	if input.AgentEnabled != nil {
+		agentEnabled = *input.AgentEnabled
+	}
 
 	host := domain.Host{
 		ID: input.ID, Name: input.Name, Address: input.Address, Port: input.Port, User: input.User,
-		AuthType: input.AuthType, KnownHostsFile: input.KnownHostsFile, ProxyJumpHostID: input.ProxyJumpHostID,
+		AgentEnabled: agentEnabled,
+		AuthType:     input.AuthType, KnownHostsFile: input.KnownHostsFile, ProxyJumpHostID: input.ProxyJumpHostID,
 		ProxyID: input.ProxyID, SudoMode: input.SudoMode,
 	}
 	if hasExisting {
@@ -761,17 +795,40 @@ func (s *Service) SaveHost(ctx context.Context, input domain.HostInput, actor st
 		return domain.Host{}, err
 	}
 	s.audit(ctx, "", "host_saved", actor, map[string]any{
-		"host_id": created.ID, "name": created.Name, "auth_type": created.AuthType, "has_private_key": created.HasPrivateKey, "sudo_mode": created.SudoMode,
+		"host_id": created.ID, "name": created.Name, "agent_enabled": created.AgentEnabled, "auth_type": created.AuthType, "has_private_key": created.HasPrivateKey, "sudo_mode": created.SudoMode,
 	})
 	return created, nil
 }
 
 func (s *Service) GetHost(ctx context.Context, id string) (domain.Host, error) {
-	return s.store.GetHost(ctx, id)
+	host, err := s.store.GetHost(ctx, id)
+	if err != nil {
+		return domain.Host{}, err
+	}
+	return s.withStoredHostKey(host), nil
 }
 
 func (s *Service) ListHosts(ctx context.Context) ([]domain.Host, error) {
-	return s.store.ListHosts(ctx)
+	hosts, err := s.store.ListHosts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for index := range hosts {
+		hosts[index] = s.withStoredHostKey(hosts[index])
+	}
+	return hosts, nil
+}
+
+func (s *Service) withStoredHostKey(host domain.Host) domain.Host {
+	key, ok := s.transport.StoredHostKey(host)
+	if ok {
+		host.HostKey = &domain.HostKey{
+			Fingerprint: key.Fingerprint,
+			Algorithm:   key.Algorithm,
+			Trusted:     key.Trusted,
+		}
+	}
+	return host
 }
 
 func (s *Service) ListHostCapabilities(ctx context.Context) ([]domain.HostCapability, error) {
@@ -781,6 +838,13 @@ func (s *Service) ListHostCapabilities(ctx context.Context) ([]domain.HostCapabi
 	}
 	result := make([]domain.HostCapability, 0, len(hosts))
 	for _, host := range hosts {
+		if !host.AgentEnabled {
+			continue
+		}
+		connection, _, resolveErr := s.resolveSSHConnection(ctx, host)
+		if resolveErr == nil && requireAgentSSHAccess("eino-agent", connection) != nil {
+			continue
+		}
 		result = append(result, domain.HostCapability{ID: host.ID, Name: host.Name, AuthType: host.AuthType, SudoMode: host.SudoMode})
 	}
 	return result, nil
@@ -789,6 +853,9 @@ func (s *Service) ListHostCapabilities(ctx context.Context) ([]domain.HostCapabi
 func (s *Service) DeleteHost(ctx context.Context, id, actor string) error {
 	if s.hasSSHTunnelForHost(id) {
 		return fmt.Errorf("%w: stop the tunnel before deleting host %q", ErrHostHasActiveTunnel, id)
+	}
+	if s.hasActiveSSHShellForHost(id) {
+		return fmt.Errorf("host %q has an active SSH shell; close it before deleting the host", id)
 	}
 	hosts, err := s.store.ListHosts(ctx)
 	if err != nil {
@@ -806,13 +873,16 @@ func (s *Service) DeleteHost(ctx context.Context, id, actor string) error {
 	return nil
 }
 
-func (s *Service) ProbeHost(ctx context.Context, id string) (sshx.HostInfo, error) {
+func (s *Service) ProbeHost(ctx context.Context, id, actor string) (sshx.HostInfo, error) {
 	host, err := s.store.GetHost(ctx, id)
 	if err != nil {
 		return sshx.HostInfo{}, err
 	}
 	connection, _, err := s.resolveSSHConnection(ctx, host)
 	if err != nil {
+		return sshx.HostInfo{}, err
+	}
+	if err := requireAgentSSHAccess(actor, connection); err != nil {
 		return sshx.HostInfo{}, err
 	}
 	connection, err = s.hydrateSSHConnection(connection, false)
@@ -878,7 +948,7 @@ func (s *Service) Evaluate(ctx context.Context, req domain.ExecRequest) (domain.
 			return domain.Decision{}, fmt.Errorf("SSH connection binding is invalid for local Workspace operations")
 		}
 	} else if req.Mode == domain.ExecSSHFileTransfer {
-		transferSource, err = s.bindSSHFileTransfer(ctx, host, &req)
+		transferSource, err = s.bindSSHFileTransfer(ctx, host, &req, "")
 		if err != nil {
 			return domain.Decision{}, err
 		}
@@ -934,7 +1004,7 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 			return domain.ExecResult{}, fmt.Errorf("SSH connection binding is invalid for local Workspace operations")
 		}
 	} else if req.Mode == domain.ExecSSHFileTransfer {
-		transferSource, err = s.bindSSHFileTransfer(ctx, host, &req)
+		transferSource, err = s.bindSSHFileTransfer(ctx, host, &req, actor)
 		if err != nil {
 			return domain.ExecResult{}, err
 		}
@@ -942,9 +1012,12 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 		if req.SourceConnectionDigest != "" {
 			return domain.ExecResult{}, fmt.Errorf("source SSH connection binding is only valid for host-to-host transfers")
 		}
-		_, digest, connectionErr := s.resolveSSHConnection(ctx, host)
+		connection, digest, connectionErr := s.resolveSSHConnection(ctx, host)
 		if connectionErr != nil {
 			return domain.ExecResult{}, connectionErr
+		}
+		if err := requireAgentSSHAccess(actor, connection); err != nil {
+			return domain.ExecResult{}, err
 		}
 		bindSSHRequest(&req, digest)
 	}
@@ -960,25 +1033,18 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 		decision = mergeTransferDecisions(decision, s.policy.Evaluate(ctx, transferSource, req))
 	}
 	sessionID := SessionIDFromContext(ctx)
-	sessionGrantUsed := false
-	// A session grant can only remove repeated Change-level prompts. Critical
-	// requests always require a fresh one-time approval, even if policy is
-	// tightened after an earlier grant was created for the same request shape.
-	if decision.Action == domain.ActionApprove && decision.Risk == domain.RiskChange && sessionID != "" && !isHostWorkspaceShell(req) {
-		fingerprint, fingerprintErr := approvalFingerprint(req)
-		if fingerprintErr != nil {
-			return domain.ExecResult{}, fingerprintErr
-		}
-		granted, grantErr := s.store.HasSessionApprovalGrant(ctx, sessionID, fingerprint)
-		if grantErr != nil {
-			return domain.ExecResult{}, grantErr
-		}
-		if granted {
-			decision.Action = domain.ActionAllow
-			decision.Reason = "approved by an exact-operation grant in this Agent session"
-			decision.RuleHits = append(decision.RuleHits, "session_approval_grant")
-			sessionGrantUsed = true
-		}
+	if req.Mode == domain.ExecSSHShellStart && sessionID == "" {
+		return domain.ExecResult{}, fmt.Errorf("interactive SSH shells require an Agent conversation")
+	}
+	settings, settingsErr := s.store.GetSystemSettings(ctx)
+	if settingsErr != nil {
+		return domain.ExecResult{}, settingsErr
+	}
+	llmRequest := actor == "eino-agent" || actor == "mcp-client"
+	if llmRequest && settings.ApprovalMode == domain.ApprovalModeFullAccess {
+		decision.Action = domain.ActionAllow
+		decision.Reason = "allowed by full access mode"
+		decision.RuleHits = append(decision.RuleHits, "approval_mode_full_access")
 	}
 	requestCipher, err := s.encryptor.Encrypt([]byte(requestJSON))
 	if err != nil {
@@ -988,32 +1054,34 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 	now := time.Now().UTC()
 	var commandExplanation *domain.CommandReview
 	var explanationInput *domain.CommandReviewInput
-	var explainer CommandExplainer
-	settings, settingsErr := s.store.GetSystemSettings(ctx)
-	if settingsErr != nil {
-		return domain.ExecResult{}, settingsErr
-	}
-	if settings.ApprovalExplanationsEnabled && (decision.Action == domain.ActionApprove || decision.Action == domain.ActionBreakGlass) {
-		if explainer = s.commandExplainer(); explainer != nil {
-			planStep := ""
-			if sessionID != "" {
-				if plan, planErr := s.store.GetAgentPlan(ctx, sessionID); planErr == nil {
-					for _, step := range plan.Steps {
-						if step.Status == "in_progress" {
-							planStep = fmt.Sprintf("%d. %s", step.Number, step.Title)
-							break
-						}
-					}
-				}
+	var reviewer ApprovalReviewer
+	autoRejected := false
+	approvalRequired := decision.Action == domain.ActionApprove || decision.Action == domain.ActionBreakGlass
+	if approvalRequired {
+		reviewer = s.approvalReviewer()
+		input := s.commandReviewInput(ctx, req, decision, host, digest, sessionID)
+		explanationInput = &input
+		if llmRequest && settings.ApprovalMode == domain.ApprovalModeAuto {
+			review := s.reviewForAutomaticApproval(ctx, reviewer, input, settings.SubagentTimeoutSeconds)
+			commandExplanation = &review
+			switch {
+			case review.Status == "completed" && review.Decision == domain.ApprovalAgentAllow:
+				decision.Action = domain.ActionAllow
+				decision.Reason = review.Reason
+				decision.RuleHits = append(decision.RuleHits, "approval_agent_allowed")
+			case review.Status == "completed" && review.Decision == domain.ApprovalAgentReject:
+				autoRejected = true
+				decision.Reason = review.Reason
+				decision.RuleHits = append(decision.RuleHits, "approval_agent_rejected")
+			default:
+				decision.RuleHits = append(decision.RuleHits, "approval_agent_human_fallback")
 			}
-			input := domain.CommandReviewInput{
-				Request: req, Policy: decision, Host: domain.HostCapability{ID: host.ID, Name: host.Name, AuthType: host.AuthType, SudoMode: host.SudoMode},
-				PlanStep: planStep, RequestDigest: digest,
-			}
-			explanationInput = &input
+		} else if settings.ApprovalExplanationsEnabled && reviewer != nil {
 			commandExplanation = &domain.CommandReview{
 				Status: "pending", DeterministicRisk: decision.Risk,
 			}
+		} else {
+			explanationInput = nil
 		}
 	}
 	reviewJSON := ""
@@ -1027,6 +1095,10 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 		SearchText: s.redactor.Redact(req.SearchText()), RequestDigest: digest,
 		Risk: decision.Risk, Status: "created", AIReviewJSON: reviewJSON, AIReview: commandExplanation, StartedAt: now,
 	}
+	if owner, ok := executionOwnerFromContext(ctx); ok {
+		run.ToolName = owner.ToolName
+		run.ToolArgumentsJSON = s.redactor.Redact(owner.Arguments)
+	}
 	logger := observability.FromContext(ctx).With(
 		"session_id", sessionID, "host_id", host.ID,
 		"mode", req.Mode, "program", req.Program, "elevated", req.Elevated,
@@ -1034,6 +1106,19 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 	)
 	policyLogger := logger.With("component", "policy")
 	policyLogger.DebugContext(ctx, "execution policy evaluated", "risk", decision.Risk, "action", decision.Action, "policy_hit_count", len(decision.RuleHits), "request_digest", digest)
+	if autoRejected {
+		run.Status = "rejected"
+		run.Error = decision.Reason
+		run.CompletedAt = time.Now().UTC()
+		if err := s.store.CreateRun(ctx, run); err != nil {
+			return domain.ExecResult{}, err
+		}
+		s.audit(ctx, run.ID, "approval_agent_rejected", "approval-agent", map[string]any{
+			"risk": decision.Risk, "reason": commandExplanation.Reason, "model": commandExplanation.Model,
+		})
+		logger.With("component", "approval").InfoContext(ctx, "approval Agent rejected execution", "risk", decision.Risk, "model", commandExplanation.Model)
+		return execResultFromRun(run, "", ""), nil
+	}
 	switch decision.Action {
 	case domain.ActionDeny:
 		run.Status = "denied"
@@ -1065,8 +1150,8 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 		}
 		s.audit(ctx, run.ID, "approval_requested", actor, map[string]any{"approval_id": approval.ID, "risk": decision.Risk, "hits": decision.RuleHits})
 		logger.With("component", "approval").InfoContext(ctx, "execution awaiting approval", "approval_id", approval.ID, "risk", decision.Risk, "expires_at", approval.ExpiresAt)
-		if explanationInput != nil && explainer != nil {
-			s.startPendingApprovalExplanation(ctx, approval, *explanationInput, explainer, settings.SubagentTimeoutSeconds)
+		if commandExplanation != nil && commandExplanation.Status == "pending" && explanationInput != nil && reviewer != nil {
+			s.startPendingApprovalExplanation(ctx, approval, *explanationInput, reviewer, settings.SubagentTimeoutSeconds)
 		}
 		return domain.ExecResult{RunID: run.ID, Status: run.Status, Risk: decision.Risk, ApprovalID: approval.ID, PolicyHits: decision.RuleHits}, nil
 	case domain.ActionAllow:
@@ -1077,8 +1162,10 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 		if owner, ok := executionOwnerFromContext(ctx); ok {
 			s.bindExecutionOwner(run.ID, owner)
 		}
-		if sessionGrantUsed {
-			s.audit(ctx, run.ID, "session_approval_grant_used", actor, map[string]any{"session_id": sessionID})
+		if commandExplanation != nil && commandExplanation.Status == "completed" && commandExplanation.Decision == domain.ApprovalAgentAllow {
+			s.audit(ctx, run.ID, "approval_agent_granted", "approval-agent", map[string]any{
+				"risk": decision.Risk, "reason": commandExplanation.Reason, "model": commandExplanation.Model,
+			})
 		}
 		return s.execute(ctx, host, req, run, actor, decision.RuleHits, stream)
 	default:
@@ -1086,10 +1173,56 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 	}
 }
 
+func (s *Service) commandReviewInput(ctx context.Context, req domain.ExecRequest, decision domain.Decision, host domain.Host, digest, sessionID string) domain.CommandReviewInput {
+	planStep := ""
+	if sessionID != "" {
+		if plan, err := s.store.GetAgentPlan(ctx, sessionID); err == nil {
+			for _, step := range plan.Steps {
+				if step.Status == "in_progress" {
+					planStep = fmt.Sprintf("%d. %s", step.Number, step.Title)
+					break
+				}
+			}
+		}
+	}
+	return domain.CommandReviewInput{
+		Request: req, Policy: decision,
+		Host:          domain.HostCapability{ID: host.ID, Name: host.Name, AuthType: host.AuthType, SudoMode: host.SudoMode},
+		PlanStep:      planStep,
+		RequestDigest: digest,
+	}
+}
+
+func (s *Service) reviewForAutomaticApproval(ctx context.Context, reviewer ApprovalReviewer, input domain.CommandReviewInput, timeoutSeconds int) domain.CommandReview {
+	if reviewer == nil {
+		return s.normalizeCommandReview(domain.CommandReview{}, fmt.Errorf("approval Agent is unavailable for the active model"), input.Policy.Risk, timeoutSeconds)
+	}
+	timeoutSeconds = effectiveSubagentTimeoutSeconds(timeoutSeconds)
+	reviewCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
+	defer cancel()
+	select {
+	case s.explanationSem <- struct{}{}:
+		defer func() { <-s.explanationSem }()
+	case <-reviewCtx.Done():
+		return s.normalizeCommandReview(domain.CommandReview{}, reviewCtx.Err(), input.Policy.Risk, timeoutSeconds)
+	}
+	review, err := reviewer.Review(reviewCtx, input)
+	review = s.normalizeCommandReview(review, err, input.Policy.Risk, timeoutSeconds)
+	if review.Status == "completed" && review.Decision != domain.ApprovalAgentAllow && review.Decision != domain.ApprovalAgentReject {
+		review.Status = "degraded"
+		review.Errors = append(review.Errors, "approval Agent returned an invalid decision")
+	}
+	if review.Status == "completed" && strings.TrimSpace(review.Reason) == "" {
+		review.Status = "degraded"
+		review.Errors = append(review.Errors, "approval Agent returned no reason")
+	}
+	return review
+}
+
 // startPendingApprovalExplanation keeps model latency outside the human
 // approval critical path. Explanation work is bounded globally and canceled as
 // soon as its approval is no longer pending.
-func (s *Service) startPendingApprovalExplanation(parent context.Context, approval domain.Approval, input domain.CommandReviewInput, explainer CommandExplainer, timeoutSeconds int) {
+func (s *Service) startPendingApprovalExplanation(parent context.Context, approval domain.Approval, input domain.CommandReviewInput, reviewer ApprovalReviewer, timeoutSeconds int) {
 	baseCtx := context.WithoutCancel(parent)
 	timeoutSeconds = effectiveSubagentTimeoutSeconds(timeoutSeconds)
 	logger := observability.FromContext(baseCtx).With(
@@ -1100,7 +1233,7 @@ func (s *Service) startPendingApprovalExplanation(parent context.Context, approv
 	default:
 		review := domain.CommandReview{
 			Status: "unavailable", DeterministicRisk: input.Policy.Risk,
-			Errors: []string{"command explanation skipped because the local queue is full"}, ReviewedAt: time.Now().UTC(),
+			Errors: []string{"approval Agent review skipped because the local queue is full"}, ReviewedAt: time.Now().UTC(),
 		}
 		persistCtx, cancelPersist := context.WithTimeout(baseCtx, 3*time.Second)
 		err := s.persistPendingApprovalExplanation(persistCtx, approval, input.Policy.Risk, review, 0)
@@ -1125,7 +1258,7 @@ func (s *Service) startPendingApprovalExplanation(parent context.Context, approv
 		defer s.clearApprovalExplanation(approval.ID, task)
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				logger.ErrorContext(baseCtx, "approval explanation Agent panicked", "panic", fmt.Sprint(recovered))
+				logger.ErrorContext(baseCtx, "approval Agent panicked", "panic", fmt.Sprint(recovered))
 			}
 		}()
 
@@ -1149,7 +1282,7 @@ func (s *Service) startPendingApprovalExplanation(parent context.Context, approv
 
 		started := time.Now()
 		logger.InfoContext(baseCtx, "approval explanation started", "risk", approval.Risk, "queue_ms", started.Sub(queuedAt).Milliseconds())
-		review, reviewErr := explainer.Review(explanationCtx, input)
+		review, reviewErr := reviewer.Review(explanationCtx, input)
 		if errors.Is(explanationCtx.Err(), context.Canceled) {
 			logger.InfoContext(baseCtx, "approval explanation canceled", "duration_ms", time.Since(started).Milliseconds())
 			return
@@ -1179,7 +1312,7 @@ func (s *Service) persistPendingApprovalExplanation(ctx context.Context, approva
 	if err := s.store.UpdatePendingApprovalExplanation(ctx, approval.ID, approval.RunID, string(reviewJSON)); err != nil {
 		return err
 	}
-	s.audit(ctx, approval.RunID, "command_ai_explained", "command-explainer-agent", map[string]any{
+	s.audit(ctx, approval.RunID, "approval_agent_reviewed", "approval-agent", map[string]any{
 		"approval_id": approval.ID, "status": review.Status, "deterministic_risk": risk,
 		"model": review.Model, "duration_ms": duration.Milliseconds(),
 	})
@@ -1195,7 +1328,7 @@ func (s *Service) normalizeCommandReview(review domain.CommandReview, reviewErr 
 		model := review.Model
 		message := reviewErr.Error()
 		if errors.Is(reviewErr, context.DeadlineExceeded) || strings.Contains(strings.ToLower(message), "context deadline exceeded") {
-			message = fmt.Sprintf("command explanation model did not respond within %d seconds", effectiveSubagentTimeoutSeconds(timeoutSeconds))
+			message = fmt.Sprintf("approval Agent did not respond within %d seconds", effectiveSubagentTimeoutSeconds(timeoutSeconds))
 		}
 		review = domain.CommandReview{
 			Status: "unavailable", Model: model, DeterministicRisk: deterministicRisk,
@@ -1209,6 +1342,18 @@ func (s *Service) normalizeCommandReview(review domain.CommandReview, reviewErr 
 		review.ReviewedAt = time.Now().UTC()
 	}
 	review.DeterministicRisk = deterministicRisk
+	review.Decision = strings.ToLower(strings.TrimSpace(review.Decision))
+	review.Reason = s.redactor.Redact(strings.TrimSpace(review.Reason))
+	if len(review.Reason) > 1000 {
+		review.Reason = review.Reason[:1000]
+	}
+	if review.Explanation != nil {
+		review.Explanation.Summary = s.redactor.Redact(review.Explanation.Summary)
+		review.Explanation.Mechanism = s.redactor.Redact(review.Explanation.Mechanism)
+		for index := range review.Explanation.Risks {
+			review.Explanation.Risks[index] = s.redactor.Redact(review.Explanation.Risks[index])
+		}
+	}
 	if len(review.Errors) > 5 {
 		review.Errors = review.Errors[:5]
 	}
@@ -1229,19 +1374,15 @@ func effectiveSubagentTimeoutSeconds(timeoutSeconds int) int {
 }
 
 func (s *Service) Approve(ctx context.Context, approvalID, reason, actor string) (domain.ExecResult, error) {
-	return s.ApproveWithScope(ctx, approvalID, reason, "once", actor)
-}
-
-func (s *Service) ApproveWithScope(ctx context.Context, approvalID, reason, scope, actor string) (domain.ExecResult, error) {
-	approved, err := s.approveForExecution(ctx, approvalID, reason, scope, actor)
+	approved, err := s.approveForExecution(ctx, approvalID, reason, actor)
 	if err != nil {
 		return domain.ExecResult{}, err
 	}
 	return s.executeApproved(ctx, approved)
 }
 
-func (s *Service) ApproveWithScopeAsync(ctx context.Context, approvalID, reason, scope, actor string) (domain.ExecResult, error) {
-	approved, err := s.approveForExecution(ctx, approvalID, reason, scope, actor)
+func (s *Service) ApproveAsync(ctx context.Context, approvalID, reason, actor string) (domain.ExecResult, error) {
+	approved, err := s.approveForExecution(ctx, approvalID, reason, actor)
 	if err != nil {
 		return domain.ExecResult{}, err
 	}
@@ -1260,15 +1401,8 @@ type approvedExecution struct {
 	actor    string
 }
 
-func (s *Service) approveForExecution(ctx context.Context, approvalID, reason, scope, actor string) (approvedExecution, error) {
+func (s *Service) approveForExecution(ctx context.Context, approvalID, reason, actor string) (approvedExecution, error) {
 	logger := observability.FromContext(ctx).With("component", "approval", "approval_id", approvalID, "actor", actor)
-	if scope == "" {
-		scope = "once"
-	}
-	if scope != "once" && scope != "session" {
-		logger.WarnContext(ctx, "approval rejected by validation", "scope", scope)
-		return approvedExecution{}, fmt.Errorf("invalid approval scope %q", scope)
-	}
 	approval, err := s.store.GetApproval(ctx, approvalID)
 	if err != nil {
 		return approvedExecution{}, err
@@ -1284,9 +1418,6 @@ func (s *Service) approveForExecution(ctx context.Context, approvalID, reason, s
 		return approvedExecution{}, fmt.Errorf("approval expired")
 	}
 	if approval.Risk == domain.RiskCritical {
-		if scope == "session" {
-			return approvedExecution{}, fmt.Errorf("critical operations cannot be approved for an entire session")
-		}
 		if strings.TrimSpace(reason) == "" {
 			return approvedExecution{}, fmt.Errorf("approval reason is required for critical operations")
 		}
@@ -1306,9 +1437,6 @@ func (s *Service) approveForExecution(ctx context.Context, approvalID, reason, s
 	if err != nil || digest != approval.RequestDigest {
 		return approvedExecution{}, fmt.Errorf("approved request digest no longer matches")
 	}
-	if scope == "session" && requiresOneTimeApproval(req) {
-		return approvedExecution{}, fmt.Errorf("this operation requires a fresh one-time approval for every invocation")
-	}
 	run, err := s.store.GetRun(ctx, approval.RunID)
 	if err != nil {
 		return approvedExecution{}, err
@@ -1317,42 +1445,45 @@ func (s *Service) approveForExecution(ctx context.Context, approvalID, reason, s
 	if err != nil {
 		return approvedExecution{}, err
 	}
-	if scope == "session" {
-		if approval.SessionID == "" {
-			return approvedExecution{}, fmt.Errorf("approval has no Agent session and cannot create a session grant")
-		}
-		fingerprint, err := approvalFingerprint(req)
-		if err != nil {
-			return approvedExecution{}, err
-		}
-		if err := s.store.ApprovePendingWithSessionGrantAndStartRun(ctx, approval.ID, run.ID, reason, approval.SessionID, fingerprint, time.Now().UTC().Add(8*time.Hour), approval.Risk); err != nil {
-			return approvedExecution{}, err
-		}
-	} else if err := s.store.ApprovePendingAndStartRun(ctx, approval.ID, run.ID, reason, approval.Risk); err != nil {
+	if err := s.store.ApprovePendingAndStartRun(ctx, approval.ID, run.ID, reason, approval.Risk); err != nil {
 		return approvedExecution{}, err
 	}
 	s.cancelApprovalExplanation(ctx, approval.ID, approval.RunID)
 	run.Status = "running"
-	s.audit(ctx, run.ID, "approval_granted", actor, map[string]any{"approval_id": approval.ID, "reason": reason, "scope": scope, "session_id": approval.SessionID})
-	logger.InfoContext(ctx, "approval granted", "run_id", run.ID, "scope", scope, "risk", approval.Risk, "session_id", approval.SessionID)
+	s.audit(ctx, run.ID, "approval_granted", actor, map[string]any{"approval_id": approval.ID, "reason": reason, "session_id": approval.SessionID})
+	logger.InfoContext(ctx, "approval granted", "run_id", run.ID, "risk", approval.Risk, "session_id", approval.SessionID)
 	return approvedExecution{approval: approval, request: req, run: run, host: host, actor: actor}, nil
 }
 
 func (s *Service) startApprovedExecution(parent context.Context, approved approvedExecution) error {
+	executionCtx, cancel := context.WithCancel(context.WithoutCancel(parent))
 	s.executionMu.Lock()
 	if s.executionClosed {
 		s.executionMu.Unlock()
+		cancel()
 		return fmt.Errorf("service is shutting down")
 	}
+	if _, cancelled := s.cancelledExecutions[approved.run.ID]; cancelled {
+		delete(s.cancelledExecutions, approved.run.ID)
+		s.executionMu.Unlock()
+		cancel()
+		return context.Canceled
+	}
+	s.executionCancels[approved.run.ID] = cancel
 	s.executionWG.Add(1)
 	s.executionMu.Unlock()
 
-	executionCtx, cancel := context.WithCancel(context.WithoutCancel(parent))
 	stopServiceCancellation := context.AfterFunc(s.executionCtx, cancel)
 	go func() {
 		defer s.executionWG.Done()
 		defer stopServiceCancellation()
 		defer cancel()
+		defer func() {
+			s.executionMu.Lock()
+			delete(s.executionCancels, approved.run.ID)
+			delete(s.cancelledExecutions, approved.run.ID)
+			s.executionMu.Unlock()
+		}()
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				err := fmt.Errorf("approved execution stopped unexpectedly")
@@ -1363,6 +1494,22 @@ func (s *Service) startApprovedExecution(parent context.Context, approved approv
 		_, _ = s.executeApproved(executionCtx, approved)
 	}()
 	return nil
+}
+
+func (s *Service) cancelApprovedExecution(runID string) bool {
+	if runID == "" {
+		return false
+	}
+	s.executionMu.Lock()
+	cancel := s.executionCancels[runID]
+	if cancel == nil {
+		s.cancelledExecutions[runID] = struct{}{}
+	}
+	s.executionMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return true
 }
 
 func (s *Service) executeApproved(ctx context.Context, approved approvedExecution) (domain.ExecResult, error) {
@@ -1529,6 +1676,13 @@ func execResultFromRun(run domain.Run, approvalID, operatorInstruction string) d
 			result.Tunnel = &tunnel
 		}
 	}
+	if request.Mode == domain.ExecSSHShellStart {
+		var shell domain.SSHShell
+		if json.Unmarshal([]byte(run.StdoutRedacted), &shell) == nil && shell.ID != "" {
+			result.Shell = &shell
+		}
+		result.ShellUsage = sshShellUsage()
+	}
 	return result
 }
 
@@ -1579,7 +1733,9 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 	if req.Mode == domain.ExecSSHFileTransfer {
 		hostIDs = append(hostIDs, req.SourceHostID)
 	}
-	release, err := s.acquire(ctx, hostIDs...)
+	release := func() {}
+	var err error
+	release, err = s.acquire(ctx, hostIDs...)
 	if err != nil {
 		logger.WarnContext(ctx, "SSH execution canceled before acquiring capacity", "error", err)
 		return domain.ExecResult{}, err
@@ -1618,6 +1774,7 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 	var raw sshx.RawResult
 	var execErr error
 	var tunnel *domain.SSHTunnel
+	var shell *domain.SSHShell
 	var outputSink *executionOutputSink
 	if stream != nil || s.hasExecutionSubscribers(run.SessionID) {
 		outputSink = s.newExecutionOutputSink(run, stream)
@@ -1631,6 +1788,18 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 			tunnel = &created
 			raw.ExitCode = 0
 			raw.Stdout, execErr = marshalSSHTunnel(created)
+		} else {
+			raw.ExitCode = -1
+		}
+	} else if req.Mode == domain.ExecSSHShellStart {
+		started := time.Now()
+		created, shellErr := s.openSSHShell(ctx, host, connection, req, run, actor)
+		execErr = shellErr
+		raw.Duration = time.Since(started)
+		if shellErr == nil {
+			shell = &created
+			raw.ExitCode = 0
+			raw.Stdout, execErr = marshalSSHShell(created)
 		} else {
 			raw.ExitCode = -1
 		}
@@ -1654,14 +1823,23 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 	run.CompletedAt = time.Now().UTC()
 	if execErr != nil {
 		run.Status = "failed"
+		if errors.Is(execErr, context.Canceled) || errors.Is(execErr, context.DeadlineExceeded) ||
+			errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			run.Status = "interrupted"
+		}
 		run.Error = execErr.Error()
 	} else if raw.ExitCode != 0 {
-		run.Status = "failed"
 		run.Error = "remote command exited with code " + strconv.Itoa(raw.ExitCode)
+		if len(bytes.TrimSpace(raw.Stdout)) > 0 {
+			run.Status = "partial"
+		} else {
+			run.Status = "failed"
+		}
 	} else {
 		run.Status = "completed"
 	}
-	if err := s.store.UpdateRun(ctx, run); err != nil {
+	persistCtx := context.WithoutCancel(ctx)
+	if err := s.store.UpdateRun(persistCtx, run); err != nil {
 		logger.ErrorContext(ctx, "persist SSH execution result failed", "error", err)
 		return domain.ExecResult{}, err
 	}
@@ -1670,7 +1848,7 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 		RunID:     run.ID,
 		Status:    run.Status,
 	})
-	s.audit(ctx, run.ID, "command_completed", actor, map[string]any{"status": run.Status, "exit_code": run.ExitCode, "duration_ms": raw.Duration.Milliseconds()})
+	s.audit(persistCtx, run.ID, "command_completed", actor, map[string]any{"status": run.Status, "exit_code": run.ExitCode, "duration_ms": raw.Duration.Milliseconds()})
 	completion := logger.InfoContext
 	if run.Status == "failed" {
 		completion = logger.ErrorContext
@@ -1680,6 +1858,10 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 		RunID: run.ID, Status: run.Status, Risk: run.Risk, ExitCode: run.ExitCode,
 		Stdout: run.StdoutRedacted, Stderr: run.StderrRedacted,
 		Duration: raw.Duration, PolicyHits: hits, Change: approvedReq.Change, Tunnel: tunnel, CompletedAt: run.CompletedAt,
+		Shell: shell,
+	}
+	if approvedReq.Mode == domain.ExecSSHShellStart && run.Status == "completed" {
+		result.ShellUsage = sshShellUsage()
 	}
 	if run.Status == "completed" && (approvedReq.Mode == domain.ExecRemoteSearch || approvedReq.Mode == domain.ExecWorkspaceSearch) {
 		decorateFileSearchResult(&result, approvedReq.SearchPattern, approvedReq.SearchMatchMode, approvedReq.ContextLines)
@@ -1764,6 +1946,10 @@ func validateExecutionRequest(host domain.Host, req domain.ExecRequest) error {
 		if err := validateSSHTunnelRequest(req); err != nil {
 			return err
 		}
+	case domain.ExecSSHShellStart:
+		if err := validateSSHShellRequest(req); err != nil {
+			return err
+		}
 	}
 	if req.Mode == domain.ExecSSHFileTransfer && req.Elevated {
 		return fmt.Errorf("elevated mode is not supported for SFTP transfers")
@@ -1796,6 +1982,16 @@ func validateRequestLimits(req domain.ExecRequest, limits config.Limits, redacto
 		}
 	} else if req.TunnelRemoteHost != "" || req.TunnelRemotePort != 0 || req.TunnelLocalPort != 0 {
 		return fmt.Errorf("SSH tunnel fields are only valid for ssh_tunnel_start requests")
+	}
+	if req.Mode == domain.ExecSSHShellStart {
+		if req.Program != "" || len(req.Args) != 0 || req.Script != "" || len(req.Env) != 0 ||
+			req.RemotePath != "" || req.SourceHostID != "" || req.SourcePath != "" || req.WorkspaceID != "" ||
+			req.RelativePath != "" || req.Change != nil || req.TunnelRemoteHost != "" ||
+			req.TunnelRemotePort != 0 || req.TunnelLocalPort != 0 {
+			return fmt.Errorf("SSH shell requests cannot include command, file, transfer, Workspace, environment, or tunnel fields")
+		}
+	} else if req.ShellCols != 0 || req.ShellRows != 0 {
+		return fmt.Errorf("SSH shell fields are only valid for ssh_shell_start requests")
 	}
 	if req.Mode == domain.ExecWorkspaceShell {
 		switch req.WorkspaceShellBackend {
@@ -1883,22 +2079,6 @@ func isHostWorkspaceShell(req domain.ExecRequest) bool {
 	return req.Mode == domain.ExecWorkspaceShell && req.WorkspaceShellBackend == domain.WorkspaceShellModeHost
 }
 
-func requiresOneTimeApproval(req domain.ExecRequest) bool {
-	if isHostWorkspaceShell(req) {
-		return true
-	}
-	switch req.Mode {
-	case domain.ExecRemoteRead, domain.ExecRemoteSearch, domain.ExecWorkspaceRead, domain.ExecWorkspaceSearch, domain.ExecSSHTunnelStart:
-		return true
-	}
-	for _, program := range []string{"cat", "cut", "grep", "head", "less", "more", "tail"} {
-		if found, err := policy.ContainsProgram(req, program); err == nil && found {
-			return true
-		}
-	}
-	return false
-}
-
 func packageMutation(args []string) bool {
 	for _, argument := range args {
 		switch strings.ToLower(argument) {
@@ -1925,36 +2105,16 @@ func containsCredentialControl(value string) bool {
 }
 
 func (s *Service) StartTask(ctx context.Context, req domain.ExecRequest, actor string) (domain.Task, error) {
-	if blockingApprovalsFromContext(ctx) {
-		decision, err := s.Evaluate(ctx, req)
-		if err != nil {
-			return domain.Task{}, err
-		}
-		if decision.Action == domain.ActionApprove || decision.Action == domain.ActionBreakGlass {
-			task := domain.Task{ID: ids.New("task"), HostID: req.HostID, Status: "waiting_for_approval", StartedAt: time.Now().UTC()}
-			result, submitErr := s.Submit(ctx, req, actor)
-			task.RunID = result.RunID
-			task.Status = result.Status
-			task.OperatorInstruction = result.OperatorInstruction
-			task.EndedAt = time.Now().UTC()
-			state := &taskState{task: task, result: result}
-			if submitErr != nil {
-				state.err = submitErr.Error()
-			}
-			s.taskMu.Lock()
-			s.tasks[task.ID] = state
-			s.taskMu.Unlock()
-			_ = s.store.UpsertTask(context.Background(), task, result, state.err)
-			return task, submitErr
-		}
+	req.Background = true
+	background := s.executionCtx
+	if background == nil {
+		background = context.Background()
 	}
-
-	background := context.Background()
 	if sessionID := SessionIDFromContext(ctx); sessionID != "" {
 		background = WithSessionID(background, sessionID)
 	}
 	if owner, ok := executionOwnerFromContext(ctx); ok {
-		background = WithExecutionOwner(background, owner.ToolCallID, owner.ToolName)
+		background = WithExecutionOwner(background, owner.ToolCallID, owner.ToolName, owner.Arguments)
 	}
 	taskCtx, cancel := context.WithCancel(background)
 	task := domain.Task{ID: ids.New("task"), HostID: req.HostID, Status: "running", StartedAt: time.Now().UTC()}
@@ -1969,34 +2129,139 @@ func (s *Service) StartTask(ctx context.Context, req domain.ExecRequest, actor s
 	go func() {
 		result, err := s.submit(taskCtx, req, actor, func(streamName string, data []byte) {
 			s.taskMu.Lock()
-			defer s.taskMu.Unlock()
+			if s.tasks[state.task.ID] != state {
+				s.taskMu.Unlock()
+				return
+			}
 			chunk := s.redactor.Redact(string(data))
 			if streamName == "stderr" {
 				state.result.Stderr += chunk
 			} else {
 				state.result.Stdout += chunk
 			}
-			_ = s.store.UpsertTask(context.Background(), state.task, state.result, state.err)
+			taskSnapshot, resultSnapshot, taskErr := state.task, state.result, state.err
+			s.taskMu.Unlock()
+			_ = s.store.UpsertTask(context.Background(), taskSnapshot, resultSnapshot, taskErr)
 		})
+		if err == nil && result.Status == "approval_required" && result.ApprovalID != "" {
+			s.taskMu.Lock()
+			if s.tasks[state.task.ID] != state {
+				s.taskMu.Unlock()
+				_ = s.Reject(context.Background(), result.ApprovalID, "background task cancelled", actor)
+				return
+			}
+			state.result = result
+			state.task.RunID = result.RunID
+			state.task.Status = "approval_required"
+			state.approvalID = result.ApprovalID
+			taskSnapshot, resultSnapshot := state.task, state.result
+			s.taskMu.Unlock()
+			_ = s.store.UpsertTask(context.Background(), taskSnapshot, resultSnapshot, "")
+			notifyApproval(ctx, result)
+			s.trackApprovalTask(taskCtx, state, result.ApprovalID, actor)
+			return
+		}
 		s.taskMu.Lock()
-		defer s.taskMu.Unlock()
+		if s.tasks[state.task.ID] != state {
+			s.taskMu.Unlock()
+			return
+		}
 		state.result = result
 		state.task.RunID = result.RunID
 		state.task.EndedAt = time.Now().UTC()
-		if state.task.Status == "cancelled" {
-			delete(s.tasks, state.task.ID)
-			return
-		}
 		state.task.Status = result.Status
 		if err != nil {
 			state.err = err.Error()
 			state.task.Status = "failed"
 		}
-		_ = s.store.UpsertTask(context.Background(), state.task, state.result, state.err)
+		taskSnapshot, resultSnapshot, taskErr := state.task, state.result, state.err
 		delete(s.tasks, state.task.ID)
+		s.taskMu.Unlock()
+		_ = s.store.UpsertTask(context.Background(), taskSnapshot, resultSnapshot, taskErr)
 	}()
-	_ = ctx
 	return task, nil
+}
+
+func (s *Service) trackApprovalTask(ctx context.Context, state *taskState, approvalID, actor string) {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		approval, approvalErr := s.store.GetApproval(context.Background(), approvalID)
+		if approvalErr == nil && approval.Status == "pending" && time.Now().UTC().After(approval.ExpiresAt) {
+			expireCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			if s.store.DecideApproval(expireCtx, approval.ID, "expired", "approval expired") == nil {
+				s.cancelApprovalExplanation(expireCtx, approval.ID, approval.RunID)
+				if run, err := s.store.GetRun(expireCtx, approval.RunID); err == nil {
+					run.Status = "expired"
+					run.Error = "approval expired"
+					run.CompletedAt = time.Now().UTC()
+					_ = s.store.UpdateRun(expireCtx, run)
+					s.clearExecutionOwner(run.ID)
+					s.audit(expireCtx, run.ID, "approval_expired", "control-plane", map[string]any{"approval_id": approval.ID})
+				}
+			}
+			cancel()
+			continue
+		}
+		if approvalErr == nil {
+			run, runErr := s.store.GetRun(context.Background(), approval.RunID)
+			if runErr == nil {
+				result := execResultFromRun(run, approval.ID, "")
+				if approval.Status == "rejected" || approval.Status == "expired" {
+					result.OperatorInstruction = approval.Reason
+				}
+				status := run.Status
+				if approval.Status == "pending" {
+					status = "approval_required"
+					result.Status = status
+				}
+				terminal := terminalExecutionStatus(status)
+				s.taskMu.Lock()
+				if s.tasks[state.task.ID] != state {
+					s.taskMu.Unlock()
+					return
+				}
+				changed := state.task.Status != status || terminal
+				if changed {
+					state.task.RunID = run.ID
+					state.task.Status = status
+					state.task.OperatorInstruction = result.OperatorInstruction
+					state.result = result
+					if terminal {
+						state.task.EndedAt = time.Now().UTC()
+						delete(s.tasks, state.task.ID)
+					}
+				}
+				taskSnapshot, resultSnapshot, taskErr := state.task, state.result, state.err
+				s.taskMu.Unlock()
+				if changed {
+					_ = s.store.UpsertTask(context.Background(), taskSnapshot, resultSnapshot, taskErr)
+				}
+				if terminal {
+					return
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			s.taskMu.Lock()
+			if s.tasks[state.task.ID] != state {
+				s.taskMu.Unlock()
+				return
+			}
+			state.task.Status = "interrupted"
+			state.task.EndedAt = time.Now().UTC()
+			state.result.Status = "interrupted"
+			state.err = ctx.Err().Error()
+			taskSnapshot, resultSnapshot, taskErr := state.task, state.result, state.err
+			delete(s.tasks, state.task.ID)
+			s.taskMu.Unlock()
+			_ = s.store.UpsertTask(context.Background(), taskSnapshot, resultSnapshot, taskErr)
+			s.audit(context.Background(), taskSnapshot.RunID, "task_interrupted", actor, map[string]any{"task_id": taskSnapshot.ID})
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func (s *Service) GetTask(id string) (domain.Task, domain.ExecResult, string, error) {
@@ -2013,24 +2278,43 @@ func (s *Service) GetTask(id string) (domain.Task, domain.ExecResult, string, er
 
 func (s *Service) CancelTask(id, actor string) error {
 	s.taskMu.Lock()
-	defer s.taskMu.Unlock()
 	state, ok := s.tasks[id]
 	if !ok {
+		s.taskMu.Unlock()
 		if _, _, _, err := s.store.GetTask(context.Background(), id); err != nil {
 			return err
 		}
 		return fmt.Errorf("task is not running and cannot be cancelled")
 	}
 	if state.task.Status != "running" && state.task.Status != "waiting_for_approval" && state.task.Status != "approval_required" {
+		s.taskMu.Unlock()
 		return fmt.Errorf("task is not running and cannot be cancelled")
 	}
-	if state.cancel != nil {
-		state.cancel()
-	}
+	cancel := state.cancel
+	approvalID := state.approvalID
+	runID := state.task.RunID
 	state.task.Status = "cancelled"
 	state.task.EndedAt = time.Now().UTC()
-	s.audit(context.Background(), state.task.RunID, "task_cancelled", actor, map[string]any{"task_id": id})
-	_ = s.store.UpsertTask(context.Background(), state.task, state.result, state.err)
+	state.result.Status = "cancelled"
+	taskSnapshot, resultSnapshot, taskErr := state.task, state.result, state.err
+	delete(s.tasks, id)
+	s.taskMu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if approvalID != "" {
+		approval, err := s.store.GetApproval(context.Background(), approvalID)
+		if err == nil && approval.Status == "pending" {
+			if rejectErr := s.Reject(context.Background(), approvalID, "background task cancelled", actor); rejectErr != nil {
+				s.cancelApprovedExecution(runID)
+			}
+		} else {
+			s.cancelApprovedExecution(runID)
+		}
+	}
+	s.audit(context.Background(), runID, "task_cancelled", actor, map[string]any{"task_id": id})
+	_ = s.store.UpsertTask(context.Background(), taskSnapshot, resultSnapshot, taskErr)
 	return nil
 }
 
@@ -2095,9 +2379,9 @@ func (s *Service) RetryApprovalExplanation(ctx context.Context, approvalID, acto
 	if !settings.ApprovalExplanationsEnabled {
 		return domain.Approval{}, fmt.Errorf("approval explanations are disabled in system settings")
 	}
-	explainer := s.commandExplainer()
-	if explainer == nil {
-		return domain.Approval{}, fmt.Errorf("command explanation Agent is unavailable for the active model")
+	reviewer := s.approvalReviewer()
+	if reviewer == nil {
+		return domain.Approval{}, fmt.Errorf("approval Agent is unavailable for the active model")
 	}
 
 	requestData, err := s.encryptor.Decrypt(approval.RequestCipher)
@@ -2177,10 +2461,10 @@ func (s *Service) RetryApprovalExplanation(ctx context.Context, approvalID, acto
 	}
 	var review domain.CommandReview
 	var reviewErr error
-	if freshExplainer, ok := explainer.(FreshCommandExplainer); ok {
-		review, reviewErr = freshExplainer.ReviewFresh(explanationCtx, input)
+	if freshReviewer, ok := reviewer.(FreshApprovalReviewer); ok {
+		review, reviewErr = freshReviewer.ReviewFresh(explanationCtx, input)
 	} else {
-		review, reviewErr = explainer.Review(explanationCtx, input)
+		review, reviewErr = reviewer.Review(explanationCtx, input)
 	}
 	cancel()
 	if retryCtx.Err() != nil {
@@ -2306,6 +2590,14 @@ func normalizeRequest(req *domain.ExecRequest, limits config.Limits) {
 	if req.Env == nil {
 		req.Env = map[string]string{}
 	}
+	if req.Mode == domain.ExecSSHShellStart {
+		if req.ShellCols == 0 {
+			req.ShellCols = 120
+		}
+		if req.ShellRows == 0 {
+			req.ShellRows = 32
+		}
+	}
 }
 
 func canonicalRequest(req domain.ExecRequest) (string, string, error) {
@@ -2315,16 +2607,6 @@ func canonicalRequest(req domain.ExecRequest) (string, string, error) {
 	}
 	digest := sha256.Sum256(data)
 	return string(data), hex.EncodeToString(digest[:]), nil
-}
-
-func approvalFingerprint(req domain.ExecRequest) (string, error) {
-	req.Reason = ""
-	data, err := json.Marshal(req)
-	if err != nil {
-		return "", err
-	}
-	digest := sha256.Sum256(data)
-	return hex.EncodeToString(digest[:]), nil
 }
 
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'" }

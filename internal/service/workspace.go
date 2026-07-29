@@ -552,6 +552,63 @@ func (s *Service) PreviewAdminWorkspaceFile(workspaceID, relativePath string) (W
 	return result, nil
 }
 
+func (s *Service) SaveAdminWorkspaceTextFile(ctx context.Context, workspaceID, relativePath, content string) (WorkspaceUploadResult, error) {
+	workspace, ok := s.workspaceByID(workspaceID)
+	if !ok {
+		return WorkspaceUploadResult{}, fmt.Errorf("workspace %q not found", workspaceID)
+	}
+	if workspace.Access != "read_write" {
+		return WorkspaceUploadResult{}, fmt.Errorf("workspace %q is read_only", workspace.ID)
+	}
+	if len(content) > maxWorkspaceUploadBytes {
+		return WorkspaceUploadResult{}, fmt.Errorf("workspace text file exceeds 100 MiB")
+	}
+	if err := ctx.Err(); err != nil {
+		return WorkspaceUploadResult{}, err
+	}
+	relativePath = strings.TrimSpace(relativePath)
+	path, err := s.resolveWorkspacePath(workspace, relativePath, false)
+	if err != nil {
+		return WorkspaceUploadResult{}, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return WorkspaceUploadResult{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return WorkspaceUploadResult{}, fmt.Errorf("workspace edit target is not a regular file")
+	}
+	if info.Size() > maxWorkspaceUploadBytes {
+		return WorkspaceUploadResult{}, fmt.Errorf("workspace text file exceeds 100 MiB")
+	}
+	current, err := os.ReadFile(path)
+	if err != nil {
+		return WorkspaceUploadResult{}, err
+	}
+	if bytes.IndexByte(current, 0) >= 0 || !utf8.Valid(current) {
+		return WorkspaceUploadResult{}, fmt.Errorf("workspace edit target is binary")
+	}
+	suffix := time.Now().UTC().Format("20060102T150405Z") + "-" + ids.New("file")
+	temporary := filepath.Join(filepath.Dir(path), ".opspilot-"+filepath.Base(path)+"-"+suffix+".tmp")
+	if err := writeSyncedFile(temporary, []byte(content), info.Mode().Perm()); err != nil {
+		return WorkspaceUploadResult{}, err
+	}
+	defer os.Remove(temporary)
+	if err := ctx.Err(); err != nil {
+		return WorkspaceUploadResult{}, err
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		return WorkspaceUploadResult{}, err
+	}
+	if err := syncLocalDirectory(filepath.Dir(path)); err != nil {
+		return WorkspaceUploadResult{}, err
+	}
+	digest := sha256.Sum256([]byte(content))
+	return WorkspaceUploadResult{
+		WorkspaceID: workspace.ID, Path: relativePath, Size: int64(len(content)), SHA256: hex.EncodeToString(digest[:]),
+	}, nil
+}
+
 func (s *Service) DeleteAdminWorkspaceEntry(ctx context.Context, workspaceID, relativePath, actor string) (WorkspaceDeleteResult, error) {
 	workspace, ok := s.workspaceByID(workspaceID)
 	if !ok {
@@ -1225,14 +1282,62 @@ func (s *Service) executeWorkspaceHostShell(ctx context.Context, workspace confi
 	execCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
 	args := []string{"-se"}
+	var cleanupPowerShellScript func() error
 	if runtime.GOOS == "windows" {
-		args = []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "-"}
+		scriptPath, cleanup, scriptErr := createWorkspacePowerShellScript(req.Script)
+		if scriptErr != nil {
+			return sshx.RawResult{}, scriptErr
+		}
+		cleanupPowerShellScript = cleanup
+		args = []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath}
 	}
 	command := exec.CommandContext(execCtx, shell, args...)
 	command.Dir = resolvedCwd
 	command.Env = workspaceHostEnvironment(workspace.Root, req.Env)
-	command.Stdin = strings.NewReader(req.Script)
-	return s.runWorkspaceProcess(execCtx, command, timeout, "host shell")
+	if runtime.GOOS != "windows" {
+		command.Stdin = strings.NewReader(req.Script)
+	}
+	result, runErr := s.runWorkspaceProcess(execCtx, command, timeout, "host shell")
+	if cleanupPowerShellScript != nil {
+		if cleanupErr := cleanupPowerShellScript(); cleanupErr != nil {
+			cleanupErr = fmt.Errorf("remove temporary PowerShell script: %w", cleanupErr)
+			if runErr != nil {
+				return result, errors.Join(runErr, cleanupErr)
+			}
+			return result, cleanupErr
+		}
+	}
+	return result, runErr
+}
+
+const workspacePowerShellUTF8Preamble = `$__opsPilotUtf8Encoding = [System.Text.UTF8Encoding]::new($false)
+[System.Console]::InputEncoding = $__opsPilotUtf8Encoding
+[System.Console]::OutputEncoding = $__opsPilotUtf8Encoding
+$OutputEncoding = $__opsPilotUtf8Encoding
+`
+
+func workspacePowerShellScript(script string) []byte {
+	const utf8BOM = "\xef\xbb\xbf"
+	return []byte(utf8BOM + workspacePowerShellUTF8Preamble + script)
+}
+
+func createWorkspacePowerShellScript(script string) (string, func() error, error) {
+	directory, err := os.MkdirTemp("", "opspilot-workspace-shell-*")
+	if err != nil {
+		return "", nil, fmt.Errorf("create temporary PowerShell directory: %w", err)
+	}
+	cleanup := func() error {
+		return os.RemoveAll(directory)
+	}
+	path := filepath.Join(directory, "script.ps1")
+	if err := os.WriteFile(path, workspacePowerShellScript(script), 0o600); err != nil {
+		cleanupErr := cleanup()
+		if cleanupErr != nil {
+			err = errors.Join(err, fmt.Errorf("remove temporary PowerShell directory: %w", cleanupErr))
+		}
+		return "", nil, fmt.Errorf("write temporary PowerShell script: %w", err)
+	}
+	return path, cleanup, nil
 }
 
 func workspaceHostEnvironment(workspaceRoot string, input map[string]string) []string {

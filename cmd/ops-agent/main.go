@@ -34,7 +34,7 @@ import (
 	"eino-ops-agent/internal/store"
 )
 
-const version = "0.1.4"
+const version = "0.1.5"
 
 type application struct {
 	config    config.Config
@@ -360,7 +360,7 @@ func hostCommand(ctx context.Context, app *application, args []string) error {
 			return fmt.Errorf("host ID is required")
 		}
 		if args[0] == "probe" {
-			value, err := app.service.ProbeHost(ctx, args[1])
+			value, err := app.service.ProbeHost(ctx, args[1], "cli")
 			return printJSON(value, err)
 		}
 		if args[0] == "scan-key" {

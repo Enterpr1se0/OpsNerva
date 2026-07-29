@@ -60,13 +60,46 @@ func TestModelRequestRetryPolicy(t *testing.T) {
 	if modelRequestRetryDecision(ctx, 1, schema.AssistantMessage("partial", nil), errors.New("connection reset")).Retry {
 		t.Fatal("partial model output was marked retryable")
 	}
-	if modelRequestRetryDecision(ctx, 2, nil, context.DeadlineExceeded).Retry {
-		t.Fatal("a second model timeout was marked retryable")
+	if !modelRequestRetryDecision(ctx, 2, nil, context.DeadlineExceeded).Retry {
+		t.Fatal("a second model timeout was not marked retryable")
+	}
+	if modelRequestRetryDecision(ctx, 3, nil, context.DeadlineExceeded).Retry {
+		t.Fatal("a third model timeout was marked retryable")
+	}
+	if !modelRequestRetryDecision(ctx, 4, nil, &modelopenai.APIError{HTTPStatusCode: 503}).Retry {
+		t.Fatal("the fourth transient provider failure was not marked retryable")
+	}
+	if modelRequestRetryDecision(ctx, 5, nil, &modelopenai.APIError{HTTPStatusCode: 503}).Retry {
+		t.Fatal("a fifth transient provider failure was marked retryable")
 	}
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
 	if modelRequestRetryDecision(cancelled, 1, nil, &modelopenai.APIError{HTTPStatusCode: 502}).Retry {
 		t.Fatal("a canceled request was marked retryable")
+	}
+}
+
+func TestModelRequestRetryNoticeMatchesBackoff(t *testing.T) {
+	var notices []modelRequestRetryNotice
+	ctx := withModelRequestRetryNotifier(context.Background(), func(notice modelRequestRetryNotice) {
+		notices = append(notices, notice)
+	})
+	for attempt, expectedDelay := range []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second} {
+		retryAttempt := attempt + 1
+		if !modelRequestRetryDecision(ctx, retryAttempt, nil, &modelopenai.APIError{HTTPStatusCode: 502}).Retry {
+			t.Fatalf("attempt %d was not marked retryable", retryAttempt)
+		}
+		if delay := modelRequestRetryBackoff(ctx, retryAttempt); delay != expectedDelay {
+			t.Fatalf("attempt %d delay = %v, want %v", retryAttempt, delay, expectedDelay)
+		}
+	}
+	if len(notices) != modelRequestMaxRetries {
+		t.Fatalf("notices = %#v", notices)
+	}
+	for index, notice := range notices {
+		if notice.Attempt != index+1 || notice.Max != modelRequestMaxRetries || notice.Delay != time.Second*time.Duration(1<<index) {
+			t.Fatalf("notice %d = %#v", index, notice)
+		}
 	}
 }
 

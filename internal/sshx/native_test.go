@@ -35,6 +35,23 @@ type testSSHServer struct {
 	wg               sync.WaitGroup
 }
 
+type shellInputBuffer struct {
+	bytes.Buffer
+}
+
+func (*shellInputBuffer) Close() error { return nil }
+
+func TestNativeShellInterruptWritesPTYControlByte(t *testing.T) {
+	input := &shellInputBuffer{}
+	session := &nativeShellSession{stdin: input, done: make(chan struct{})}
+	if err := session.Interrupt(); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(input.Bytes(), []byte{0x03}) {
+		t.Fatalf("interrupt bytes = %v, want [3]", input.Bytes())
+	}
+}
+
 func startTestSSHServer(t *testing.T, password string) *testSSHServer {
 	t.Helper()
 	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
@@ -171,7 +188,7 @@ func (s *testSSHServer) handleSession(channel ssh.Channel, requests <-chan *ssh.
 				}
 				return
 			}
-			if strings.Contains(payload.Command, "bash -se") {
+			if strings.Contains(payload.Command, "bash -s") {
 				_, _ = io.ReadAll(channel)
 			}
 			_, _ = io.WriteString(channel, "native-ok\n")
@@ -220,6 +237,9 @@ func TestNativeSSHTrustExecAndExitStatus(t *testing.T) {
 	if key.Trusted {
 		t.Fatal("unrecorded host key was reported as trusted")
 	}
+	if _, ok := transport.StoredHostKey(connection.Target); ok {
+		t.Fatal("unrecorded host key was found in known_hosts")
+	}
 	if _, err := transport.TrustHostKey(context.Background(), connection, "SHA256:not-the-key"); err == nil {
 		t.Fatal("mismatched host key fingerprint was trusted")
 	}
@@ -229,6 +249,10 @@ func TestNativeSSHTrustExecAndExitStatus(t *testing.T) {
 	}
 	if !trustedKey.Trusted {
 		t.Fatal("trusted host key was not marked trusted")
+	}
+	storedKey, ok := transport.StoredHostKey(connection.Target)
+	if !ok || !storedKey.Trusted || storedKey.Fingerprint != key.Fingerprint || storedKey.Algorithm != key.Algorithm {
+		t.Fatalf("stored host key was not recovered from known_hosts: %#v found=%t", storedKey, ok)
 	}
 	rescannedKey, err := transport.ScanHostKey(context.Background(), connection)
 	if err != nil {
@@ -305,6 +329,101 @@ func TestNativeSFTPUpload(t *testing.T) {
 	}
 	if string(data) != "native sftp payload" {
 		t.Fatalf("unexpected uploaded data %q", data)
+	}
+}
+
+func TestNativeSFTPFileManagerOperations(t *testing.T) {
+	server := startTestSSHServer(t, "sftp-manager-password")
+	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
+	transport := NewNativeSSHTransport(config.SSH{DefaultKnownHosts: knownHosts}, config.Default().Limits)
+	connection := ConnectionSpec{Target: server.host()}
+	connection.Target.ID = "sftp_manager_host"
+	key, err := transport.ScanHostKey(context.Background(), connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transport.TrustHostKey(context.Background(), connection, key.Fingerprint); err != nil {
+		t.Fatal(err)
+	}
+
+	directory := filepath.ToSlash(filepath.Join(server.root, "managed"))
+	created, err := transport.CreateSFTPDirectory(context.Background(), connection, directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Type != "directory" || created.Path != directory {
+		t.Fatalf("unexpected created directory: %#v", created)
+	}
+
+	filePath := directory + "/hello.txt"
+	uploaded, err := transport.UploadSFTPFile(context.Background(), connection, filePath, strings.NewReader("hello over SFTP"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uploaded.Type != "file" || uploaded.Size != int64(len("hello over SFTP")) {
+		t.Fatalf("unexpected uploaded entry: %#v", uploaded)
+	}
+	if _, err := transport.UploadSFTPFile(context.Background(), connection, filePath, strings.NewReader("conflict"), false); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("upload conflict was not rejected: %v", err)
+	}
+
+	listed, err := transport.ListSFTPFiles(context.Background(), connection, directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listed.HostID != connection.Target.ID || len(listed.Entries) != 1 || listed.Entries[0].Name != "hello.txt" {
+		t.Fatalf("unexpected directory listing: %#v", listed)
+	}
+
+	download, err := transport.OpenSFTPFile(context.Background(), connection, filePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloaded, err := io.ReadAll(download.Reader)
+	if closeErr := download.Reader.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(downloaded) != "hello over SFTP" {
+		t.Fatalf("unexpected downloaded content %q", downloaded)
+	}
+	if err := os.Chmod(filepath.FromSlash(filePath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	replaced, err := transport.UploadSFTPFile(context.Background(), connection, filePath, strings.NewReader("edited over SFTP"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replaced.Size != int64(len("edited over SFTP")) {
+		t.Fatalf("unexpected replaced entry: %#v", replaced)
+	}
+	replacedInfo, err := os.Stat(filepath.FromSlash(filePath))
+	if err != nil || replacedInfo.Mode().Perm() != 0o750 {
+		t.Fatalf("SFTP overwrite mode = %v, err = %v", replacedInfo.Mode().Perm(), err)
+	}
+	replacedContent, err := os.ReadFile(filepath.FromSlash(filePath))
+	if err != nil || string(replacedContent) != "edited over SFTP" {
+		t.Fatalf("SFTP overwrite content = %q, err = %v", replacedContent, err)
+	}
+
+	renamedPath := directory + "/renamed.txt"
+	renamed, err := transport.RenameSFTPEntry(context.Background(), connection, filePath, renamedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renamed.Path != renamedPath || renamed.Name != "renamed.txt" {
+		t.Fatalf("unexpected renamed entry: %#v", renamed)
+	}
+	if _, err := transport.RemoveSFTPEntry(context.Background(), connection, renamedPath, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transport.RemoveSFTPEntry(context.Background(), connection, directory, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.FromSlash(directory)); !os.IsNotExist(err) {
+		t.Fatalf("managed directory still exists: %v", err)
 	}
 }
 

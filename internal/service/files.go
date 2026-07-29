@@ -54,9 +54,11 @@ func buildRemoteFileReadScript(req domain.ExecRequest) string {
 	quoted := shellQuote(req.RemotePath)
 	lines := []string{
 		"set -e",
+		"file_stat=$(stat -Lc '%s\t%a\t%U\t%G\t%Y' -- " + quoted + ")",
+		"file_sha256=$(sha256sum -- " + quoted + ")",
 		"printf '" + fileMetaMarker + "\\n'",
-		"stat -Lc '%s\\t%a\\t%U\\t%G\\t%Y' -- " + quoted,
-		"sha256sum -- " + quoted,
+		"printf '%s\\n' \"$file_stat\"",
+		"printf '%s\\n' \"$file_sha256\"",
 		"printf '" + fileContentMarker + "\\n'",
 	}
 	switch {

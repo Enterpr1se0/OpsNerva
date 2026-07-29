@@ -67,14 +67,15 @@ type LoggingDiagnostics struct {
 }
 
 type AgentDiagnostics struct {
-	Available                 bool   `json:"available"`
-	Source                    string `json:"source"`
-	ProviderName              string `json:"provider_name,omitempty"`
-	Model                     string `json:"model,omitempty"`
-	ToolCount                 int    `json:"tool_count"`
-	ExplanationAgentAvailable bool   `json:"explanation_agent_available"`
-	ModelError                string `json:"model_error,omitempty"`
-	ExplanationError          string `json:"explanation_error,omitempty"`
+	Available              bool   `json:"available"`
+	Source                 string `json:"source"`
+	ProviderName           string `json:"provider_name,omitempty"`
+	Model                  string `json:"model,omitempty"`
+	ToolCount              int    `json:"tool_count"`
+	ApprovalAgentAvailable bool   `json:"approval_agent_available"`
+	ApprovalMode           string `json:"approval_mode"`
+	ModelError             string `json:"model_error,omitempty"`
+	ApprovalError          string `json:"approval_error,omitempty"`
 }
 
 type ResourceDiagnostics struct {

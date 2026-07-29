@@ -27,7 +27,8 @@ type toolCallActivity struct {
 }
 
 type toolInputValidationError struct {
-	message string
+	message    string
+	validation *domain.ToolValidationDetails
 }
 
 func (err *toolInputValidationError) Error() string {
@@ -36,6 +37,10 @@ func (err *toolInputValidationError) Error() string {
 
 func invalidToolInput(format string, arguments ...any) error {
 	return &toolInputValidationError{message: fmt.Sprintf(format, arguments...)}
+}
+
+func invalidStructuredToolInput(message string, validation domain.ToolValidationDetails) error {
+	return &toolInputValidationError{message: message, validation: &validation}
 }
 
 func withToolActivityNotifier(ctx context.Context, notify func(toolCallActivity)) context.Context {
@@ -117,7 +122,7 @@ func fatalToolError(ctx context.Context, err error) error {
 
 func toolFailureFromError(toolName string, err error) domain.ToolFailure {
 	code, message, retryable, nextAction := classifyAgentToolError(toolName, err)
-	return domain.ToolFailure{
+	failure := domain.ToolFailure{
 		ToolMeta: domain.ToolMeta{
 			ToolVersion: "1.1",
 			OK:          false,
@@ -128,6 +133,11 @@ func toolFailureFromError(toolName string, err error) domain.ToolFailure {
 		},
 		Status: "failed",
 	}
+	var inputValidation *toolInputValidationError
+	if errors.As(err, &inputValidation) {
+		failure.Validation = inputValidation.validation
+	}
+	return failure
 }
 
 func classifyAgentToolError(toolName string, err error) (code, message string, retryable bool, nextAction string) {
@@ -153,6 +163,12 @@ func classifyAgentToolError(toolName string, err error) (code, message string, r
 			return "outcome_unknown", "the external MCP call timed out and may have taken effect", false, "inspect the external system state before deciding whether another call is safe"
 		}
 		return "timeout", "the function tool did not finish before its timeout", true, "retry only after narrowing the operation or increasing its configured timeout"
+	case toolName == "ssh_shell" &&
+		(strings.Contains(messageLower, "requesting a credential") || strings.Contains(messageLower, "private web terminal")):
+		return "operator_input_required", rootMessage, false, "wait for the operator to enter the credential in the private Web terminal; do not send, request, or retry the credential"
+	case toolName == "ssh_shell" &&
+		(strings.Contains(messageLower, "shell limit reached") || strings.Contains(messageLower, "service is shutting down")):
+		return "unavailable", rootMessage, false, "close an active shell or wait until the service is available before starting another one"
 	case strings.Contains(messageLower, "required"), strings.Contains(messageLower, "invalid"), strings.Contains(messageLower, "unsupported"):
 		return "validation_failed", rootMessage, false, "correct the function tool input using this error; do not repeat unchanged input"
 	case strings.Contains(messageLower, "changed"), strings.Contains(messageLower, "conflict"):
@@ -198,7 +214,7 @@ func normalizeToolCallErrors(next compose.InvokableToolEndpoint) compose.Invokab
 		started := time.Now()
 		logger := observability.FromContext(ctx).With("component", "agent", "tool_name", input.Name, "tool_call_id", input.CallID)
 		notifyToolActivity(ctx, input)
-		ctx = service.WithExecutionOwner(ctx, input.CallID, input.Name)
+		ctx = service.WithExecutionOwner(ctx, input.CallID, input.Name, input.Arguments)
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				if ctx.Err() != nil {

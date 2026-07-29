@@ -25,7 +25,7 @@ func TestDefaultSystemPromptKeepsHardOperationalRules(t *testing.T) {
 		"Execute only the current in_progress step",
 		"Never request credentials",
 		"never run sudo or include passwords in tool input",
-		"Policy and human approval are authoritative",
+		"Policy and the configured approval mode are authoritative",
 		"never retry that operation in the same run",
 		"Never bypass policy",
 		"workspace_* may access only the conversation-bound Workspace",

@@ -6,16 +6,22 @@ import (
 	"eino-ops-agent/internal/domain"
 )
 
-func TestDecodeExplanationJSONAndRejectUnexpectedFields(t *testing.T) {
-	var explanation domain.CommandExplanation
-	response := "```json\n{\"summary\":\"重启服务\",\"mechanism\":\"systemd restarts the unit\",\"risks\":[\"requests may fail\"]}\n```"
-	if err := decodeJSONObject(response, &explanation); err != nil {
+func TestDecodeApprovalReviewJSONAndRejectUnexpectedFields(t *testing.T) {
+	var review struct {
+		Decision  string   `json:"decision"`
+		Reason    string   `json:"reason"`
+		Summary   string   `json:"summary"`
+		Mechanism string   `json:"mechanism"`
+		Risks     []string `json:"risks"`
+	}
+	response := "```json\n{\"decision\":\"allow\",\"reason\":\"范围明确\",\"summary\":\"重启服务\",\"mechanism\":\"systemd restarts the unit\",\"risks\":[\"requests may fail\"]}\n```"
+	if err := decodeJSONObject(response, &review); err != nil {
 		t.Fatal(err)
 	}
-	if explanation.Summary != "重启服务" || len(explanation.Risks) != 1 {
-		t.Fatalf("unexpected structured explanation: %#v", explanation)
+	if review.Decision != domain.ApprovalAgentAllow || review.Summary != "重启服务" || len(review.Risks) != 1 {
+		t.Fatalf("unexpected structured review: %#v", review)
 	}
-	if err := decodeJSONObject(`{"summary":"test","unexpected":true}`, &explanation); err == nil {
+	if err := decodeJSONObject(`{"decision":"allow","unexpected":true}`, &review); err == nil {
 		t.Fatal("expected an unknown structured field to be rejected")
 	}
 }

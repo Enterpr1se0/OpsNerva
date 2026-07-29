@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"eino-ops-agent/internal/domain"
+
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
@@ -35,6 +37,40 @@ func TestTypedToolInputErrorIsReportedAsValidationFailure(t *testing.T) {
 	if failure.OK || failure.Code != "validation_failed" || failure.Retryable || !strings.Contains(failure.Message, "host_id") {
 		t.Fatalf("unexpected typed input failure: %#v", failure)
 	}
+}
+
+func TestStructuredToolInputErrorPreservesCorrectionDetails(t *testing.T) {
+	failure := toolFailureFromError("ssh_shell", invalidStructuredToolInput(
+		"action=input received unsupported fields: host_id",
+		domain.ToolValidationDetails{
+			Action: "input", AllowedFields: []string{"action", "shell_id", "input", "submit", "reason"},
+			GotFields: []string{"action", "host_id"}, UnexpectedFields: []string{"host_id"},
+			Example: map[string]any{"action": "input", "shell_id": "shell_xxx", "input": "whoami", "submit": true},
+		},
+	))
+	if failure.Code != "validation_failed" || failure.Validation == nil {
+		t.Fatalf("structured validation details were lost: %#v", failure)
+	}
+	if failure.Validation.Action != "input" || len(failure.Validation.UnexpectedFields) != 1 ||
+		failure.Validation.UnexpectedFields[0] != "host_id" {
+		t.Fatalf("unexpected validation details: %#v", failure.Validation)
+	}
+}
+
+func TestSSHShellCredentialPromptRequiresPrivateOperatorInput(t *testing.T) {
+	failure := toolFailureFromError("ssh_shell", &shellCredentialPromptTestError{})
+	if failure.OK || failure.Code != "operator_input_required" || failure.Retryable {
+		t.Fatalf("unexpected credential prompt failure: %#v", failure)
+	}
+	if !strings.Contains(failure.NextAction, "private Web terminal") || !strings.Contains(failure.NextAction, "retry the credential") {
+		t.Fatalf("credential prompt next action is unclear: %#v", failure)
+	}
+}
+
+type shellCredentialPromptTestError struct{}
+
+func (*shellCredentialPromptTestError) Error() string {
+	return "the remote terminal is requesting a credential; wait for the operator to use the private Web terminal input"
 }
 
 func TestToolCallActivityIsPublishedBeforeExecution(t *testing.T) {

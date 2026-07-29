@@ -79,6 +79,25 @@ func (s *Service) resolveSSHConnection(ctx context.Context, target domain.Host) 
 	return connection, hex.EncodeToString(digest[:]), nil
 }
 
+func requireAgentHostAccess(actor string, host domain.Host) error {
+	if actor == "eino-agent" && !host.AgentEnabled {
+		return fmt.Errorf("host is not available to Agent")
+	}
+	return nil
+}
+
+func requireAgentSSHAccess(actor string, connection sshx.ConnectionSpec) error {
+	if err := requireAgentHostAccess(actor, connection.Target); err != nil {
+		return err
+	}
+	for _, jump := range connection.Jumps {
+		if err := requireAgentHostAccess(actor, jump); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Service) resolveSSHHostProxy(ctx context.Context, host domain.Host) (domain.Host, error) {
 	if host.ProxyID == "" {
 		return host, nil

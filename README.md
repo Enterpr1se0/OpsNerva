@@ -1,13 +1,13 @@
 # OpsPilot — AI SSH 运维 Agent
 
-OpsPilot 是一个使用 Go 与 Eino 构建的 AI 运维 Agent：LLM 通过受控工具完成 SSH 诊断、部署和恢复，而风险分级、人工审批、加密审计和输出脱敏全部由服务端强制执行——模型只能提出操作，批准与执行始终在你手里。
+OpsPilot 是一个使用 Go 与 Eino 构建的个人 AI 运维 Agent：LLM 通过受控工具完成 SSH 诊断、部署和恢复，服务端统一执行风险分级、可配置审批、加密审计和输出脱敏。
 
 ## 特性
 
-- **受控执行**：命令由确定性策略分级，变更需人工审批，危险操作逐次确认并填写原因，禁止项永久拒绝。
+- **受控执行**：命令由确定性策略分级，并支持 Manual、Auto 和 Full access 三种审批模式。
 - **内置跨平台 SSH**：支持 `ssh-agent`、上传私钥、密码、SOCKS5/HTTP 代理、ProxyJump 链、托管 sudo 和严格 Host Key 校验，不依赖系统 `ssh` 命令。
 - **多模型**：任意 OpenAI 兼容提供商，共享代理配置、连接测试、运行时热切换；支持向视觉模型发送图片。
-- **Workspace**：托管目录内的文件管理、补丁编辑和 Shell；Linux 可用 Bubblewrap 沙箱，宿主机 Shell 必须逐次审批。
+- **Workspace**：托管目录内的文件管理、补丁编辑和 Shell；Linux 可用 Bubblewrap 沙箱。
 - **可恢复会话**：会话、工具结果、任务计划和审批状态持久化，刷新页面不会中断正在运行的 Agent。
 - **加密审计**：命令、输出和凭据使用 AES-256-GCM 加密保存，模型只接收脱敏历史；审计页可检索并结构化展示每次执行。
 - **可扩展**：动态加载 Skill 与外部 MCP 工具，自身也可作为 MCP Server 接入其他客户端；内置 Tavily 网络搜索与网页提取。
@@ -48,7 +48,7 @@ docker run --rm -p 8080:8080 \
 
 ### 从源码构建
 
-需要 Git、Go 1.26+、Node.js 22+（Linux / macOS 另需 `make`）：
+需要 Git、Go 1.26+、Node.js 22.13+（Linux / macOS 另需 `make`）：
 
 ```bash
 git clone https://github.com/Enterpr1se0/eino-ops-agent.git
@@ -73,11 +73,11 @@ make build
 | 风险 | 例子 | 默认行为 |
 |---|---|---|
 | `read_only` | `ps`、`df`、`journalctl` | 自动执行 |
-| `change` | 写文件、安装依赖、重启服务 | 人工审批 |
-| `critical` | `rm`、`dd`、防火墙、磁盘操作 | 逐次审批并填写原因 |
-| `forbidden` | 读取私钥、关闭审计 | 永久拒绝 |
+| `change` | 写文件、安装依赖、重启服务 | Manual 下人工审批 |
+| `critical` | `rm`、`dd`、防火墙、磁盘操作 | Manual 下人工审批并填写原因 |
+| `forbidden` | 读取私钥、关闭审计 | Manual/Auto 下拒绝 |
 
-审批摘要绑定主机、命令、参数、环境和文件内容的 SHA-256，批准后的任何改动都会使其失效；模型只能查询审批状态，不能调用批准接口。自定义规则见 [configs/policy.yaml](configs/policy.yaml)。
+`Manual` 由用户审批；`Auto` 由无 Tool 的独立审批 Agent 审查原本需要审批的请求，异常时回退人工；`Full access` 允许主 Agent 跳过策略拦截和审批。三种模式都不会掩盖参数、连接、权限或命令本身的真实错误。审批摘要绑定主机、命令、参数、环境和文件内容的 SHA-256。自定义规则见 [configs/policy.yaml](configs/policy.yaml)。
 
 ## 开发
 

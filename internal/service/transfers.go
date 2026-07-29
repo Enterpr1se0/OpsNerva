@@ -23,7 +23,7 @@ func (s *Service) TransferFileBetweenHosts(ctx context.Context, sourceHostID, so
 	}, actor)
 }
 
-func (s *Service) bindSSHFileTransfer(ctx context.Context, destination domain.Host, req *domain.ExecRequest) (domain.Host, error) {
+func (s *Service) bindSSHFileTransfer(ctx context.Context, destination domain.Host, req *domain.ExecRequest, actor string) (domain.Host, error) {
 	if err := validateSSHFileTransferRequest(*req); err != nil {
 		return domain.Host{}, err
 	}
@@ -31,13 +31,19 @@ func (s *Service) bindSSHFileTransfer(ctx context.Context, destination domain.Ho
 	if err != nil {
 		return domain.Host{}, fmt.Errorf("load source SSH host: %w", err)
 	}
-	_, destinationDigest, err := s.resolveSSHConnection(ctx, destination)
+	destinationConnection, destinationDigest, err := s.resolveSSHConnection(ctx, destination)
 	if err != nil {
 		return domain.Host{}, fmt.Errorf("resolve destination SSH connection: %w", err)
 	}
-	_, sourceDigest, err := s.resolveSSHConnection(ctx, source)
+	if err := requireAgentSSHAccess(actor, destinationConnection); err != nil {
+		return domain.Host{}, err
+	}
+	sourceConnection, sourceDigest, err := s.resolveSSHConnection(ctx, source)
 	if err != nil {
 		return domain.Host{}, fmt.Errorf("resolve source SSH connection: %w", err)
+	}
+	if err := requireAgentSSHAccess(actor, sourceConnection); err != nil {
+		return domain.Host{}, err
 	}
 	bindSSHRequest(req, destinationDigest)
 	bindSSHTransferSource(req, sourceDigest)

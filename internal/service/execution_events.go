@@ -145,7 +145,7 @@ func (s *Service) clearExecutionOwner(runID string) {
 
 func terminalExecutionStatus(status string) bool {
 	switch status {
-	case "completed", "failed", "interrupted", "rejected", "denied", "expired":
+	case "completed", "partial", "failed", "interrupted", "rejected", "denied", "expired":
 		return true
 	default:
 		return false

@@ -56,6 +56,146 @@ func (t *NativeSSHTransport) ExecStream(ctx context.Context, connection Connecti
 	return t.execWithCallback(ctx, connection, req, callback)
 }
 
+func (t *NativeSSHTransport) OpenShell(ctx context.Context, connection ConnectionSpec, req domain.ExecRequest, cols, rows int, callback func(string, []byte)) (ShellSession, error) {
+	if err := validateNativeConnection(connection); err != nil {
+		return nil, err
+	}
+	if cols < 20 || cols > 500 {
+		cols = 120
+	}
+	if rows < 5 || rows > 200 {
+		rows = 32
+	}
+	command := "exec bash -l"
+	if req.Cwd != "" {
+		prefix, err := remotePrefix(req.Cwd, nil)
+		if err != nil {
+			return nil, err
+		}
+		command = prefix + command
+	}
+	command, initialInput, err := applyElevation(connection.Target, req, command, nil)
+	if err != nil {
+		return nil, err
+	}
+	client, err := t.connect(ctx, connection, nil, false)
+	if err != nil {
+		return nil, fmt.Errorf("connect native SSH shell: %w", err)
+	}
+	session, err := client.client.NewSession()
+	if err != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf("create SSH shell session: %w", err)
+	}
+	stdin, err := session.StdinPipe()
+	if err != nil {
+		_ = session.Close()
+		_ = client.Close()
+		return nil, fmt.Errorf("open SSH shell input: %w", err)
+	}
+	if callback != nil {
+		session.Stdout = callbackWriter{stream: "stdout", callback: callback}
+		session.Stderr = callbackWriter{stream: "stderr", callback: callback}
+	}
+	modes := ssh.TerminalModes{
+		ssh.ECHO:          1,
+		ssh.TTY_OP_ISPEED: 14400,
+		ssh.TTY_OP_OSPEED: 14400,
+	}
+	if err := session.RequestPty("xterm-256color", rows, cols, modes); err != nil {
+		_ = session.Close()
+		_ = client.Close()
+		return nil, fmt.Errorf("request SSH PTY: %w", err)
+	}
+	if err := session.Start(command); err != nil {
+		_ = session.Close()
+		_ = client.Close()
+		return nil, fmt.Errorf("start SSH shell: %w", err)
+	}
+	result := &nativeShellSession{
+		client: client, session: session, stdin: stdin, done: make(chan struct{}),
+	}
+	go result.wait()
+	if initialInput != nil {
+		data, readErr := io.ReadAll(initialInput)
+		if readErr != nil {
+			_ = result.Close()
+			return nil, fmt.Errorf("prepare managed sudo input: %w", readErr)
+		}
+		if len(data) > 0 {
+			if _, err := result.Write(data); err != nil {
+				_ = result.Close()
+				return nil, fmt.Errorf("send managed sudo input: %w", err)
+			}
+		}
+	}
+	return result, nil
+}
+
+type nativeShellSession struct {
+	client    *nativeClient
+	session   *ssh.Session
+	stdin     io.WriteCloser
+	done      chan struct{}
+	exit      ShellExit
+	waitMu    sync.RWMutex
+	closeOnce sync.Once
+}
+
+func (s *nativeShellSession) wait() {
+	err := s.session.Wait()
+	s.waitMu.Lock()
+	s.exit = nativeShellExit(err)
+	s.waitMu.Unlock()
+	close(s.done)
+	_ = s.client.Close()
+}
+
+func (s *nativeShellSession) Write(data []byte) (int, error) {
+	select {
+	case <-s.done:
+		return 0, io.ErrClosedPipe
+	default:
+		return s.stdin.Write(data)
+	}
+}
+
+func (s *nativeShellSession) Resize(cols, rows int) error {
+	if cols < 20 || cols > 500 || rows < 5 || rows > 200 {
+		return fmt.Errorf("terminal size is out of range")
+	}
+	select {
+	case <-s.done:
+		return io.ErrClosedPipe
+	default:
+		return s.session.WindowChange(rows, cols)
+	}
+}
+
+func (s *nativeShellSession) Interrupt() error {
+	_, err := s.Write([]byte{0x03})
+	return err
+}
+
+func (s *nativeShellSession) Wait() ShellExit {
+	<-s.done
+	s.waitMu.RLock()
+	defer s.waitMu.RUnlock()
+	return s.exit
+}
+
+func (s *nativeShellSession) Close() error {
+	var closeErr error
+	s.closeOnce.Do(func() {
+		_ = s.stdin.Close()
+		closeErr = s.session.Close()
+		if err := s.client.Close(); closeErr == nil {
+			closeErr = err
+		}
+	})
+	return closeErr
+}
+
 func (t *NativeSSHTransport) OpenTunnel(ctx context.Context, connection ConnectionSpec) (TunnelClient, error) {
 	if err := validateNativeConnection(connection); err != nil {
 		return nil, err
@@ -294,6 +434,42 @@ func (t *NativeSSHTransport) isHostKeyTrusted(host domain.Host, address string, 
 		return false
 	}
 	return callback(address, knownHostAddress(address), key) == nil
+}
+
+func (t *NativeSSHTransport) StoredHostKey(host domain.Host) (HostKey, bool) {
+	t.knownHostsMu.Lock()
+	defer t.knownHostsMu.Unlock()
+	knownHostsPath := t.knownHostsPath(host)
+	if knownHostsPath == "" {
+		return HostKey{}, false
+	}
+	contents, err := os.ReadFile(knownHostsPath)
+	if err != nil {
+		return HostKey{}, false
+	}
+	callback, err := knownhosts.New(knownHostsPath)
+	if err != nil {
+		return HostKey{}, false
+	}
+	address := normalizedSSHAddress(host)
+	for _, line := range strings.Split(string(contents), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		_, _, key, _, _, err := ssh.ParseKnownHosts([]byte(line + "\n"))
+		if err != nil || key == nil {
+			continue
+		}
+		if callback(address, knownHostAddress(address), key) == nil {
+			return HostKey{
+				Fingerprint: ssh.FingerprintSHA256(key),
+				Algorithm:   key.Type(),
+				Trusted:     true,
+			}, true
+		}
+	}
+	return HostKey{}, false
 }
 
 func (t *NativeSSHTransport) TrustHostKey(ctx context.Context, connection ConnectionSpec, expectedFingerprint string) (HostKey, error) {
@@ -586,4 +762,17 @@ func nativeExitCode(err error) int {
 		return exitErr.ExitStatus()
 	}
 	return -1
+}
+
+func nativeShellExit(err error) ShellExit {
+	if err == nil {
+		code := 0
+		return ShellExit{ExitCode: &code}
+	}
+	var exitErr *ssh.ExitError
+	if errors.As(err, &exitErr) {
+		code := exitErr.ExitStatus()
+		return ShellExit{ExitCode: &code, Signal: exitErr.Signal(), Err: err}
+	}
+	return ShellExit{Err: err}
 }

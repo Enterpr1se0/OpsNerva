@@ -51,10 +51,32 @@ type Transport interface {
 	Probe(context.Context, ConnectionSpec) (HostInfo, error)
 	ScanHostKey(context.Context, ConnectionSpec) (HostKey, error)
 	TrustHostKey(context.Context, ConnectionSpec, string) (HostKey, error)
+	StoredHostKey(domain.Host) (HostKey, bool)
 }
 
 type StreamingTransport interface {
 	ExecStream(context.Context, ConnectionSpec, domain.ExecRequest, func(stream string, data []byte)) (RawResult, error)
+}
+
+type ShellExit struct {
+	ExitCode *int
+	Signal   string
+	Err      error
+}
+
+// ShellSession is one persistent PTY-backed SSH process. The control plane
+// owns its lifetime and is responsible for binding writes to an approved
+// Agent conversation.
+type ShellSession interface {
+	Write([]byte) (int, error)
+	Resize(cols, rows int) error
+	Interrupt() error
+	Wait() ShellExit
+	Close() error
+}
+
+type InteractiveTransport interface {
+	OpenShell(context.Context, ConnectionSpec, domain.ExecRequest, int, int, func(stream string, data []byte)) (ShellSession, error)
 }
 
 type HostFileTransferTransport interface {
@@ -140,7 +162,7 @@ func buildRemoteCommand(req domain.ExecRequest) (string, io.Reader, error) {
 		if strings.TrimSpace(req.Script) == "" {
 			return "", nil, fmt.Errorf("script is empty")
 		}
-		return prefix + "bash -se", strings.NewReader(req.Script), nil
+		return prefix + "bash -s", strings.NewReader(req.Script), nil
 	default:
 		return "", nil, fmt.Errorf("unsupported execution mode %q", req.Mode)
 	}
@@ -168,7 +190,7 @@ func applyElevation(host domain.Host, req domain.ExecRequest, command string, st
 		// credential (or otherwise does not prompt), it leaves the password unread
 		// and would otherwise pass it to the elevated command. The gate below
 		// discards everything through the marker before starting the real command,
-		// regardless of whether sudo consumed the password line. For `bash -se`,
+		// regardless of whether sudo consumed the password line. For `bash -s`,
 		// this prevents the password from becoming the first script command.
 		marker, err := newSudoInputMarker(host.SudoPassword)
 		if err != nil {

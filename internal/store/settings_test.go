@@ -28,6 +28,12 @@ func TestLegacyReviewSettingsMigrateToOneExplanationToggle(t *testing.T) {
 VALUES(1,20,1,0,'2026-01-01T00:00:00Z')`); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE session_approval_grants (
+session_id TEXT NOT NULL, request_fingerprint TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+PRIMARY KEY(session_id,request_fingerprint));
+INSERT INTO session_approval_grants VALUES('session','fingerprint','2026-01-01T00:00:00Z','2027-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -55,9 +61,20 @@ VALUES(1,20,1,0,'2026-01-01T00:00:00Z')`); err != nil {
 	if settings.SystemPrompt != domain.DefaultSystemPrompt || settings.DefaultSystemPrompt != domain.DefaultSystemPrompt {
 		t.Fatalf("legacy settings did not receive the default system prompt: %#v", settings)
 	}
+	if settings.ApprovalMode != domain.ApprovalModeManual {
+		t.Fatalf("legacy settings did not default to manual approval: %#v", settings)
+	}
+	var legacyGrantTables int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='session_approval_grants'`).Scan(&legacyGrantTables); err != nil {
+		t.Fatal(err)
+	}
+	if legacyGrantTables != 0 {
+		t.Fatal("legacy session approval grants survived migration")
+	}
 	settings.ApprovalExplanationsEnabled = true
 	settings.SubagentModelProviderID = "model_fixture"
 	settings.SubagentTimeoutSeconds = 45
+	settings.ApprovalMode = domain.ApprovalModeAuto
 	settings.WorkspaceShellMode = domain.WorkspaceShellModeDisabled
 	if _, err := st.SaveSystemSettings(ctx, settings); err != nil {
 		t.Fatal(err)
@@ -75,7 +92,7 @@ VALUES(1,20,1,0,'2026-01-01T00:00:00Z')`); err != nil {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !settings.ApprovalExplanationsEnabled || settings.AgentMaxIterations != 20 || settings.SubagentModelProviderID != "model_fixture" || settings.SubagentTimeoutSeconds != 45 || settings.WorkspaceShellMode != domain.WorkspaceShellModeDisabled {
+	if !settings.ApprovalExplanationsEnabled || settings.AgentMaxIterations != 20 || settings.ApprovalMode != domain.ApprovalModeAuto || settings.SubagentModelProviderID != "model_fixture" || settings.SubagentTimeoutSeconds != 45 || settings.WorkspaceShellMode != domain.WorkspaceShellModeDisabled {
 		// Existing installations retain their explicitly stored iteration value.
 		t.Fatalf("migrated explanation setting did not persist: %#v", settings)
 	}

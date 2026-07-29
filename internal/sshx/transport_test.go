@@ -46,7 +46,7 @@ func TestBuildRemoteProgramQuotesArguments(t *testing.T) {
 }
 
 func TestManagedSudoPasswordUsesStdin(t *testing.T) {
-	command, stdin, err := applyElevation(domain.Host{SudoMode: "password", SudoPassword: "sudo-secret"}, domain.ExecRequest{Elevated: true}, "bash -se", strings.NewReader("echo ok\n"))
+	command, stdin, err := applyElevation(domain.Host{SudoMode: "password", SudoPassword: "sudo-secret"}, domain.ExecRequest{Elevated: true}, "bash -s", strings.NewReader("echo ok\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ exec "$@"
 			command, stdin, err := applyElevation(
 				domain.Host{SudoMode: "password", SudoPassword: password},
 				domain.ExecRequest{Elevated: true},
-				"bash -se",
+				"bash -s",
 				strings.NewReader("printf 'command-input-ok\\n'\n"),
 			)
 			if err != nil {
@@ -130,7 +130,7 @@ func TestBuildRemoteScriptUsesStdin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if command != "bash -se" {
+	if command != "bash -s" {
 		t.Fatalf("unexpected command %q", command)
 	}
 	data, _ := io.ReadAll(stdin)

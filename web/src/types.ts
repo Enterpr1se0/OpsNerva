@@ -3,17 +3,25 @@ export type Risk = 'read_only' | 'change' | 'critical' | 'forbidden'
 export type HostAuthType = 'agent' | 'key' | 'password'
 export type HostSudoMode = 'none' | 'nopasswd' | 'password'
 
+export interface HostKey {
+  fingerprint: string
+  algorithm?: string
+  trusted: boolean
+}
+
 export interface Host {
   id: string
   name: string
   address: string
   port: number
   user: string
+  agent_enabled: boolean
   auth_type: HostAuthType
   has_private_key: boolean
   known_hosts_file?: string
   proxy_jump_host_id?: string
   proxy_id?: string
+  host_key?: HostKey
   has_password: boolean
   sudo_mode: HostSudoMode
   has_sudo_password: boolean
@@ -27,6 +35,7 @@ export interface HostInput {
   address: string
   port: number
   user: string
+  agent_enabled: boolean
   auth_type: HostAuthType
   private_key: string
   known_hosts_file: string
@@ -60,12 +69,16 @@ export interface ApprovalExecutionResult {
   exit_code?: number
   stdout?: string
   stderr?: string
+  shell?: SSHShell
+  shell_usage?: SSHShellUsage
 }
 
 export interface Run {
   id: string
   session_id?: string
   host_id: string
+  tool_name?: string
+  tool_arguments_json?: string
   request_json: string
   risk: Risk
   status: string
@@ -101,6 +114,90 @@ export interface SSHTunnelList {
   count: number
 }
 
+export interface SSHTunnelStartInput {
+  host_id: string
+  remote_host: string
+  remote_port: number
+  local_port: number
+}
+
+export interface SSHShell {
+  id: string
+  run_id: string
+  session_id: string
+  surface: 'agent' | 'quick' | 'workspace'
+  host_id: string
+  host_name: string
+  user: string
+  elevated: boolean
+  cwd?: string
+  status: 'starting' | 'running' | 'stopping' | 'completed' | 'closed' | 'interrupted' | 'failed'
+  cols: number
+  rows: number
+  last_sequence: number
+  exit_code?: number
+  termination_reason?: 'requested_close' | 'service_stopped' | 'remote_exit' | 'remote_signal' | 'connection_lost' | 'start_failed'
+  error?: string
+  started_at: string
+  ended_at?: string
+}
+
+export interface SSHShellEvent {
+  shell_id: string
+  first_sequence?: number
+  sequence: number
+  stream: 'stdout' | 'stderr' | 'input' | 'control' | 'status'
+  source?: 'agent' | 'operator'
+  content?: string
+  sensitive?: boolean
+  input_bytes?: number
+  status?: string
+  created_at: string
+}
+
+export interface SSHShellSnapshot {
+  shell: SSHShell
+  events: SSHShellEvent[]
+  recent_output?: string
+  next_sequence: number
+}
+
+export interface SSHShellList {
+  shells: SSHShell[]
+  count: number
+}
+
+export interface SSHShellStartInput {
+  host_id: string
+  surface?: 'quick' | 'workspace'
+}
+
+export interface SSHShellUsage {
+  input: string
+  status: string
+  close: string
+}
+
+export interface SFTPFileEntry {
+  name: string
+  path: string
+  type: 'file' | 'directory' | 'symlink'
+  size?: number
+  mode: string
+  modified_at: string
+}
+
+export interface SFTPFileList {
+  host_id: string
+  path: string
+  entries: SFTPFileEntry[]
+}
+
+export interface SFTPMutationResult {
+  host_id: string
+  entry: SFTPFileEntry
+}
+
 export interface CommandExplanation {
   summary: string
   mechanism: string
@@ -110,6 +207,8 @@ export interface CommandExplanation {
 export interface CommandReview {
   status: 'pending' | 'completed' | 'degraded' | 'unavailable'
   model?: string
+  decision?: 'allow' | 'reject'
+  reason?: string
   deterministic_risk: Risk
   explanation?: CommandExplanation
   errors?: string[]
@@ -146,6 +245,9 @@ export interface AgentEvent {
   approval_id?: string
   status?: string
   risk?: Risk
+  retry_attempt?: number
+  retry_max?: number
+  retry_delay_ms?: number
 }
 
 export interface ChatSession {
@@ -272,12 +374,12 @@ export interface ModelCatalog {
 
 export interface ModelStatus {
   available: boolean
-  explanation_agent_available: boolean
-  explanation_provider_id?: string
-  explanation_provider_name?: string
-  explanation_model?: string
-  explanation_timeout_seconds?: number
-  explanation_error?: string
+  approval_agent_available: boolean
+  approval_provider_id?: string
+  approval_provider_name?: string
+  approval_model?: string
+  approval_timeout_seconds?: number
+  approval_error?: string
   source: 'database' | 'environment' | 'none'
   provider_id?: string
   name?: string
@@ -304,6 +406,7 @@ export interface SystemSettings {
   agent_max_iterations: number
   system_prompt: string
   default_system_prompt: string
+  approval_mode: ApprovalMode
   approval_explanations_enabled: boolean
   subagent_model_provider_id: string
   subagent_timeout_seconds: number
@@ -318,10 +421,12 @@ export interface SystemSettings {
 }
 
 export type WorkspaceShellMode = 'sandbox' | 'host' | 'disabled'
+export type ApprovalMode = 'manual' | 'auto' | 'full_access'
 
 export interface SystemSettingsInput {
   agent_max_iterations: number
   system_prompt?: string
+  approval_mode?: ApprovalMode
   approval_explanations_enabled?: boolean
   subagent_model_provider_id?: string
   subagent_timeout_seconds?: number

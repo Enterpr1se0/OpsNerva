@@ -136,7 +136,7 @@ func (e *Engine) Evaluate(_ context.Context, host domain.Host, req domain.ExecRe
 		}
 	}
 	if req.Mode == domain.ExecWorkspaceShell {
-		// Arbitrary local scripts always require an exact human approval. Static
+		// Arbitrary local scripts always pass through the configured approval mode. Static
 		// command classification cannot prove that wrapper programs such as env,
 		// find, or an interpreter invocation are free of workspace mutations.
 		risk = maxRisk(risk, domain.RiskChange)
@@ -162,6 +162,10 @@ func (e *Engine) Evaluate(_ context.Context, host domain.Host, req domain.ExecRe
 		risk = maxRisk(risk, domain.RiskChange)
 		hits = append(hits, "ssh_local_port_forward")
 	}
+	if req.Mode == domain.ExecSSHShellStart {
+		risk = maxRisk(risk, domain.RiskChange)
+		hits = append(hits, "ssh_interactive_shell")
+	}
 	fileContentAccess := isFileContentAccess(req.Mode) || hasFileContentProgram(hits)
 	if fileContentAccess {
 		hits = append(hits, "file_content_access")
@@ -171,7 +175,7 @@ func (e *Engine) Evaluate(_ context.Context, host domain.Host, req domain.ExecRe
 	switch risk {
 	case domain.RiskReadOnly:
 		if fileContentAccess {
-			return domain.Decision{Risk: risk, Action: domain.ActionApprove, Reason: "reading file content requires human approval", RuleHits: unique(hits)}
+			return domain.Decision{Risk: risk, Action: domain.ActionApprove, Reason: "reading file content requires configured approval", RuleHits: unique(hits)}
 		}
 		return domain.Decision{Risk: risk, Action: domain.ActionAllow, Reason: "read-only command", RuleHits: unique(hits)}
 	case domain.RiskChange:
@@ -362,6 +366,15 @@ func shellSource(req domain.ExecRequest) (string, error) {
 		}
 		return "ssh-tunnel --local " + shellQuote(fmt.Sprintf("127.0.0.1:%d", req.TunnelLocalPort)) +
 			" --remote " + shellQuote(net.JoinHostPort(req.TunnelRemoteHost, strconv.Itoa(req.TunnelRemotePort))), nil
+	case domain.ExecSSHShellStart:
+		if req.HostID == "" {
+			return "", fmt.Errorf("interactive SSH shell requires a host")
+		}
+		command := "interactive-shell"
+		if req.Cwd != "" {
+			command += " --cwd " + shellQuote(req.Cwd)
+		}
+		return command, nil
 	default:
 		return "", fmt.Errorf("unsupported execution mode %q", req.Mode)
 	}

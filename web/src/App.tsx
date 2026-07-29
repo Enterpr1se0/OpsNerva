@@ -1,19 +1,25 @@
 import { FormEvent, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
+import type { TFunction } from 'i18next'
+import type { Terminal as XTermInstance } from '@xterm/xterm'
+import '@xterm/xterm/css/xterm.css'
 import {
   Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronLeft, ChevronRight, CircleDot, Clock3, Cpu, Edit3, Eye, EyeOff, FileText, FolderOpen, FunctionSquare, History, ImagePlus, KeyRound, LockKeyhole, LogOut,
   Cable, Download, ListChecks, LoaderCircle, Plus, Power, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, Square, TerminalSquare, Trash2, UploadCloud, UserRound, X, Zap,
 } from 'lucide-react'
-import { api, chatAttachmentURL, streamChat, workspaceFileEventsURL } from './api'
+import { api, chatAttachmentURL, sftpDownloadURL, sshShellEventsURL, streamChat, workspaceFileEventsURL } from './api'
 import i18n, { localeFor, type SupportedLanguage } from './i18n'
-import type { AgentEvent, AgentPlan, Approval, ApprovalExecutionResult, ChatMessage, ChatSession, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelProvider, ModelProviderInput, ModelProviderKind, Proxy, ProxyInput, Run, ServerLogEntry, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
+import { TextFileEditor } from './TextFileEditor'
+import type { AgentEvent, AgentPlan, Approval, ApprovalExecutionResult, ApprovalMode, ChatMessage, ChatSession, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelProvider, ModelProviderInput, ModelProviderKind, Proxy, ProxyInput, Run, ServerLogEntry, SFTPFileEntry, SSHShell, SSHShellEvent, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
 
-type Page = 'chat' | 'config' | 'extensions' | 'audit' | 'logs'
+type Page = 'chat' | 'ssh' | 'config' | 'extensions' | 'audit' | 'logs'
 type ChatEntryImage = {id:string;name:string;mimeType:string;sizeBytes:number;url:string}
 type PendingChatImage = {id:string;file:File;url:string}
 type ChatEntry = { id: string; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; tool?: string; toolCallId?:string; runId?:string; transient?:boolean; liveStdout?:string; liveStderr?:string; images?:ChatEntryImage[]; active?: boolean; streaming?: boolean; status?: 'pending' | 'completed' | 'failed' }
+type ModelRetryState = {attempt:number;max:number;readyAt:number}
 type ActiveChatStream = { id: string; sessionId: string; controller: AbortController }
 
 function historyEntries(messages:ChatMessage[],sessionID:string):ChatEntry[]{
@@ -49,7 +55,7 @@ function updateToolRunStatus(entries:ChatEntry[],runID:string,status:string){
 		const result=jsonRecord(payload.result),task=jsonRecord(payload.task)
 		const itemRunID=item.runId||textValue(payload.run_id)||textValue(result?.run_id)||textValue(task?.run_id)
 		const currentStatus=textValue(payload.status)||textValue(result?.status)||textValue(task?.status)
-		if(itemRunID===runID&&status==='in_progress'&&!item.transient&&['completed','failed','interrupted','rejected','denied','expired'].includes(currentStatus))return item
+		if(itemRunID===runID&&status==='in_progress'&&!item.transient&&['completed','partial','failed','interrupted','rejected','denied','expired'].includes(currentStatus))return item
 		return itemRunID===runID?{...item,runId:runID,content:toolContentWithStatus(item.content,status),transient:status==='in_progress'||status==='approval_required'}:item
 	})
 }
@@ -142,15 +148,18 @@ function App() {
   const [approvals, setApprovals] = useState<Approval[]>([])
   const [runs, setRuns] = useState<Run[]>([])
   const [sshTunnels,setSSHTunnels]=useState<SSHTunnel[]>([])
+  const [sshShells,setSSHShells]=useState<SSHShell[]>([])
+  const [selectedShell,setSelectedShell]=useState<SSHShell|null>(null)
+  const [openConnectionPanel,setOpenConnectionPanel]=useState<'tunnel'|'shell'|null>(null)
   const [error, setError] = useState('')
 	const [agentStreaming,setAgentStreaming]=useState(false)
 
   const refresh = useCallback(async () => {
     try {
-	  const [nextHealth, nextHosts, nextProviders, nextProxies, nextSettings, nextCapabilities, nextToolCatalog, nextSkills, nextMCPServers, nextApprovals, nextRuns, nextSSHTunnels] = await Promise.all([
-		api.health(), api.hosts(), api.modelProviders(), api.proxies(), api.systemSettings(), api.capabilities(), api.llmTools(), api.skills(), api.mcpServers(), api.approvals(), api.runs(), api.sshTunnels(),
+	  const [nextHealth, nextHosts, nextProviders, nextProxies, nextSettings, nextCapabilities, nextToolCatalog, nextSkills, nextMCPServers, nextApprovals, nextRuns, nextSSHTunnels, nextSSHShells] = await Promise.all([
+		api.health(), api.hosts(), api.modelProviders(), api.proxies(), api.systemSettings(), api.capabilities(), api.llmTools(), api.skills(), api.mcpServers(), api.approvals(), api.runs(), api.sshTunnels(), api.sshShells(),
       ])
-	  setHealth(nextHealth); setHosts(nextHosts); setProviders(nextProviders); setProxies(nextProxies);setSettings(nextSettings);setCapabilities(nextCapabilities);setToolCatalog(nextToolCatalog);setSkills(nextSkills);setMCPServers(nextMCPServers); setApprovals(nextApprovals); setRuns(nextRuns);setSSHTunnels(nextSSHTunnels.tunnels||[]); setError('')
+	  setHealth(nextHealth); setHosts(nextHosts); setProviders(nextProviders); setProxies(nextProxies);setSettings(nextSettings);setCapabilities(nextCapabilities);setToolCatalog(nextToolCatalog);setSkills(nextSkills);setMCPServers(nextMCPServers); setApprovals(nextApprovals); setRuns(nextRuns);setSSHTunnels(nextSSHTunnels.tunnels||[]);setSSHShells(nextSSHShells.shells||[]); setError('')
 	} catch (err) { const message=errorText(err);if(/authentication required/i.test(message))setAuth('guest');setError(message) }
   }, [])
 	const refreshApprovals=useCallback(async(decidedID?:string)=>{
@@ -199,12 +208,23 @@ function App() {
 			setError(errorText(err))
 		}
 	}
+	const registerSSHTunnel=(tunnel:SSHTunnel)=>{
+		setSSHTunnels(current=>[...current.filter(item=>item.id!==tunnel.id),tunnel])
+	}
+	const rememberSSHShell=(shell:SSHShell)=>{
+		setSSHShells(current=>[...current.filter(item=>item.id!==shell.id),shell])
+	}
+	const registerSSHShell=(shell:SSHShell)=>{
+		rememberSSHShell(shell)
+		setSelectedShell(shell)
+	}
 
   return <div className="app-shell">
     <aside className="sidebar">
       <div className="brand"><div className="brand-mark"><TerminalSquare size={23}/></div><div><strong>OpsPilot</strong></div></div>
       <nav>
         <Nav active={page === 'chat'} icon={<Bot/>} label={t('shell.nav.agent')} onClick={() => setPage('chat')}/>
+        <Nav active={page === 'ssh'} icon={<TerminalSquare/>} label={t('shell.nav.ssh')} onClick={() => setPage('ssh')}/>
         <Nav active={page === 'config'} icon={<Settings2/>} label={t('shell.nav.configuration')} onClick={() => setPage('config')}/>
 		<Nav active={page === 'extensions'} icon={<Braces/>} label={t('shell.nav.extensions')} onClick={() => setPage('extensions')}/>
         <Nav active={page === 'audit'} icon={<History/>} label={t('shell.nav.audit')} onClick={() => setPage('audit')}/>
@@ -212,24 +232,27 @@ function App() {
       </nav>
       <div className="sidebar-foot">
 			<button className="logout-button" onClick={async()=>{try{await api.logout()}finally{setAuth('guest')}}}><LogOut size={15}/>{t('shell.signOut')}</button>
-        <div className="build">v0.1.4</div>
+        <div className="build">v0.1.5</div>
       </div>
     </aside>
     <main>
 	      <header className="topbar"><div><h1>{title}</h1></div><div className="top-actions">
+        <SSHTunnelStatus tunnels={sshTunnels} hosts={hosts} open={openConnectionPanel==='tunnel'} onOpenChange={open=>setOpenConnectionPanel(current=>open?'tunnel':current==='tunnel'?null:current)} onStop={stopSSHTunnel} onCreated={registerSSHTunnel}/>
+        <SSHShellStatus shells={sshShells.filter(shell=>shell.surface!=='workspace')} hosts={hosts} open={openConnectionPanel==='shell'} onOpenChange={open=>setOpenConnectionPanel(current=>open?'shell':current==='shell'?null:current)} onOpen={shell=>{setOpenConnectionPanel(null);setSelectedShell(shell)}} onCreated={registerSSHShell}/>
         <LanguageSwitch/>
-        <SSHTunnelStatus tunnels={sshTunnels} onStop={stopSSHTunnel}/>
         <span className={`status ${health?.status === 'ok' ? 'online' : ''}`}><CircleDot size={14}/>{health?.status === 'ok' ? t('shell.online') : t('shell.disconnected')}</span>
         <button className="icon-button" onClick={refresh} title={t('shell.refresh')}><RefreshCw size={17}/></button>
       </div></header>
       {error && <div className="global-error"><ShieldAlert size={17}/>{error}<button onClick={() => setError('')}><X size={15}/></button></div>}
       <section className="workspace">
-			{page === 'chat' && <ChatPage hosts={hosts} tunnels={sshTunnels} approvals={approvals} runs={runs} capabilities={capabilities} imageTypes={settings?.chat_image_allowed_types||defaultChatImageTypes} agentAvailable={!!health?.agent_available} modelName={health?.model?.model} refresh={refresh} refreshApprovals={refreshApprovals} onStreamingChange={setAgentStreaming}/>}
+			{page === 'chat' && <ChatPage hosts={hosts} tunnels={sshTunnels} approvals={approvals} runs={runs} capabilities={capabilities} settings={settings} imageTypes={settings?.chat_image_allowed_types||defaultChatImageTypes} agentAvailable={!!health?.agent_available} modelName={health?.model?.model} refresh={refresh} refreshApprovals={refreshApprovals} onSettingsChanged={setSettings} onError={setError} onStreamingChange={setAgentStreaming}/>}
+			{page === 'ssh' && <SSHWorkspacePage hosts={hosts} shells={sshShells.filter(shell=>shell.surface==='workspace')} onCreated={rememberSSHShell} refresh={refresh} onError={message=>setError(message)}/>}
 		{page === 'config' && <ConfigurationPage hosts={hosts} providers={providers} proxies={proxies} settings={settings} capabilities={capabilities} health={health} refresh={refresh}/>}
 		{page === 'extensions' && <ExtensionsPage skills={skills} mcpServers={mcpServers} toolCatalog={toolCatalog} refresh={refresh}/>}
         {page === 'audit' && <AuditPage runs={runs} hosts={hosts}/>}
         {page === 'logs' && <LogsPage/>}
       </section>
+      {selectedShell&&<SSHShellTerminal initialShell={selectedShell} onClose={()=>setSelectedShell(null)} onChanged={()=>void refresh()} onError={message=>setError(message)}/>}
     </main>
   </div>
 }
@@ -243,24 +266,475 @@ function LanguageSwitch(){
 	</div>
 }
 
-function SSHTunnelStatus({tunnels,onStop}:{tunnels:SSHTunnel[];onStop:(id:string)=>Promise<void>}){
+function ApprovalModeStatus({settings,onChanged,onError}:{settings:SystemSettings|null;onChanged:(settings:SystemSettings)=>void;onError:(message:string)=>void}){
+	const {t}=useTranslation()
+	const mode=settings?.approval_mode??'manual'
+	const [open,setOpen]=useState(false)
+	const [busy,setBusy]=useState(false)
+	const [confirmFullAccess,setConfirmFullAccess]=useState(false)
+	const apply=async(next:ApprovalMode)=>{
+		if(!settings||next===mode){setOpen(false);return}
+		setBusy(true)
+		try{
+			const result=await api.saveSystemSettings({agent_max_iterations:settings.agent_max_iterations,approval_mode:next})
+			onChanged(result)
+			setOpen(false)
+		}catch(err){onError(errorText(err))}
+		finally{setBusy(false)}
+	}
+	const select=(next:ApprovalMode)=>{
+		if(next==='full_access'&&mode!=='full_access'){setOpen(false);setConfirmFullAccess(true);return}
+		void apply(next)
+	}
+	return <>
+		<details className={`approval-mode-status ${mode}`} open={open} onToggle={event=>setOpen(event.currentTarget.open)}>
+			<summary title={t('settings.approvalMode')} onClick={event=>{if(busy)event.preventDefault()}}>{busy?<LoaderCircle className="spin" size={13}/>:<ShieldCheck size={13}/>}<span>{t(`settings.approvalMode_${mode}`)}</span><ChevronRight size={12}/></summary>
+			<div className="approval-mode-menu">
+				{(['manual','auto','full_access'] as ApprovalMode[]).map(value=><button type="button" className={value===mode?'active':''} disabled={busy||!settings} onClick={()=>select(value)} key={value}><span>{t(`settings.approvalMode_${value}`)}</span>{value===mode&&<Check size={13}/>}</button>)}
+			</div>
+		</details>
+		{confirmFullAccess&&<FullAccessConfirmDialog onCancel={()=>setConfirmFullAccess(false)} onConfirm={()=>{setConfirmFullAccess(false);void apply('full_access')}}/>}
+	</>
+}
+
+function SSHTunnelStatus({tunnels,hosts,open,onOpenChange,onStop,onCreated}:{tunnels:SSHTunnel[];hosts:Host[];open:boolean;onOpenChange:(open:boolean)=>void;onStop:(id:string)=>Promise<void>;onCreated:(tunnel:SSHTunnel)=>void}){
 	const {t,i18n:instance}=useTranslation()
 	const [stopping,setStopping]=useState('')
-	return <details className="ssh-tunnel-status">
-		<summary title={t('tunnels.title')}><Cable size={14}/><span>{t('tunnels.short')}</span><em>{tunnels.length}</em></summary>
-		<div className="ssh-tunnel-popover">
-			<header><span><Cable size={15}/><b>{t('tunnels.title')}</b></span><small>{t('tunnels.localOnly')}</small></header>
-			<div>
-				{tunnels.map(tunnel=><section className={tunnel.status} key={tunnel.id}>
-					<div className="ssh-tunnel-route"><i/><code>{tunnel.host_name||tunnel.host_id}:{tunnel.remote_host}:{tunnel.remote_port}</code><span>→</span><code>localhost:{tunnel.local_port}</code></div>
-					<dl><div><dt>{t('common.status')}</dt><dd>{t(`statusLabels.${tunnel.status}`,{defaultValue:tunnel.status})}</dd></div><div><dt>{t('tunnels.connections')}</dt><dd>{tunnel.active_connections} / {tunnel.total_connections}</dd></div><div><dt>{t('tunnels.traffic')}</dt><dd>↑ {formatFileSize(tunnel.bytes_sent)} · ↓ {formatFileSize(tunnel.bytes_received)}</dd></div><div><dt>{t('tunnels.started')}</dt><dd>{new Date(tunnel.started_at).toLocaleTimeString(localeFor(instance.language))}</dd></div></dl>
-					<div className="ssh-tunnel-meta"><span>{tunnel.proxy_used?t('tunnels.viaProxy'):t('tunnels.direct')}</span><code>{tunnel.id}</code><button type="button" disabled={stopping===tunnel.id} onClick={async()=>{setStopping(tunnel.id);try{await onStop(tunnel.id)}finally{setStopping('')}}}>{stopping===tunnel.id?<LoaderCircle className="spin" size={12}/>:<Square size={10} fill="currentColor"/>}{t('tunnels.stop')}</button></div>
-					{tunnel.error&&<p><ShieldAlert size={12}/>{tunnel.error}</p>}
-				</section>)}
-				{!tunnels.length&&<div className="ssh-tunnel-empty">{t('tunnels.empty')}</div>}
+	const [creating,setCreating]=useState(false)
+	return <>
+		<details className="ssh-tunnel-status" open={open} onToggle={event=>onOpenChange(event.currentTarget.open)}>
+			<summary title={t('tunnels.title')}><Cable size={14}/><span>{t('tunnels.short')}</span><em>{tunnels.length}</em></summary>
+			<div className="ssh-tunnel-popover">
+				<header><span><Cable size={15}/><b>{t('tunnels.title')}</b></span><button type="button" disabled={!hosts.length} onClick={()=>{onOpenChange(false);setCreating(true)}}><Plus size={13}/>{t('tunnels.create')}</button></header>
+				<div>
+					{tunnels.map(tunnel=><section className={tunnel.status} key={tunnel.id}>
+						<div className="ssh-tunnel-route"><i/><code>{tunnel.host_name||tunnel.host_id}:{tunnel.remote_host}:{tunnel.remote_port}</code><span>→</span><code>localhost:{tunnel.local_port}</code></div>
+						<dl><div><dt>{t('common.status')}</dt><dd>{t(`statusLabels.${tunnel.status}`,{defaultValue:tunnel.status})}</dd></div><div><dt>{t('tunnels.connections')}</dt><dd>{tunnel.active_connections} / {tunnel.total_connections}</dd></div><div><dt>{t('tunnels.traffic')}</dt><dd>↑ {formatFileSize(tunnel.bytes_sent)} · ↓ {formatFileSize(tunnel.bytes_received)}</dd></div><div><dt>{t('tunnels.started')}</dt><dd>{new Date(tunnel.started_at).toLocaleTimeString(localeFor(instance.language))}</dd></div></dl>
+						<div className="ssh-tunnel-meta"><span>{tunnel.proxy_used?t('tunnels.viaProxy'):t('tunnels.direct')}</span><code>{tunnel.id}</code><button type="button" disabled={stopping===tunnel.id} onClick={async()=>{setStopping(tunnel.id);try{await onStop(tunnel.id)}finally{setStopping('')}}}>{stopping===tunnel.id?<LoaderCircle className="spin" size={12}/>:<Square size={10} fill="currentColor"/>}{t('tunnels.stop')}</button></div>
+						{tunnel.error&&<p><ShieldAlert size={12}/>{tunnel.error}</p>}
+					</section>)}
+					{!tunnels.length&&<div className="ssh-tunnel-empty">{hosts.length?t('tunnels.empty'):t('connections.noHosts')}</div>}
+				</div>
 			</div>
-		</div>
-	</details>
+		</details>
+		{creating&&<SSHTunnelCreateDialog hosts={hosts} onCancel={()=>setCreating(false)} onCreated={tunnel=>{onCreated(tunnel);setCreating(false)}}/>}
+	</>
+}
+
+function SSHTunnelCreateDialog({hosts,onCancel,onCreated}:{hosts:Host[];onCancel:()=>void;onCreated:(tunnel:SSHTunnel)=>void}){
+	const {t}=useTranslation()
+	const [hostID,setHostID]=useState(hosts[0]?.id||'')
+	const [remoteHost,setRemoteHost]=useState('127.0.0.1')
+	const [remotePort,setRemotePort]=useState('')
+	const [localPort,setLocalPort]=useState('')
+	const [busy,setBusy]=useState(false)
+	const [error,setError]=useState('')
+	const submit=async(event:FormEvent)=>{
+		event.preventDefault()
+		setBusy(true);setError('')
+		try{
+			const tunnel=await api.startSSHTunnel({host_id:hostID,remote_host:remoteHost.trim(),remote_port:Number(remotePort),local_port:localPort===''?0:Number(localPort)})
+			onCreated(tunnel)
+		}catch(err){setError(errorText(err))}
+		finally{setBusy(false)}
+	}
+	return createPortal(<div className="connection-dialog-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget&&!busy)onCancel()}}>
+		<form className="connection-dialog panel" role="dialog" aria-modal="true" aria-labelledby="new-tunnel-title" onSubmit={submit}>
+			<header><span><Cable size={20}/><span><small>{t('tunnels.title')}</small><h2 id="new-tunnel-title">{t('tunnels.create')}</h2></span></span><button type="button" disabled={busy} onClick={onCancel}><X size={16}/></button></header>
+			<div className="connection-dialog-fields">
+				<label><span>{t('common.host')}</span><select value={hostID} onChange={event=>setHostID(event.target.value)} required>{hosts.map(host=><option value={host.id} key={host.id}>{host.name} · {host.user}@{host.address}:{host.port}</option>)}</select></label>
+				<label><span>{t('tunnels.remoteHost')}</span><input value={remoteHost} onChange={event=>setRemoteHost(event.target.value)} required/></label>
+				<label><span>{t('tunnels.remotePort')}</span><input type="number" min="1" max="65535" value={remotePort} onChange={event=>setRemotePort(event.target.value)} required autoFocus/></label>
+				<label><span>{t('tunnels.localPort')}</span><input type="number" min="1" max="65535" value={localPort} onChange={event=>setLocalPort(event.target.value)} placeholder={t('tunnels.automaticPort')}/></label>
+			</div>
+			{error&&<p className="connection-dialog-error"><ShieldAlert size={14}/>{error}</p>}
+			<footer><button type="button" disabled={busy} onClick={onCancel}>{t('common.cancel')}</button><button className="primary" disabled={busy||!hostID}>{busy?<LoaderCircle className="spin" size={14}/>:<Plus size={14}/>} {busy?t('tunnels.starting'):t('tunnels.start')}</button></footer>
+		</form>
+	</div>,document.body)
+}
+
+function SSHShellStatus({shells,hosts,open,onOpenChange,onOpen,onCreated}:{shells:SSHShell[];hosts:Host[];open:boolean;onOpenChange:(open:boolean)=>void;onOpen:(shell:SSHShell)=>void;onCreated:(shell:SSHShell)=>void}){
+	const {t}=useTranslation()
+	const [creating,setCreating]=useState(false)
+	return <>
+		<details className="ssh-shell-status" open={open} onToggle={event=>onOpenChange(event.currentTarget.open)}>
+			<summary title={t('sshShell.title')}><TerminalSquare size={14}/><span>{t('sshShell.short')}</span><em>{shells.length}</em></summary>
+			<div className="ssh-shell-popover">
+				<header><span><TerminalSquare size={15}/><b>{t('sshShell.title')}</b></span><button type="button" disabled={!hosts.length} onClick={()=>{onOpenChange(false);setCreating(true)}}><Plus size={13}/>{t('sshShell.create')}</button></header>
+				<div>
+					{shells.map(shell=><button type="button" className={shell.status} onClick={()=>onOpen(shell)} key={shell.id}>
+						<span><i/><b>{shell.host_name||shell.host_id}</b><code>{shell.elevated?'root':shell.user}</code></span>
+						<small>{shell.cwd||'~'}</small>
+						<ChevronRight size={14}/>
+					</button>)}
+					{!shells.length&&<div className="ssh-shell-empty">{hosts.length?t('sshShell.empty'):t('connections.noHosts')}</div>}
+				</div>
+			</div>
+		</details>
+		{creating&&<SSHShellCreateDialog hosts={hosts} onCancel={()=>setCreating(false)} onCreated={shell=>{onCreated(shell);setCreating(false)}}/>}
+	</>
+}
+
+function SSHShellCreateDialog({hosts,onCancel,onCreated}:{hosts:Host[];onCancel:()=>void;onCreated:(shell:SSHShell)=>void}){
+	const {t}=useTranslation()
+	const [hostID,setHostID]=useState(hosts[0]?.id||'')
+	const [busy,setBusy]=useState(false)
+	const [error,setError]=useState('')
+	const submit=async(event:FormEvent)=>{
+		event.preventDefault()
+		setBusy(true);setError('')
+		try{
+			const shell=await api.startSSHShell({host_id:hostID})
+			onCreated(shell)
+		}catch(err){setError(errorText(err))}
+		finally{setBusy(false)}
+	}
+	return createPortal(<div className="connection-dialog-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget&&!busy)onCancel()}}>
+		<form className="connection-dialog compact panel" role="dialog" aria-modal="true" aria-labelledby="new-shell-title" onSubmit={submit}>
+			<header><span><TerminalSquare size={20}/><span><small>{t('sshShell.title')}</small><h2 id="new-shell-title">{t('sshShell.create')}</h2></span></span><button type="button" disabled={busy} onClick={onCancel}><X size={16}/></button></header>
+			<div className="connection-dialog-fields single">
+				<label><span>{t('common.host')}</span><select value={hostID} onChange={event=>setHostID(event.target.value)} required autoFocus>{hosts.map(host=><option value={host.id} key={host.id}>{host.name} · {host.user}@{host.address}:{host.port}</option>)}</select></label>
+			</div>
+			{error&&<p className="connection-dialog-error"><ShieldAlert size={14}/>{error}</p>}
+			<footer><button type="button" disabled={busy} onClick={onCancel}>{t('common.cancel')}</button><button className="primary" disabled={busy||!hostID}>{busy?<LoaderCircle className="spin" size={14}/>:<TerminalSquare size={14}/>} {busy?t('sshShell.starting'):t('sshShell.start')}</button></footer>
+		</form>
+	</div>,document.body)
+}
+
+function sshShellActive(status:string){return ['starting','running','stopping'].includes(status)}
+
+function SSHShellTerminal({initialShell,onClose,onChanged,onError,embedded=false}:{initialShell:SSHShell;onClose:()=>void;onChanged:()=>void;onError:(message:string)=>void;embedded?:boolean}){
+	const {t}=useTranslation()
+	const [shell,setShell]=useState(initialShell)
+	const [secret,setSecret]=useState('')
+	const [sendingSecret,setSendingSecret]=useState(false)
+	const [closing,setClosing]=useState(false)
+	const terminalElement=useRef<HTMLDivElement>(null)
+	const terminalRef=useRef<XTermInstance|null>(null)
+	const lastSequence=useRef(0)
+	const onChangedRef=useRef(onChanged)
+	const onErrorRef=useRef(onError)
+	onChangedRef.current=onChanged
+	onErrorRef.current=onError
+	const active=sshShellActive(shell.status)
+
+	useEffect(()=>{
+		const container=terminalElement.current
+		if(!container)return
+		let disposed=false
+		let cleanup=()=>{}
+		void Promise.all([import('@xterm/xterm'),import('@xterm/addon-fit')]).then(([xtermModule,fitModule])=>{
+			if(disposed)return
+			const terminal=new xtermModule.Terminal({
+				cursorBlink:true,
+				convertEol:false,
+				fontFamily:"'JetBrains Mono','Cascadia Code','SFMono-Regular',Consolas,monospace",
+				fontSize:13,
+				theme:{background:'#071019',foreground:'#d8e3ea',cursor:'#55d6be',selectionBackground:'#31546a'},
+				scrollback:4_294_967_295,
+			})
+			const fit=new fitModule.FitAddon()
+			terminal.loadAddon(fit)
+			terminal.open(container)
+			terminalRef.current=terminal
+			fit.fit()
+			terminal.focus()
+
+			let inputBuffer=''
+			let inputTimer:number|undefined
+			let sendChain=Promise.resolve()
+			const flushInput=()=>{
+				if(inputTimer!==undefined)window.clearTimeout(inputTimer)
+				inputTimer=undefined
+				const input=inputBuffer
+				inputBuffer=''
+				if(!input)return
+				sendChain=sendChain.then(()=>api.sshShellInput(initialShell.id,input,false)).catch(err=>onErrorRef.current(errorText(err)))
+			}
+			const inputDisposable=terminal.onData(data=>{
+				inputBuffer+=data
+				if(data.includes('\r')||data.includes('\n')||data.includes('\x03'))flushInput()
+				else if(inputTimer===undefined)inputTimer=window.setTimeout(flushInput,24)
+			})
+			let resizeTimer:number|undefined
+			const resizeDisposable=terminal.onResize(({cols,rows})=>{
+				if(resizeTimer!==undefined)window.clearTimeout(resizeTimer)
+				resizeTimer=window.setTimeout(()=>{void api.resizeSSHShell(initialShell.id,cols,rows).catch(()=>{/* the session may have ended */})},120)
+			})
+			const observer=new ResizeObserver(()=>fit.fit())
+			observer.observe(container)
+
+			const source=new EventSource(sshShellEventsURL(initialShell.id,0))
+			const onShellEvent=(raw:Event)=>{
+				const message=raw as MessageEvent<string>
+				try{
+					const event=JSON.parse(message.data) as SSHShellEvent
+					if(event.sequence<=lastSequence.current)return
+					lastSequence.current=event.sequence
+					if(event.content&&(event.stream==='stdout'||event.stream==='stderr'))terminal.write(event.content)
+					if(event.status&&event.stream==='status'){
+						setShell(current=>({...current,status:event.status as SSHShell['status'],last_sequence:event.sequence}))
+						if(!sshShellActive(event.status)){
+							source.close()
+							void api.sshShell(initialShell.id,event.sequence).then(snapshot=>setShell(snapshot.shell)).catch(()=>{/* final state is already visible */})
+							onChangedRef.current()
+						}
+					}
+				}catch{/* malformed events are ignored; the next sequence remains recoverable */}
+			}
+			source.addEventListener('shell-event',onShellEvent)
+			source.onerror=()=>{if(source.readyState===EventSource.CLOSED)onErrorRef.current(t('sshShell.streamEnded'))}
+			cleanup=()=>{
+				flushInput()
+				source.removeEventListener('shell-event',onShellEvent)
+				source.close()
+				observer.disconnect()
+				inputDisposable.dispose()
+				resizeDisposable.dispose()
+				if(inputTimer!==undefined)window.clearTimeout(inputTimer)
+				if(resizeTimer!==undefined)window.clearTimeout(resizeTimer)
+				terminal.dispose()
+				terminalRef.current=null
+			}
+			if(disposed)cleanup()
+		}).catch(err=>onErrorRef.current(errorText(err)))
+		return()=>{disposed=true;cleanup()}
+	},[initialShell.id,t])
+
+	const sendSecret=async(event:FormEvent)=>{
+		event.preventDefault()
+		if(!secret||!active||sendingSecret)return
+		setSendingSecret(true)
+		try{await api.sshShellInput(shell.id,`${secret}\r`,true);setSecret('');terminalRef.current?.focus()}
+		catch(err){onError(errorText(err))}
+		finally{setSendingSecret(false)}
+	}
+	const interrupt=async()=>{try{setShell(await api.interruptSSHShell(shell.id))}catch(err){onError(errorText(err))}finally{terminalRef.current?.focus()}}
+	const stop=async()=>{setClosing(true);try{setShell(await api.closeSSHShell(shell.id));onChanged()}catch(err){onError(errorText(err))}finally{setClosing(false)}}
+	const titleID=`ssh-shell-terminal-title-${shell.id}`
+	const terminal=<section className={`ssh-shell-terminal-dialog ${embedded?'embedded':''}`} role={embedded?undefined:'dialog'} aria-modal={embedded?undefined:true} aria-labelledby={titleID}>
+			<header>
+				<div><TerminalSquare size={20}/><span><small>{t('sshShell.interactive')}</small><h2 id={titleID}>{shell.host_name||shell.host_id}</h2></span></div>
+				<div className="ssh-shell-terminal-state"><em className={shell.status}>{t(`statusLabels.${shell.status}`,{defaultValue:shell.status})}</em><code>{shell.elevated?'root':shell.user}</code>{!embedded&&<button type="button" onClick={onClose} title={t('common.close')}><X size={16}/></button>}</div>
+			</header>
+			<div className="ssh-shell-terminal-meta"><span>{shell.host_id}</span><span>{shell.cwd||'~'}</span>{shell.termination_reason&&<span>{t(`sshShell.termination.${shell.termination_reason}`,{defaultValue:shell.termination_reason})}</span>}<code>{shell.id}</code></div>
+			<div className="ssh-shell-terminal-screen" ref={terminalElement}/>
+			<footer>
+				<form onSubmit={sendSecret}><LockKeyhole size={14}/><PasswordInput value={secret} onChange={event=>setSecret(event.target.value)} disabled={!active||sendingSecret} placeholder={t('sshShell.sensitivePlaceholder')} autoComplete="off"/><button className="primary" disabled={!secret||!active||sendingSecret}>{sendingSecret?<LoaderCircle className="spin" size={13}/>:<Send size={13}/>} {t('sshShell.sendSensitive')}</button></form>
+				<div><button type="button" disabled={!active} onClick={()=>void interrupt()}><Square size={10}/>{t('sshShell.interrupt')}</button><button type="button" className="danger" disabled={!active||closing} onClick={()=>void stop()}>{closing?<LoaderCircle className="spin" size={13}/>:<Power size={13}/>} {t('sshShell.closeSession')}</button></div>
+			</footer>
+			{shell.error&&<p className="ssh-shell-terminal-error"><ShieldAlert size={13}/>{shell.error}</p>}
+		</section>
+	return embedded?terminal:<div className="ssh-shell-terminal-backdrop">{terminal}</div>
+}
+
+function SSHWorkspacePage({hosts,shells,onCreated,refresh,onError}:{hosts:Host[];shells:SSHShell[];onCreated:(shell:SSHShell)=>void;refresh:()=>Promise<void>;onError:(message:string)=>void}){
+	const {t}=useTranslation()
+	const [hostID,setHostID]=useState(hosts[0]?.id||'')
+	const [selectedShellID,setSelectedShellID]=useState(shells[0]?.id||'')
+	const [starting,setStarting]=useState(false)
+	useEffect(()=>{
+		if(!hosts.some(host=>host.id===hostID))setHostID(hosts[0]?.id||'')
+	},[hostID,hosts])
+	useEffect(()=>{
+		if(!shells.some(shell=>shell.id===selectedShellID))setSelectedShellID(shells[0]?.id||'')
+	},[selectedShellID,shells])
+	const selectedShell=shells.find(shell=>shell.id===selectedShellID)
+	const startShell=async()=>{
+		if(!hostID||starting)return
+		setStarting(true)
+		try{
+			const shell=await api.startSSHShell({host_id:hostID,surface:'workspace'})
+			onCreated(shell);setSelectedShellID(shell.id)
+		}catch(err){onError(errorText(err))}
+		finally{setStarting(false)}
+	}
+	if(!hosts.length)return <div className="ssh-workspace-empty panel"><Server size={28}/><b>{t('connections.noHosts')}</b></div>
+	return <div className="ssh-workspace">
+		<SFTPBrowser key={hostID} hosts={hosts} hostID={hostID} onHostChange={setHostID}/>
+		<section className="ssh-workspace-terminal panel">
+			<header className="ssh-terminal-tabs">
+				<div>{shells.map(shell=><button type="button" className={shell.id===selectedShellID?'active':''} onClick={()=>setSelectedShellID(shell.id)} key={shell.id}><i className={shell.status}/><span>{shell.host_name||shell.host_id}</span><small>{shell.elevated?'root':shell.user}</small></button>)}</div>
+				<button type="button" className="ssh-new-terminal" disabled={starting||!hostID} onClick={()=>void startShell()}>{starting?<LoaderCircle className="spin" size={14}/>:<Plus size={14}/>} {t('sshWorkspace.newTerminal')}</button>
+			</header>
+			<div className="ssh-terminal-stage">
+				{selectedShell?<SSHShellTerminal key={selectedShell.id} initialShell={selectedShell} embedded onClose={()=>setSelectedShellID('')} onChanged={()=>void refresh()} onError={onError}/>:<div className="ssh-terminal-empty"><TerminalSquare size={32}/><b>{t('sshWorkspace.noTerminal')}</b><button type="button" className="primary" disabled={starting} onClick={()=>void startShell()}>{starting?<LoaderCircle className="spin" size={14}/>:<Plus size={14}/>} {t('sshWorkspace.newTerminal')}</button></div>}
+			</div>
+		</section>
+	</div>
+}
+
+type SFTPNameEditor={mode:'create'}|{mode:'rename';entry:SFTPFileEntry}
+type SFTPDeleteCandidate={entry:SFTPFileEntry}
+type SFTPOverwriteCandidate={file:File;path:string}
+type SFTPTextEncoding='utf-8'|'utf-16le'|'utf-16be'|'gb18030'
+type SFTPTextFile={entry:SFTPFileEntry;content:string;binary:boolean;encoding:SFTPTextEncoding}
+
+function remoteChildPath(parent:string,name:string){return parent==='/'?`/${name}`:`${parent}/${name}`}
+function remoteParentPath(value:string){if(!value||value==='/')return '/';const parts=value.split('/').filter(Boolean);parts.pop();return `/${parts.join('/')}`||'/'}
+function textFileName(name:string){
+	const extension=name.toLowerCase().match(/(?:^|\.)([^./]+)$/)?.[1]||''
+	return new Set(['txt','md','markdown','json','jsonl','yaml','yml','toml','ini','conf','config','env','properties','xml','html','htm','css','scss','less','js','jsx','ts','tsx','mjs','cjs','go','rs','py','rb','php','java','kt','kts','c','h','cc','cpp','hpp','cs','swift','sh','bash','zsh','fish','ps1','bat','cmd','sql','csv','tsv','log','service','socket','timer']).has(extension)
+}
+function utf16Encoding(bytes:Uint8Array,name:string):SFTPTextEncoding|''{
+	if(bytes.length>=2&&bytes[0]===0xff&&bytes[1]===0xfe)return'utf-16le'
+	if(bytes.length>=2&&bytes[0]===0xfe&&bytes[1]===0xff)return'utf-16be'
+	if(!textFileName(name)||bytes.length<4)return''
+	const sample=Math.min(bytes.length,4096)
+	let evenZeros=0,oddZeros=0,pairs=0
+	for(let index=0;index+1<sample;index+=2){if(bytes[index]===0)evenZeros+=1;if(bytes[index+1]===0)oddZeros+=1;pairs+=1}
+	if(!pairs)return''
+	if(oddZeros/pairs>.3&&evenZeros/pairs<.1)return'utf-16le'
+	if(evenZeros/pairs>.3&&oddZeros/pairs<.1)return'utf-16be'
+	return''
+}
+function decodeTextFile(buffer:ArrayBuffer,name:string){
+	const bytes=new Uint8Array(buffer)
+	const utf16=utf16Encoding(bytes,name)
+	if(utf16)return{content:new TextDecoder(utf16,{fatal:true}).decode(bytes),binary:false,encoding:utf16}
+	if(bytes.includes(0))return{content:'',binary:true,encoding:'utf-8' as const}
+	try{return{content:new TextDecoder('utf-8',{fatal:true}).decode(bytes),binary:false,encoding:'utf-8' as const}}
+	catch{
+		if(textFileName(name)){
+			try{return{content:new TextDecoder('gb18030',{fatal:true}).decode(bytes),binary:false,encoding:'gb18030' as const}}
+			catch{/* invalid text remains binary */}
+		}
+		return{content:'',binary:true,encoding:'utf-8' as const}
+	}
+}
+
+function SFTPBrowser({hosts,hostID,onHostChange}:{hosts:Host[];hostID:string;onHostChange:(id:string)=>void}){
+	const {t,i18n:instance}=useTranslation()
+	const [path,setPath]=useState('')
+	const [pathInput,setPathInput]=useState('')
+	const [entries,setEntries]=useState<SFTPFileEntry[]>([])
+	const [loading,setLoading]=useState(true)
+	const [busy,setBusy]=useState(false)
+	const [listError,setListError]=useState('')
+	const [notice,setNotice]=useState('')
+	const [noticeError,setNoticeError]=useState(false)
+	const [dragging,setDragging]=useState(false)
+	const [inputKey,setInputKey]=useState(0)
+	const [nameEditor,setNameEditor]=useState<SFTPNameEditor|null>(null)
+	const [deleteCandidate,setDeleteCandidate]=useState<SFTPDeleteCandidate|null>(null)
+	const [overwriteCandidate,setOverwriteCandidate]=useState<SFTPOverwriteCandidate|null>(null)
+	const [textFile,setTextFile]=useState<SFTPTextFile|null>(null)
+	const [openingFile,setOpeningFile]=useState('')
+	const loadRequest=useRef(0)
+	const load=useCallback(async(target='')=>{
+		if(!hostID)return
+		const request=++loadRequest.current
+		setLoading(true);setListError('')
+		try{
+			const result=await api.sftpEntries(hostID,target)
+			if(request!==loadRequest.current)return
+			setPath(result.path);setPathInput(result.path);setEntries(result.entries||[])
+		}catch(err){
+			if(request!==loadRequest.current)return
+			setEntries([]);setListError(errorText(err))
+		}finally{if(request===loadRequest.current)setLoading(false)}
+	},[hostID])
+	useEffect(()=>{void load('')},[load])
+	const download=(entry:SFTPFileEntry)=>{
+		const anchor=document.createElement('a')
+		anchor.href=sftpDownloadURL(hostID,entry.path);anchor.download=entry.name
+		document.body.appendChild(anchor);anchor.click();anchor.remove()
+	}
+	const openTextFile=async(entry:SFTPFileEntry)=>{
+		if(openingFile)return
+		setOpeningFile(entry.path);setNotice('');setNoticeError(false)
+		try{
+			const decoded=decodeTextFile(await api.sftpFile(hostID,entry.path),entry.name)
+			setTextFile({entry,...decoded})
+		}catch(err){setNotice(errorText(err));setNoticeError(true)}
+		finally{setOpeningFile('')}
+	}
+	const uploadFiles=async(files:File[],overwrite=false)=>{
+		if(!files.length||busy)return
+		setBusy(true);setNotice('');setNoticeError(false)
+		let uploaded=0
+		for(const file of files){
+			const target=remoteChildPath(path,file.name)
+			try{await api.uploadSFTPFile(hostID,target,file,overwrite);uploaded+=1}
+			catch(err){
+				const message=errorText(err)
+				if(files.length===1&&!overwrite&&message.includes('already exists'))setOverwriteCandidate({file,path:target})
+				else{setNotice(message);setNoticeError(true)}
+				break
+			}
+		}
+		if(uploaded){setNotice(t('sshWorkspace.uploaded',{count:uploaded}));setNoticeError(false)}
+		setInputKey(value=>value+1);setBusy(false)
+		if(uploaded)await load(path)
+	}
+	const saveName=async(name:string)=>{
+		if(!name.trim()||name==='.'||name==='..'||name.includes('/'))return
+		setBusy(true);setNotice('');setNoticeError(false)
+		try{
+			if(nameEditor?.mode==='create'){
+				await api.createSFTPDirectory(hostID,remoteChildPath(path,name))
+				setNotice(t('sshWorkspace.directoryCreated'))
+			}else if(nameEditor?.mode==='rename'){
+				await api.renameSFTPEntry(hostID,nameEditor.entry.path,remoteChildPath(path,name))
+				setNotice(t('sshWorkspace.renamed'))
+			}
+			setNameEditor(null);await load(path)
+		}catch(err){setNotice(errorText(err));setNoticeError(true)}
+		finally{setBusy(false)}
+	}
+	const remove=async()=>{
+		if(!deleteCandidate)return
+		setBusy(true);setNotice('');setNoticeError(false)
+		try{
+			await api.deleteSFTPEntry(hostID,deleteCandidate.entry.path,deleteCandidate.entry.type==='directory')
+			setNotice(t('sshWorkspace.deleted'));setDeleteCandidate(null);await load(path)
+		}catch(err){setNotice(errorText(err));setNoticeError(true)}
+		finally{setBusy(false)}
+	}
+	const overwrite=async()=>{
+		if(!overwriteCandidate)return
+		const candidate=overwriteCandidate
+		setBusy(true);setNotice('');setNoticeError(false)
+		try{
+			await api.uploadSFTPFile(hostID,candidate.path,candidate.file,true)
+			setNotice(t('sshWorkspace.uploaded',{count:1}));setOverwriteCandidate(null);await load(path)
+		}catch(err){setNotice(errorText(err));setNoticeError(true)}
+		finally{setBusy(false)}
+	}
+	const saveTextFile=async(content:string)=>{
+		if(!textFile)return
+		const result=await api.uploadSFTPTextFile(hostID,textFile.entry.path,content,textFile.encoding)
+		setTextFile({entry:result.entry,content,binary:false,encoding:textFile.encoding})
+		setNotice(t('sshWorkspace.saved',{path:textFile.entry.path}));setNoticeError(false)
+		await load(path)
+	}
+	const acceptsFiles=(event:React.DragEvent<HTMLElement>)=>Array.from(event.dataTransfer.types).includes('Files')
+	return <>
+		<aside className={`sftp-browser panel ${dragging?'dragging':''}`} onDragEnter={event=>{if(acceptsFiles(event)){event.preventDefault();setDragging(true)}}} onDragOver={event=>{if(acceptsFiles(event)){event.preventDefault();event.dataTransfer.dropEffect=busy?'none':'copy'}}} onDragLeave={event=>{event.preventDefault();if(!(event.relatedTarget instanceof Node&&event.currentTarget.contains(event.relatedTarget)))setDragging(false)}} onDrop={event=>{if(!acceptsFiles(event))return;event.preventDefault();setDragging(false);if(!busy)void uploadFiles(Array.from(event.dataTransfer.files))}}>
+			<header><div><FolderOpen size={17}/><b>SFTP</b></div><select value={hostID} onChange={event=>onHostChange(event.target.value)}>{hosts.map(host=><option value={host.id} key={host.id}>{host.name} · {host.user}@{host.address}</option>)}</select></header>
+			<form className="sftp-path" onSubmit={event=>{event.preventDefault();void load(pathInput)}}><button type="button" disabled={!path||path==='/'} onClick={()=>void load(remoteParentPath(path))} title={t('workspace.parent')}>‹</button><input value={pathInput} onChange={event=>setPathInput(event.target.value)} aria-label={t('sshWorkspace.remotePath')}/><button type="submit" disabled={loading}><ChevronRight size={13}/></button><button type="button" disabled={loading} onClick={()=>void load(path)} title={t('common.refresh')}><RefreshCw className={loading?'spin':''} size={13}/></button></form>
+			<div className="sftp-actions"><button type="button" disabled={busy||!path} onClick={()=>setNameEditor({mode:'create'})}><Plus size={13}/>{t('sshWorkspace.newDirectory')}</button><label className={busy?'disabled':''}><UploadCloud size={13}/>{t('common.upload')}<input key={inputKey} type="file" multiple disabled={busy||!path} onChange={event=>void uploadFiles(Array.from(event.target.files||[]))}/></label></div>
+			<div className="sftp-list">{loading?<span className="sftp-state"><LoaderCircle className="spin" size={14}/>{t('common.loading')}</span>:listError?<span className="sftp-state error">{listError}</span>:entries.length?entries.map(entry=><div className="sftp-row" key={`${entry.type}:${entry.path}`}><button type="button" className="sftp-entry" onClick={()=>entry.type==='directory'?void load(entry.path):void openTextFile(entry)} title={entry.path}>{openingFile===entry.path?<LoaderCircle className="spin" size={14}/>:entry.type==='directory'?<FolderOpen size={14}/>:<FileText size={14}/>}<span><b>{entry.name}</b><small>{entry.mode} · {entry.type==='directory'?'—':formatFileSize(entry.size||0)} · {new Date(entry.modified_at).toLocaleString(localeFor(instance.language))}</small></span></button>{entry.type!=='directory'&&<button type="button" onClick={()=>download(entry)} title={t('common.download')}><Download size={12}/></button>}<button type="button" onClick={()=>setNameEditor({mode:'rename',entry})} title={t('sshWorkspace.rename')}><Edit3 size={12}/></button><button type="button" className="danger" onClick={()=>setDeleteCandidate({entry})} title={t('common.delete')}><Trash2 size={12}/></button></div>):<span className="sftp-state">{t('workspace.emptyDirectory')}</span>}</div>
+			{notice&&<div className={`sftp-notice ${noticeError?'error':''}`}>{notice}<button onClick={()=>setNotice('')}><X size={11}/></button></div>}
+			{dragging&&<div className="sftp-drop"><UploadCloud size={28}/><b>{t('workspace.dropFilesHere')}</b></div>}
+		</aside>
+		{nameEditor&&<SFTPNameDialog mode={nameEditor.mode} initialName={nameEditor.mode==='rename'?nameEditor.entry.name:''} busy={busy} onCancel={()=>setNameEditor(null)} onConfirm={name=>void saveName(name)}/>}
+		{deleteCandidate&&<DestructiveConfirmDialog label={t('sshWorkspace.deleteLabel')} title={t('sshWorkspace.deleteTitle',{name:deleteCandidate.entry.name})} description={t('sshWorkspace.deleteDescription',{path:deleteCandidate.entry.path})} busy={busy} onCancel={()=>setDeleteCandidate(null)} onConfirm={()=>void remove()}/>}
+		{overwriteCandidate&&<SFTPOverwriteDialog path={overwriteCandidate.path} busy={busy} onCancel={()=>setOverwriteCandidate(null)} onConfirm={()=>void overwrite()}/>}
+		{textFile&&<TextFileEditor path={textFile.entry.path} meta={`${textFile.entry.mode} · ${formatFileSize(textFile.entry.size||0)} · ${textFile.encoding.toUpperCase()} · ${new Date(textFile.entry.modified_at).toLocaleString(localeFor(instance.language))}`} content={textFile.content} binary={textFile.binary} editable onClose={()=>setTextFile(null)} onSave={saveTextFile} onDownload={()=>download(textFile.entry)}/>}
+	</>
+}
+
+function SFTPNameDialog({mode,initialName,busy,onCancel,onConfirm}:{mode:'create'|'rename';initialName:string;busy:boolean;onCancel:()=>void;onConfirm:(name:string)=>void}){
+	const {t}=useTranslation()
+	const [name,setName]=useState(initialName)
+	const valid=!!name.trim()&&name!=='.'&&name!=='..'&&!name.includes('/')
+	return createPortal(<div className="connection-dialog-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget&&!busy)onCancel()}}><form className="connection-dialog compact panel" onSubmit={event=>{event.preventDefault();if(valid)onConfirm(name)}}><header><span><FolderOpen size={19}/><span><small>SFTP</small><h2>{t(mode==='create'?'sshWorkspace.newDirectory':'sshWorkspace.rename')}</h2></span></span><button type="button" disabled={busy} onClick={onCancel}><X size={15}/></button></header><div className="connection-dialog-fields single"><label><span>{t('sshWorkspace.name')}</span><input value={name} onChange={event=>setName(event.target.value)} autoFocus required/></label></div><footer><button type="button" disabled={busy} onClick={onCancel}>{t('common.cancel')}</button><button className="primary" disabled={busy||!valid}>{busy?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {t('common.save')}</button></footer></form></div>,document.body)
+}
+
+function SFTPOverwriteDialog({path,busy,onCancel,onConfirm}:{path:string;busy:boolean;onCancel:()=>void;onConfirm:()=>void}){
+	const {t}=useTranslation()
+	return createPortal(<div className="connection-dialog-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget&&!busy)onCancel()}}><section className="sftp-overwrite-dialog panel"><header><FileText size={19}/><h2>{t('sshWorkspace.overwriteTitle')}</h2></header><code>{path}</code><footer><button type="button" disabled={busy} onClick={onCancel}>{t('common.cancel')}</button><button type="button" className="primary" disabled={busy} onClick={onConfirm}>{busy?<LoaderCircle className="spin" size={13}/>:<UploadCloud size={13}/>} {t('sshWorkspace.overwrite')}</button></footer></section></div>,document.body)
 }
 
 type PasswordInputProps=Omit<React.InputHTMLAttributes<HTMLInputElement>,'type'>
@@ -296,6 +770,11 @@ function DestructiveConfirmDialog({label,title,description,busy,onCancel,onConfi
 	const {t}=useTranslation()
 	useEffect(()=>{const close=(event:KeyboardEvent)=>{if(event.key==='Escape'&&!busy)onCancel()};window.addEventListener('keydown',close);return()=>window.removeEventListener('keydown',close)},[busy,onCancel])
 	return <div className="destructive-dialog-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget&&!busy)onCancel()}}><section className="destructive-dialog panel" role="dialog" aria-modal="true" aria-labelledby="destructive-dialog-title"><header><Trash2 size={21}/><span><small>{label}</small><h2 id="destructive-dialog-title">{title}</h2></span></header><p>{description}</p><footer><button type="button" autoFocus disabled={busy} onClick={onCancel}>{t('common.cancel')}</button><button type="button" className="danger" disabled={busy} onClick={onConfirm}>{busy?<LoaderCircle className="spin" size={14}/>:<Trash2 size={14}/>} {busy?t('common.deleting'):t('common.delete')}</button></footer></section></div>
+}
+
+function FullAccessConfirmDialog({onCancel,onConfirm}:{onCancel:()=>void;onConfirm:()=>void}){
+	const {t}=useTranslation()
+	return createPortal(<div className="destructive-dialog-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget)onCancel()}}><section className="destructive-dialog panel" role="dialog" aria-modal="true" aria-labelledby="full-access-dialog-title"><header><ShieldAlert size={21}/><span><small>FULL ACCESS</small><h2 id="full-access-dialog-title">{t('settings.fullAccessTitle')}</h2></span></header><p>{t('settings.fullAccessConfirm')}</p><footer><button type="button" autoFocus onClick={onCancel}>{t('common.cancel')}</button><button type="button" className="danger" onClick={onConfirm}><ShieldAlert size={14}/>{t('common.enable')}</button></footer></section></div>,document.body)
 }
 
 function LoginPage({onAuthenticated}:{onAuthenticated:()=>void}){
@@ -537,7 +1016,7 @@ function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus
 	const [imagesDirty,setImagesDirty]=useState(false)
 	const [shellDirty,setShellDirty]=useState(false)
 	const [savingSection,setSavingSection]=useState<SystemSettingsSection|''>('')
-  const [notice,setNotice]=useState('')
+	const [notice,setNotice]=useState('')
 	useEffect(()=>{if(!iterationsDirty)setMaxIterations(savedValue)},[savedValue,iterationsDirty])
 	useEffect(()=>{if(!promptDirty)setSystemPrompt(savedPrompt)},[savedPrompt,promptDirty])
 	useEffect(()=>{if(!explanationDirty){setExplanationEnabled(savedExplanation);setSubagentProvider(savedSubagentProvider);setSubagentTimeout(savedSubagentTimeout)}},[savedExplanation,savedSubagentProvider,savedSubagentTimeout,explanationDirty])
@@ -595,8 +1074,8 @@ function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus
 			<SettingsDisclosure icon={<Bot size={18}/>} title={t('settings.systemPrompt')} meta={systemPrompt.length?t('settings.systemPromptCharacters',{count:systemPrompt.length}):undefined}>
 				<form onSubmit={submit('prompt')}><div className="system-prompt-actions"><button type="button" disabled={systemPrompt===defaultPrompt} onClick={restoreDefaultPrompt}><RefreshCw size={13}/>{t('settings.restoreDefaultPrompt')}</button></div><textarea className="system-prompt-input" aria-label={t('settings.systemPrompt')} spellCheck={false} value={systemPrompt} onChange={event=>updateSystemPrompt(event.target.value)}/><small className="system-prompt-count">{systemPrompt.length?t('settings.systemPromptCharacters',{count:systemPrompt.length}):t('settings.emptySystemPrompt')}</small><SettingsSectionFooter dirty={promptDirty} busy={busy} saving={savingSection==='prompt'} onDiscard={()=>discard('prompt')}/></form>
 			</SettingsDisclosure>
-			<SettingsDisclosure icon={<BrainCircuit size={18}/>} title={t('settings.explanationSection')} meta={<span className={modelStatus?.explanation_agent_available?'ready':'offline'}><CircleDot size={9}/>{modelStatus?.explanation_agent_available?t('settings.runnerReady'):t('settings.modelUnavailable')}</span>}>
-				<form onSubmit={submit('explanation')}><div className="subagent-settings"><label className="subagent-toggle"><span><b>{t('settings.commandAgent')}</b></span><input type="checkbox" checked={explanationEnabled} onChange={event=>toggleExplanation(event.target.checked)}/><i/></label><div className="subagent-config-grid"><label><span><b>{t('settings.modelProvider')}</b></span><select value={subagentProvider} onChange={event=>selectSubagentProvider(event.target.value)}><option value="">{t('settings.followMain')}</option>{providers.map(provider=><option value={provider.id} key={provider.id}>{provider.name} · {provider.model}</option>)}</select></label><label><span><b>{t('settings.requestTimeout')}</b></span><div className="subagent-timeout-input"><input aria-label={t('settings.timeout')} type="number" min="5" max="120" step="1" value={subagentTimeout} onChange={event=>updateSubagentTimeout(Number(event.target.value))}/><em>{t('settings.seconds',{count:subagentTimeout})}</em></div></label></div>{modelStatus?.explanation_error&&<div className="subagent-runtime-error"><ShieldAlert size={14}/><span>{modelStatus.explanation_error}</span></div>}</div><SettingsSectionFooter dirty={explanationDirty} busy={busy} saving={savingSection==='explanation'} onDiscard={()=>discard('explanation')}/></form>
+			<SettingsDisclosure icon={<BrainCircuit size={18}/>} title={t('settings.explanationSection')} meta={<span className={modelStatus?.approval_agent_available?'ready':'offline'}><CircleDot size={9}/>{modelStatus?.approval_agent_available?t('settings.runnerReady'):t('settings.modelUnavailable')}</span>}>
+				<form onSubmit={submit('explanation')}><div className="subagent-settings"><label className="subagent-toggle"><span><b>{t('settings.commandAgent')}</b></span><input type="checkbox" checked={explanationEnabled} onChange={event=>toggleExplanation(event.target.checked)}/><i/></label><div className="subagent-config-grid"><label><span><b>{t('settings.modelProvider')}</b></span><select value={subagentProvider} onChange={event=>selectSubagentProvider(event.target.value)}><option value="">{t('settings.followMain')}</option>{providers.map(provider=><option value={provider.id} key={provider.id}>{provider.name} · {provider.model}</option>)}</select></label><label><span><b>{t('settings.requestTimeout')}</b></span><div className="subagent-timeout-input"><input aria-label={t('settings.timeout')} type="number" min="5" max="120" step="1" value={subagentTimeout} onChange={event=>updateSubagentTimeout(Number(event.target.value))}/><em>{t('settings.seconds',{count:subagentTimeout})}</em></div></label></div>{modelStatus?.approval_error&&<div className="subagent-runtime-error"><ShieldAlert size={14}/><span>{modelStatus.approval_error}</span></div>}</div><SettingsSectionFooter dirty={explanationDirty} busy={busy} saving={savingSection==='explanation'} onDiscard={()=>discard('explanation')}/></form>
 			</SettingsDisclosure>
 			<SettingsDisclosure icon={<ImagePlus size={18}/>} title={t('settings.chatImages')} meta={imageTypes.map(value=>value.replace('image/','').toUpperCase()).join(' · ')}>
 				<form onSubmit={submit('images')}><div className="chat-image-formats">{[['image/png','PNG'],['image/jpeg','JPEG'],['image/webp','WebP'],['image/gif','GIF']].map(([value,label])=><label className={imageTypes.includes(value)?'active':''} key={value}><input type="checkbox" checked={imageTypes.includes(value)} disabled={imageTypes.length===1&&imageTypes.includes(value)} onChange={()=>toggleImageType(value)}/><span>{label}</span></label>)}</div><SettingsSectionFooter dirty={imagesDirty} busy={busy} saving={savingSection==='images'} onDiscard={()=>discard('images')}/></form>
@@ -651,7 +1130,7 @@ function Nav({ active, icon, label, count, warn, onClick }: {active:boolean;icon
   return <button className={`nav-item ${active ? 'active' : ''}`} onClick={onClick}>{icon}<span>{label}</span>{count !== undefined && <em className={warn ? 'warn' : ''}>{count}</em>}</button>
 }
 
-function ChatPage({ hosts, tunnels, approvals, runs, capabilities, imageTypes, agentAvailable, modelName, refresh, refreshApprovals, onStreamingChange }: {hosts:Host[];tunnels:SSHTunnel[];approvals:Approval[];runs:Run[];capabilities:ToolCapabilities;imageTypes:string[];agentAvailable:boolean;modelName?:string;refresh:()=>Promise<void>;refreshApprovals:(decidedID?:string)=>Promise<void>;onStreamingChange:(streaming:boolean)=>void}) {
+function ChatPage({ hosts, tunnels, approvals, runs, capabilities, settings, imageTypes, agentAvailable, modelName, refresh, refreshApprovals, onSettingsChanged, onError, onStreamingChange }: {hosts:Host[];tunnels:SSHTunnel[];approvals:Approval[];runs:Run[];capabilities:ToolCapabilities;settings:SystemSettings|null;imageTypes:string[];agentAvailable:boolean;modelName?:string;refresh:()=>Promise<void>;refreshApprovals:(decidedID?:string)=>Promise<void>;onSettingsChanged:(settings:SystemSettings)=>void;onError:(message:string)=>void;onStreamingChange:(streaming:boolean)=>void}) {
 	const {t,i18n:instance}=useTranslation()
   const [entries, setEntries] = useState<ChatEntry[]>([])
 	  const [message, setMessage] = useState('')
@@ -668,7 +1147,8 @@ function ChatPage({ hosts, tunnels, approvals, runs, capabilities, imageTypes, a
   const [running, setRunning] = useState(false)
   const [detachedRunning,setDetachedRunning]=useState(false)
 	const [stopping,setStopping]=useState(false)
-	const [modelRetrying,setModelRetrying]=useState(false)
+	const [modelRetry,setModelRetry]=useState<ModelRetryState|null>(null)
+	const [retryClock,setRetryClock]=useState(0)
   const [reasoningSeen, setReasoningSeen] = useState(false)
   const [plan,setPlan]=useState<AgentPlan|null>(null)
 	const [approvalNotice,setApprovalNotice]=useState('')
@@ -680,13 +1160,20 @@ function ChatPage({ hosts, tunnels, approvals, runs, capabilities, imageTypes, a
 	  const activeStreamRef=useRef<ActiveChatStream|null>(null)
 	  const imageURLsRef=useRef(new Set<string>())
   const sessionLoadRef=useRef('')
-  const hostNames = useMemo(() => hosts.map((host) => host.name).join(', '), [hosts])
+  const agentHosts = useMemo(() => hosts.filter(host => host.agent_enabled), [hosts])
+  const hostNames = useMemo(() => agentHosts.map(host => host.name).join(', '), [agentHosts])
   const tunnelSummary=tunnels.length?tunnels.map(tunnel=>`${tunnel.host_name||tunnel.host_id}:${tunnel.remote_host}:${tunnel.remote_port} → localhost:${tunnel.local_port}`).join(' · '):t('tunnels.none')
   const currentApprovals=useMemo(()=>sessionId?approvals.filter(item=>item.session_id===sessionId):[],[approvals,sessionId])
 	const pendingExplanationID=currentApprovals.find(item=>item.ai_review?.status==='pending')?.id||''
 	const sessionBusy=running||detachedRunning
 	const selectedWorkspace=capabilities.workspaces.find(workspace=>workspace.id===workspaceID)||capabilities.workspaces[0]
 	useEffect(()=>{if(!selectedWorkspace)return;if(workspaceID!==selectedWorkspace.id)setWorkspaceID(selectedWorkspace.id);rememberWorkspace(selectedWorkspace.id)},[selectedWorkspace,workspaceID])
+	useEffect(()=>{
+		if(!modelRetry)return
+		setRetryClock(Date.now())
+		const timer=window.setInterval(()=>setRetryClock(Date.now()),1000)
+		return()=>window.clearInterval(timer)
+	},[modelRetry])
 	useEffect(()=>{onStreamingChange(running)},[running,onStreamingChange])
 	useEffect(()=>()=>onStreamingChange(false),[onStreamingChange])
 	useEffect(()=>()=>{sessionLoadRef.current='';const stream=activeStreamRef.current;activeStreamRef.current=null;stream?.controller.abort()},[])
@@ -713,7 +1200,7 @@ function ChatPage({ hosts, tunnels, approvals, runs, capabilities, imageTypes, a
     activeStreamRef.current=null
     stream.controller.abort()
     setRunning(false)
-    setModelRetrying(false)
+    setModelRetry(null)
   }, [])
 
   const loadSession = useCallback(async (id: string) => {
@@ -724,7 +1211,7 @@ function ChatPage({ hosts, tunnels, approvals, runs, capabilities, imageTypes, a
     try {
       const state = await api.chatState(id)
       if(sessionLoadRef.current!==requestID)return
-	      setEntries(historyEntries(state.messages||[],id));setDetachedRunning(!!state.active);setStopping(false);setModelRetrying(false);setPlan(state.plan||null);setWorkspaceID(state.workspace_id||'');setBoundWorkspaceID(state.workspace_id||'')
+	      setEntries(historyEntries(state.messages||[],id));setDetachedRunning(!!state.active);setStopping(false);setModelRetry(null);setPlan(state.plan||null);setWorkspaceID(state.workspace_id||'');setBoundWorkspaceID(state.workspace_id||'')
       setSessionId(id); rememberSession(id); setHistoryError('')
       void refresh()
     } catch (err) { if(sessionLoadRef.current===requestID)setHistoryError(errorText(err)) }
@@ -775,7 +1262,7 @@ function ChatPage({ hosts, tunnels, approvals, runs, capabilities, imageTypes, a
     sessionLoadRef.current=''
     setLoadingSession('')
     setHistoryOpen(false)
-	    stickToLatest.current=true;setSessionId('');setBoundWorkspaceID('');setEntries([]); setMessage('');clearPendingImages(); setHistoryError(''); setReasoningSeen(false);setDetachedRunning(false);setStopping(false);setModelRetrying(false);setPlan(null); rememberSession(newSessionMarker)
+	    stickToLatest.current=true;setSessionId('');setBoundWorkspaceID('');setEntries([]); setMessage('');clearPendingImages(); setHistoryError(''); setReasoningSeen(false);setDetachedRunning(false);setStopping(false);setModelRetry(null);setPlan(null); rememberSession(newSessionMarker)
     void refreshSessions()
   }
 
@@ -826,15 +1313,15 @@ function ChatPage({ hosts, tunnels, approvals, runs, capabilities, imageTypes, a
     activeStreamRef.current={id:streamID,sessionId:sessionId,controller}
     const isAttached=()=>activeStreamRef.current?.id===streamID
     stickToLatest.current=true
-    setApprovalNotice('');setReasoningSeen(false);setStopping(false);setModelRetrying(false);setRunning(true)
+    setApprovalNotice('');setReasoningSeen(false);setStopping(false);setModelRetry(null);setRunning(true)
 	    const entryImages=queryImages.map(image=>({id:image.id,name:image.file.name,mimeType:image.file.type,sizeBytes:image.file.size,url:image.url}))
 	    setEntries((old) => [...old, { id: userEntryID, kind: 'user', content: query, images:entryImages, status:'pending' }, { id: 'streaming', kind: 'assistant', content: '', streaming:true }])
 	    try {
       await streamChat(sessionId, selectedWorkspace?.id||'', query, queryImages.map(image=>image.file), (frame: AgentEvent) => {
         if(!isAttached())return
 	        if (frame.session_id) { querySessionID=frame.session_id;activeStreamRef.current!.sessionId=frame.session_id;setSessionId(frame.session_id);setBoundWorkspaceID(selectedWorkspace?.id||'');rememberSession(frame.session_id) }
-        if(frame.type==='retry')setModelRetrying(true)
-        else if(['approval','reasoning','tool','tool_output','message','done','interrupted','error'].includes(frame.type))setModelRetrying(false)
+        if(frame.type==='retry'){const now=Date.now();setRetryClock(now);setModelRetry({attempt:frame.retry_attempt||1,max:frame.retry_max||1,readyAt:now+(frame.retry_delay_ms||0)})}
+        else if(['approval','reasoning','tool','tool_output','message','done','interrupted','error'].includes(frame.type))setModelRetry(null)
         if (frame.type === 'approval') { setEntries(old=>updateActiveToolStatus(old.map(item=>item.id===userEntryID?{...item,status:'completed'}:item),'approval_required',frame.run_id));setApprovalNotice('');void refreshApprovals() }
         if(frame.type==='tool_output'){
           setEntries(old=>appendToolOutput(old,frame))
@@ -871,10 +1358,10 @@ function ChatPage({ hosts, tunnels, approvals, runs, capabilities, imageTypes, a
 			if (frame.type === 'interrupted') {setStopping(false);setDetachedRunning(false);setEntries(old=>[...updateActiveToolStatus(old.filter(item=>item.id!=='streaming').map(item=>item.id===userEntryID?{...item,status:'failed' as const}:deactivateReasoning(item)),'interrupted'),{id:clientId(),kind:'assistant',content:frame.content||t('chat.stopped')}])}
 			if (frame.type === 'error') setEntries((old) => [...updateActiveToolStatus(old.map(item=>item.id===userEntryID?{...item,status:'failed' as const}:item.id==='streaming'?{...item,streaming:false}:item),'failed'), { id: clientId(), kind: 'error', content: frame.error || t('chat.agentError') }])
       },controller.signal)
-    } catch (err) { if(isAttached()){setModelRetrying(false);setEntries((old) => [...updateActiveToolStatus(old.map(item=>item.id===userEntryID?{...item,status:'failed' as const}:item),'failed'), { id: clientId(), kind: 'error', content: errorText(err) }])} }
+    } catch (err) { if(isAttached()){setModelRetry(null);setEntries((old) => [...updateActiveToolStatus(old.map(item=>item.id===userEntryID?{...item,status:'failed' as const}:item),'failed'), { id: clientId(), kind: 'error', content: errorText(err) }])} }
     finally {
       if(!isAttached())return
-      setModelRetrying(false)
+      setModelRetry(null)
       setEntries((old) => old.filter((item) => item.id !== 'streaming' || item.content !== '').map((item)=>item.id==='streaming'?{...item,streaming:false}:deactivateReasoning(item)))
       setRunning(false)
 		setStopping(false)
@@ -897,8 +1384,14 @@ function ChatPage({ hosts, tunnels, approvals, runs, capabilities, imageTypes, a
 			if(!result.cancelled){const state=await api.chatState(targetSessionID);setDetachedRunning(!!state.active);setPlan(state.plan||null);setEntries(historyEntries(state.messages||[],targetSessionID));void refreshSessions();void refresh()}
 		}catch(err){setEntries(old=>[...old,{id:clientId(),kind:'error',content:t('chat.stopFailed',{message:errorText(err)})}])}
 		finally{if(!requested)setStopping(false)}
-	}
+  }
   const streamingResponseStarted=entries.some((item)=>item.id==='streaming'&&item.content!=='')
+  const retryDelay=modelRetry?Math.max(0,Math.ceil((modelRetry.readyAt-retryClock)/1000)):0
+  const modelRetryLabel=modelRetry?t(retryDelay>0?'chat.retryWaiting':'chat.retryingModel',{
+	  attempt:modelRetry.attempt,
+	  max:modelRetry.max,
+	  delay:retryDelay,
+  }):''
 
   return <div className="chat-layout">
     <ChatWorkspacePanel key={selectedWorkspace?.id||''} workspaces={capabilities.workspaces} workspaceID={selectedWorkspace?.id||''} switching={workspaceSwitching} disabled={sessionBusy||!!loadingSession} bound={!!selectedWorkspace&&boundWorkspaceID===selectedWorkspace.id} onSelect={id=>void switchWorkspace(id)}/>
@@ -909,13 +1402,13 @@ function ChatPage({ hosts, tunnels, approvals, runs, capabilities, imageTypes, a
       <div className="messages" ref={messagesRef} onScroll={event=>{const element=event.currentTarget;stickToLatest.current=element.scrollHeight-element.scrollTop-element.clientHeight<90}}>
 		{entries.length === 0 && <div className="empty-chat"><div className="radar"><Activity size={35}/></div><h2>{t('chat.emptyTitle')}</h2></div>}
         {entries.map((entry) => <ChatBubble key={entry.id} entry={entry} runs={runs} hosts={hosts}/>) }
-		{running&&modelRetrying&&<div className="thinking"><span/><span/><span/> {t('chat.retryingModel')}</div>}
-		{running&&!modelRetrying&&!reasoningSeen&&!streamingResponseStarted&&<div className="thinking"><span/><span/><span/> {t('chat.waitingModel')}</div>}
+		{running&&modelRetry&&<div className="thinking"><span/><span/><span/> {modelRetryLabel}</div>}
+		{running&&!modelRetry&&!reasoningSeen&&!streamingResponseStarted&&<div className="thinking"><span/><span/><span/> {t('chat.waitingModel')}</div>}
 		{detachedRunning&&!running&&<div className="thinking background-agent"><span/><span/><span/> {t('chat.backgroundRunning')}</div>}
       </div>
 		  <form className="composer" onSubmit={submit}>
-			  {sessionBusy&&<div className="llm-work-status" role="status" aria-live="polite"><LoaderCircle className="spin" size={13}/><b>{stopping?t('chat.stopping'):modelRetrying?t('chat.retryingModel'):t('chat.running')}</b><button type="button" className="agent-stop-button" onClick={()=>void stopAgent()} disabled={stopping||!(activeStreamRef.current?.sessionId||sessionId)} title={t('chat.stopTitle')}><Square size={11} fill="currentColor"/>{t('chat.stop')}</button></div>}
-			  <div className="context-line"><span><Server size={13}/>{hosts.length?t('chat.hostsCount',{count:hosts.length,names:hostNames}):t('chat.noHosts')}</span><span className={`composer-tunnels ${tunnels.length?'active':''}`} title={tunnelSummary}><Cable size={13}/><code>{tunnelSummary}</code></span><span><Cpu size={13}/>{modelName || t('chat.noModel')}</span></div>
+			  {sessionBusy&&<div className="llm-work-status" role="status" aria-live="polite"><LoaderCircle className="spin" size={13}/><b>{stopping?t('chat.stopping'):modelRetryLabel||t('chat.running')}</b><button type="button" className="agent-stop-button" onClick={()=>void stopAgent()} disabled={stopping||!(activeStreamRef.current?.sessionId||sessionId)} title={t('chat.stopTitle')}><Square size={11} fill="currentColor"/>{t('chat.stop')}</button></div>}
+			  <div className="context-line"><ApprovalModeStatus settings={settings} onChanged={onSettingsChanged} onError={onError}/><span className={`composer-tunnels ${tunnels.length?'active':''}`} title={tunnelSummary}><Cable size={13}/><code>{tunnelSummary}</code></span><span className="composer-model" title={modelName || t('chat.noModel')}><Cpu size={13}/>{modelName || t('chat.noModel')}</span><span className="composer-hosts" title={agentHosts.length?t('chat.hostsCount',{count:agentHosts.length,names:hostNames}):t('chat.noHosts')}><Server size={13}/>{agentHosts.length?t('chat.hostsCount',{count:agentHosts.length,names:hostNames}):t('chat.noHosts')}</span></div>
 			  {pendingImages.length>0&&<div className="composer-images">{pendingImages.map(image=><div key={image.id}><img src={image.url} alt={image.file.name}/><span title={image.file.name}>{image.file.name}</span><button type="button" onClick={()=>removePendingImage(image.id)} title={t('chat.removeImage')}><X size={11}/></button></div>)}</div>}
 			  {imageNotice&&<div className="composer-image-notice">{imageNotice}<button type="button" onClick={()=>setImageNotice('')}><X size={11}/></button></div>}
 			  <div className="input-row"><label className="image-attach-button" title={t('chat.addImages')}><ImagePlus size={18}/><input key={imageInputKey} type="file" accept={imageTypes.join(',')} multiple disabled={!agentAvailable||sessionBusy||workspaceSwitching||!!loadingSession} onChange={event=>addImages(Array.from(event.target.files||[]))}/></label><textarea value={message} onChange={(event) => setMessage(event.target.value)} onPaste={event=>{const files=Array.from(event.clipboardData.files).filter(file=>file.type.startsWith('image/'));if(files.length)addImages(files)}} placeholder={!agentAvailable?t('chat.configureModel'):loadingSession?t('chat.loadingConversation'):sessionBusy?t('chat.busyPlaceholder'):t('chat.prompt')} disabled={!agentAvailable||sessionBusy||workspaceSwitching||!!loadingSession} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }}/><button aria-label={t('common.next')} disabled={!agentAvailable || sessionBusy || workspaceSwitching || !!loadingSession || (!message.trim()&&!pendingImages.length)}><Send size={18}/></button></div>
@@ -926,7 +1419,7 @@ function ChatPage({ hosts, tunnels, approvals, runs, capabilities, imageTypes, a
       {historyError&&<div className="history-error">{historyError}</div>}
 	  {!sessions.length&&!historyError&&<div className="history-empty">{t('chat.noSaved')}</div>}
 	  {sessions.map(session=>{const pending=approvals.filter(item=>item.session_id===session.id).length;const active=session.active||(session.id===sessionId&&sessionBusy);return <div className={`session-item ${session.id===sessionId?'active':''}`} key={session.id}><button className="session-open" onClick={()=>switchSession(session.id)} disabled={workspaceSwitching||loadingSession===session.id}><b>{session.title}{pending>0&&<em className="session-approval-count">{t('chat.approvalCount',{count:pending})}</em>}{active&&<em className="session-running-count">{t('chat.runningBadge')}</em>}</b><span>{new Date(session.updated_at).toLocaleString(localeFor(instance.language))} · {t('chat.messageCount',{count:session.message_count})} · {session.workspace_id||t('chat.noWorkspace')}</span></button><button className="session-delete" onClick={()=>{if(!active)setSessionDeleteCandidate(session)}} disabled={active||workspaceSwitching} title={active?t('chat.cannotDelete'):t('chat.deleteConversation')}><Trash2 size={13}/></button></div>})}
-	</div><div className="session-summary"><Metric label={t('chat.saved')} value={sessions.length.toString()} tone="green"/><Metric label={t('chat.hosts')} value={hosts.length.toString()}/></div></aside>
+	</div><div className="session-summary"><Metric label={t('chat.saved')} value={sessions.length.toString()} tone="green"/><Metric label={t('chat.hosts')} value={agentHosts.length.toString()}/></div></aside>
 	{sessionDeleteCandidate&&<DestructiveConfirmDialog label={t('chat.deleteDialogLabel')} title={t('chat.deleteTitle',{title:sessionDeleteCandidate.title})} description={t('chat.deleteText')} busy={deletingSession} onCancel={()=>setSessionDeleteCandidate(null)} onConfirm={()=>void removeSession()}/>}
   </div>
 }
@@ -1035,6 +1528,12 @@ function ChatWorkspacePanel({workspaces,workspaceID,switching,disabled,bound,onS
 			setNotice({kind:'success',text:t('workspace.deleted',{type:t(`workspace.${result.type}`,{defaultValue:result.type})})})
 		}catch(err){setNotice({kind:'error',text:errorText(err)})}finally{setDeleting('');setDeleteCandidate(null)}
 	}
+	const savePreview=async(content:string)=>{
+		if(!workspace||!preview)return
+		const saved=await api.saveWorkspaceTextFile(workspace.id,preview.path,content)
+		setPreview({...preview,content,binary:false,size:saved.size,sha256:saved.sha256})
+		setNotice({kind:'success',text:t('workspace.saved',{path:saved.path})})
+	}
 	const up=()=>{if(path==='.')return;const parts=path.split('/');parts.pop();setPath(parts.join('/')||'.')}
 
 	if(!workspace)return <aside className="workspace-browser-panel panel empty"><div className="panel-header"><div><FolderOpen size={17}/><span>{t('common.workspace')}</span></div></div><div className="workspace-empty"><FolderOpen size={23}/><span>{t('workspace.noConfigured')}</span></div></aside>
@@ -1048,7 +1547,7 @@ function ChatWorkspacePanel({workspaces,workspaceID,switching,disabled,bound,onS
 			{notice&&<div className={`chat-workspace-notice ${notice.kind}`}>{notice.text}</div>}
 			{dragging&&<div className="workspace-drop-overlay"><UploadCloud size={27}/><b>{t('workspace.dropFilesHere')}</b><span>{path}</span></div>}
 		</aside>
-		{preview&&<div className="workspace-preview-backdrop" role="presentation" onMouseDown={event=>{if(event.target===event.currentTarget)setPreview(null)}}><section className="workspace-preview-dialog" role="dialog" aria-modal="true" aria-label={`${t('workspace.previewFile')} ${preview.path}`}><header><div><FileText size={18}/><span><b>{preview.path}</b><small>{formatFileSize(preview.size)} · SHA-256 {preview.sha256}</small></span></div><button onClick={()=>setPreview(null)} title={t('workspace.closePreview')}><X size={16}/></button></header>{preview.binary?<div className="workspace-binary-preview"><FileText size={30}/><b>{t('workspace.binary')}</b></div>:<pre>{preview.content||''}</pre>}</section></div>}
+		{preview&&<TextFileEditor path={preview.path} meta={`${formatFileSize(preview.size)} · SHA-256 ${preview.sha256}`} content={preview.content||''} binary={preview.binary} editable={workspace.access==='read_write'} onClose={()=>setPreview(null)} onSave={savePreview}/>}
 		{deleteCandidate&&<DestructiveConfirmDialog label={t('workspace.permanentDelete')} title={t('workspace.deleteTitle',{path:`${deleteCandidate.workspaceID}:${deleteCandidate.path}`})} description={t('workspace.deleteDescription',{target:deleteCandidate.type==='directory'?t('workspace.deleteFolderTarget'):t('workspace.deleteFileTarget')})} busy={deleting===deleteCandidate.path} onCancel={()=>setDeleteCandidate(null)} onConfirm={()=>void removeEntry()}/>}
 	</>
 }
@@ -1140,7 +1639,8 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
 	const display=jsonRecord(payload._display)
 	const toolArguments=jsonRecord(display?.arguments)
 	const request=jsonRecord(display?.request)||requestFromRun(run)
-	const destinationHostID=textValue(display?.host_id)||run?.host_id||textValue(request?.host_id)||textValue(toolArguments?.host_id)||textValue(toolArguments?.destination_host_id)
+	const shellPayload=jsonRecord(payload.shell)||jsonRecord(resultPayload?.shell)
+	const destinationHostID=textValue(display?.host_id)||run?.host_id||textValue(request?.host_id)||textValue(toolArguments?.host_id)||textValue(toolArguments?.destination_host_id)||textValue(shellPayload?.host_id)
 	const destinationHost=hostIdentity(hosts,destinationHostID)
   const hostID=destinationHost.id
   const hostName=destinationHost.name||hostID||'—'
@@ -1163,6 +1663,28 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
 	const tunnelRemotePort=(request?numberValue(request.remote_port):0)||numberValue(tunnel?.remote_port)||numberValue(toolArguments?.remote_port)
 	const tunnelLocalPort=(request?numberValue(request.local_port):0)||numberValue(tunnel?.local_port)||numberValue(toolArguments?.local_port)
 	const tunnelRoute=tunnelAction==='start'?sshTunnelRoute(hostName,tunnelRemoteHost,tunnelRemotePort,tunnelLocalPort,t('tunnels.automaticPort')):tunnelAction==='stop'?textValue(toolArguments?.tunnel_id):''
+	const shellOperation=entry.tool==='ssh_shell'
+	const shellAction=textValue(toolArguments?.action)||(requestMode==='ssh_shell_start'?'start':'')
+	const shellID=textValue(toolArguments?.shell_id)||textValue(shellPayload?.id)
+	const shellEvents=[...recordArray(payload.events),...recordArray(resultPayload?.events)]
+	const shellOutput=textValue(payload.recent_output)||textValue(resultPayload?.recent_output)||shellEvents
+		.filter(event=>['stdout','stderr'].includes(textValue(event.stream)))
+		.map(event=>textValue(event.content))
+		.join('')
+	const shellInput=textValue(toolArguments?.input)
+	const shellInputDisplay=`${shellInput}${toolArguments?.submit===true&&!/[\r\n]$/.test(shellInput)?' ↵':''}`
+	const shellActionLabel=shellAction?t(`sshShell.toolActions.${shellAction}`,{defaultValue:t('sshShell.short')}):t('sshShell.short')
+	const shellSummary=shellOperation?(shellAction==='start'
+		?`${hostName}:${request?textValue(request.cwd)||'~':textValue(toolArguments?.cwd)||'~'} · PTY`
+		:shellAction==='input'
+			?shellInputDisplay
+			:shellAction==='status'
+				?latestOutput(shellOutput,1)||shellID
+				:shellAction==='list'
+					?String(numberValue(payload.count)||numberValue(resultPayload?.count))
+					:shellID):''
+	const shellPrimaryContent=shellAction==='input'?shellInputDisplay:shellAction==='status'?shellOutput:shellSummary
+	const shellPrimaryAction=shellOperation&&(shellAction==='input'||shellAction==='status')
 	const fileSearchMode=unifiedFileRead&&(requestMode==='remote_search'||requestMode==='workspace_search')
 	const fileReadMode=unifiedFileRead&&(requestMode==='remote_read'||requestMode==='workspace_read')
 	const structuredFileOperation=fileReadMode||fileSearchMode
@@ -1182,7 +1704,7 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
 	const file=jsonRecord(payload.file)||jsonRecord(resultPayload?.file)
 	const filePath=textValue(file?.path)||remotePath||relativePath
 	const fileTarget=`${workspaceID?`${workspaceID}:`:''}${filePath}`
-	const eventToolLabel=structuredFileOperation?t(fileSearchMode?(workspaceID?'toolNames.workspace_file_search_mode':'toolNames.ssh_file_search_mode'):(workspaceID?'toolNames.workspace_file_read':'toolNames.ssh_file_read')):toolLabel(entry.tool||'')
+	const eventToolLabel=shellOperation?shellActionLabel:structuredFileOperation?t(fileSearchMode?(workspaceID?'toolNames.workspace_file_search_mode':'toolNames.ssh_file_search_mode'):(workspaceID?'toolNames.workspace_file_read':'toolNames.ssh_file_read')):toolLabel(entry.tool||'')
 	const fileOperationParameters:Array<Array<unknown>>=structuredFileOperation&&request?[
 		...(workspaceID?[["workspace_id",workspaceID]]:[["host_id",hostID]]),
 		["path",filePath],
@@ -1194,13 +1716,13 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
 		]),
 		...(workspaceID?[]:[["elevated",request.elevated===true]])
 	]:[]
-	const transferSummary=tunnelRoute||(workspaceTransfer?`${workspaceID}:${relativePath} → ${remotePath}`:sshTransfer?`${sourceHostName}:${sourcePath} → ${hostName}:${remotePath}`:'')
+	const transferSummary=tunnelRoute||shellSummary||(workspaceTransfer?`${workspaceID}:${relativePath} → ${remotePath}`:sshTransfer?`${sourceHostName}:${sourcePath} → ${hostName}:${remotePath}`:'')
   const planSteps=Array.isArray(payload.steps)?payload.steps.map(jsonRecord).filter((step):step is JsonRecord=>!!step):[]
   const planSummary=textValue(payload.goal)||textValue(planSteps.find(step=>textValue(step.status)==='in_progress'||textValue(step.status)==='blocked')?.title)
 	const operation=filePath||(script?t('tool.bashScript'):program||eventToolLabel||t('tool.result'))
   const args=request&&Array.isArray(request.args)?request.args.map(value=>String(value)):[]
   const env=request?jsonRecord(request.env):undefined
-	const rawStdout=textValue(payload.stdout)||textValue(resultPayload?.stdout)||entry.liveStdout||run?.stdout_redacted||''
+	const rawStdout=shellAction==='status'?shellOutput:textValue(payload.stdout)||textValue(resultPayload?.stdout)||entry.liveStdout||run?.stdout_redacted||''
 	const stdout=change?cleanFileChangeOutput(rawStdout):rawStdout
   const stderr=textValue(payload.stderr)||textValue(resultPayload?.stderr)||entry.liveStderr||run?.stderr_redacted||run?.error||''
   const stdoutPreview=latestOutput(stdout)
@@ -1233,12 +1755,14 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
   const resultExitCode=resultPayload?.exit_code
   const exitCode=typeof payload.exit_code==='number'?payload.exit_code:typeof resultExitCode==='number'?resultExitCode:run?.exit_code??'—'
   return <details className={`tool-event tool-event-rich ${status}`} open={expanded} onToggle={event=>setExpanded(event.currentTarget.open)}>
-	<summary><div className="tool-summary-icon"><TerminalSquare size={15}/></div><div className="tool-summary-copy"><div className="tool-summary-operation"><b>{eventToolLabel||entry.tool||t('common.functions')}:</b><code title={commandSummary}>{commandSummary}</code></div>{targets.length>0&&<div className="tool-summary-targets">{targets.map((target,index)=><span className={`tool-target-chip ${target.kind}`} title={`${target.label}: ${[target.name,target.id].filter(Boolean).join(' · ')}`} key={`${target.kind}_${target.id||target.name}_${index}`}>{target.kind==='host'?<Server size={11}/>:target.kind==='workspace'?<FolderOpen size={11}/>:<ListChecks size={11}/>}<em>{target.label}</em>{target.name&&<b>{target.name}</b>}{target.id&&<code>{target.id}</code>}</span>)}</div>}</div><span className={`tool-status ${status}`}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span><ChevronRight size={14}/>{stdoutPreview&&<div className="tool-summary-preview"><span>{t('tool.latestStdout',{count:Math.min(3,stdoutPreview.split('\n').length)})}</span><pre>{stdoutPreview}</pre></div>}</summary>
+	<summary><div className="tool-summary-icon"><TerminalSquare size={15}/></div><div className="tool-summary-copy"><div className="tool-summary-operation"><b>{eventToolLabel||entry.tool||t('common.functions')}:</b><code title={commandSummary}>{commandSummary}</code></div>{targets.length>0&&<div className="tool-summary-targets">{targets.map((target,index)=><span className={`tool-target-chip ${target.kind}`} title={`${target.label}: ${[target.name,target.id].filter(Boolean).join(' · ')}`} key={`${target.kind}_${target.id||target.name}_${index}`}>{target.kind==='host'?<Server size={11}/>:target.kind==='workspace'?<FolderOpen size={11}/>:<ListChecks size={11}/>}<em>{target.label}</em>{target.name&&<b>{target.name}</b>}{target.id&&<code>{target.id}</code>}</span>)}</div>}</div><span className={`tool-status ${status}`}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span><ChevronRight size={14}/>{stdoutPreview&&<div className="tool-summary-preview"><span>{shellAction==='status'?shellActionLabel:t('tool.latestStdout',{count:Math.min(3,stdoutPreview.split('\n').length)})}</span><pre>{stdoutPreview}</pre></div>}</summary>
     <div className="tool-event-body">
+	  {shellPrimaryAction&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><pre>{shellPrimaryContent||'—'}</pre></div></section>}
+      {(shellOperation||entry.tool==='ssh_exec'||entry.tool==='ssh_run_script')&&toolArguments&&<CompactTable title={t('tool.actualParameters')} columns={[t('tool.parameter'),t('tool.value')]} rows={Object.entries(toolArguments).map(([key,value])=>[key,value])}/>}
       {request?<div className="tool-execution-layout">
         <section className="tool-command-pane">
-		  <div className="tool-command-head"><span>{tunnelOperation?t('tunnels.forwarding'):structuredFileOperation?t(fileSearchMode?'tool.searchOperation':'tool.readOperation'):filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}{request.elevated===true&&<em><ShieldAlert size={12}/>sudo / root</em>}</div>
-			  <div className="tool-command-block">{tunnelOperation?<pre>{tunnelRoute||requestMode}</pre>:workspaceTransfer?<pre>workspace_upload {workspaceID}:{relativePath} → {remotePath}</pre>:sshTransfer?<pre>{sourceHostName}:{sourcePath} → {hostName}:{remotePath}</pre>:structuredFileOperation?<pre>{fileSearchMode?'search':'read'} {fileTarget}</pre>:filePath?<pre>{requestMode} {workspaceID?`${workspaceID}:`:''}{filePath}</pre>:script?<pre>{script}</pre>:program?<pre><span className="prompt-sign">$</span> {program}</pre>:<pre>{requestMode} {remotePath}</pre>}</div>
+		  <div className="tool-command-head"><span>{shellOperation?t('sshShell.interactive'):tunnelOperation?t('tunnels.forwarding'):structuredFileOperation?t(fileSearchMode?'tool.searchOperation':'tool.readOperation'):filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}{request.elevated===true&&<em><ShieldAlert size={12}/>sudo / root</em>}</div>
+			  <div className="tool-command-block">{shellOperation?<pre>{shellSummary}</pre>:tunnelOperation?<pre>{tunnelRoute||requestMode}</pre>:workspaceTransfer?<pre>workspace_upload {workspaceID}:{relativePath} → {remotePath}</pre>:sshTransfer?<pre>{sourceHostName}:{sourcePath} → {hostName}:{remotePath}</pre>:structuredFileOperation?<pre>{fileSearchMode?'search':'read'} {fileTarget}</pre>:filePath?<pre>{requestMode} {workspaceID?`${workspaceID}:`:''}{filePath}</pre>:script?<pre>{script}</pre>:program?<pre><span className="prompt-sign">$</span> {program}</pre>:<pre>{requestMode} {remotePath}</pre>}</div>
 		  {fileOperationParameters.length>0&&<CompactTable title={t('tool.actualParameters')} columns={[t('tool.parameter'),t('tool.value')]} rows={fileOperationParameters}/>}
 		  {change&&textValue(change.diff)&&<DiffViewer change={change}/>}
 		  {program&&<CompactTable title={t('tool.originalArgs')} columns={[t('tool.index'),t('tool.value')]} rows={[[0,textValue(request.program)],...args.map((arg,index)=>[index+1,JSON.stringify(arg)])]}/>}
@@ -1248,12 +1772,12 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
 			  <dl className="tool-context-grid"><div><dt>{workspaceTransfer||sshTransfer?t('tool.targetHost'):workspaceID?t('common.workspace'):t('tool.targetHost')}</dt><dd>{workspaceTransfer||sshTransfer?[destinationHost.name,hostID].filter(Boolean).join(' · '):workspaceID||[destinationHost.name,hostID].filter(Boolean).join(' · ')||'—'}</dd></div><div><dt>{tunnelOperation?t('tunnels.remoteEndpoint'):workspaceTransfer||sshTransfer?t('tool.sourceFile'):filePath?t('tool.filePath'):t('tool.workingDirectory')}</dt><dd>{tunnelOperation?`${tunnelRemoteHost}:${tunnelRemotePort}`:workspaceTransfer?`${workspaceID}:${relativePath}`:sshTransfer?`${[sourceHost.name,sourceHost.id].filter(Boolean).join(' · ')}:${sourcePath}`:filePath||textValue(request.cwd)||t('tool.defaultDirectory')}</dd></div><div><dt>{t('tool.permission')}</dt><dd>{workspaceShellBackend==='host'?t('tool.hostAuthority'):workspaceShellBackend==='sandbox'?t('tool.sandbox'):request.elevated===true?t('tool.managedSudo'):t('tool.normalUser')}</dd></div><div><dt>{t('common.risk')}</dt><dd>{risk?t(`riskLabels.${risk}`,{defaultValue:risk}):'—'}</dd></div><div><dt>{t('common.status')}</dt><dd>{t(`statusLabels.${status}`,{defaultValue:status})}</dd></div><div><dt>{t('tool.exitCode')}</dt><dd>{exitCode}</dd></div><div><dt>{t('tool.duration')}</dt><dd>{formatDuration(payload.duration??resultPayload?.duration,run)}</dd></div><div><dt>{t('tool.runId')}</dt><dd>{runID||'—'}</dd></div></dl>
 		  {textValue(request.reason)&&<div className="tool-reason"><span>{t('tool.reason')}</span><p>{textValue(request.reason)}</p></div>}
         </aside>
-      </div>:<GenericToolResult payload={payload}/>} 
+      </div>:!shellPrimaryAction&&<GenericToolResult payload={payload}/>}
 	  {file&&<FileMetadataPanel file={file}/>}
 	  {fileSearchMode&&searchResult&&<div className={`file-search-result ${searchFound?'found':'empty'}`}><Search size={15}/><div><b>{t(searchFound?'tool.searchMatched':'tool.searchNoMatches')}</b><span>{searchMatchModeLabel} · {searchPattern}</span></div></div>}
 	  {(textValue(payload.message)||textValue(payload.next_action))&&<div className={`tool-guidance ${payload.ok===false?'error':''}`}><ShieldAlert size={15}/><div><b>{textValue(payload.code)||t('tool.result')}</b>{textValue(payload.message)&&<p>{textValue(payload.message)}</p>}{textValue(payload.next_action)&&<small>{t('common.next')} · {textValue(payload.next_action)}</small>}</div></div>}
 	  {instruction&&<div className="tool-instruction"><ShieldAlert size={15}/><div><b>{t('tool.operatorInstruction')}</b><p>{instruction}</p></div></div>}
-      {(stdout||stderr)&&<div className="tool-output-grid">{stdout&&<ToolOutputPanel kind="stdout" label="STDOUT" content={stdout} live={status==='in_progress'}/>} {stderr&&<ToolOutputPanel kind="stderr" label={t('tool.stderrResult')} content={stderr} live={status==='in_progress'}/>}</div>}
+      {((stdout&&shellAction!=='status')||stderr)&&<div className="tool-output-grid">{stdout&&shellAction!=='status'&&<ToolOutputPanel kind="stdout" label="STDOUT" content={stdout} live={status==='in_progress'}/>} {stderr&&<ToolOutputPanel kind="stderr" label={t('tool.stderrResult')} content={stderr} live={status==='in_progress'}/>}</div>}
 	  <details className="tool-raw"><summary>{t('tool.rawJson')}</summary><pre>{JSON.stringify(rawPayload,null,2)}</pre></details>
     </div>
   </details>
@@ -1320,9 +1844,9 @@ function ReviewList({title,items,tone}:{title:string;items?:string[];tone?:strin
 function CommandExplanationPanel({review}:{review?:CommandReview}){
 	const {t,i18n:instance}=useTranslation()
   if(!review)return null
-			if(review.status==='pending')return <div className="command-review-panel pending" role="status" aria-live="polite"><div className="command-review-pending"><span className="review-agent-icon"><LoaderCircle className="spin" size={17}/></span><b>{t('approval.explanationWorking')}</b></div></div>
+			if(review.status==='pending')return <div className="command-review-panel pending" role="status" aria-live="polite"><div className="command-review-pending"><span className="review-agent-icon"><LoaderCircle className="spin" size={17}/></span><b>{t('approval.reviewWorking')}</b></div></div>
   const explanation=review.explanation
-	  return <details className={`command-review-panel ${review.status}`}><summary><span className="review-agent-icon"><BrainCircuit size={17}/></span><span><b>{t('approval.explanationAgent')}</b><small>{review.status==='completed'?t('approval.explanationCompleted'):review.status==='degraded'?t('approval.explanationPartial'):t('approval.explanationUnavailable')}</small></span><em>{t(`riskLabels.${review.deterministic_risk}`,{defaultValue:review.deterministic_risk.replace('_',' ')})}</em><ChevronRight size={14}/></summary><div className="command-review-body">{explanation&&<section className="review-explanation"><div className="review-section-title"><span>AI</span><div><b>{t('approval.plainExplanation')}</b><small>{explanation.summary}</small></div></div><p>{explanation.mechanism}</p><div className="review-list-grid"><ReviewList title={t('approval.risks')} items={explanation.risks} tone="warn"/></div></section>}{review.errors&&review.errors.length>0&&<div className="review-errors"><b>{t('approval.degradedInfo')}</b>{review.errors.map((item,index)=><code key={index}>{item}</code>)}</div>}<div className="review-meta">{t('common.model')} {review.model||t('common.unavailable')} · {new Date(review.reviewed_at).toLocaleString(localeFor(instance.language))}</div></div></details>
+	  return <details className={`command-review-panel ${review.status}`}><summary><span className="review-agent-icon"><BrainCircuit size={17}/></span><span><b>{t('approval.explanationAgent')}</b><small>{review.status==='completed'?t('approval.explanationCompleted'):review.status==='degraded'?t('approval.explanationPartial'):t('approval.explanationUnavailable')}</small></span><em>{t(`riskLabels.${review.deterministic_risk}`,{defaultValue:review.deterministic_risk.replace('_',' ')})}</em><ChevronRight size={14}/></summary><div className="command-review-body">{review.decision&&<div className={`review-decision ${review.decision}`}><b>{t(`approval.review_${review.decision}`)}</b><span>{review.reason}</span></div>}{explanation&&<section className="review-explanation"><div className="review-section-title"><span>AI</span><div><b>{t('approval.plainExplanation')}</b><small>{explanation.summary}</small></div></div><p>{explanation.mechanism}</p><div className="review-list-grid"><ReviewList title={t('approval.risks')} items={explanation.risks} tone="warn"/></div></section>}{review.errors&&review.errors.length>0&&<div className="review-errors"><b>{t('approval.degradedInfo')}</b>{review.errors.map((item,index)=><code key={index}>{item}</code>)}</div>}<div className="review-meta">{t('common.model')} {review.model||t('common.unavailable')} · {review.reviewed_at?new Date(review.reviewed_at).toLocaleString(localeFor(instance.language)):'—'}</div></div></details>
 }
 
 function ApprovalDialog({
@@ -1351,7 +1875,7 @@ function ApprovalDialog({
   const { t, i18n: instance } = useTranslation();
   const [note, setNote] = useState("");
   const [decisionBusy, setDecisionBusy] = useState<
-    "" | "once" | "session" | "reject"
+    "" | "once" | "reject"
   >("");
   const [explanationBusy, setExplanationBusy] = useState(false);
   const [error, setError] = useState("");
@@ -1379,6 +1903,7 @@ function ApprovalDialog({
   const hostWorkspaceShell =
     requestMode === "workspace_shell" && workspaceShellBackend === "host";
   const tunnelApproval = requestMode === "ssh_tunnel_start";
+  const sshShellApproval = requestMode === "ssh_shell_start";
   const fileReadApproval = [
     "remote_read",
     "remote_search",
@@ -1388,16 +1913,6 @@ function ApprovalDialog({
   const fileSearchApproval = ["remote_search", "workspace_search"].includes(
     requestMode,
   );
-  const directProgram = textValue(request.program).split("/").pop() || "";
-  const directFileReadApproval =
-    ["cat", "cut", "grep", "head", "less", "more", "tail"].includes(
-      directProgram,
-    ) ||
-    (requestMode === "script" &&
-      /(?:^|[\n;&|])\s*(?:\/[\w./-]+\/)?(?:cat|cut|grep|head|less|more|tail)(?:\s|$)/m.test(
-        script,
-      ));
-  const oneTimeFileAccess = fileReadApproval || directFileReadApproval || tunnelApproval;
   const workspaceTransfer = requestMode === "workspace_upload";
   const sshTransfer = requestMode === "ssh_file_transfer";
   const sourceHostID = textValue(request.source_host_id);
@@ -1412,6 +1927,8 @@ function ApprovalDialog({
       : t(fileSearchApproval ? "approval.searchTitle" : "approval.readTitle")
     : tunnelApproval
       ? t("approval.tunnelTitle")
+    : sshShellApproval
+      ? t("approval.sshShellTitle")
     : elevated
     ? filePath
       ? t("approval.sudoFileTitle")
@@ -1431,6 +1948,8 @@ function ApprovalDialog({
     ? elevated
       ? t(fileSearchApproval ? "approval.rootSearchLabel" : "approval.rootReadLabel")
       : t(fileSearchApproval ? "approval.searchLabel" : "approval.readLabel")
+    : sshShellApproval
+    ? t("approval.sshShellLabel")
     : sshTransfer
     ? t("approval.transferLabel")
     : workspaceTransfer
@@ -1450,8 +1969,11 @@ function ApprovalDialog({
   const tunnelRemoteHost = textValue(request.remote_host);
   const tunnelRemotePort = numberValue(request.remote_port);
   const tunnelOperation = sshTunnelRoute(targetHost,tunnelRemoteHost,tunnelRemotePort,tunnelLocalPort,t('tunnels.automaticPort'));
+  const sshShellOperation = `${targetHost}:${textValue(request.cwd)||'~'} · PTY`;
   const operation = tunnelApproval
     ? tunnelOperation
+    : sshShellApproval
+    ? sshShellOperation
     : sshTransfer
     ? `${sourceHost}:${sourcePath} → ${targetHost}:${remotePath}`
     : workspaceTransfer
@@ -1499,14 +2021,13 @@ function ApprovalDialog({
       ]
     : [];
   const explanationPending = approval.ai_review?.status === "pending";
-  const decide = async (scope: "once" | "session") => {
-    setDecisionBusy(scope);
+  const decide = async () => {
+    setDecisionBusy("once");
     setError("");
     try {
       const result = await api.approve(
         approval.id,
-        note.trim() || "Reviewed and approved in the current Agent session.",
-        scope,
+        note.trim() || "Reviewed and approved.",
       );
       onApproved(result);
       onNotice(
@@ -1641,7 +2162,7 @@ function ApprovalDialog({
               rows={fileApprovalParameters}
             />
           )}
-          {change&&textValue(change.diff)?<DiffViewer change={change}/>:<pre className="approval-command-preview">{script || `${tunnelApproval?'':'$ '}${operation}`}</pre>}
+          {change&&textValue(change.diff)?<DiffViewer change={change}/>:<pre className="approval-command-preview">{script || `${tunnelApproval||sshShellApproval?'':'$ '}${operation}`}</pre>}
           <dl>
             <div>
               <dt>
@@ -1687,10 +2208,10 @@ function ApprovalDialog({
               <dd>{approval.request_digest.slice(0, 12)}</dd>
             </div>
           </dl>
-          {hostWorkspaceShell && (
+          {(hostWorkspaceShell || sshShellApproval) && (
             <div className="approval-host-shell-warning">
               <ShieldAlert size={14} />
-              <span>{t("approval.hostShellWarning")}</span>
+              <span>{t(sshShellApproval?"approval.sshShellWarning":"approval.hostShellWarning")}</span>
             </div>
           )}
           {typeof request.reason === "string" && <p>{request.reason}</p>}
@@ -1706,7 +2227,7 @@ function ApprovalDialog({
               size={13}
             />
             {explanationPending
-              ? t("approval.explanationWorking")
+              ? t("approval.reviewWorking")
               : explanationBusy
                 ? t("approval.retrying")
                 : t("approval.retryExplanation")}
@@ -1735,7 +2256,7 @@ function ApprovalDialog({
           <button
             className="allow-once"
             disabled={decisionDisabled || stopping}
-            onClick={() => decide("once")}
+            onClick={() => decide()}
           >
             <Check size={16} />
             <span>
@@ -1745,37 +2266,6 @@ function ApprovalDialog({
                   : elevated
                     ? t("approval.allowSudo")
                     : t("approval.allowOnce")}
-              </b>
-            </span>
-          </button>
-          <button
-            className="allow-session"
-            disabled={
-              decisionDisabled ||
-              stopping ||
-              approval.risk === "critical" ||
-              hostWorkspaceShell ||
-              oneTimeFileAccess
-            }
-            onClick={() => decide("session")}
-            title={
-              oneTimeFileAccess
-                ? t(tunnelApproval?"approval.tunnelSessionUnavailable":"approval.fileReadUnavailable")
-                : hostWorkspaceShell
-                ? t("approval.hostUnavailable")
-                : approval.risk === "critical"
-                  ? t("approval.criticalUnavailable")
-                  : ""
-            }
-          >
-            <ShieldCheck size={16} />
-            <span>
-              <b>
-                {decisionBusy === "session"
-                  ? t("approval.authorizing")
-                  : elevated
-                    ? t("approval.allowSessionSudo")
-                    : t("approval.allowSession")}
               </b>
             </span>
           </button>
@@ -1817,6 +2307,7 @@ const emptyHostForm: HostInput = {
   address: "",
   port: 22,
   user: "",
+  agent_enabled: true,
   auth_type: "agent",
   private_key: "",
   known_hosts_file: "",
@@ -1839,7 +2330,7 @@ function HostsPage({ hosts, proxies, refresh }: {hosts:Host[];proxies:Proxy[];re
   const editing=!!form.id
 	const resetPrivateKey=()=>{setPrivateKeyName('');setPrivateKeyError('');setExistingPrivateKey(false);setPrivateKeyInputKey(value=>value+1)}
 	const openCreate=()=>{setForm(emptyHostForm);resetPrivateKey();setShowForm(true);setNotice('')}
-	const openEdit=(host:Host)=>{setForm({id:host.id,name:host.name,address:host.address,port:host.port,user:host.user,auth_type:host.auth_type||'agent',private_key:'',known_hosts_file:host.known_hosts_file||'',proxy_jump_host_id:host.proxy_jump_host_id||'',proxy_id:host.proxy_id||'',password:'',sudo_mode:host.sudo_mode||'none',sudo_password:''});setPrivateKeyName('');setPrivateKeyError('');setExistingPrivateKey(host.auth_type==='key'&&host.has_private_key);setPrivateKeyInputKey(value=>value+1);setShowForm(true);setNotice('')}
+	const openEdit=(host:Host)=>{setForm({id:host.id,name:host.name,address:host.address,port:host.port,user:host.user,agent_enabled:host.agent_enabled,auth_type:host.auth_type||'agent',private_key:'',known_hosts_file:host.known_hosts_file||'',proxy_jump_host_id:host.proxy_jump_host_id||'',proxy_id:host.proxy_id||'',password:'',sudo_mode:host.sudo_mode||'none',sudo_password:''});setPrivateKeyName('');setPrivateKeyError('');setExistingPrivateKey(host.auth_type==='key'&&host.has_private_key);setPrivateKeyInputKey(value=>value+1);setShowForm(true);setNotice('')}
 	const setAuthType=(auth_type:HostAuthType)=>{setForm(current=>({...current,auth_type,password:'',private_key:auth_type==='key'?current.private_key:''}));if(auth_type!=='key'){setPrivateKeyName('');setPrivateKeyError('');setPrivateKeyInputKey(value=>value+1)}}
 	const choosePrivateKey=async(event:React.ChangeEvent<HTMLInputElement>)=>{const selected=event.target.files?.[0];setPrivateKeyError('');if(!selected){setPrivateKeyName('');setForm(current=>({...current,private_key:''}));return}if(selected.size<=0||selected.size>maxPrivateKeyBytes){setPrivateKeyName('');setForm(current=>({...current,private_key:''}));setPrivateKeyError(t('hosts.keySizeError'));return}try{const content=await selected.text();setPrivateKeyName(selected.name);setForm(current=>({...current,private_key:content}))}catch(err){setPrivateKeyName('');setForm(current=>({...current,private_key:''}));setPrivateKeyError(errorText(err))}}
 	const missingPrivateKey=form.auth_type==='key'&&!form.private_key&&!existingPrivateKey
@@ -1855,6 +2346,7 @@ function HostsPage({ hosts, proxies, refresh }: {hosts:Host[];proxies:Proxy[];re
 	  <label><span>{t('hosts.address')}</span><input value={form.address} onChange={event=>setForm({...form,address:event.target.value})} required/></label>
 	  <label><span>{t('hosts.port')}</span><input type="number" min="1" max="65535" value={form.port} onChange={event=>setForm({...form,port:Number(event.target.value)})} required/></label>
 	  <label><span>{t('hosts.user')}</span><input value={form.user} onChange={event=>setForm({...form,user:event.target.value})} required/></label>
+	  <label className="host-agent-toggle"><span>Agent</span><input type="checkbox" checked={form.agent_enabled} onChange={event=>setForm({...form,agent_enabled:event.target.checked})}/><i/></label>
 	  <label><span>{t('hosts.authentication')}</span><select value={form.auth_type} onChange={event=>setAuthType(event.target.value as HostAuthType)}>{(['agent','key','password'] as HostAuthType[]).map(mode=><option value={mode} key={mode}>{authLabel(mode)}</option>)}</select></label>
 	  {form.auth_type==='password'&&<label><span>{t('hosts.sshPassword')}</span><PasswordInput autoComplete="new-password" value={form.password} onChange={event=>setForm({...form,password:event.target.value})} placeholder={editing?t('hosts.keepPassword'):t('common.required')} required={!editing}/></label>}
 	  {form.auth_type==='key'&&<div className="private-key-field"><span>{t('hosts.privateKey')}</span><label className={`private-key-picker ${privateKeyError||missingPrivateKey?'invalid':''}`} title={privateKeyName||t('hosts.chooseKey')}><UploadCloud size={15}/><span><b>{privateKeyName||(existingPrivateKey?t('hosts.storedKey'):t('hosts.choosePrivateKey'))}</b>{!privateKeyName&&!existingPrivateKey&&<small>{t('hosts.keyLimit')}</small>}</span><input key={privateKeyInputKey} type="file" onChange={event=>void choosePrivateKey(event)}/></label>{(privateKeyError||missingPrivateKey)&&<small className="private-key-error">{privateKeyError||t('hosts.keyRequired')}</small>}</div>}
@@ -1864,7 +2356,7 @@ function HostsPage({ hosts, proxies, refresh }: {hosts:Host[];proxies:Proxy[];re
 	  <label><span>{t('hosts.sudoPolicy')}</span><select value={form.sudo_mode} onChange={event=>setForm({...form,sudo_mode:event.target.value as HostSudoMode,sudo_password:''})}>{(['none','nopasswd','password'] as HostSudoMode[]).map(mode=><option value={mode} key={mode}>{sudoLabel(mode)}</option>)}</select></label>
 	  {form.sudo_mode==='password'&&<label><span>{t('hosts.sudoPasswordLabel')}</span><PasswordInput autoComplete="new-password" value={form.sudo_password} onChange={event=>setForm({...form,sudo_password:event.target.value})} placeholder={editing?t('hosts.keepPassword'):t('common.required')} required={!editing}/></label>}
 		</div><div className="form-actions"><button type="button" onClick={()=>setShowForm(false)}>{t('common.cancel')}</button><button className="primary" disabled={saving||!!privateKeyError||missingPrivateKey}>{saving?t('common.saving'):editing?t('hosts.update'):t('hosts.save')}</button></div></form></ConfigurationEditorPage>}
-		{!showForm&&<div className="host-grid">{hosts.map(host=>{const key=hostKeys[host.id],keyError=hostKeyErrors[host.id],scanning=hostKeyBusy===`scan-${host.id}`,trusting=hostKeyBusy===`trust-${host.id}`,proxy=proxies.find(item=>item.id===host.proxy_id);return <article className="host-card panel" key={host.id}><div className="host-top"><div className="server-glyph"><Server size={22}/></div><div><h3>{host.name}</h3><span>{`${host.user}@${host.address}:${host.port}`}</span></div><span className={`host-key-state ${key?.trusted?'trusted':key?'untrusted':'unchecked'}`}>{scanning?t('hosts.checkingKey'):key?.trusted?t('hosts.trustedKey'):key?t('hosts.untrustedKey'):t('hosts.uncheckedKey')}</span></div><dl><div><dt>{t('hosts.authentication')}</dt><dd>{authLabel(host.auth_type||'agent')}</dd></div>{proxy&&<div><dt>{t('hosts.proxy')}</dt><dd title={proxy.url}>{proxy.name}</dd></div>}<div><dt>Sudo</dt><dd>{sudoLabel(host.sudo_mode||'none')}</dd></div><div><dt>{t('hosts.hostId')}</dt><dd>{host.id}</dd></div></dl>{(key||keyError)&&<div className={`host-key-review ${key?.trusted?'trusted':'untrusted'}`}>{key&&<><div><KeyRound size={14}/><span><b>{key.algorithm||t('hosts.hostKey')}</b><code title={key.fingerprint}>{key.fingerprint}</code></span></div>{!key.trusted&&<button className="trust" disabled={trusting} onClick={()=>void trust(host)}>{trusting?<LoaderCircle className="spin" size={13}/>:<ShieldCheck size={13}/>} {trusting?t('hosts.trustingKey'):t('hosts.trustKey')}</button>}</>}{keyError&&<span className="host-key-error">{keyError}</span>}</div>}<div className="card-actions"><button onClick={()=>void probe(host)}><Activity size={15}/>{t('hosts.probe')}</button><button disabled={scanning||trusting} onClick={()=>void scan(host)}>{scanning?<LoaderCircle className="spin" size={15}/>:<KeyRound size={15}/>} {t('hosts.checkKey')}</button><button onClick={()=>openEdit(host)}><Edit3 size={15}/>{t('common.edit')}</button><button className="danger" disabled={deletingHost===host.id} title={t('common.delete')} onClick={()=>setDeleteCandidate(host)}>{deletingHost===host.id?<LoaderCircle className="spin" size={15}/>:<Trash2 size={15}/>}</button></div></article>})}</div>}
+		{!showForm&&<div className="host-grid">{hosts.map(host=>{const key=hostKeys[host.id]||host.host_key,keyError=hostKeyErrors[host.id],scanning=hostKeyBusy===`scan-${host.id}`,trusting=hostKeyBusy===`trust-${host.id}`,proxy=proxies.find(item=>item.id===host.proxy_id);return <article className="host-card panel" key={host.id}><div className="host-top"><div className="server-glyph"><Server size={22}/></div><div><h3>{host.name}</h3><span>{`${host.user}@${host.address}:${host.port}`}</span></div><div className="host-top-states"><span className={`host-agent-state ${host.agent_enabled?'active':''}`} title="Agent"><Bot size={13}/></span><span className={`host-key-state ${key?.trusted?'trusted':key?'untrusted':'unchecked'}`}>{scanning?t('hosts.checkingKey'):key?.trusted?t('hosts.trustedKey'):key?t('hosts.untrustedKey'):t('hosts.uncheckedKey')}</span></div></div><dl><div><dt>{t('hosts.authentication')}</dt><dd>{authLabel(host.auth_type||'agent')}</dd></div>{proxy&&<div><dt>{t('hosts.proxy')}</dt><dd title={proxy.url}>{proxy.name}</dd></div>}<div><dt>Sudo</dt><dd>{sudoLabel(host.sudo_mode||'none')}</dd></div><div><dt>{t('hosts.hostId')}</dt><dd>{host.id}</dd></div></dl>{(key||keyError)&&<div className={`host-key-review ${key?.trusted?'trusted':'untrusted'}`}>{key&&<><div><KeyRound size={14}/><span><b>{key.algorithm||t('hosts.hostKey')}</b><code title={key.fingerprint}>{key.fingerprint}</code></span></div>{!key.trusted&&<button className="trust" disabled={trusting} onClick={()=>void trust(host)}>{trusting?<LoaderCircle className="spin" size={13}/>:<ShieldCheck size={13}/>} {trusting?t('hosts.trustingKey'):t('hosts.trustKey')}</button>}</>}{keyError&&<span className="host-key-error">{keyError}</span>}</div>}<div className="card-actions"><button onClick={()=>void probe(host)}><Activity size={15}/>{t('hosts.probe')}</button><button disabled={scanning||trusting} onClick={()=>void scan(host)}>{scanning?<LoaderCircle className="spin" size={15}/>:<KeyRound size={15}/>} {t('hosts.checkKey')}</button><button onClick={()=>openEdit(host)}><Edit3 size={15}/>{t('common.edit')}</button><button className="danger" disabled={deletingHost===host.id} title={t('common.delete')} onClick={()=>setDeleteCandidate(host)}>{deletingHost===host.id?<LoaderCircle className="spin" size={15}/>:<Trash2 size={15}/>}</button></div></article>})}</div>}
 	{!showForm&&!hosts.length && <Empty icon={<Server/>} title={t('hosts.emptyTitle')}/>}
 	{deleteCandidate&&<DestructiveConfirmDialog label={t('hosts.deleteDialogLabel')} title={t('hosts.deleteTitle',{name:deleteCandidate.name})} description={t('hosts.deleteText')} busy={deletingHost===deleteCandidate.id} onCancel={()=>setDeleteCandidate(null)} onConfirm={()=>void remove()}/>}
   </div>
@@ -1966,6 +2458,7 @@ function ModelsPage({providers,proxies,health,refresh}:{providers:ModelProvider[
 
 function AuditRunDetail({run,req,hosts}:{run:Run;req:JsonRecord;hosts:Host[]}){
 	const {t}=useTranslation()
+	const toolArguments=run.tool_arguments_json?parseRecord(run.tool_arguments_json):undefined
 	const script=textValue(req.script)
 	const program=textValue(req.program)?fullProgram(req):''
 	const args=Array.isArray(req.args)?req.args.map(value=>String(value)):[]
@@ -1985,15 +2478,18 @@ function AuditRunDetail({run,req,hosts}:{run:Run;req:JsonRecord;hosts:Host[]}){
 	const workspaceTransfer=mode==='workspace_upload'
 	const sshTransfer=mode==='ssh_file_transfer'
 	const tunnelMode=mode==='ssh_tunnel_start'
+	const shellMode=mode==='ssh_shell_start'
 	const tunnelRoute=tunnelMode?sshTunnelRoute(destinationHost.name||destinationHost.id,textValue(req.remote_host),numberValue(req.remote_port),numberValue(req.local_port),t('tunnels.automaticPort')):''
+	const shellTarget=`${destinationHost.name||destinationHost.id} · PTY`
 	const fileTarget=`${workspaceID?`${workspaceID}:`:''}${filePath}`
 	const consumed=new Set(['program','args','script','cwd','reason','change','env','host_id','workspace_id','remote_path','relative_path','source_path','source_host_id','mode','elevated','workspace_shell_backend','remote_host','remote_port','local_port'])
 	const extras=Object.entries(req).filter(([key,value])=>!consumed.has(key)&&value!==undefined&&value!==null&&value!==''&&!(Array.isArray(value)&&!value.length))
 	return <>
+		{toolArguments&&<CompactTable title={`${toolLabel(run.tool_name||'')} · ${t('tool.actualParameters')}`} columns={[t('tool.parameter'),t('tool.value')]} rows={Object.entries(toolArguments).map(([key,value])=>[key,value])}/>}
 		<div className="tool-execution-layout">
 			<section className="tool-command-pane">
-				<div className="tool-command-head"><span>{tunnelMode?t('tunnels.forwarding'):searchMode?t('tool.searchOperation'):readMode?t('tool.readOperation'):workspaceTransfer||sshTransfer||filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}{req.elevated===true&&<em><ShieldAlert size={12}/>sudo / root</em>}</div>
-				<div className="tool-command-block">{tunnelMode?<pre>{tunnelRoute}</pre>:workspaceTransfer?<pre>workspace_upload {workspaceID}:{relativePath} → {remotePath}</pre>:sshTransfer?<pre>{[sourceHost.name||sourceHost.id,sourcePath].filter(Boolean).join(':')} → {destinationHost.name||destinationHost.id}:{remotePath}</pre>:searchMode||readMode?<pre>{searchMode?'search':'read'} {fileTarget}</pre>:script?<pre>{script}</pre>:program?<pre><span className="prompt-sign">$</span> {program}</pre>:filePath?<pre>{mode} {fileTarget}</pre>:<pre>{JSON.stringify(req,null,2)}</pre>}</div>
+				<div className="tool-command-head"><span>{shellMode?`${t('sshShell.toolActions.start')} Shell`:tunnelMode?t('tunnels.forwarding'):searchMode?t('tool.searchOperation'):readMode?t('tool.readOperation'):workspaceTransfer||sshTransfer||filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}{req.elevated===true&&<em><ShieldAlert size={12}/>sudo / root</em>}</div>
+				<div className="tool-command-block">{shellMode?<pre>{shellTarget}</pre>:tunnelMode?<pre>{tunnelRoute}</pre>:workspaceTransfer?<pre>workspace_upload {workspaceID}:{relativePath} → {remotePath}</pre>:sshTransfer?<pre>{[sourceHost.name||sourceHost.id,sourcePath].filter(Boolean).join(':')} → {destinationHost.name||destinationHost.id}:{remotePath}</pre>:searchMode||readMode?<pre>{searchMode?'search':'read'} {fileTarget}</pre>:script?<pre>{script}</pre>:program?<pre><span className="prompt-sign">$</span> {program}</pre>:filePath?<pre>{mode} {fileTarget}</pre>:<pre>{JSON.stringify(req,null,2)}</pre>}</div>
 				{change&&textValue(change.diff)&&<DiffViewer change={change}/>}
 				{program&&args.length>0&&<CompactTable title={t('tool.originalArgs')} columns={[t('tool.index'),t('tool.value')]} rows={[[0,textValue(req.program)],...args.map((arg,index)=>[index+1,JSON.stringify(arg)])]}/>}
 				{env&&Object.keys(env).length>0&&<CompactTable title={t('tool.environment')} columns={[t('tool.key'),t('tool.value')]} rows={Object.entries(env).map(([key,value])=>[key,String(value)])}/>}
@@ -2012,8 +2508,35 @@ function AuditRunDetail({run,req,hosts}:{run:Run;req:JsonRecord;hosts:Host[]}){
 			</aside>
 		</div>
 		{(run.stdout_redacted||run.stderr_redacted||run.error)&&<div className="tool-output-grid">{run.stdout_redacted&&<div className="tool-output stdout"><span>STDOUT · REDACTED</span><pre>{run.stdout_redacted}</pre></div>}{run.stderr_redacted&&<div className="tool-output stderr"><span>STDERR · REDACTED</span><pre>{run.stderr_redacted}</pre></div>}{run.error&&!run.stderr_redacted&&<div className="tool-output stderr"><span>{t('common.error')}</span><pre>{run.error}</pre></div>}</div>}
-		<details className="tool-raw"><summary>{t('tool.rawJson')}</summary><pre>{JSON.stringify(req,null,2)}</pre></details>
+		<details className="tool-raw"><summary>{t('tool.normalizedRequest')}</summary><pre>{JSON.stringify(req,null,2)}</pre></details>
 	</>
+}
+
+function auditOperationSummary(req:JsonRecord,run:Run,hosts:Host[],t:TFunction){
+	const mode=textValue(req.mode)
+	const destinationHost=hostIdentity(hosts,run.host_id)
+	const destinationName=destinationHost.name||destinationHost.id
+	const workspaceID=textValue(req.workspace_id)
+	const relativePath=textValue(req.relative_path)
+	const remotePath=textValue(req.remote_path)
+	const sourceHost=hostIdentity(hosts,textValue(req.source_host_id))
+	switch(mode){
+		case'program':return fullProgram(req)
+		case'script':return `${t('toolNames.ssh_run_script')} · ${compactScript(textValue(req.script))}`
+		case'ssh_shell_start':return `${t('sshShell.toolActions.start')} Shell`
+		case'ssh_tunnel_start':return sshTunnelRoute(destinationName,textValue(req.remote_host),numberValue(req.remote_port),numberValue(req.local_port),t('tunnels.automaticPort'))
+		case'remote_read':return `${t('toolNames.ssh_file_read')} · ${remotePath}`
+		case'remote_search':return `${t('toolNames.ssh_file_search_mode')} · ${remotePath} · ${textValue(req.search_pattern)}`
+		case'remote_edit':return `${t('toolNames.ssh_file_edit')} · ${remotePath}`
+		case'workspace_read':return `${t('toolNames.workspace_file_read')} · ${workspaceID}:${relativePath}`
+		case'workspace_search':return `${t('toolNames.workspace_file_search_mode')} · ${workspaceID}:${relativePath} · ${textValue(req.search_pattern)}`
+		case'workspace_edit':return `${t('toolNames.workspace_file_edit')} · ${workspaceID}:${relativePath}`
+		case'workspace_directory_list':return `${t('toolNames.workspace_file_list')} · ${workspaceID}:${relativePath}`
+		case'workspace_shell':return `${t('toolNames.workspace_shell')} · ${compactScript(textValue(req.script))}`
+		case'workspace_upload':return `${t('toolNames.workspace_file_upload')} · ${workspaceID}:${relativePath} → ${destinationName}:${remotePath}`
+		case'ssh_file_transfer':return `${t('toolNames.ssh_file_transfer')} · ${sourceHost.name||sourceHost.id}:${textValue(req.source_path)} → ${destinationName}:${remotePath}`
+		default:return mode||t('audit.unknownOperation')
+	}
 }
 
 function AuditPage({runs,hosts}:{runs:Run[];hosts:Host[]}) {
@@ -2028,7 +2551,7 @@ function AuditPage({runs,hosts}:{runs:Run[];hosts:Host[]}) {
     for(const run of filtered){const key=run.session_id||'__direct__';grouped.set(key,[...(grouped.get(key)||[]),run])}
 	return [...grouped.entries()].map(([id,items])=>{items.sort((a,b)=>Date.parse(b.started_at)-Date.parse(a.started_at));return{id,title:id==='__direct__'?t('audit.direct'):titles.get(id)||t('audit.missingConversation'),runs:items,latest:items[0]?.started_at,critical:items.filter(run=>run.risk==='critical'||run.risk==='forbidden').length,pending:items.filter(run=>run.status==='approval_required').length}}).sort((a,b)=>Date.parse(b.latest||'')-Date.parse(a.latest||''))
 	},[filtered,sessions,t,instance.language])
-	return <div className="page-stack"><div className="audit-toolbar"><div className="search-box"><Search size={16}/><input aria-label={t('common.search')} value={query} onChange={event=>setQuery(event.target.value)}/></div><span>{t('audit.counts',{sessions:groups.length,runs:filtered.length})}</span></div><div className="audit-groups">{groups.map(group=><details className="audit-session panel" key={group.id}><summary className="audit-session-summary"><div className="audit-session-glyph"><History size={17}/></div><div className="audit-session-name"><b>{group.title}</b><span>{group.id==='__direct__'?t('audit.noSession'):group.id} · {t('audit.lastRun',{date:new Date(group.latest).toLocaleString(localeFor(instance.language))})}</span></div><div className="audit-session-stats"><span><b>{group.runs.length}</b> {t('audit.runs')}</span>{group.critical>0&&<span className="critical-count"><b>{group.critical}</b> {t('audit.critical')}</span>}{group.pending>0&&<span className="pending-count"><b>{group.pending}</b> {t('audit.pending')}</span>}</div><ChevronRight className="audit-session-chevron" size={17}/></summary><div className="audit-table"><div className="audit-row audit-head"><span>{t('audit.columns.time')}</span><span>{t('audit.columns.operation')}</span><span>{t('audit.columns.risk')}</span><span>{t('audit.columns.status')}</span><span>{t('audit.columns.host')}</span><span>{t('audit.columns.exit')}</span></div>{group.runs.map(run=>{let req:Record<string,unknown>={};try{req=JSON.parse(run.request_json)}catch{req={request:run.request_json}};const args=Array.isArray(req.args)?req.args.join(' '):'';const mode=textValue(req.mode);const auditHost=hostIdentity(hosts,run.host_id);const operation=mode==='ssh_tunnel_start'?sshTunnelRoute(auditHost.name||auditHost.id,textValue(req.remote_host),numberValue(req.remote_port),numberValue(req.local_port),t('tunnels.automaticPort')):typeof req.program==='string'?`${req.program} ${args}`.trim():t('audit.bashScript');return <details key={run.id}><summary className="audit-row"><span>{new Date(run.started_at).toLocaleString(localeFor(instance.language))}</span><span className="command">{operation}</span><span><i className={`risk-dot ${run.risk}`}/>{t(`riskLabels.${run.risk}`,{defaultValue:run.risk})}</span><span className={`run-status ${run.status}`}>{t(`statusLabels.${run.status}`,{defaultValue:run.status})}</span><span>{run.host_id.slice(0,16)}</span><span>{run.exit_code}</span></summary><div className="run-detail"><AuditRunDetail run={run} req={req} hosts={hosts}/></div></details>})}</div></details>)}</div>{!runs.length&&<Empty icon={<History/>} title={t('audit.emptyTitle')}/>} {runs.length>0&&!groups.length&&<Empty icon={<Search/>} title={t('audit.noMatch')}/>}</div>
+	return <div className="page-stack"><div className="audit-toolbar"><div className="search-box"><Search size={16}/><input aria-label={t('common.search')} value={query} onChange={event=>setQuery(event.target.value)}/></div><span>{t('audit.counts',{sessions:groups.length,runs:filtered.length})}</span></div><div className="audit-groups">{groups.map(group=><details className="audit-session panel" key={group.id}><summary className="audit-session-summary"><div className="audit-session-glyph"><History size={17}/></div><div className="audit-session-name"><b>{group.title}</b><span>{group.id==='__direct__'?t('audit.noSession'):group.id} · {t('audit.lastRun',{date:new Date(group.latest).toLocaleString(localeFor(instance.language))})}</span></div><div className="audit-session-stats"><span><b>{group.runs.length}</b> {t('audit.runs')}</span>{group.critical>0&&<span className="critical-count"><b>{group.critical}</b> {t('audit.critical')}</span>}{group.pending>0&&<span className="pending-count"><b>{group.pending}</b> {t('audit.pending')}</span>}</div><ChevronRight className="audit-session-chevron" size={17}/></summary><div className="audit-table"><div className="audit-row audit-head"><span>{t('audit.columns.time')}</span><span>{t('audit.columns.operation')}</span><span>{t('audit.columns.risk')}</span><span>{t('audit.columns.status')}</span><span>{t('audit.columns.host')}</span><span>{t('audit.columns.exit')}</span></div>{group.runs.map(run=>{let req:Record<string,unknown>={};try{req=JSON.parse(run.request_json)}catch{req={request:run.request_json}};const auditHost=hostIdentity(hosts,run.host_id);const workspaceID=textValue(req.workspace_id);const target=auditHost.name||(run.host_id.startsWith('workspace_')?workspaceID:run.host_id)||'—';const operation=auditOperationSummary(req,run,hosts,t);return <details key={run.id}><summary className="audit-row"><span>{new Date(run.started_at).toLocaleString(localeFor(instance.language))}</span><span className="command">{operation}</span><span><i className={`risk-dot ${run.risk}`}/>{t(`riskLabels.${run.risk}`,{defaultValue:run.risk})}</span><span className={`run-status ${run.status}`}>{t(`statusLabels.${run.status}`,{defaultValue:run.status})}</span><span title={run.host_id}>{target}</span><span>{run.exit_code}</span></summary><div className="run-detail"><AuditRunDetail run={run} req={req} hosts={hosts}/></div></details>})}</div></details>)}</div>{!runs.length&&<Empty icon={<History/>} title={t('audit.emptyTitle')}/>} {runs.length>0&&!groups.length&&<Empty icon={<Search/>} title={t('audit.noMatch')}/>}</div>
 }
 
 function logFieldValue(value:unknown){

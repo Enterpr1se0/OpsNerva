@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"time"
 
 	"eino-ops-agent/internal/domain"
 	"eino-ops-agent/internal/service"
@@ -103,7 +104,7 @@ func toolGuard(name string) string {
 		return "agent_state"
 	case "ssh_exec", "ssh_run_script":
 		return "policy_checked"
-	case "ssh_tunnel", "ssh_file_read", "workspace_file_read", "ssh_file_edit", "ssh_file_transfer", "workspace_file_edit", "workspace_file_upload", "workspace_shell":
+	case "ssh_tunnel", "ssh_shell", "ssh_file_read", "workspace_file_read", "ssh_file_edit", "ssh_file_transfer", "workspace_file_edit", "workspace_file_upload", "workspace_shell":
 		return "approval_required"
 	case "ssh_task":
 		return "audited_control"
@@ -154,6 +155,85 @@ type SSHTunnelInput struct {
 	LocalPort  int    `json:"local_port,omitempty" jsonschema:"start only: local 127.0.0.1 port; zero selects an available port"`
 	TunnelID   string `json:"tunnel_id,omitempty" jsonschema:"stop only: active tunnel identifier"`
 	Reason     string `json:"reason,omitempty" jsonschema:"optional concise purpose; used when starting a tunnel"`
+}
+
+type SSHShellInput struct {
+	Action        string `json:"action" jsonschema:"shell operation: start, input, status, list, interrupt, or close"`
+	HostID        string `json:"host_id,omitempty" jsonschema:"start only: registered SSH host identifier"`
+	ShellID       string `json:"shell_id,omitempty" jsonschema:"input, status, interrupt, and close only: interactive shell identifier"`
+	Input         string `json:"input,omitempty" jsonschema:"input only: exact non-secret bytes to send"`
+	Submit        bool   `json:"submit,omitempty" jsonschema:"input only: append a carriage return when input has no newline"`
+	Cwd           string `json:"cwd,omitempty" jsonschema:"start only: absolute remote working directory"`
+	Elevated      bool   `json:"elevated,omitempty" jsonschema:"start only: open the approved shell through managed sudo"`
+	AfterSequence uint64 `json:"after_sequence,omitempty" jsonschema:"status only: return every event after this sequence without truncation"`
+	WaitSeconds   int    `json:"wait_seconds,omitempty" jsonschema:"status only: wait up to 10 seconds for new output"`
+	Coalesce      bool   `json:"coalesce,omitempty" jsonschema:"status only: merge adjacent events without dropping content"`
+	Reason        string `json:"reason,omitempty" jsonschema:"optional concise audit note for any action; start requires it"`
+}
+
+func sshShellProvidedFields(input SSHShellInput) []string {
+	fields := []string{"action"}
+	if input.HostID != "" {
+		fields = append(fields, "host_id")
+	}
+	if input.ShellID != "" {
+		fields = append(fields, "shell_id")
+	}
+	if input.Input != "" {
+		fields = append(fields, "input")
+	}
+	if input.Submit {
+		fields = append(fields, "submit")
+	}
+	if input.Cwd != "" {
+		fields = append(fields, "cwd")
+	}
+	if input.Elevated {
+		fields = append(fields, "elevated")
+	}
+	if input.AfterSequence != 0 {
+		fields = append(fields, "after_sequence")
+	}
+	if input.WaitSeconds != 0 {
+		fields = append(fields, "wait_seconds")
+	}
+	if input.Coalesce {
+		fields = append(fields, "coalesce")
+	}
+	if input.Reason != "" {
+		fields = append(fields, "reason")
+	}
+	return fields
+}
+
+func validateSSHShellActionFields(input SSHShellInput, action string, allowed []string, example map[string]any) error {
+	provided := sshShellProvidedFields(input)
+	allowedSet := make(map[string]bool, len(allowed))
+	for _, field := range allowed {
+		allowedSet[field] = true
+	}
+	unexpected := make([]string, 0)
+	for _, field := range provided {
+		if !allowedSet[field] {
+			unexpected = append(unexpected, field)
+		}
+	}
+	if len(unexpected) == 0 {
+		return nil
+	}
+	return invalidStructuredToolInput(
+		fmt.Sprintf("action=%s received unsupported fields: %s", action, strings.Join(unexpected, ", ")),
+		domain.ToolValidationDetails{
+			Action: action, AllowedFields: allowed, GotFields: provided,
+			UnexpectedFields: unexpected, Example: example,
+		},
+	)
+}
+
+func invalidSSHShellValue(input SSHShellInput, action, message string, allowed []string, example map[string]any) error {
+	return invalidStructuredToolInput(message, domain.ToolValidationDetails{
+		Action: action, AllowedFields: allowed, GotFields: sshShellProvidedFields(input), Example: example,
+	})
 }
 
 type FileReadInput struct {
@@ -258,8 +338,45 @@ type WebExtractInput struct {
 	URLs []string `json:"urls" jsonschema:"1-5 specific public HTTP/HTTPS page URLs; never include credentials, private addresses, or private operational data"`
 }
 
+type HistoryRun struct {
+	ID                string           `json:"id"`
+	SessionID         string           `json:"session_id,omitempty"`
+	HostID            string           `json:"host_id"`
+	ToolName          string           `json:"tool_name,omitempty"`
+	ToolArgumentsJSON string           `json:"tool_arguments_json,omitempty"`
+	RequestJSON       string           `json:"request_json"`
+	RequestDigest     string           `json:"request_digest"`
+	Risk              domain.RiskLevel `json:"risk"`
+	Status            string           `json:"status"`
+	ExitCode          int              `json:"exit_code"`
+	StdoutRedacted    string           `json:"stdout_redacted,omitempty"`
+	StderrRedacted    string           `json:"stderr_redacted,omitempty"`
+	Error             string           `json:"error,omitempty"`
+	StartedAt         time.Time        `json:"started_at"`
+	CompletedAt       time.Time        `json:"completed_at,omitempty"`
+}
+
 type HistoryOutput struct {
-	Runs []domain.Run `json:"runs"`
+	Runs []HistoryRun `json:"runs"`
+}
+
+func historyRun(run domain.Run) HistoryRun {
+	return HistoryRun{
+		ID: run.ID, SessionID: run.SessionID, HostID: run.HostID,
+		ToolName: run.ToolName, ToolArgumentsJSON: run.ToolArgumentsJSON,
+		RequestJSON: run.RequestJSON, RequestDigest: run.RequestDigest,
+		Risk: run.Risk, Status: run.Status, ExitCode: run.ExitCode,
+		StdoutRedacted: run.StdoutRedacted, StderrRedacted: run.StderrRedacted,
+		Error: run.Error, StartedAt: run.StartedAt, CompletedAt: run.CompletedAt,
+	}
+}
+
+func historyRuns(runs []domain.Run) []HistoryRun {
+	result := make([]HistoryRun, len(runs))
+	for index, run := range runs {
+		result[index] = historyRun(run)
+	}
+	return result
 }
 
 type TaskInput struct {
@@ -267,7 +384,7 @@ type TaskInput struct {
 	Action string `json:"action" jsonschema:"task operation: status or cancel"`
 }
 
-const rejectedOperationNextAction = "stop this operation, do not resubmit it, and follow operator_instruction as the human's authoritative replacement instruction"
+const rejectedOperationNextAction = "stop this operation and do not resubmit the unchanged request; follow operator_instruction when one is present"
 
 func normalizeToolStatus(meta *domain.ToolMeta, status string) {
 	meta.ToolVersion = "1.1"
@@ -275,11 +392,15 @@ func normalizeToolStatus(meta *domain.ToolMeta, status string) {
 	switch status {
 	case "completed", "running":
 		meta.OK = true
+	case "partial":
+		meta.OK = true
+		meta.Message = "the command returned usable output but exited with a non-zero status"
+		meta.NextAction = "use the output where sufficient; check the exit code before assuming full completion"
 	case "approval_required":
 		meta.OK = true
 		meta.NextAction = "wait for the human decision; do not resubmit or try to approve this operation"
 	case "rejected":
-		meta.Message = "the human operator rejected this operation"
+		meta.Message = "the operation was rejected during approval"
 		meta.NextAction = rejectedOperationNextAction
 	case "failed":
 		meta.Message = "the operation failed; inspect this Tool result for available error details"
@@ -417,10 +538,10 @@ func ReadHistoryTool(ctx context.Context, svc *service.Service, input HistorySea
 		if err != nil {
 			return HistoryOutput{}, err
 		}
-		return HistoryOutput{Runs: []domain.Run{result.Run}}, nil
+		return HistoryOutput{Runs: []HistoryRun{historyRun(result.Run)}}, nil
 	}
 	runs, err := svc.SearchRuns(ctx, input.Query, input.HostID, input.Limit)
-	return HistoryOutput{Runs: runs}, err
+	return HistoryOutput{Runs: historyRuns(runs)}, err
 }
 
 func ReadSkillTool(ctx context.Context, svc *service.Service, input SkillInput, actor string) (SkillOutput, error) {
@@ -448,8 +569,8 @@ func TaskStartToolResult(svc *service.Service, task domain.Task, startErr error)
 	return TaskToolResult(task, result, taskErr, startErr)
 }
 
-func RunExecutionTool(ctx context.Context, svc *service.Service, request domain.ExecRequest, background bool, actor string) (domain.ExecResult, error) {
-	if !background {
+func RunExecutionTool(ctx context.Context, svc *service.Service, request domain.ExecRequest, actor string) (domain.ExecResult, error) {
+	if !request.Background {
 		result, err := svc.Submit(ctx, request, actor)
 		return NormalizeExecToolResult(result, err)
 	}
@@ -585,7 +706,7 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	}
 
 	if err := appendTool(toolutils.InferTool("ssh_host_inspect", "Inspect a registered SSH host and return hostname, kernel, architecture, user, and uptime. This is read-only.", func(ctx context.Context, input HostInput) (any, error) {
-		capability, err := svc.ProbeHost(ctx, input.HostID)
+		capability, err := svc.ProbeHost(ctx, input.HostID, "eino-agent")
 		return normalizeValueToolResult(ctx, "ssh_host_inspect", capability, err)
 	})); err != nil {
 		return nil, err
@@ -596,19 +717,19 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_exec", "Execute one remote program with a separate argument vector. Set background=true only for a long-running command that must be polled or cancelled; omitted background defaults to false. Set elevated=true when root is required; credentials are injected by the control plane and all elevated requests require human approval.", func(ctx context.Context, input ExecInput) (domain.ExecResult, error) {
-		request := domain.ExecRequest{HostID: input.HostID, Mode: domain.ExecProgram, Program: input.Program, Args: input.Args, Cwd: input.Cwd, Env: input.Env, Elevated: input.Elevated, TimeoutSeconds: input.TimeoutSeconds, Reason: input.Reason}
-		return RunExecutionTool(ctx, svc, request, input.Background, "eino-agent")
+	if err := appendTool(toolutils.InferTool("ssh_exec", "Execute one remote program with a separate argument vector. Set background=true only for a long-running command that must be polled or cancelled; omitted background defaults to false. Set elevated=true when root is required; credentials are injected by the control plane and elevated requests follow the configured approval mode.", func(ctx context.Context, input ExecInput) (domain.ExecResult, error) {
+		request := domain.ExecRequest{HostID: input.HostID, Mode: domain.ExecProgram, Program: input.Program, Args: input.Args, Background: input.Background, Cwd: input.Cwd, Env: input.Env, Elevated: input.Elevated, TimeoutSeconds: input.TimeoutSeconds, Reason: input.Reason}
+		return RunExecutionTool(ctx, svc, request, "eino-agent")
 	})); err != nil {
 		return nil, err
 	}
 	if err := appendTool(toolutils.InferTool("ssh_run_script", "Run a complete Bash script after deterministic AST risk analysis. Set background=true only for a long-running script that must be polled or cancelled; omitted background defaults to false. Set elevated=true for control-plane-managed sudo; never embed sudo or credentials in the script.", func(ctx context.Context, input ScriptInput) (domain.ExecResult, error) {
-		request := domain.ExecRequest{HostID: input.HostID, Mode: domain.ExecScript, Script: input.Script, Cwd: input.Cwd, Env: input.Env, Elevated: input.Elevated, TimeoutSeconds: input.TimeoutSeconds, Reason: input.Reason}
-		return RunExecutionTool(ctx, svc, request, input.Background, "eino-agent")
+		request := domain.ExecRequest{HostID: input.HostID, Mode: domain.ExecScript, Script: input.Script, Background: input.Background, Cwd: input.Cwd, Env: input.Env, Elevated: input.Elevated, TimeoutSeconds: input.TimeoutSeconds, Reason: input.Reason}
+		return RunExecutionTool(ctx, svc, request, "eino-agent")
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_tunnel", "Manage local SSH port forwarding through registered hosts. start forwards one remote endpoint to local 127.0.0.1 and requires one-time human approval; the registered host's network proxy and ProxyJump chain are reused automatically. list returns all current tunnels. stop closes one tunnel by tunnel_id. Tunnels are process-local and end when OpsPilot stops.", func(ctx context.Context, input SSHTunnelInput) (any, error) {
+	if err := appendTool(toolutils.InferTool("ssh_tunnel", "Manage local SSH port forwarding through registered hosts. start forwards one remote endpoint to local 127.0.0.1 under the configured approval mode; the registered host's network proxy and ProxyJump chain are reused automatically. list returns all current tunnels. stop closes one tunnel by tunnel_id. Tunnels are process-local and end when OpsPilot stops.", func(ctx context.Context, input SSHTunnelInput) (any, error) {
 		switch strings.ToLower(strings.TrimSpace(input.Action)) {
 		case "start":
 			if input.TunnelID != "" {
@@ -633,12 +754,120 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
+	if err := appendTool(toolutils.InferTool("ssh_shell", "Manage an approved interactive PTY only when a real terminal prompt is required. start opens a shell that remains active until closed or disconnected; input sends raw non-secret bytes and submit=true adds Enter; status returns complete incremental events and a readable recent_output; list finds this conversation's active shells; interrupt sends Ctrl+C; close ends it. Never send credentials—the operator uses the private Web terminal.", func(ctx context.Context, input SSHShellInput) (any, error) {
+		action := strings.ToLower(strings.TrimSpace(input.Action))
+		sessionID := service.SessionIDFromContext(ctx)
+		if sessionID == "" {
+			return normalizeValueToolResult(ctx, "ssh_shell", domain.SSHShell{}, invalidToolInput("ssh_shell requires an Agent conversation"))
+		}
+		switch action {
+		case "start":
+			allowed := []string{"action", "host_id", "cwd", "elevated", "reason"}
+			example := map[string]any{"action": "start", "host_id": "host_xxx", "reason": "open an interactive diagnostic shell"}
+			if err := validateSSHShellActionFields(input, action, allowed, example); err != nil {
+				return normalizeValueToolResult(ctx, "ssh_shell", domain.ExecResult{}, err)
+			}
+			if strings.TrimSpace(input.HostID) == "" || strings.TrimSpace(input.Reason) == "" {
+				return normalizeValueToolResult(ctx, "ssh_shell", domain.ExecResult{}, invalidSSHShellValue(input, action, "action=start requires host_id and reason", allowed, example))
+			}
+			if len(input.Reason) > 500 {
+				return normalizeValueToolResult(ctx, "ssh_shell", domain.ExecResult{}, invalidSSHShellValue(input, action, "reason must not exceed 500 bytes", allowed, example))
+			}
+			result, err := svc.StartSSHShell(ctx, input.HostID, input.Cwd, input.Elevated, 120, 32, input.Reason, "eino-agent")
+			return NormalizeExecToolResult(result, err)
+		case "input":
+			allowed := []string{"action", "shell_id", "input", "submit", "reason"}
+			example := map[string]any{"action": "input", "shell_id": "shell_xxx", "input": "whoami", "submit": true}
+			if err := validateSSHShellActionFields(input, action, allowed, example); err != nil {
+				return normalizeValueToolResult(ctx, "ssh_shell", domain.SSHShellSnapshot{}, err)
+			}
+			if strings.TrimSpace(input.ShellID) == "" || input.Input == "" {
+				return normalizeValueToolResult(ctx, "ssh_shell", domain.SSHShellSnapshot{}, invalidSSHShellValue(input, action, "action=input requires shell_id and input", allowed, example))
+			}
+			shellInput := input.Input
+			if input.Submit && !strings.HasSuffix(shellInput, "\r") && !strings.HasSuffix(shellInput, "\n") {
+				shellInput += "\r"
+			}
+			if len(shellInput) > 64<<10 || len(input.Reason) > 500 {
+				return normalizeValueToolResult(ctx, "ssh_shell", domain.SSHShellSnapshot{}, invalidSSHShellValue(input, action, "input must not exceed 65536 bytes and reason must not exceed 500 bytes", allowed, example))
+			}
+			result, err := svc.WriteSSHShell(ctx, input.ShellID, sessionID, shellInput, input.Reason, "eino-agent")
+			return normalizeValueToolResult(ctx, "ssh_shell", result, err)
+		case "status":
+			allowed := []string{"action", "shell_id", "after_sequence", "wait_seconds", "coalesce", "reason"}
+			example := map[string]any{"action": "status", "shell_id": "shell_xxx", "after_sequence": 0, "coalesce": true}
+			if err := validateSSHShellActionFields(input, action, allowed, example); err != nil {
+				return normalizeValueToolResult(ctx, "ssh_shell", domain.SSHShellSnapshot{}, err)
+			}
+			if strings.TrimSpace(input.ShellID) == "" {
+				return normalizeValueToolResult(ctx, "ssh_shell", domain.SSHShellSnapshot{}, invalidSSHShellValue(input, action, "action=status requires shell_id", allowed, example))
+			}
+			if input.WaitSeconds < 0 || input.WaitSeconds > 10 {
+				return normalizeValueToolResult(ctx, "ssh_shell", domain.SSHShellSnapshot{}, invalidSSHShellValue(input, action, "wait_seconds must be between 0 and 10", allowed, example))
+			}
+			if len(input.Reason) > 500 {
+				return normalizeValueToolResult(ctx, "ssh_shell", domain.SSHShellSnapshot{}, invalidSSHShellValue(input, action, "reason must not exceed 500 bytes", allowed, example))
+			}
+			result, err := svc.GetSSHShellSnapshot(ctx, input.ShellID, sessionID, input.AfterSequence,
+				time.Duration(input.WaitSeconds)*time.Second, input.Coalesce, input.Reason, "eino-agent")
+			return normalizeValueToolResult(ctx, "ssh_shell", result, err)
+		case "list":
+			allowed := []string{"action", "reason"}
+			example := map[string]any{"action": "list"}
+			if err := validateSSHShellActionFields(input, action, allowed, example); err != nil {
+				return normalizeValueToolResult(ctx, "ssh_shell", domain.SSHShellList{}, err)
+			}
+			if len(input.Reason) > 500 {
+				return normalizeValueToolResult(ctx, "ssh_shell", domain.SSHShellList{}, invalidSSHShellValue(input, action, "reason must not exceed 500 bytes", allowed, example))
+			}
+			result, err := svc.ListSSHShells(ctx, sessionID, true, input.Reason, "eino-agent")
+			return normalizeValueToolResult(ctx, "ssh_shell", result, err)
+		case "interrupt":
+			allowed := []string{"action", "shell_id", "reason"}
+			example := map[string]any{"action": "interrupt", "shell_id": "shell_xxx"}
+			if err := validateSSHShellActionFields(input, action, allowed, example); err != nil {
+				return normalizeValueToolResult(ctx, "ssh_shell", domain.SSHShell{}, err)
+			}
+			if strings.TrimSpace(input.ShellID) == "" {
+				return normalizeValueToolResult(ctx, "ssh_shell", domain.SSHShell{}, invalidSSHShellValue(input, action, "action=interrupt requires shell_id", allowed, example))
+			}
+			if len(input.Reason) > 500 {
+				return normalizeValueToolResult(ctx, "ssh_shell", domain.SSHShell{}, invalidSSHShellValue(input, action, "reason must not exceed 500 bytes", allowed, example))
+			}
+			result, err := svc.InterruptSSHShell(ctx, input.ShellID, sessionID, input.Reason, "eino-agent")
+			return normalizeValueToolResult(ctx, "ssh_shell", result, err)
+		case "close":
+			allowed := []string{"action", "shell_id", "reason"}
+			example := map[string]any{"action": "close", "shell_id": "shell_xxx"}
+			if err := validateSSHShellActionFields(input, action, allowed, example); err != nil {
+				return normalizeValueToolResult(ctx, "ssh_shell", domain.SSHShell{}, err)
+			}
+			if strings.TrimSpace(input.ShellID) == "" {
+				return normalizeValueToolResult(ctx, "ssh_shell", domain.SSHShell{}, invalidSSHShellValue(input, action, "action=close requires shell_id", allowed, example))
+			}
+			if len(input.Reason) > 500 {
+				return normalizeValueToolResult(ctx, "ssh_shell", domain.SSHShell{}, invalidSSHShellValue(input, action, "reason must not exceed 500 bytes", allowed, example))
+			}
+			result, err := svc.CloseSSHShell(ctx, input.ShellID, sessionID, input.Reason, "eino-agent")
+			return normalizeValueToolResult(ctx, "ssh_shell", result, err)
+		default:
+			return normalizeValueToolResult(ctx, "ssh_shell", domain.SSHShell{}, invalidStructuredToolInput(
+				"invalid action: use start, input, status, list, interrupt, or close",
+				domain.ToolValidationDetails{
+					Action: action, AllowedFields: []string{"action"}, GotFields: sshShellProvidedFields(input),
+					Example: map[string]any{"action": "list"},
+				},
+			))
+		}
+	})); err != nil {
+		return nil, err
+	}
 	if err := appendTool(toolutils.InferTool("ssh_task", "Read or cancel one background SSH task. Use action=status to get complete redacted output, or action=cancel to stop a running task.", func(_ context.Context, input TaskInput) (domain.ExecResult, error) {
 		return RunTaskTool(svc, input, "eino-agent")
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_file_read", "Read one remote file after one-time human approval. By default returns complete content; byte ranges, tail lines, and metadata-only reads are optional. To search, set pattern and the required match_mode: literal searches exact text, while regex uses POSIX regular expressions (for example port|socks|proxy). context_lines is optional and search results are never truncated. No matches is a successful result with search.found=false. Read-range and search parameters are mutually exclusive. Sensitive credential paths are denied.", func(ctx context.Context, input FileReadInput) (domain.ExecResult, error) {
+	if err := appendTool(toolutils.InferTool("ssh_file_read", "Read one remote file under the configured approval mode. By default returns complete content; byte ranges, tail lines, and metadata-only reads are optional. To search, set pattern and the required match_mode: literal searches exact text, while regex uses POSIX regular expressions (for example port|socks|proxy). context_lines is optional and search results are never truncated. No matches is a successful result with search.found=false. Read-range and search parameters are mutually exclusive. Sensitive credential paths are denied unless Full access is enabled.", func(ctx context.Context, input FileReadInput) (domain.ExecResult, error) {
 		return RunFileReadTool(ctx, svc, input, "eino-agent")
 	}, fileSearchSchemaOption())); err != nil {
 		return nil, err
@@ -649,13 +878,13 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_file_edit", "Apply a unified diff to one existing remote file after human approval. The approval shows the exact added and deleted lines.", func(ctx context.Context, input FileEditInput) (domain.ExecResult, error) {
+	if err := appendTool(toolutils.InferTool("ssh_file_edit", "Apply a unified diff to one existing remote file under the configured approval mode. The review shows the exact added and deleted lines.", func(ctx context.Context, input FileEditInput) (domain.ExecResult, error) {
 		result, err := svc.EditRemoteFile(ctx, input.HostID, input.Path, input.Diff, input.Validator, input.Elevated, input.Reason, "eino-agent")
 		return NormalizeExecToolResult(result, err)
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_file_transfer", "Transfer one regular file between two registered SSH hosts through the control plane. The hosts do not need network access to each other. Call ssh_file_read with metadata_only=true on the source first and bind its SHA256. Existing destinations are rejected unless overwrite=true and their current SHA256 is also bound. The exact transfer requires human approval.", func(ctx context.Context, input SSHFileTransferInput) (domain.ExecResult, error) {
+	if err := appendTool(toolutils.InferTool("ssh_file_transfer", "Transfer one regular file between two registered SSH hosts through the control plane. The hosts do not need network access to each other. Call ssh_file_read with metadata_only=true on the source first and bind its SHA256. Existing destinations are rejected unless overwrite=true and their current SHA256 is also bound. The exact transfer follows the configured approval mode.", func(ctx context.Context, input SSHFileTransferInput) (domain.ExecResult, error) {
 		result, err := svc.TransferFileBetweenHosts(ctx, input.SourceHostID, input.SourcePath, input.ExpectedSHA256, input.DestinationHostID, input.DestinationPath, input.Overwrite, input.ExpectedDestinationSHA256, input.TimeoutSeconds, input.Reason, "eino-agent")
 		return NormalizeExecToolResult(result, err)
 	})); err != nil {
@@ -671,12 +900,12 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("workspace_file_read", "Read one file from the Workspace bound to this conversation after one-time human approval. By default returns complete content; byte ranges are optional and negative offset_bytes reads from the file end. To search, set pattern and the required match_mode: literal searches exact text, while regex uses POSIX regular expressions (for example port|socks|proxy). context_lines is optional and search results are never truncated. No matches is a successful result with search.found=false. Read-range and search parameters are mutually exclusive. SHA256 metadata is returned for content reads and sensitive paths are denied.", func(ctx context.Context, input WorkspaceReadInput) (domain.ExecResult, error) {
+	if err := appendTool(toolutils.InferTool("workspace_file_read", "Read one file from the Workspace bound to this conversation under the configured approval mode. By default returns complete content; byte ranges are optional and negative offset_bytes reads from the file end. To search, set pattern and the required match_mode: literal searches exact text, while regex uses POSIX regular expressions (for example port|socks|proxy). context_lines is optional and search results are never truncated. No matches is a successful result with search.found=false. Read-range and search parameters are mutually exclusive. SHA256 metadata is returned for content reads and sensitive paths are denied unless Full access is enabled.", func(ctx context.Context, input WorkspaceReadInput) (domain.ExecResult, error) {
 		return RunWorkspaceFileReadTool(ctx, svc, input, "eino-agent")
 	}, fileSearchSchemaOption())); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("workspace_file_edit", "Apply a unified diff to one existing file inside the conversation-bound read_write Workspace after human approval. The approval shows the exact added and deleted lines.", func(ctx context.Context, input WorkspaceFileEditInput) (domain.ExecResult, error) {
+	if err := appendTool(toolutils.InferTool("workspace_file_edit", "Apply a unified diff to one existing file inside the conversation-bound read_write Workspace under the configured approval mode. The review shows the exact added and deleted lines.", func(ctx context.Context, input WorkspaceFileEditInput) (domain.ExecResult, error) {
 		workspace, err := svc.SessionWorkspace(ctx)
 		if err != nil {
 			return NormalizeExecToolResult(domain.ExecResult{}, err)
@@ -696,7 +925,7 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("workspace_shell", "Run one non-interactive script in the Workspace bound to this conversation using the operator-selected Workspace Shell backend for archive extraction, builds, tests, and packaging. Sandbox mode uses network-disabled Bubblewrap on Linux. Host mode has full host filesystem and network authority, is limited to read_write Workspaces, and requires a fresh one-time human approval for every invocation. Disabled mode rejects the call.", func(ctx context.Context, input WorkspaceShellInput) (domain.ExecResult, error) {
+	if err := appendTool(toolutils.InferTool("workspace_shell", "Run one non-interactive script in the Workspace bound to this conversation using the operator-selected Workspace Shell backend for archive extraction, builds, tests, and packaging. Sandbox mode uses network-disabled Bubblewrap on Linux. Host mode has full host filesystem and network authority, is limited to read_write Workspaces, and follows the configured approval mode. Disabled mode rejects the call.", func(ctx context.Context, input WorkspaceShellInput) (domain.ExecResult, error) {
 		workspace, err := svc.SessionWorkspace(ctx)
 		if err != nil {
 			return NormalizeExecToolResult(domain.ExecResult{}, err)

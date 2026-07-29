@@ -29,7 +29,7 @@ var (
 	ErrEmptyResponse = errors.New("model returned an empty response")
 )
 
-const emptyResponseMaxAttempts = 2
+const emptyResponseMaxAttempts = modelRequestMaxRetries + 1
 const interruptedRunMessage = domain.AgentInterruptedMessage
 const modelConnectionTestMaxTokens = 64
 const finalAnswerInstruction = `You are FinalAnswerAgent, a read-only result summarizer with no tools.
@@ -64,6 +64,69 @@ type finalAnswerInput struct {
 	Request     string                  `json:"request"`
 	Plan        *finalAnswerPlan        `json:"plan,omitempty"`
 	ToolResults []finalAnswerToolResult `json:"tool_results"`
+}
+
+type assistantOutputGuard struct {
+	pending strings.Builder
+	blocked bool
+}
+
+func (guard *assistantOutputGuard) Write(content string) string {
+	if content == "" || guard.blocked {
+		return ""
+	}
+	guard.pending.WriteString(content)
+	pending := guard.pending.String()
+	if markerIndex := internalContextMarkerIndex(pending); markerIndex >= 0 {
+		guard.blocked = true
+		guard.pending.Reset()
+		return pending[:markerIndex]
+	}
+	keep := internalContextMarkerPrefixSuffix(pending)
+	if keep == len(pending) {
+		return ""
+	}
+	guard.pending.Reset()
+	if keep > 0 {
+		guard.pending.WriteString(pending[len(pending)-keep:])
+		return pending[:len(pending)-keep]
+	}
+	return pending
+}
+
+func (guard *assistantOutputGuard) Finish() string {
+	if guard.blocked {
+		return ""
+	}
+	pending := guard.pending.String()
+	guard.pending.Reset()
+	return pending
+}
+
+func internalContextMarkerIndex(content string) int {
+	index := strings.Index(content, persistedToolEvidenceHeader)
+	trailerIndex := strings.Index(content, persistedToolEvidenceTrailer)
+	if index < 0 || trailerIndex >= 0 && trailerIndex < index {
+		return trailerIndex
+	}
+	return index
+}
+
+func internalContextMarkerPrefixSuffix(content string) int {
+	maximum := len(persistedToolEvidenceHeader) - 1
+	if trailerMaximum := len(persistedToolEvidenceTrailer) - 1; trailerMaximum > maximum {
+		maximum = trailerMaximum
+	}
+	if len(content) < maximum {
+		maximum = len(content)
+	}
+	for size := maximum; size > 0; size-- {
+		suffix := content[len(content)-size:]
+		if strings.HasPrefix(persistedToolEvidenceHeader, suffix) || strings.HasPrefix(persistedToolEvidenceTrailer, suffix) {
+			return size
+		}
+	}
+	return 0
 }
 
 type toolCallTracker struct {
@@ -125,20 +188,23 @@ func (t *toolCallTracker) removeNamed(target capturedToolCall) {
 }
 
 type Event struct {
-	Type       string `json:"type"`
-	Role       string `json:"role,omitempty"`
-	ToolName   string `json:"tool_name,omitempty"`
-	ToolCallID string `json:"tool_call_id,omitempty"`
-	Content    string `json:"content,omitempty"`
-	SegmentID  string `json:"segment_id,omitempty"`
-	SessionID  string `json:"session_id,omitempty"`
-	RunID      string `json:"run_id,omitempty"`
-	Stream     string `json:"stream,omitempty"`
-	Sequence   uint64 `json:"sequence,omitempty"`
-	Error      string `json:"error,omitempty"`
-	ApprovalID string `json:"approval_id,omitempty"`
-	Status     string `json:"status,omitempty"`
-	Risk       string `json:"risk,omitempty"`
+	Type         string `json:"type"`
+	Role         string `json:"role,omitempty"`
+	ToolName     string `json:"tool_name,omitempty"`
+	ToolCallID   string `json:"tool_call_id,omitempty"`
+	Content      string `json:"content,omitempty"`
+	SegmentID    string `json:"segment_id,omitempty"`
+	SessionID    string `json:"session_id,omitempty"`
+	RunID        string `json:"run_id,omitempty"`
+	Stream       string `json:"stream,omitempty"`
+	Sequence     uint64 `json:"sequence,omitempty"`
+	Error        string `json:"error,omitempty"`
+	ApprovalID   string `json:"approval_id,omitempty"`
+	Status       string `json:"status,omitempty"`
+	Risk         string `json:"risk,omitempty"`
+	RetryAttempt int    `json:"retry_attempt,omitempty"`
+	RetryMax     int    `json:"retry_max,omitempty"`
+	RetryDelayMS int64  `json:"retry_delay_ms,omitempty"`
 }
 
 type Runtime struct {
@@ -156,21 +222,22 @@ type Runtime struct {
 	tools     []ToolDescriptor
 	toolsAt   string
 	active    map[string]context.CancelFunc
+	retryWait func(context.Context, time.Duration) error
 }
 
 type Status struct {
-	Available                 bool   `json:"available"`
-	ExplanationAgentAvailable bool   `json:"explanation_agent_available"`
-	ExplanationProviderID     string `json:"explanation_provider_id,omitempty"`
-	ExplanationProviderName   string `json:"explanation_provider_name,omitempty"`
-	ExplanationModel          string `json:"explanation_model,omitempty"`
-	ExplanationTimeoutSeconds int    `json:"explanation_timeout_seconds,omitempty"`
-	ExplanationError          string `json:"explanation_error,omitempty"`
-	Source                    string `json:"source"`
-	ProviderID                string `json:"provider_id,omitempty"`
-	Name                      string `json:"name,omitempty"`
-	Model                     string `json:"model,omitempty"`
-	Error                     string `json:"error,omitempty"`
+	Available              bool   `json:"available"`
+	ApprovalAgentAvailable bool   `json:"approval_agent_available"`
+	ApprovalProviderID     string `json:"approval_provider_id,omitempty"`
+	ApprovalProviderName   string `json:"approval_provider_name,omitempty"`
+	ApprovalModel          string `json:"approval_model,omitempty"`
+	ApprovalTimeoutSeconds int    `json:"approval_timeout_seconds,omitempty"`
+	ApprovalError          string `json:"approval_error,omitempty"`
+	Source                 string `json:"source"`
+	ProviderID             string `json:"provider_id,omitempty"`
+	Name                   string `json:"name,omitempty"`
+	Model                  string `json:"model,omitempty"`
+	Error                  string `json:"error,omitempty"`
 }
 
 type TestResult struct {
@@ -237,7 +304,7 @@ func (r *Runtime) Reload(ctx context.Context) error {
 			r.tools = nil
 			r.toolsAt = ""
 			r.mu.Unlock()
-			r.service.SetCommandExplainer(nil)
+			r.service.SetApprovalReviewer(nil)
 			observability.FromContext(ctx).WarnContext(ctx, "model runtime unavailable", "component", "agent", "reason", "no active model provider")
 			return nil
 		}
@@ -267,7 +334,7 @@ func (r *Runtime) Reload(ctx context.Context) error {
 		r.tools = nil
 		r.toolsAt = ""
 		r.mu.Unlock()
-		r.service.SetCommandExplainer(nil)
+		r.service.SetApprovalReviewer(nil)
 		observability.FromContext(ctx).ErrorContext(ctx, "model runtime reload failed", "component", "agent", "provider_id", status.ProviderID, "model", cfg.Name, "error", err)
 		return err
 	}
@@ -286,42 +353,42 @@ func (r *Runtime) Reload(ctx context.Context) error {
 		r.tools = nil
 		r.toolsAt = ""
 		r.mu.Unlock()
-		r.service.SetCommandExplainer(nil)
+		r.service.SetApprovalReviewer(nil)
 		observability.FromContext(ctx).ErrorContext(ctx, "final answer Agent unavailable", "component", "agent", "provider_id", status.ProviderID, "model", cfg.Name, "error", err)
 		return fmt.Errorf("build final answer Agent: %w", err)
 	}
 	explanationCfg := cfg
-	status.ExplanationProviderID = status.ProviderID
-	status.ExplanationProviderName = status.Name
-	status.ExplanationModel = cfg.Name
-	status.ExplanationTimeoutSeconds = settings.SubagentTimeoutSeconds
+	status.ApprovalProviderID = status.ProviderID
+	status.ApprovalProviderName = status.Name
+	status.ApprovalModel = cfg.Name
+	status.ApprovalTimeoutSeconds = settings.SubagentTimeoutSeconds
 	var explanationConfigErr error
 	if settings.SubagentModelProviderID != "" {
-		status.ExplanationProviderID = settings.SubagentModelProviderID
-		status.ExplanationProviderName = ""
-		status.ExplanationModel = ""
+		status.ApprovalProviderID = settings.SubagentModelProviderID
+		status.ApprovalProviderName = ""
+		status.ApprovalModel = ""
 		var explanationProvider domain.ModelProvider
 		explanationCfg, explanationProvider, explanationConfigErr = r.service.ModelProviderConfig(ctx, settings.SubagentModelProviderID)
 		if explanationConfigErr == nil {
-			status.ExplanationProviderID = explanationProvider.ID
-			status.ExplanationProviderName = explanationProvider.Name
-			status.ExplanationModel = explanationProvider.Model
+			status.ApprovalProviderID = explanationProvider.ID
+			status.ApprovalProviderName = explanationProvider.Name
+			status.ApprovalModel = explanationProvider.Model
 		}
 	}
-	var explanationCoordinator *ExplanationCoordinator
+	var approvalCoordinator *ApprovalCoordinator
 	var explanationErr error
 	if explanationConfigErr != nil {
 		explanationErr = fmt.Errorf("load configured subagent model provider: %w", explanationConfigErr)
 	} else {
-		explanationCoordinator, explanationErr = buildExplanationCoordinator(
+		approvalCoordinator, explanationErr = buildApprovalCoordinator(
 			r.baseCtx, explanationCfg, time.Duration(settings.SubagentTimeoutSeconds)*time.Second,
 		)
 	}
 	if explanationErr != nil {
-		status.ExplanationError = explanationErr.Error()
-		observability.FromContext(ctx).WarnContext(ctx, "command explanation Agent unavailable", "component", "agent", "provider_id", status.ExplanationProviderID, "model", status.ExplanationModel, "error", explanationErr)
+		status.ApprovalError = explanationErr.Error()
+		observability.FromContext(ctx).WarnContext(ctx, "approval Agent unavailable", "component", "agent", "provider_id", status.ApprovalProviderID, "model", status.ApprovalModel, "error", explanationErr)
 	} else {
-		status.ExplanationAgentAvailable = true
+		status.ApprovalAgentAvailable = true
 	}
 	status.Available = true
 	r.mu.Lock()
@@ -332,8 +399,8 @@ func (r *Runtime) Reload(ctx context.Context) error {
 	r.tools = toolDescriptors
 	r.toolsAt = time.Now().UTC().Format(time.RFC3339Nano)
 	r.mu.Unlock()
-	r.service.SetCommandExplainer(explanationCoordinator)
-	observability.FromContext(ctx).InfoContext(ctx, "model runtime ready", "component", "agent", "source", status.Source, "provider_id", status.ProviderID, "model", status.Model, "max_iterations", settings.AgentMaxIterations, "explanation_agent", status.ExplanationAgentAvailable, "explanation_provider_id", status.ExplanationProviderID, "explanation_model", status.ExplanationModel, "explanation_timeout_seconds", status.ExplanationTimeoutSeconds)
+	r.service.SetApprovalReviewer(approvalCoordinator)
+	observability.FromContext(ctx).InfoContext(ctx, "model runtime ready", "component", "agent", "source", status.Source, "provider_id", status.ProviderID, "model", status.Model, "max_iterations", settings.AgentMaxIterations, "approval_agent", status.ApprovalAgentAvailable, "approval_provider_id", status.ApprovalProviderID, "approval_model", status.ApprovalModel, "approval_timeout_seconds", status.ApprovalTimeoutSeconds)
 	return nil
 }
 
@@ -489,6 +556,9 @@ func generateFinalAnswer(ctx context.Context, finalizer agentRunner, input final
 	answer = strings.TrimSpace(answer)
 	if answer == "" {
 		return "", fmt.Errorf("generate final answer: %w", ErrEmptyResponse)
+	}
+	if containsInternalContextMarker(answer) {
+		return "", fmt.Errorf("generate final answer: model exposed internal context")
 	}
 	return answer, nil
 }
@@ -687,10 +757,15 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 		toolCalls := newToolCallTracker(workspaceState.ID, inlineContext)
 		runCtx := service.WithSessionID(ctx, sessionID)
 		runCtx = service.WithBlockingApprovals(runCtx)
-		runCtx = withModelRequestRetryNotifier(runCtx, func(attempt int, _ error) {
+		runCtx = withModelRequestRetryNotifier(runCtx, func(notice modelRequestRetryNotice) {
 			total := modelRetries.Add(1)
-			logger.WarnContext(ctx, "transient model request failed; retrying", "retry_attempt", attempt, "model_retries", total)
-			emit(Event{Type: "retry", SessionID: sessionID, Status: "in_progress"})
+			logger.WarnContext(ctx, "transient model request failed; retrying",
+				"retry_attempt", notice.Attempt, "retry_max", notice.Max, "retry_delay", notice.Delay,
+				"model_retries", total, "error", notice.Err)
+			emit(Event{
+				Type: "retry", SessionID: sessionID, Status: "in_progress",
+				RetryAttempt: notice.Attempt, RetryMax: notice.Max, RetryDelayMS: notice.Delay.Milliseconds(),
+			})
 		})
 		runCtx = withToolActivityNotifier(runCtx, func(activity toolCallActivity) {
 			markActivity()
@@ -767,6 +842,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 			if variant.IsStreaming && variant.MessageStream != nil {
 				stream := variant.MessageStream
 				var assistantContent strings.Builder
+				var assistantGuard assistantOutputGuard
 				assistantHasToolCalls := false
 				var toolResult strings.Builder
 				var reasoning strings.Builder
@@ -826,16 +902,23 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 						toolResult.WriteString(message.Content)
 						continue
 					}
-					emit(Event{Type: "message", Role: role, ToolName: variant.ToolName, Content: message.Content, SessionID: sessionID})
 					if variant.Role == schema.Assistant {
 						assistantContent.WriteString(message.Content)
+						if content := assistantGuard.Write(message.Content); content != "" {
+							emit(Event{Type: "message", Role: role, ToolName: variant.ToolName, Content: content, SessionID: sessionID})
+						}
+						continue
 					}
+					emit(Event{Type: "message", Role: role, ToolName: variant.ToolName, Content: message.Content, SessionID: sessionID})
 				}
 				stream.Close()
 				if retryingStream {
 					continue
 				}
 				if variant.Role == schema.Assistant {
+					if content := assistantGuard.Finish(); content != "" {
+						emit(Event{Type: "message", Role: role, ToolName: variant.ToolName, Content: content, SessionID: sessionID})
+					}
 					if len(assistantChunks) > 0 {
 						merged, mergeErr := schema.ConcatMessages(assistantChunks)
 						if mergeErr == nil {
@@ -923,12 +1006,19 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 					emit(Event{Type: "tool", ToolName: toolName, ToolCallID: toolCallID, Content: displayContent, SessionID: sessionID})
 					continue
 				}
-				emit(Event{Type: "message", Role: role, ToolName: toolName, Content: displayContent, SessionID: sessionID})
+				if variant.Role != schema.Assistant || !containsInternalContextMarker(displayContent) {
+					emit(Event{Type: "message", Role: role, ToolName: toolName, Content: displayContent, SessionID: sessionID})
+				}
 			}
 		}
 
 		if err := ctx.Err(); err != nil {
 			return "", err
+		}
+		internalContextLeak := containsInternalContextMarker(answerCandidate)
+		if internalContextLeak {
+			logger.WarnContext(ctx, "blocked model response containing internal context", "candidate_bytes", len(answerCandidate))
+			answerCandidate = ""
 		}
 		answer = answerCandidate
 		iterationAttrs := []any{
@@ -953,8 +1043,12 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 			if finalAnswerContext.Plan != nil {
 				finalPlanStatus = finalAnswerContext.Plan.Status
 			}
-			logger.InfoContext(ctx, "generating final answer after empty terminal model output",
-				"tool_results", len(finalAnswerContext.ToolResults), "plan_status", finalPlanStatus)
+			reason := "empty_terminal_output"
+			if internalContextLeak {
+				reason = "internal_context_blocked"
+			}
+			logger.InfoContext(ctx, "generating safe final answer",
+				"reason", reason, "tool_results", len(finalAnswerContext.ToolResults), "plan_status", finalPlanStatus)
 			finalAnswer, finalErr := generateFinalAnswer(ctx, finalizer, finalAnswerContext)
 			if finalErr != nil {
 				logger.ErrorContext(ctx, "final answer generation failed", "error", finalErr)
@@ -963,7 +1057,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 			answer = finalAnswer
 			turnCompleted = true
 			emit(Event{Type: "message", Role: string(schema.Assistant), Content: answer, SessionID: sessionID})
-			logger.InfoContext(ctx, "final answer generated after empty terminal model output", "answer_bytes", len(answer))
+			logger.InfoContext(ctx, "safe final answer generated", "reason", reason, "answer_bytes", len(answer))
 			break
 		}
 		if attemptActivity.Load() {
@@ -974,6 +1068,17 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 		if attempt == emptyResponseMaxAttempts {
 			return "", fmt.Errorf("%w after %d attempts; the failed turn was excluded from future model context", ErrEmptyResponse, emptyResponseMaxAttempts)
 		}
+		retryAttempt := attempt
+		delay := modelRequestRetryBackoff(ctx, retryAttempt)
+		logger.WarnContext(ctx, "empty model response; retrying",
+			"retry_attempt", retryAttempt, "retry_max", modelRequestMaxRetries, "retry_delay", delay)
+		emit(Event{
+			Type: "retry", SessionID: sessionID, Status: "in_progress",
+			RetryAttempt: retryAttempt, RetryMax: modelRequestMaxRetries, RetryDelayMS: delay.Milliseconds(),
+		})
+		if err := r.waitForModelRetry(ctx, delay); err != nil {
+			return "", err
+		}
 	}
 
 	if answer != "" {
@@ -983,6 +1088,20 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 	}
 	emit(Event{Type: "done", SessionID: sessionID, Content: answer})
 	return answer, nil
+}
+
+func (r *Runtime) waitForModelRetry(ctx context.Context, delay time.Duration) error {
+	if r.retryWait != nil {
+		return r.retryWait(ctx, delay)
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // enrichToolContent attaches the normalized, audited execution request to the

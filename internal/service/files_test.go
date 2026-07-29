@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -12,6 +13,51 @@ import (
 	"eino-ops-agent/internal/config"
 	"eino-ops-agent/internal/domain"
 )
+
+func TestRemoteFileReadScriptDoesNotExposeMetadataMarkersOnMissingFile(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "missing.conf")
+	script := buildRemoteFileReadScript(domain.ExecRequest{
+		Mode: domain.ExecRemoteRead, RemotePath: target,
+	})
+	command := exec.Command("bash", "-se")
+	command.Stdin = strings.NewReader(script)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+
+	err := command.Run()
+	if err == nil {
+		t.Fatal("missing remote file read succeeded")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("missing remote file produced stdout that would be classified as partial: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "No such file") {
+		t.Fatalf("missing remote file returned unclear stderr: %q", stderr.String())
+	}
+}
+
+func TestRemoteFileReadScriptKeepsParseableMetadata(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "config.conf")
+	content := "enabled=true\n"
+	if err := os.WriteFile(target, []byte(content), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	script := buildRemoteFileReadScript(domain.ExecRequest{
+		Mode: domain.ExecRemoteRead, RemotePath: target,
+	})
+	command := exec.Command("bash", "-se")
+	command.Stdin = strings.NewReader(script)
+	output, err := command.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, parsedContent := parseFileReadOutput(target, string(output))
+	if parsedContent != content || metadata.Path != target || metadata.Size != int64(len(content)) || metadata.SHA256 == "" {
+		t.Fatalf("remote file output was not parseable: metadata=%#v content=%q", metadata, parsedContent)
+	}
+}
 
 func TestRemoteFileEditApprovesDeclarativeDiffAndBuildsScriptAfterApproval(t *testing.T) {
 	svc, transport, host := newTestService(t)

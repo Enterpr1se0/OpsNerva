@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -98,6 +99,10 @@ func (*fileReadToolTransport) TrustHostKey(context.Context, sshx.ConnectionSpec,
 	return sshx.HostKey{}, nil
 }
 
+func (*fileReadToolTransport) StoredHostKey(domain.Host) (sshx.HostKey, bool) {
+	return sshx.HostKey{}, false
+}
+
 func (*backgroundToolTransport) Probe(context.Context, sshx.ConnectionSpec) (sshx.HostInfo, error) {
 	return sshx.HostInfo{}, nil
 }
@@ -108,6 +113,10 @@ func (*backgroundToolTransport) ScanHostKey(context.Context, sshx.ConnectionSpec
 
 func (*backgroundToolTransport) TrustHostKey(context.Context, sshx.ConnectionSpec, string) (sshx.HostKey, error) {
 	return sshx.HostKey{}, nil
+}
+
+func (*backgroundToolTransport) StoredHostKey(domain.Host) (sshx.HostKey, bool) {
+	return sshx.HostKey{}, false
 }
 
 func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
@@ -137,8 +146,8 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 	if len(descriptors) != len(loaded) || len(descriptors) < 20 {
 		t.Fatalf("catalog=%d loaded=%d", len(descriptors), len(loaded))
 	}
-	if len(descriptors) != 21 {
-		t.Fatalf("built-in catalog size=%d, want 21", len(descriptors))
+	if len(descriptors) != 22 {
+		t.Fatalf("built-in catalog size=%d, want 22", len(descriptors))
 	}
 
 	seen := make(map[string]bool, len(descriptors))
@@ -158,7 +167,8 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 			t.Fatalf("%s still exposes retired verbose fields: %s", descriptor.Name, descriptor.InputSchema)
 		}
 		if descriptor.Name == "ssh_exec" {
-			if descriptor.Guard != "policy_checked" || !strings.Contains(string(descriptor.InputSchema), `"host_id"`) || !strings.Contains(string(descriptor.InputSchema), `"program"`) || !strings.Contains(string(descriptor.InputSchema), `"background"`) {
+			if descriptor.Guard != "policy_checked" || !strings.Contains(schemaText, `"host_id"`) || !strings.Contains(schemaText, `"program"`) ||
+				!strings.Contains(schemaText, `"args"`) || !strings.Contains(schemaText, `"background"`) || !strings.Contains(schemaText, `"elevated"`) {
 				t.Fatalf("ssh_exec metadata does not reflect its runtime schema: %#v", descriptor)
 			}
 			var schema struct {
@@ -215,6 +225,16 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 				t.Fatalf("ssh_tunnel metadata does not reflect its runtime schema: %#v", descriptor)
 			}
 		}
+		if descriptor.Name == "ssh_shell" {
+			schema := string(descriptor.InputSchema)
+			if descriptor.Guard != "approval_required" || !strings.Contains(schema, `"action"`) ||
+				!strings.Contains(schema, `"shell_id"`) || !strings.Contains(schema, `"input"`) ||
+				!strings.Contains(schema, `"submit"`) || !strings.Contains(schema, `"after_sequence"`) ||
+				!strings.Contains(schema, `"coalesce"`) || !strings.Contains(schema, `"reason"`) ||
+				strings.Contains(schema, `"ttl_seconds"`) || strings.Contains(schema, `"extend_seconds"`) {
+				t.Fatalf("ssh_shell metadata does not reflect its runtime schema: %#v", descriptor)
+			}
+		}
 		if descriptor.Name == "ssh_history" && descriptor.Category != "history" {
 			t.Fatalf("ssh_history category = %q, want history", descriptor.Category)
 		}
@@ -236,8 +256,31 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 			t.Fatalf("removed %s tool remains in the Agent catalog", retired)
 		}
 	}
-	if !seen["ops_plan_create"] || !seen["ops_plan_step_update"] || !seen["ssh_file_edit"] || !seen["ssh_file_transfer"] || !seen["ssh_tunnel"] || !seen["workspace_file_edit"] || !seen["workspace_file_upload"] || !seen["workspace_shell"] || !seen["web_search"] || !seen["web_extract"] || !seen["ssh_task"] || !seen["ssh_history"] || !seen["ops_skill"] {
+	if !seen["ops_plan_create"] || !seen["ops_plan_step_update"] || !seen["ssh_file_edit"] || !seen["ssh_file_transfer"] || !seen["ssh_tunnel"] || !seen["ssh_shell"] || !seen["workspace_file_edit"] || !seen["workspace_file_upload"] || !seen["workspace_shell"] || !seen["web_search"] || !seen["web_extract"] || !seen["ssh_task"] || !seen["ssh_history"] || !seen["ops_skill"] {
 		t.Fatalf("representative functions missing: %#v", seen)
+	}
+}
+
+func TestSSHShellActionValidationReportsExactFields(t *testing.T) {
+	input := SSHShellInput{Action: "input", HostID: "host-wrong", ShellID: "shell-1", Input: "whoami", Submit: true}
+	err := validateSSHShellActionFields(input, "input",
+		[]string{"action", "shell_id", "input", "submit", "reason"},
+		map[string]any{"action": "input", "shell_id": "shell_xxx", "input": "whoami", "submit": true},
+	)
+	var validation *toolInputValidationError
+	if !errors.As(err, &validation) || validation.validation == nil {
+		t.Fatalf("structured validation error was not returned: %v", err)
+	}
+	if len(validation.validation.UnexpectedFields) != 1 || validation.validation.UnexpectedFields[0] != "host_id" {
+		t.Fatalf("unexpected field details = %#v", validation.validation)
+	}
+
+	valid := SSHShellInput{Action: "status", ShellID: "shell-1", Coalesce: true, Reason: "read new output"}
+	if err := validateSSHShellActionFields(valid, "status",
+		[]string{"action", "shell_id", "after_sequence", "wait_seconds", "coalesce", "reason"},
+		nil,
+	); err != nil {
+		t.Fatalf("valid status fields were rejected: %v", err)
 	}
 }
 
@@ -386,6 +429,16 @@ func TestWebExtractToolResultExposesPartialAndProviderFailures(t *testing.T) {
 }
 
 func TestTaskToolResultsExposeRejectionAndStderr(t *testing.T) {
+	partial, err := NormalizeExecToolResult(domain.ExecResult{
+		RunID: "run_partial", Status: "partial", ExitCode: 2, Stdout: "matched configuration\n",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !partial.OK || partial.Code != "partial" || partial.Retryable || partial.NextAction == "" {
+		t.Fatalf("partial execution was not exposed as usable without automatic retry: %#v", partial)
+	}
+
 	execResult, err := NormalizeExecToolResult(domain.ExecResult{
 		RunID:               "run_exec_rejected",
 		Status:              "rejected",
@@ -457,7 +510,7 @@ func TestRunScriptBackgroundReturnsTaskAndUnifiedTaskToolReturnsOutput(t *testin
 		}
 	}()
 	svc := service.New(st, engine, transport, encryptor, security.NewRedactor(), config.Default().Limits)
-	host, err := svc.AddHost(ctx, domain.Host{Name: "background-host", Address: "127.0.0.1", Port: 22, User: "ops"}, "test")
+	host, err := svc.AddHost(ctx, domain.Host{Name: "background-host", Address: "127.0.0.1", Port: 22, User: "ops", AgentEnabled: true}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -527,6 +580,195 @@ func TestRunScriptBackgroundReturnsTaskAndUnifiedTaskToolReturnsOutput(t *testin
 	t.Fatal("background task did not complete")
 }
 
+func TestApprovalGatedBackgroundScriptReturnsBeforeDecision(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	st, err := store.Open(ctx, t.TempDir()+"/background-approval.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	engine, _ := policy.Load("")
+	encryptor, err := security.NewEncryptor("", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &backgroundToolTransport{started: make(chan domain.ExecRequest, 1), release: make(chan struct{})}
+	defer close(transport.release)
+	svc := service.New(st, engine, transport, encryptor, security.NewRedactor(), config.Default().Limits)
+	host, err := svc.AddHost(ctx, domain.Host{Name: "approval-background", Address: "127.0.0.1", Port: 22, User: "ops", AgentEnabled: true}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := BuildTools(svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var scriptTool tool.InvokableTool
+	for _, candidate := range loaded {
+		info, infoErr := candidate.Info(ctx)
+		if infoErr != nil {
+			t.Fatal(infoErr)
+		}
+		if info.Name == "ssh_run_script" {
+			scriptTool = candidate.(tool.InvokableTool)
+			break
+		}
+	}
+	if scriptTool == nil {
+		t.Fatal("ssh_run_script was not registered")
+	}
+	notifications := make(chan domain.ExecResult, 1)
+	toolCtx := service.WithApprovalNotifier(service.WithBlockingApprovals(service.WithSessionID(ctx, "background-approval")), func(result domain.ExecResult) {
+		notifications <- result
+	})
+	inputJSON, _ := json.Marshal(map[string]any{
+		"host_id": host.ID, "script": "sleep 8; echo bg-finished", "background": true,
+		"reason": "verify approval-gated background execution",
+	})
+	startedAt := time.Now()
+	resultJSON, err := scriptTool.InvokableRun(toolCtx, string(inputJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(startedAt) > 500*time.Millisecond {
+		t.Fatalf("approval-gated background Tool Call blocked for %s", time.Since(startedAt))
+	}
+	var result domain.ExecResult
+	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.TaskID == "" || result.Status != "running" {
+		t.Fatalf("background Tool result = %#v", result)
+	}
+	var pending domain.ExecResult
+	select {
+	case pending = <-notifications:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for background approval")
+	}
+	if pending.Status != "approval_required" || pending.ApprovalID == "" {
+		t.Fatalf("background approval = %#v", pending)
+	}
+	if err := svc.Reject(context.Background(), pending.ApprovalID, "test complete", "operator"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		task, taskResult, _, err := svc.GetTask(result.TaskID)
+		if err == nil && task.Status == "rejected" {
+			if taskResult.Status != "rejected" {
+				t.Fatalf("rejected background result = %#v", taskResult)
+			}
+			select {
+			case request := <-transport.started:
+				t.Fatalf("rejected background request executed: %#v", request)
+			default:
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("rejected background task did not reach a terminal state")
+}
+
+func TestSSHExecPersistsArgumentsAndBackgroundWithOriginalToolCall(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/exec-history.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	engine, _ := policy.Load("")
+	encryptor, err := security.NewEncryptor("", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &backgroundToolTransport{started: make(chan domain.ExecRequest, 1), release: make(chan struct{})}
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(transport.release) }) })
+	svc := service.New(st, engine, transport, encryptor, security.NewRedactor(), config.Default().Limits)
+	host, err := svc.AddHost(ctx, domain.Host{Name: "exec-history", Address: "127.0.0.1", Port: 22, User: "ops", AgentEnabled: true}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := BuildTools(svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var execTool tool.InvokableTool
+	for _, candidate := range loaded {
+		info, infoErr := candidate.Info(ctx)
+		if infoErr != nil {
+			t.Fatal(infoErr)
+		}
+		if info.Name == "ssh_exec" {
+			execTool = candidate.(tool.InvokableTool)
+			break
+		}
+	}
+	if execTool == nil {
+		t.Fatal("ssh_exec was not registered")
+	}
+	inputJSON, err := json.Marshal(map[string]any{
+		"host_id": host.ID, "program": "printf", "args": []string{"%s", "args-ok"}, "background": true,
+		"elevated": false, "reason": "verify exact ssh_exec argument persistence",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolCtx := service.WithExecutionOwner(ctx, "call-exec-history", "ssh_exec", string(inputJSON))
+	startedJSON, err := execTool.InvokableRun(toolCtx, string(inputJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var started domain.ExecResult
+	if err := json.Unmarshal([]byte(startedJSON), &started); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case request := <-transport.started:
+		if request.Program != "printf" || len(request.Args) != 2 || request.Args[0] != "%s" || request.Args[1] != "args-ok" || !request.Background || request.Elevated {
+			t.Fatalf("SSH transport received incomplete request: %#v", request)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("background ssh_exec did not reach the SSH transport")
+	}
+	runs, err := st.SearchRuns(ctx, "", host.ID, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("stored runs = %d, want 1", len(runs))
+	}
+	run := runs[0]
+	var storedRequest domain.ExecRequest
+	if err := json.Unmarshal([]byte(run.RequestJSON), &storedRequest); err != nil {
+		t.Fatal(err)
+	}
+	if storedRequest.Program != "printf" || len(storedRequest.Args) != 2 || storedRequest.Args[0] != "%s" || storedRequest.Args[1] != "args-ok" || !storedRequest.Background || storedRequest.Elevated {
+		t.Fatalf("normalized execution request lost fields: %#v", storedRequest)
+	}
+	var original map[string]any
+	if err := json.Unmarshal([]byte(run.ToolArgumentsJSON), &original); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := original["args"].([]any)
+	if run.ToolName != "ssh_exec" || len(args) != 2 || args[0] != "%s" || args[1] != "args-ok" || original["background"] != true || original["elevated"] != false {
+		t.Fatalf("original Tool Call was not persisted exactly: run=%#v arguments=%#v", run, original)
+	}
+	releaseOnce.Do(func() { close(transport.release) })
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		task, _, _, err := svc.GetTask(started.TaskID)
+		if err == nil && task.Status == "completed" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("background persistence test task did not complete")
+}
+
 func TestUnifiedTaskToolCancelsWithStandardExecResult(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir()+"/cancel-task.db")
@@ -542,7 +784,7 @@ func TestUnifiedTaskToolCancelsWithStandardExecResult(t *testing.T) {
 	transport := &backgroundToolTransport{started: make(chan domain.ExecRequest, 1), release: make(chan struct{})}
 	defer close(transport.release)
 	svc := service.New(st, engine, transport, encryptor, security.NewRedactor(), config.Default().Limits)
-	host, err := svc.AddHost(ctx, domain.Host{Name: "cancel-host", Address: "127.0.0.1", Port: 22, User: "ops"}, "test")
+	host, err := svc.AddHost(ctx, domain.Host{Name: "cancel-host", Address: "127.0.0.1", Port: 22, User: "ops", AgentEnabled: true}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -562,6 +804,15 @@ func TestUnifiedTaskToolCancelsWithStandardExecResult(t *testing.T) {
 	if result.OK || result.TaskID != task.ID || result.Status != "cancelled" || result.Code != "cancelled" || result.ToolVersion != "1.1" {
 		t.Fatalf("cancel result is not a standard ExecResult: %#v", result)
 	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		runs, searchErr := st.SearchRuns(ctx, "", host.ID, "", 10)
+		if searchErr == nil && len(runs) == 1 && runs[0].Status == "interrupted" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("cancelled background execution did not stop")
 }
 
 func TestFileReadMetadataOnlyKeepsSHA256WithoutContent(t *testing.T) {
@@ -578,7 +829,7 @@ func TestFileReadMetadataOnlyKeepsSHA256WithoutContent(t *testing.T) {
 	}
 	transport := &fileReadToolTransport{}
 	svc := service.New(st, engine, transport, encryptor, security.NewRedactor(), config.Default().Limits)
-	host, err := svc.AddHost(ctx, domain.Host{Name: "file-host", Address: "127.0.0.1", Port: 22, User: "ops"}, "test")
+	host, err := svc.AddHost(ctx, domain.Host{Name: "file-host", Address: "127.0.0.1", Port: 22, User: "ops", AgentEnabled: true}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -698,13 +949,21 @@ func TestUnifiedHistoryToolSearchesAndReadsExactRun(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	reviewJSON := `{"status":"completed","model":"private-review-model","deterministic_risk":"read_only","explanation":{"summary":"SUBAGENT_SUMMARY_SENTINEL","mechanism":"SUBAGENT_MECHANISM_SENTINEL","risks":["SUBAGENT_RISK_SENTINEL"]},"reviewed_at":"2026-07-29T00:00:00Z"}`
 	for _, run := range []domain.Run{
-		{ID: "run-nginx", SessionID: "session-a", HostID: "host-a", RequestJSON: `{"program":"nginx"}`, RequestDigest: "digest-a", Risk: domain.RiskReadOnly, Status: "completed", StartedAt: now.Add(-time.Minute)},
+		{ID: "run-nginx", SessionID: "session-a", HostID: "host-a", RequestJSON: `{"program":"nginx"}`, RequestDigest: "digest-a", Risk: domain.RiskReadOnly, Status: "completed", AIReviewJSON: reviewJSON, StartedAt: now.Add(-time.Minute)},
 		{ID: "run-disk", SessionID: "session-b", HostID: "host-b", RequestJSON: `{"program":"df"}`, RequestDigest: "digest-b", Risk: domain.RiskReadOnly, Status: "completed", StartedAt: now},
 	} {
 		if err := st.CreateRun(ctx, run); err != nil {
 			t.Fatal(err)
 		}
+	}
+	storedRun, err := st.GetRun(ctx, "run-nginx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedRun.AIReview == nil || storedRun.AIReview.Explanation == nil {
+		t.Fatal("history leak fixture did not persist the command explainer review")
 	}
 	engine, _ := policy.Load("")
 	encryptor, err := security.NewEncryptor("", t.TempDir())
@@ -718,6 +977,15 @@ func TestUnifiedHistoryToolSearchesAndReadsExactRun(t *testing.T) {
 	}
 	if len(searched.Runs) != 1 || searched.Runs[0].ID != "run-nginx" {
 		t.Fatalf("history search result = %#v", searched)
+	}
+	encodedHistory, err := json.Marshal(searched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, leaked := range []string{"ai_review", "private-review-model", "SUBAGENT_SUMMARY_SENTINEL", "SUBAGENT_MECHANISM_SENTINEL", "SUBAGENT_RISK_SENTINEL"} {
+		if strings.Contains(string(encodedHistory), leaked) {
+			t.Fatalf("history exposed command explainer data %q: %s", leaked, encodedHistory)
+		}
 	}
 	exact, err := ReadHistoryTool(ctx, svc, HistorySearchInput{RunID: "run-disk"})
 	if err != nil {

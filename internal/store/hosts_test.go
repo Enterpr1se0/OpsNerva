@@ -11,6 +11,52 @@ import (
 	"eino-ops-agent/internal/domain"
 )
 
+func TestExistingHostsDefaultToAgentEnabledDuringMigration(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "agent-enabled.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE hosts (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  address TEXT NOT NULL,
+  port INTEGER NOT NULL,
+  username TEXT NOT NULL,
+  auth_type TEXT NOT NULL DEFAULT 'agent',
+  private_key_cipher TEXT NOT NULL DEFAULT '',
+  known_hosts_file TEXT NOT NULL DEFAULT '',
+  proxy_jump_host_id TEXT NOT NULL DEFAULT '',
+  proxy_id TEXT NOT NULL DEFAULT '',
+  password_cipher TEXT NOT NULL DEFAULT '',
+  sudo_mode TEXT NOT NULL DEFAULT 'none',
+  sudo_password_cipher TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+INSERT INTO hosts(id,name,address,port,username,created_at,updated_at)
+VALUES('host-existing','existing','192.0.2.30',22,'ops','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	host, err := st.GetHost(ctx, "host-existing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !host.AgentEnabled {
+		t.Fatal("existing host was disabled for Agent during migration")
+	}
+}
+
 func TestLegacySystemSSHHostsAreRemovedAndSchemaIsSimplified(t *testing.T) {
 	ctx := context.Background()
 	path := t.TempDir() + "/legacy-hosts.db"
@@ -143,7 +189,7 @@ func TestDeleteHostRemovesRelatedRecords(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.ApprovePendingWithSessionGrantAndStartRun(ctx, approval.ID, run.ID, "reviewed", run.SessionID, "fingerprint", now.Add(time.Hour), approval.Risk); err != nil {
+	if err := st.ApprovePendingAndStartRun(ctx, approval.ID, run.ID, "reviewed", approval.Risk); err != nil {
 		t.Fatal(err)
 	}
 
@@ -161,9 +207,6 @@ func TestDeleteHostRemovesRelatedRecords(t *testing.T) {
 	}
 	if _, _, _, err := st.GetTask(ctx, "task-delete"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("related task was not deleted: %v", err)
-	}
-	if granted, err := st.HasSessionApprovalGrant(ctx, run.SessionID, "fingerprint"); err != nil || granted {
-		t.Fatalf("related session grant was not deleted: granted=%v err=%v", granted, err)
 	}
 	var auditCount int
 	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM audit_events WHERE run_id=?`, run.ID).Scan(&auditCount); err != nil {

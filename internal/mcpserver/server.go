@@ -21,7 +21,7 @@ func New(svc *service.Service, version string) *Server {
 
 	mcp.AddTool(server, &mcp.Tool{Name: "ssh_host_inspect", Description: "Read-only inspection of a registered SSH host."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.HostInput) (*mcp.CallToolResult, sshx.HostInfo, error) {
-			output, err := svc.ProbeHost(ctx, input.HostID)
+			output, err := svc.ProbeHost(ctx, input.HostID, "mcp-client")
 			return nil, output, err
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "ssh_host_list", Description: "List registered host IDs, names, authentication types, and managed sudo modes without connection details or credentials."},
@@ -31,12 +31,12 @@ func New(svc *service.Service, version string) *Server {
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "ssh_exec", Description: "Execute one remote program with separate arguments through deterministic policy, approval, and audit controls. Set background=true for cancellable background execution; it defaults to false."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.ExecInput) (*mcp.CallToolResult, domain.ExecResult, error) {
-			output, err := agent.RunExecutionTool(ctx, svc, execRequest(input), input.Background, "mcp-client")
+			output, err := agent.RunExecutionTool(ctx, svc, execRequest(input), "mcp-client")
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_run_script", Description: "Analyze and run a Bash script. Set background=true for cancellable background execution; it defaults to false. State changes require human approval."},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_run_script", Description: "Analyze and run a Bash script under the configured approval mode. Set background=true for cancellable background execution; it defaults to false."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.ScriptInput) (*mcp.CallToolResult, domain.ExecResult, error) {
-			output, err := agent.RunExecutionTool(ctx, svc, scriptRequest(input), input.Background, "mcp-client")
+			output, err := agent.RunExecutionTool(ctx, svc, scriptRequest(input), "mcp-client")
 			return nil, output, err
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "ssh_task", Description: "Read or cancel one background SSH task with action=status or action=cancel."},
@@ -44,7 +44,7 @@ func New(svc *service.Service, version string) *Server {
 			output, err := agent.RunTaskTool(svc, input, "mcp-client")
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_read", Description: "Read one remote file or search it after one-time human approval. Search requires pattern plus match_mode=literal|regex, returns every matching line, and reports no matches as search.found=false. Credential paths are denied.", InputSchema: fileSearchInputSchema[agent.FileReadInput]()},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_read", Description: "Read one remote file or search it under the configured approval mode. Search requires pattern plus match_mode=literal|regex, returns every matching line, and reports no matches as search.found=false.", InputSchema: fileSearchInputSchema[agent.FileReadInput]()},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.FileReadInput) (*mcp.CallToolResult, domain.ExecResult, error) {
 			output, err := agent.RunFileReadTool(ctx, svc, input, "mcp-client")
 			return nil, output, err
@@ -61,7 +61,7 @@ func New(svc *service.Service, version string) *Server {
 			output, err = agent.NormalizeExecToolResult(output, err)
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_transfer", Description: "Transfer one SHA256-bound regular file between two registered SSH hosts through the control plane after human approval."},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_transfer", Description: "Transfer one SHA256-bound regular file between two registered SSH hosts through the control plane under the configured approval mode."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.SSHFileTransferInput) (*mcp.CallToolResult, domain.ExecResult, error) {
 			output, err := svc.TransferFileBetweenHosts(ctx, input.SourceHostID, input.SourcePath, input.ExpectedSHA256, input.DestinationHostID, input.DestinationPath, input.Overwrite, input.ExpectedDestinationSHA256, input.TimeoutSeconds, input.Reason, "mcp-client")
 			output, err = agent.NormalizeExecToolResult(output, err)
@@ -98,9 +98,9 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 func execRequest(input agent.ExecInput) domain.ExecRequest {
-	return domain.ExecRequest{HostID: input.HostID, Mode: domain.ExecProgram, Program: input.Program, Args: input.Args, Cwd: input.Cwd, Env: input.Env, Elevated: input.Elevated, TimeoutSeconds: input.TimeoutSeconds, Reason: input.Reason}
+	return domain.ExecRequest{HostID: input.HostID, Mode: domain.ExecProgram, Program: input.Program, Args: input.Args, Background: input.Background, Cwd: input.Cwd, Env: input.Env, Elevated: input.Elevated, TimeoutSeconds: input.TimeoutSeconds, Reason: input.Reason}
 }
 
 func scriptRequest(input agent.ScriptInput) domain.ExecRequest {
-	return domain.ExecRequest{HostID: input.HostID, Mode: domain.ExecScript, Script: input.Script, Cwd: input.Cwd, Env: input.Env, Elevated: input.Elevated, TimeoutSeconds: input.TimeoutSeconds, Reason: input.Reason}
+	return domain.ExecRequest{HostID: input.HostID, Mode: domain.ExecScript, Script: input.Script, Background: input.Background, Cwd: input.Cwd, Env: input.Env, Elevated: input.Elevated, TimeoutSeconds: input.TimeoutSeconds, Reason: input.Reason}
 }

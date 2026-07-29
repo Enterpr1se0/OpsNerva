@@ -7,10 +7,10 @@
 - 支持多个 OpenAI 兼容模型提供商、共享代理配置、连接测试和运行时切换。
 - 内置跨平台 SSH，支持 `ssh-agent`、上传私钥、密码、网络代理、ProxyJump、sudo 和严格 Host Key 校验。
 - Agent 可建立仅监听本机的 SSH 端口转发，Web 全局显示活动链路、连接数和流量。
-- 命令由确定性策略分级；变更和高风险操作在执行前由用户审批。
+- 命令由确定性策略分级，并由 Manual、Auto 或 Full access 模式决定是否审批。
 - 会话、工具结果、任务和审批状态持久化，刷新页面不会中断正在运行的 Agent。
 - 支持在会话中选择或粘贴图片，并把文字和图片一起发送给支持视觉输入的模型。
-- Workspace 支持文件管理、补丁和 Shell；Linux 可使用 Bubblewrap 沙箱，宿主机 Shell 必须逐次审批。
+- Workspace 支持文件管理、补丁和 Shell；Linux 可使用 Bubblewrap 沙箱。
 - 内置 Tavily 网络搜索与网页提取，并支持动态加载 Skill 和 MCP 工具。
 - 命令、输出和凭据使用 AES-256-GCM 加密保存，模型只接收脱敏后的历史信息。
 - React 前端嵌入 Go 二进制；服务端可用 Docker 部署，Windows 和 Linux 也可打包为 Tauri 桌面 App。
@@ -38,7 +38,7 @@ flowchart LR
 
 首次启动会在系统应用数据目录创建 `io.opspilot.desktop/config.yaml`、`.data/` 和 `workspace/`。桌面壳打开统一的 Web 初始化页面，由用户创建管理员密码；之后可在配置页面修改密码。
 
-从源码构建需要 Go 1.26+、Node.js 22+ 和 Rust stable。Windows 生成 NSIS 安装包：
+从源码构建需要 Go 1.26+、Node.js 22.13+ 和 Rust stable。Windows 生成 NSIS 安装包：
 
 ```powershell
 npm --prefix web install
@@ -82,7 +82,7 @@ docker run --rm -p 8080:8080 \
 
 - Git
 - Go 1.26+
-- Node.js 22+（包含 npm）
+- Node.js 22.13+（包含 npm）
 - 一个支持 Tool Calling 的 OpenAI 兼容模型
 
 Linux / macOS 的快捷构建命令还需要 `make`。内置 SSH 不依赖系统中的 `ssh` 命令。Bubblewrap 仅用于 Linux 上的 Workspace Shell 沙箱，不影响服务启动和 SSH 功能。
@@ -193,13 +193,13 @@ Agent 页面右侧的 Conversations 会列出最近会话，标题取首条用�
 
 `workspace_shell` 用于解压、构建、测试和打包等通用本地操作。系统设置提供 `Sandbox`、`Host Shell`、`Disabled` 三种明确模式，默认是 Sandbox，设置变化不会让已审批请求切换执行边界。Sandbox 仅支持 Linux，通过 `workspace_sandbox_path`（默认 `bwrap`，也可用 `OPS_AGENT_WORKSPACE_SANDBOX`）启动隔离的 user/mount/PID/network namespace，只挂载只读系统运行目录、独立 `/tmp` 和目标 Workspace，并禁用网络与嵌套 user namespace；缺少 Bubblewrap 或 namespace 权限时直接失败，不会降级执行。Workspace 的 `read_only/read_write` 决定沙箱挂载权限，`.env*`、`.ssh` 和系统隐藏文件等敏感路径会被遮蔽。
 
-Host Shell 直接拥有当前服务账户可用的宿主机文件系统与网络权限：Unix 使用 Bash，Windows 优先使用 PowerShell 7 (`pwsh.exe`) 并回退 Windows PowerShell。它仅允许 `read_write` Workspace，每次调用都必须重新人工批准，不能创建或复用会话级授权。实际后端、Workspace、脚本、相对工作目录、环境与超时全部进入加密审批摘要；审批后修改模式会导致执行失败。Critical 脚本必须逐次审批并填写原因。`Disabled` 会在创建审批前拒绝调用。
+Host Shell 直接拥有当前服务账户可用的宿主机文件系统与网络权限：Unix 使用 Bash，Windows 优先使用 PowerShell 7 (`pwsh.exe`) 并回退 Windows PowerShell。它仅允许 `read_write` Workspace，并遵循当前审批模式。实际后端、Workspace、脚本、相对工作目录、环境与超时全部进入加密请求摘要；模式或请求内容变化不会修改已经开始的执行。`Disabled` 会在审批前拒绝调用。
 
 Agent 向远端发送 Workspace 文件只使用 `workspace_file_upload`：源相对路径、读取所得 SHA256、目标主机和远端路径进入同一个审批摘要，批准执行前会再次校验源版本。托管根目录仅在服务内部使用，不写入数据库、API、审计或模型上下文。可通过 `workspace_dir` 或 `OPS_AGENT_WORKSPACE_DIR` 修改统一根目录。
 
 `workspace_file_read` 和 `ssh_file_read` 默认读取完整文件；显式设置 `offset_bytes` 时，非负值表示从文件开头计算的零基偏移，负值表示读取末尾对应字节数，例如 `-12000` 读取最后 12,000 字节。设置 `pattern` 会切换为搜索模式，并且必须同时设置 `match_mode`：`literal` 匹配完整字面量，`regex` 使用 POSIX 正则表达式；可选的 `context_lines` 返回上下文，搜索结果不会截断。未找到匹配项是成功结果并返回 `search.found=false`；搜索参数与内容范围参数互斥，不再提供独立的 file search Tool。
 
-SSH 主机间迁移单个普通文件使用 `ssh_file_transfer`。OpsPilot 分别连接源主机和目标主机，通过内置 SFTP 在内存中中继数据，因此两台主机无需彼此可达，也不会调用远端 `scp`。调用前先用 `ssh_file_read(metadata_only=true)` 获取源文件 SHA256；覆盖目标文件时还必须绑定目标文件当前 SHA256。两端连接配置、路径、版本、覆盖标记和超时进入同一次人工审批。目标端先写同目录临时文件，源 SHA256 匹配后再原子改名；版本冲突、取消或超时不会留下半文件。
+SSH 主机间迁移单个普通文件使用 `ssh_file_transfer`。OpsPilot 分别连接源主机和目标主机，通过内置 SFTP 在内存中中继数据，因此两台主机无需彼此可达，也不会调用远端 `scp`。调用前先用 `ssh_file_read(metadata_only=true)` 获取源文件 SHA256；覆盖目标文件时还必须绑定目标文件当前 SHA256。两端连接配置、路径、版本、覆盖标记和超时进入同一个受控请求。目标端先写同目录临时文件，源 SHA256 匹配后再原子改名；版本冲突、取消或超时不会留下半文件。
 
 文件编辑 Tool 把变更作为一等数据展示：审批和执行结果都显示完整 unified diff、行号以及新增/删除统计。`ssh_file_edit` 与 `workspace_file_edit` 只修改现有文件，不提供专用的新建文件 Tool。远程事务脚本只在批准后由执行层生成，不进入审批内容。编辑不再绑定 SHA256、不保存备份，也不提供自动恢复 Tool；validator 仅对临时文件执行，失败时目标文件不会被修改。Tool 的不存在资源、参数错误、超时和远端失败统一返回 `code/message/retryable/next_action`，不会用普通运行错误中断 Eino ToolNode。
 
@@ -233,26 +233,30 @@ OpsPilot 默认不接受未知 host key。先注册、扫描并人工核对指�
 
 主机可选择当前 `ssh-agent`、上传未加密 OpenSSH 格式私钥或账号密码；Windows Agent 使用系统 OpenSSH Agent named pipe。上传私钥限制为 1 MiB，与 SSH、sudo 和代理密码一样使用 AES-256-GCM 加密保存，API 只返回是否已配置，不返回内容或宿主机路径。执行时只在内存中解密和解析，密钥和密码都不会发送给模型。SSH 主机可选择共享代理中的 SOCKS5、SOCKS5H 或 HTTP CONNECT 代理；HTTPS 代理不会出现在 SSH 选择器中，也会被服务端拒绝。ProxyJump 必须引用另一个已注册且已信任 host key 的主机，每一级都会独立认证并校验 host key，最多四级且拒绝环路。两者同时配置时，代理用于连接第一台跳板机。
 
-Eino Agent 的 `ssh_tunnel` 支持 `start`、`list` 和 `stop`。`start` 把目标主机能够访问的 `remote_host:remote_port` 转发到运行 OpsPilot 的机器，并固定只监听 `127.0.0.1`；`local_port=0` 自动选择空闲端口。建立链路每次都需单独人工审批，审批框显示本机端口、SSH 主机和远程端点。连接自动复用该主机已有的网络代理、ProxyJump、认证和 Host Key 校验。Web 顶栏显示当前链路、活动/累计连接、流量和故障，可直接停止。隧道只存在于当前服务进程中，停止服务或关闭桌面 App 会立即关闭监听和活动连接。
+Eino Agent 的 `ssh_tunnel` 支持 `start`、`list` 和 `stop`。`start` 把目标主机能够访问的 `remote_host:remote_port` 转发到运行 OpsPilot 的机器，并固定只监听 `127.0.0.1`；`local_port=0` 自动选择空闲端口。建立链路遵循当前审批模式。连接自动复用该主机已有的网络代理、ProxyJump、认证和 Host Key 校验。Web 顶栏显示当前链路、活动/累计连接、流量和故障，可直接停止。隧道只存在于当前服务进程中，停止服务或关闭桌面 App 会立即关闭监听和活动连接。
 
 从双后端版本升级时会执行一次破坏性 SSH schema 迁移：旧主机及其关联的运行、审批、任务和文件操作记录会被删除，同时移除 System OpenSSH、`ssh_config` 别名和自由格式 ProxyJump 字段。聊天记录、模型设置和 Workspace 文件不受影响。
 
-主机可选择三种 sudo 策略：禁用、目标机已配置最小权限 `NOPASSWD`，或由 OpsPilot 托管 sudo 密码。LLM 不调用 `sudo`，只在 `ssh_exec`、`ssh_run_script` 或 `ssh_file_edit` 中设置 `elevated: true`。服务端再按主机策略生成 `sudo -n` 或 `sudo -S` 调用；所有 `elevated` 请求固定升级为 Critical，必须逐次人工审批并填写原因。
+主机可选择三种 sudo 策略：禁用、目标机已配置最小权限 `NOPASSWD`，或由 OpsPilot 托管 sudo 密码。LLM 不调用 `sudo`，只在 `ssh_exec`、`ssh_run_script` 或 `ssh_file_edit` 中设置 `elevated: true`。服务端再按主机策略生成 `sudo -n` 或 `sudo -S` 调用；所有 `elevated` 请求固定升级为 Critical，并遵循当前审批模式。
 
 ## 风险与审批
 
 | 风险 | 例子 | 默认行为 |
 |---|---|---|
 | `read_only` | `ps`、`df`、`journalctl`、读取有限日志 | 自动执行 |
-| `change` | 写文件、安装依赖、重启服务、部署 | 人工审批 |
-| `critical` | `rm`、`dd`、防火墙、磁盘和 SSH 配置 | 默认阻断，需要逐次人工审批 |
-| `forbidden` | 读取私钥、关闭审计、获取主密钥 | 永久拒绝 |
+| `change` | 写文件、安装依赖、重启服务、部署 | Manual 下人工审批 |
+| `critical` | `rm`、`dd`、防火墙、磁盘和 SSH 配置 | Manual 下人工审批并填写原因 |
+| `forbidden` | 读取私钥、关闭审计、获取主密钥 | Manual/Auto 下拒绝 |
 
-审批绑定主机、目录、命令/脚本、参数、环境和文件内容的 SHA-256。审批后任何修改都会使摘要失效。模型只能查询审批状态，不能调用批准接口。
+系统设置提供三种审批模式：
 
-Web 会话审批框提供三个明确选择：仅允许本次、本会话允许完全相同的操作、拒绝并告诉 LLM 改做什么。确定性 Policy 会立即创建审批，命令解释 Agent 随后在后台用精简卡片补充命令作用和具体风险；结果随 Run 持久化。解释 Agent 没有 Tool，也不拥有审批 API，调用失败不会阻塞审批，更不能修改风险等级或审批要求。
+- `Manual`：保持默认策略；需要审批的请求暂停并等待用户允许或拒绝。
+- `Auto`：无 Tool 的独立审批 Agent 审查原本需要审批的请求。结构化结果为允许时立即执行，为拒绝时终止；模型不可用、超时或响应无效时回退人工审批。确定性 `deny` 仍然拒绝。
+- `Full access`：主 Agent 发起的请求跳过策略拦截和审批。参数校验、主机授权、SSH 认证、文件版本、系统权限和命令退出状态仍按真实结果处理。
 
-Agent 的原始 Tool 调用会在 Service 层真正暂停；HTTP 运行上下文与浏览器 SSE 连接解耦，因此刷新页面或临时断网不会取消 Agent Loop。页面恢复后通过会话 state 接口同步后台状态和新增历史，在运行结束前禁止同一会话重复发送或删除。批准并执行完成后，真实结果返回同一个 Tool Call，Eino 从原调用位置继续。后台运行设有 30 分钟上限；服务进程重启仍会终止内存中的 Agent Loop，但审批和审计记录继续保留。会话级授权最长保留 8 小时，并且只忽略简短操作目的的差异；主机、命令、参数、工作目录、环境、文件路径、脚本内容、超时或提权标记有任何变化都会重新审批。Critical 操作始终要求当次人工审批并填写原因，不能使用会话级授权。拒绝时必须填写替代方案，该内容会作为 `operator_instruction` 返回被暂停的 Tool，模型必须在同一次运行中按新方案继续。
+审批 Agent 与主 Agent 使用独立 Runner，可单独选择模型和超时。它只接收标准化请求、确定性策略结果、目标主机能力、当前计划步骤和请求摘要；没有 Tool，也不调用批准 API。审查结果与操作说明随 Run 持久化。Manual 下开启“人工审批说明”时，同一审批 Agent 会在后台生成建议，建议不代替用户决定。
+
+人工审批绑定主机、目录、命令/脚本、参数、环境和文件内容的 SHA-256。审批后任何修改都会使摘要失效。Web 审批框只提供“允许本次”和“拒绝并说明”，不保存会话级授权。主 Agent 的原始 Tool 调用会在 Service 层真正暂停；刷新页面或临时断网不会取消 Agent Loop。批准并执行完成后，真实结果返回同一个 Tool Call。拒绝时填写的内容会作为 `operator_instruction` 返回被暂停的 Tool。
 
 如果主 Agent 已产生 Tool 结果却以空正文结束，Runtime 不会重跑原 Agent Loop。它会把本轮已持久化的脱敏 Tool 结果和最新计划交给一个 `MaxIterations=1`、无 Tool、无 checkpoint 的独立总结 Agent，仅补生成最终回复；该路径不能再次执行操作。总结仍失败时会返回明确错误，并保留原 Tool 结果供下一轮继续。
 
@@ -291,7 +295,7 @@ Web 的 **Extensions / MCP Servers** 还支持反向角色：让 OpsPilot 作为
 
 保存后的服务器可以 Test、Retry、Enable、Disable、Edit 或永久 Delete。启用时 OpsPilot 连接服务器、分页发现 `tools/list`，再以 `mcp__<server-hash>__<tool>` 名称注入主 Eino Agent；禁用会关闭 MCP Session，旧 Tool 句柄立即失效，并热重建模型函数列表。环境变量和 Header 使用 AES-256-GCM 加密，Web 只显示键名，不回显值。当前仅导入 MCP Tools，不导入 Resources、Prompts 或 Sampling。
 
-外部 MCP Tool 拥有对应 MCP Server 自身的执行权限，不会自动经过 OpsPilot 的 SSH Policy 或人工审批。因此只应启用管理员信任的服务器；这与 OpsPilot 自己作为 MCP Server 时复用受控 SSH Service 的安全语义不同。
+外部 MCP Tool 拥有对应 MCP Server 自身的执行权限，不会自动经过 OpsPilot 的 SSH Policy 或审批模式。因此只应启用管理员信任的服务器；这与 OpsPilot 自己作为 MCP Server 时复用受控 SSH Service 的安全语义不同。
 
 主要工具：
 

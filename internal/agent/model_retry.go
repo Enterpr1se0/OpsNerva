@@ -15,9 +15,19 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-const modelRequestMaxRetries = 2
+const (
+	modelRequestMaxRetries        = 4
+	modelRequestTimeoutMaxRetries = 2
+)
 
-type modelRequestRetryNotifier func(attempt int, err error)
+type modelRequestRetryNotice struct {
+	Attempt int
+	Max     int
+	Delay   time.Duration
+	Err     error
+}
+
+type modelRequestRetryNotifier func(modelRequestRetryNotice)
 
 type modelRequestRetryNotifierKey struct{}
 
@@ -25,10 +35,10 @@ func withModelRequestRetryNotifier(ctx context.Context, notifier modelRequestRet
 	return context.WithValue(ctx, modelRequestRetryNotifierKey{}, notifier)
 }
 
-func notifyModelRequestRetry(ctx context.Context, attempt int, err error) {
+func notifyModelRequestRetry(ctx context.Context, notice modelRequestRetryNotice) {
 	notifier, _ := ctx.Value(modelRequestRetryNotifierKey{}).(modelRequestRetryNotifier)
 	if notifier != nil {
-		notifier(attempt, err)
+		notifier(notice)
 	}
 }
 
@@ -43,14 +53,24 @@ func modelRequestRetryConfig() *adk.ModelRetryConfig {
 }
 
 func modelRequestRetryDecision(ctx context.Context, attempt int, output *schema.Message, err error) *adk.RetryDecision {
-	if err == nil || attempt > modelRequestMaxRetries || ctx.Err() != nil || modelResponseHasContent(output) || !isRetryableModelRequestError(err) {
+	retryLimit := modelRequestRetryLimit(err)
+	if err == nil || attempt > retryLimit || ctx.Err() != nil || modelResponseHasContent(output) || !isRetryableModelRequestError(err) {
 		return &adk.RetryDecision{}
 	}
-	if isModelRequestTimeout(err) && attempt > 1 {
-		return &adk.RetryDecision{}
-	}
-	notifyModelRequestRetry(ctx, attempt, err)
+	notifyModelRequestRetry(ctx, modelRequestRetryNotice{
+		Attempt: attempt,
+		Max:     retryLimit,
+		Delay:   modelRequestRetryBackoff(ctx, attempt),
+		Err:     err,
+	})
 	return &adk.RetryDecision{Retry: true}
+}
+
+func modelRequestRetryLimit(err error) int {
+	if isModelRequestTimeout(err) {
+		return modelRequestTimeoutMaxRetries
+	}
+	return modelRequestMaxRetries
 }
 
 func modelResponseHasContent(message *schema.Message) bool {

@@ -345,9 +345,6 @@ func TestWorkspaceFileAccessRequiresFreshApproval(t *testing.T) {
 	if pending.Status != "approval_required" || pending.Risk != domain.RiskReadOnly || pending.Stdout != "" {
 		t.Fatalf("file content was available before approval: %#v", pending)
 	}
-	if _, err := svc.ApproveWithScope(context.Background(), pending.ApprovalID, "reviewed", "session", "operator"); err == nil || !strings.Contains(err.Error(), "one-time") {
-		t.Fatalf("file read accepted session approval: %v", err)
-	}
 	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed", "operator")
 	if err != nil || approved.Status != "completed" || !strings.Contains(approved.Stdout, "token: fixture") {
 		t.Fatalf("approved file access failed: %#v err=%v", approved, err)
@@ -533,6 +530,60 @@ func TestWorkspaceAdminUploadIsAtomicAndNeverOverwrites(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, ".opspilot-trash")); !os.IsNotExist(err) {
 		t.Fatalf("delete created a recovery directory: %v", err)
+	}
+}
+
+func TestWorkspaceAdminTextEditorPreservesModeAndRejectsBinaryFiles(t *testing.T) {
+	svc, root := newWorkspaceService(t, "read_write")
+	path := filepath.Join(root, "config.txt")
+	if err := os.WriteFile(path, []byte("before\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.SaveAdminWorkspaceTextFile(context.Background(), "project", "config.txt", "after\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSHA := fmt.Sprintf("%x", sha256.Sum256([]byte("after\n")))
+	if result.Path != "config.txt" || result.Size != int64(len("after\n")) || result.SHA256 != wantSHA {
+		t.Fatalf("unexpected text edit result: %#v", result)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil || string(content) != "after\n" {
+		t.Fatalf("edited content = %q, err = %v", content, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o640 {
+		t.Fatalf("edited mode = %v, err = %v", info.Mode().Perm(), err)
+	}
+	binaryPath := filepath.Join(root, "binary.dat")
+	if err := os.WriteFile(binaryPath, []byte{0, 1, 2}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SaveAdminWorkspaceTextFile(context.Background(), "project", "binary.dat", "text"); err == nil || !strings.Contains(err.Error(), "binary") {
+		t.Fatalf("binary file was editable: %v", err)
+	}
+	binary, err := os.ReadFile(binaryPath)
+	if err != nil || !bytes.Equal(binary, []byte{0, 1, 2}) {
+		t.Fatalf("binary file changed: %v, err = %v", binary, err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".opspilot-") {
+			t.Fatalf("text editor left temporary file %q", entry.Name())
+		}
+	}
+}
+
+func TestWorkspaceAdminTextEditorRejectsReadOnlyWorkspace(t *testing.T) {
+	svc, root := newWorkspaceService(t, "read_only")
+	if err := os.WriteFile(filepath.Join(root, "config.txt"), []byte("before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SaveAdminWorkspaceTextFile(context.Background(), "project", "config.txt", "after\n"); err == nil || !strings.Contains(err.Error(), "read_only") {
+		t.Fatalf("read-only Workspace was editable: %v", err)
 	}
 }
 
@@ -756,9 +807,6 @@ func TestHostWorkspaceShellRequiresFreshOneTimeApproval(t *testing.T) {
 	if pending.Status != "approval_required" || !containsString(pending.PolicyHits, "workspace_host_shell") {
 		t.Fatalf("host shell did not request explicit approval: %#v", pending)
 	}
-	if _, err := svc.ApproveWithScope(context.Background(), pending.ApprovalID, "reviewed", "session", "operator"); err == nil || !strings.Contains(err.Error(), "one-time approval") {
-		t.Fatalf("host shell accepted session approval: %v", err)
-	}
 	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed once", "operator")
 	if err != nil || approved.Status != "completed" {
 		t.Fatalf("one-time host shell approval failed: %#v err=%v", approved, err)
@@ -772,6 +820,44 @@ func TestHostWorkspaceShellRequiresFreshOneTimeApproval(t *testing.T) {
 	repeated, err := svc.RunWorkspaceShell(ctx, "project", "pwd\nprintf 'ok\\n' > host-created.txt", ".", nil, 10, "exercise host shell", "test")
 	if err != nil || repeated.Status != "approval_required" {
 		t.Fatalf("repeated host shell reused approval: %#v err=%v", repeated, err)
+	}
+}
+
+func TestWorkspacePowerShellScriptUsesUTF8AndCleansTemporaryDirectory(t *testing.T) {
+	script := "Write-Output '中文输出'\n"
+	content := workspacePowerShellScript(script)
+	if !bytes.HasPrefix(content, []byte{0xef, 0xbb, 0xbf}) {
+		t.Fatalf("PowerShell script is missing its UTF-8 BOM: %x", content[:3])
+	}
+	for _, required := range []string{
+		"[System.Console]::InputEncoding = $__opsPilotUtf8Encoding",
+		"[System.Console]::OutputEncoding = $__opsPilotUtf8Encoding",
+		"$OutputEncoding = $__opsPilotUtf8Encoding",
+		script,
+	} {
+		if !bytes.Contains(content, []byte(required)) {
+			t.Fatalf("PowerShell script is missing %q", required)
+		}
+	}
+
+	path, cleanup, err := createWorkspacePowerShellScript(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Dir(path)
+	relativeToTemp, err := filepath.Rel(os.TempDir(), directory)
+	if err != nil || relativeToTemp == ".." || strings.HasPrefix(relativeToTemp, ".."+string(filepath.Separator)) {
+		t.Fatalf("PowerShell script was written outside the system temporary directory: %s", path)
+	}
+	stored, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(stored, content) {
+		t.Fatalf("temporary PowerShell script content mismatch: err=%v", err)
+	}
+	if err := cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(directory); !os.IsNotExist(err) {
+		t.Fatalf("temporary PowerShell directory was not removed: %v", err)
 	}
 }
 

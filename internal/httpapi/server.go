@@ -32,6 +32,10 @@ import (
 	"eino-ops-agent/internal/skills"
 	"eino-ops-agent/internal/store"
 	webui "eino-ops-agent/web"
+
+	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/encoding/unicode"
+	"golang.org/x/text/transform"
 )
 
 type Server struct {
@@ -121,6 +125,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/v1/workspaces/{id}", s.deleteWorkspace)
 	s.mux.HandleFunc("GET /api/v1/workspaces/{id}/files", s.listWorkspaceFiles)
 	s.mux.HandleFunc("POST /api/v1/workspaces/{id}/files", s.uploadWorkspaceFile)
+	s.mux.HandleFunc("PUT /api/v1/workspaces/{id}/files", s.saveWorkspaceTextFile)
 	s.mux.HandleFunc("DELETE /api/v1/workspaces/{id}/files", s.deleteWorkspaceEntry)
 	s.mux.HandleFunc("GET /api/v1/workspaces/{id}/preview", s.previewWorkspaceFile)
 	s.mux.HandleFunc("GET /api/v1/workspaces/{id}/events", s.workspaceFileEvents)
@@ -132,8 +137,23 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/hosts/{id}/scan-key", s.scanHostKey)
 	s.mux.HandleFunc("POST /api/v1/hosts/{id}/trust-key", s.trustHostKey)
 	s.mux.HandleFunc("POST /api/v1/hosts/{id}/probe", s.probeHost)
+	s.mux.HandleFunc("GET /api/v1/hosts/{id}/sftp/entries", s.listSFTPEntries)
+	s.mux.HandleFunc("PATCH /api/v1/hosts/{id}/sftp/entries", s.renameSFTPEntry)
+	s.mux.HandleFunc("DELETE /api/v1/hosts/{id}/sftp/entries", s.deleteSFTPEntry)
+	s.mux.HandleFunc("GET /api/v1/hosts/{id}/sftp/files", s.downloadSFTPFile)
+	s.mux.HandleFunc("PUT /api/v1/hosts/{id}/sftp/files", s.uploadSFTPFile)
+	s.mux.HandleFunc("POST /api/v1/hosts/{id}/sftp/directories", s.createSFTPDirectory)
 	s.mux.HandleFunc("GET /api/v1/ssh-tunnels", s.listSSHTunnels)
+	s.mux.HandleFunc("POST /api/v1/ssh-tunnels", s.startSSHTunnel)
 	s.mux.HandleFunc("DELETE /api/v1/ssh-tunnels/{id}", s.stopSSHTunnel)
+	s.mux.HandleFunc("GET /api/v1/ssh-shells", s.listSSHShells)
+	s.mux.HandleFunc("POST /api/v1/ssh-shells", s.startSSHShell)
+	s.mux.HandleFunc("GET /api/v1/ssh-shells/{id}", s.getSSHShell)
+	s.mux.HandleFunc("GET /api/v1/ssh-shells/{id}/events", s.sshShellEvents)
+	s.mux.HandleFunc("POST /api/v1/ssh-shells/{id}/input", s.sshShellInput)
+	s.mux.HandleFunc("POST /api/v1/ssh-shells/{id}/resize", s.resizeSSHShell)
+	s.mux.HandleFunc("POST /api/v1/ssh-shells/{id}/interrupt", s.interruptSSHShell)
+	s.mux.HandleFunc("DELETE /api/v1/ssh-shells/{id}", s.closeSSHShell)
 	s.mux.HandleFunc("POST /api/v1/policy/evaluate", s.evaluate)
 	s.mux.HandleFunc("POST /api/v1/exec", s.exec)
 	s.mux.HandleFunc("POST /api/v1/tasks", s.startTask)
@@ -445,6 +465,19 @@ func (s *Server) previewWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 	respond(w, result, err)
 }
 
+func (s *Server) saveWorkspaceTextFile(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, (100<<20)+(1<<20))
+	var input struct {
+		Path    string `json:"path"`
+		Content string `json:"content"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	result, err := s.service.SaveAdminWorkspaceTextFile(r.Context(), r.PathValue("id"), input.Path, input.Content)
+	respond(w, result, err)
+}
+
 func (s *Server) deleteWorkspaceEntry(w http.ResponseWriter, r *http.Request) {
 	result, err := s.service.DeleteAdminWorkspaceEntry(r.Context(), r.PathValue("id"), r.URL.Query().Get("path"), actor(r))
 	if err != nil {
@@ -546,6 +579,212 @@ func (s *Server) workspaceFileEvents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+	}
+}
+
+func (s *Server) listSSHShells(w http.ResponseWriter, r *http.Request) {
+	activeOnly := !strings.EqualFold(r.URL.Query().Get("active"), "false")
+	result, err := s.service.ListSSHShells(r.Context(), r.URL.Query().Get("session_id"), activeOnly, r.URL.Query().Get("reason"), actor(r))
+	respond(w, result, err)
+}
+
+func (s *Server) startSSHShell(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		HostID  string `json:"host_id"`
+		Surface string `json:"surface"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	result, err := s.service.StartOperatorSSHShell(r.Context(), input.HostID, input.Surface, actor(r))
+	if err != nil {
+		writeSSHShellError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, result)
+}
+
+func (s *Server) getSSHShell(w http.ResponseWriter, r *http.Request) {
+	after, err := strconv.ParseUint(r.URL.Query().Get("after"), 10, 64)
+	if r.URL.Query().Get("after") == "" {
+		after, err = 0, nil
+	}
+	if err != nil {
+		writeErrorStatus(w, fmt.Errorf("after must be a non-negative event sequence"), http.StatusBadRequest)
+		return
+	}
+	coalesce := strings.EqualFold(r.URL.Query().Get("coalesce"), "true")
+	result, err := s.service.GetSSHShellSnapshot(r.Context(), r.PathValue("id"), "", after, 0, coalesce, r.URL.Query().Get("reason"), actor(r))
+	if errors.Is(err, store.ErrNotFound) {
+		writeErrorStatus(w, err, http.StatusNotFound)
+		return
+	}
+	respond(w, result, err)
+}
+
+func (s *Server) sshShellInput(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Input     string `json:"input"`
+		Sensitive bool   `json:"sensitive"`
+		Submit    bool   `json:"submit"`
+		Reason    string `json:"reason"`
+	}
+	if !decodeLimit(w, r, &input, (64<<10)+(1<<10)) {
+		return
+	}
+	if input.Sensitive {
+		if input.Submit && !strings.HasSuffix(input.Input, "\r") && !strings.HasSuffix(input.Input, "\n") {
+			input.Input += "\r"
+		}
+		if err := s.service.WriteSensitiveSSHShellInput(r.Context(), r.PathValue("id"), input.Input, actor(r)); err != nil {
+			writeSSHShellError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if input.Submit && !strings.HasSuffix(input.Input, "\r") && !strings.HasSuffix(input.Input, "\n") {
+		input.Input += "\r"
+	}
+	if err := s.service.SendSSHShellInput(r.Context(), r.PathValue("id"), "", input.Input, input.Reason, actor(r)); err != nil {
+		writeSSHShellError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) resizeSSHShell(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Cols int `json:"cols"`
+		Rows int `json:"rows"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	result, err := s.service.ResizeSSHShell(r.Context(), r.PathValue("id"), input.Cols, input.Rows, actor(r))
+	if err != nil {
+		writeSSHShellError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) interruptSSHShell(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Reason string `json:"reason"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	result, err := s.service.InterruptSSHShell(r.Context(), r.PathValue("id"), "", input.Reason, actor(r))
+	if err != nil {
+		writeSSHShellError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) closeSSHShell(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.CloseSSHShell(r.Context(), r.PathValue("id"), "", r.URL.Query().Get("reason"), actor(r))
+	if err != nil {
+		writeSSHShellError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) sshShellEvents(w http.ResponseWriter, r *http.Request) {
+	after, err := sshShellEventSequence(r)
+	if err != nil {
+		writeErrorStatus(w, err, http.StatusBadRequest)
+		return
+	}
+	initial, err := s.service.GetSSHShellSnapshot(r.Context(), r.PathValue("id"), "", after, 0, false, "", "")
+	if errors.Is(err, store.ErrNotFound) {
+		writeErrorStatus(w, err, http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if _, ok := w.(http.Flusher); !ok {
+		writeError(w, fmt.Errorf("streaming is unavailable"))
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.Header().Set("Connection", "keep-alive")
+	controller := http.NewResponseController(w)
+	write := func(payload string) error {
+		if _, err := io.WriteString(w, payload); err != nil {
+			return err
+		}
+		return controller.Flush()
+	}
+	if err := write("retry: 1000\n: connected\n\n"); err != nil {
+		return
+	}
+	snapshot := initial
+	for {
+		for _, event := range snapshot.Events {
+			data, marshalErr := json.Marshal(event)
+			if marshalErr != nil {
+				return
+			}
+			if err := write(fmt.Sprintf("id: %d\nevent: shell-event\ndata: %s\n\n", event.Sequence, data)); err != nil {
+				return
+			}
+			after = event.Sequence
+		}
+		if !shellHTTPStatusActive(snapshot.Shell.Status) {
+			return
+		}
+		snapshot, err = s.service.GetSSHShellSnapshot(r.Context(), r.PathValue("id"), "", after, 10*time.Second, false, "", "")
+		if err != nil {
+			return
+		}
+		if len(snapshot.Events) == 0 {
+			if err := write(": heartbeat\n\n"); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func sshShellEventSequence(r *http.Request) (uint64, error) {
+	afterText := r.Header.Get("Last-Event-ID")
+	if afterText == "" {
+		afterText = r.URL.Query().Get("after")
+	}
+	after := uint64(0)
+	if afterText != "" {
+		value, err := strconv.ParseUint(afterText, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("after must be a non-negative event sequence")
+		}
+		after = value
+	}
+	return after, nil
+}
+
+func writeSSHShellError(w http.ResponseWriter, err error) {
+	status := http.StatusBadRequest
+	if errors.Is(err, store.ErrNotFound) {
+		status = http.StatusNotFound
+	} else if strings.Contains(err.Error(), "is running") || strings.Contains(err.Error(), "limit reached") {
+		status = http.StatusConflict
+	}
+	writeErrorStatus(w, err, status)
+}
+
+func shellHTTPStatusActive(status string) bool {
+	switch status {
+	case "starting", "running", "stopping":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -779,8 +1018,8 @@ func (s *Server) diagnostics(ctx context.Context) observability.Diagnostics {
 		catalog := s.agent.ToolCatalog()
 		result.Agent = observability.AgentDiagnostics{
 			Available: s.agent.Available(), Source: status.Source, ProviderName: redactor.Redact(status.Name), Model: redactor.Redact(status.Model),
-			ToolCount: len(catalog.Tools), ExplanationAgentAvailable: status.ExplanationAgentAvailable,
-			ModelError: redactor.Redact(status.Error), ExplanationError: redactor.Redact(status.ExplanationError),
+			ToolCount: len(catalog.Tools), ApprovalAgentAvailable: status.ApprovalAgentAvailable,
+			ModelError: redactor.Redact(status.Error), ApprovalError: redactor.Redact(status.ApprovalError),
 		}
 	} else {
 		result.Agent.Source = "none"
@@ -788,6 +1027,9 @@ func (s *Server) diagnostics(ctx context.Context) observability.Diagnostics {
 	if s.service == nil {
 		return result
 	}
+	settings, err := s.service.SystemSettings(ctx)
+	addError("system_settings", err)
+	result.Agent.ApprovalMode = settings.ApprovalMode
 	hosts, err := s.service.ListHosts(ctx)
 	addError("hosts", err)
 	result.Resources.Hosts = len(hosts)
@@ -1092,6 +1334,24 @@ func (s *Server) listSSHTunnels(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.service.ListSSHTunnels())
 }
 
+func (s *Server) startSSHTunnel(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		HostID     string `json:"host_id"`
+		RemoteHost string `json:"remote_host"`
+		RemotePort int    `json:"remote_port"`
+		LocalPort  int    `json:"local_port"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	result, err := s.service.StartOperatorSSHTunnel(r.Context(), input.HostID, input.RemoteHost, input.RemotePort, input.LocalPort, actor(r))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, result)
+}
+
 func (s *Server) stopSSHTunnel(w http.ResponseWriter, r *http.Request) {
 	result, err := s.service.StopSSHTunnel(r.Context(), r.PathValue("id"), actor(r))
 	if err != nil {
@@ -1145,13 +1405,118 @@ func (s *Server) trustHostKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) probeHost(w http.ResponseWriter, r *http.Request) {
-	result, err := s.service.ProbeHost(r.Context(), r.PathValue("id"))
+	result, err := s.service.ProbeHost(r.Context(), r.PathValue("id"), actor(r))
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, err)
 		} else {
 			writeErrorStatus(w, err, http.StatusBadGateway)
 		}
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) listSFTPEntries(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.ListOperatorSFTPFiles(r.Context(), r.PathValue("id"), r.URL.Query().Get("path"))
+	respond(w, result, err)
+}
+
+func (s *Server) downloadSFTPFile(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.OpenOperatorSFTPFile(r.Context(), r.PathValue("id"), r.URL.Query().Get("path"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	defer result.Reader.Close()
+	filename := path.Base(result.Entry.Path)
+	contentType := mime.TypeByExtension(path.Ext(filename))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
+	w.Header().Set("Content-Length", strconv.FormatInt(result.Entry.Size, 10))
+	w.Header().Set("Cache-Control", "no-store")
+	if _, err := io.Copy(w, result.Reader); err != nil {
+		observability.FromContext(r.Context()).ErrorContext(r.Context(), "SFTP download failed", "component", "server", "host_id", r.PathValue("id"), "path", result.Entry.Path, "error", err)
+	}
+}
+
+func (s *Server) uploadSFTPFile(w http.ResponseWriter, r *http.Request) {
+	overwrite, _ := strconv.ParseBool(r.URL.Query().Get("overwrite"))
+	source, err := sftpUploadReader(r.Body, r.URL.Query().Get("encoding"))
+	if err != nil {
+		writeErrorStatus(w, err, http.StatusBadRequest)
+		return
+	}
+	result, err := s.service.UploadOperatorSFTPFile(r.Context(), r.PathValue("id"), r.URL.Query().Get("path"), source, overwrite)
+	if err != nil {
+		status := http.StatusBadRequest
+		if strings.Contains(err.Error(), "already exists") {
+			status = http.StatusConflict
+		}
+		writeErrorStatus(w, err, status)
+		return
+	}
+	writeJSON(w, http.StatusCreated, result)
+}
+
+func sftpUploadReader(source io.Reader, encoding string) (io.Reader, error) {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "", "utf-8", "utf8":
+		return source, nil
+	case "utf-16le":
+		return transform.NewReader(source, unicode.UTF16(unicode.LittleEndian, unicode.UseBOM).NewEncoder()), nil
+	case "utf-16be":
+		return transform.NewReader(source, unicode.UTF16(unicode.BigEndian, unicode.UseBOM).NewEncoder()), nil
+	case "gb18030", "gbk":
+		return transform.NewReader(source, simplifiedchinese.GB18030.NewEncoder()), nil
+	default:
+		return nil, fmt.Errorf("unsupported text encoding %q", encoding)
+	}
+}
+
+func (s *Server) createSFTPDirectory(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Path string `json:"path"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	result, err := s.service.CreateOperatorSFTPDirectory(r.Context(), r.PathValue("id"), input.Path)
+	if err != nil {
+		writeErrorStatus(w, err, http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusCreated, result)
+}
+
+func (s *Server) renameSFTPEntry(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		SourcePath      string `json:"source_path"`
+		DestinationPath string `json:"destination_path"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	result, err := s.service.RenameOperatorSFTPEntry(r.Context(), r.PathValue("id"), input.SourcePath, input.DestinationPath)
+	if err != nil {
+		status := http.StatusBadRequest
+		if strings.Contains(err.Error(), "already exists") {
+			status = http.StatusConflict
+		}
+		writeErrorStatus(w, err, status)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) deleteSFTPEntry(w http.ResponseWriter, r *http.Request) {
+	recursive, _ := strconv.ParseBool(r.URL.Query().Get("recursive"))
+	result, err := s.service.RemoveOperatorSFTPEntry(r.Context(), r.PathValue("id"), r.URL.Query().Get("path"), recursive)
+	if err != nil {
+		writeErrorStatus(w, err, http.StatusBadRequest)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -1212,12 +1577,11 @@ func (s *Server) retryApprovalExplanation(w http.ResponseWriter, r *http.Request
 func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Reason string `json:"reason"`
-		Scope  string `json:"scope"`
 	}
 	if !decode(w, r, &input) {
 		return
 	}
-	result, err := s.service.ApproveWithScopeAsync(r.Context(), r.PathValue("id"), input.Reason, input.Scope, actor(r))
+	result, err := s.service.ApproveAsync(r.Context(), r.PathValue("id"), input.Reason, actor(r))
 	if err != nil {
 		writeError(w, err)
 		return

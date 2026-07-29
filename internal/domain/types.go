@@ -42,6 +42,7 @@ type Host struct {
 	Address             string    `json:"address"`
 	Port                int       `json:"port"`
 	User                string    `json:"user"`
+	AgentEnabled        bool      `json:"agent_enabled"`
 	AuthType            string    `json:"auth_type"`
 	PrivateKeyCipher    string    `json:"-"`
 	HasPrivateKey       bool      `json:"has_private_key"`
@@ -61,8 +62,15 @@ type Host struct {
 	SudoPassword        string    `json:"-"`
 	PrivateKey          []byte    `json:"-"`
 	ProxyPassword       string    `json:"-"`
+	HostKey             *HostKey  `json:"host_key,omitempty"`
 	CreatedAt           time.Time `json:"created_at"`
 	UpdatedAt           time.Time `json:"updated_at"`
+}
+
+type HostKey struct {
+	Fingerprint string `json:"fingerprint"`
+	Algorithm   string `json:"algorithm,omitempty"`
+	Trusted     bool   `json:"trusted"`
 }
 
 type HostInput struct {
@@ -71,6 +79,7 @@ type HostInput struct {
 	Address         string `json:"address"`
 	Port            int    `json:"port"`
 	User            string `json:"user"`
+	AgentEnabled    *bool  `json:"agent_enabled,omitempty"`
 	AuthType        string `json:"auth_type"`
 	PrivateKey      string `json:"private_key,omitempty"`
 	KnownHostsFile  string `json:"known_hosts_file,omitempty"`
@@ -177,6 +186,12 @@ const (
 	MaxSubagentTimeoutSeconds     = 120
 )
 
+const (
+	ApprovalModeManual     = "manual"
+	ApprovalModeAuto       = "auto"
+	ApprovalModeFullAccess = "full_access"
+)
+
 const AgentInterruptedMessage = "Agent run stopped by the operator before completion."
 
 var DefaultChatImageAllowedTypes = []string{"image/png", "image/jpeg", "image/webp", "image/gif"}
@@ -191,6 +206,7 @@ type SystemSettings struct {
 	AgentMaxIterations          int       `json:"agent_max_iterations"`
 	SystemPrompt                string    `json:"system_prompt"`
 	DefaultSystemPrompt         string    `json:"default_system_prompt"`
+	ApprovalMode                string    `json:"approval_mode"`
 	ApprovalExplanationsEnabled bool      `json:"approval_explanations_enabled"`
 	SubagentModelProviderID     string    `json:"subagent_model_provider_id"`
 	SubagentTimeoutSeconds      int       `json:"subagent_timeout_seconds"`
@@ -207,6 +223,7 @@ type SystemSettings struct {
 type SystemSettingsInput struct {
 	AgentMaxIterations          int      `json:"agent_max_iterations"`
 	SystemPrompt                *string  `json:"system_prompt,omitempty"`
+	ApprovalMode                *string  `json:"approval_mode,omitempty"`
 	ApprovalExplanationsEnabled *bool    `json:"approval_explanations_enabled,omitempty"`
 	SubagentModelProviderID     *string  `json:"subagent_model_provider_id,omitempty"`
 	SubagentTimeoutSeconds      *int     `json:"subagent_timeout_seconds,omitempty"`
@@ -416,6 +433,7 @@ const (
 	ExecWorkspaceShell         ExecMode = "workspace_shell"
 	ExecSSHFileTransfer        ExecMode = "ssh_file_transfer"
 	ExecSSHTunnelStart         ExecMode = "ssh_tunnel_start"
+	ExecSSHShellStart          ExecMode = "ssh_shell_start"
 )
 
 type FileSearchMatchMode string
@@ -431,6 +449,7 @@ type ExecRequest struct {
 	Program                   string              `json:"program,omitempty" jsonschema:"remote executable name for program mode"`
 	Args                      []string            `json:"args,omitempty" jsonschema:"separate arguments; do not include shell quoting"`
 	Script                    string              `json:"script,omitempty" jsonschema:"bash script content for script mode"`
+	Background                bool                `json:"background,omitempty" jsonschema:"run as a cancellable background task"`
 	Change                    *FileChange         `json:"change,omitempty"`
 	Cwd                       string              `json:"cwd,omitempty" jsonschema:"absolute remote working directory, or a clean workspace-relative directory for workspace_shell"`
 	Env                       map[string]string   `json:"env,omitempty" jsonschema:"non-secret environment values"`
@@ -459,7 +478,10 @@ type ExecRequest struct {
 	TunnelRemoteHost          string              `json:"remote_host,omitempty" jsonschema:"host reached from the SSH target"`
 	TunnelRemotePort          int                 `json:"remote_port,omitempty" jsonschema:"port reached from the SSH target"`
 	TunnelLocalPort           int                 `json:"local_port,omitempty" jsonschema:"local loopback port; zero selects an available port"`
+	ShellCols                 int                 `json:"shell_cols,omitempty" jsonschema:"interactive shell terminal columns"`
+	ShellRows                 int                 `json:"shell_rows,omitempty" jsonschema:"interactive shell terminal rows"`
 	LocalPath                 string              `json:"-"`
+	ShellSurface              string              `json:"-"`
 }
 
 // SearchText returns the request's human-readable text exactly as submitted,
@@ -489,17 +511,26 @@ func (r ExecRequest) SearchText() string {
 }
 
 type ToolMeta struct {
-	ToolVersion string `json:"tool_version,omitempty"`
-	OK          bool   `json:"ok"`
-	Code        string `json:"code,omitempty"`
-	Message     string `json:"message,omitempty"`
-	Retryable   bool   `json:"retryable,omitempty"`
-	NextAction  string `json:"next_action,omitempty"`
+	ToolVersion string                 `json:"tool_version,omitempty"`
+	OK          bool                   `json:"ok"`
+	Code        string                 `json:"code,omitempty"`
+	Message     string                 `json:"message,omitempty"`
+	Retryable   bool                   `json:"retryable,omitempty"`
+	NextAction  string                 `json:"next_action,omitempty"`
+	Validation  *ToolValidationDetails `json:"validation,omitempty"`
 }
 
 type ToolFailure struct {
 	ToolMeta
 	Status string `json:"status"`
+}
+
+type ToolValidationDetails struct {
+	Action           string         `json:"action,omitempty"`
+	AllowedFields    []string       `json:"allowed_fields,omitempty"`
+	GotFields        []string       `json:"got_fields,omitempty"`
+	UnexpectedFields []string       `json:"unexpected_fields,omitempty"`
+	Example          map[string]any `json:"example,omitempty"`
 }
 
 type ExecResult struct {
@@ -520,6 +551,8 @@ type ExecResult struct {
 	Change              *FileChange       `json:"change,omitempty"`
 	Search              *FileSearchResult `json:"search,omitempty"`
 	Tunnel              *SSHTunnel        `json:"tunnel,omitempty"`
+	Shell               *SSHShell         `json:"shell,omitempty"`
+	ShellUsage          *SSHShellUsage    `json:"shell_usage,omitempty"`
 }
 
 type SSHTunnel struct {
@@ -544,6 +577,64 @@ type SSHTunnelList struct {
 	Tunnels []SSHTunnel `json:"tunnels"`
 	Count   int         `json:"count"`
 }
+
+type SSHShell struct {
+	ID                string    `json:"id"`
+	RunID             string    `json:"run_id"`
+	SessionID         string    `json:"session_id"`
+	Surface           string    `json:"surface"`
+	HostID            string    `json:"host_id"`
+	HostName          string    `json:"host_name"`
+	User              string    `json:"user"`
+	Elevated          bool      `json:"elevated"`
+	Cwd               string    `json:"cwd,omitempty"`
+	Status            string    `json:"status"`
+	Cols              int       `json:"cols"`
+	Rows              int       `json:"rows"`
+	LastSequence      uint64    `json:"last_sequence"`
+	ExitCode          *int      `json:"exit_code,omitempty"`
+	TerminationReason string    `json:"termination_reason,omitempty"`
+	Error             string    `json:"error,omitempty"`
+	StartedAt         time.Time `json:"started_at"`
+	EndedAt           time.Time `json:"ended_at,omitempty"`
+}
+
+type SSHShellEvent struct {
+	ShellID       string    `json:"shell_id"`
+	FirstSequence uint64    `json:"first_sequence,omitempty"`
+	Sequence      uint64    `json:"sequence"`
+	Stream        string    `json:"stream"`
+	Source        string    `json:"source,omitempty"`
+	Content       string    `json:"content,omitempty"`
+	Sensitive     bool      `json:"sensitive,omitempty"`
+	InputBytes    int       `json:"input_bytes,omitempty"`
+	Status        string    `json:"status,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+type SSHShellSnapshot struct {
+	Shell        SSHShell        `json:"shell"`
+	Events       []SSHShellEvent `json:"events"`
+	RecentOutput string          `json:"recent_output,omitempty"`
+	NextSequence uint64          `json:"next_sequence"`
+}
+
+type SSHShellList struct {
+	Shells []SSHShell `json:"shells"`
+	Count  int        `json:"count"`
+}
+
+type SSHShellUsage struct {
+	Input  string `json:"input"`
+	Status string `json:"status"`
+	Close  string `json:"close"`
+}
+
+const (
+	SSHShellSurfaceAgent     = "agent"
+	SSHShellSurfaceQuick     = "quick"
+	SSHShellSurfaceWorkspace = "workspace"
+)
 
 type FileSearchResult struct {
 	Found        bool                `json:"found"`
@@ -594,9 +685,16 @@ type CommandExplanation struct {
 	Risks     []string `json:"risks"`
 }
 
+const (
+	ApprovalAgentAllow  = "allow"
+	ApprovalAgentReject = "reject"
+)
+
 type CommandReview struct {
 	Status            string              `json:"status"`
 	Model             string              `json:"model,omitempty"`
+	Decision          string              `json:"decision,omitempty"`
+	Reason            string              `json:"reason,omitempty"`
 	DeterministicRisk RiskLevel           `json:"deterministic_risk"`
 	Explanation       *CommandExplanation `json:"explanation,omitempty"`
 	Errors            []string            `json:"errors,omitempty"`
@@ -604,25 +702,27 @@ type CommandReview struct {
 }
 
 type Run struct {
-	ID             string         `json:"id"`
-	SessionID      string         `json:"session_id,omitempty"`
-	HostID         string         `json:"host_id"`
-	RequestJSON    string         `json:"request_json"`
-	RequestCipher  string         `json:"-"`
-	SearchText     string         `json:"-"`
-	RequestDigest  string         `json:"request_digest"`
-	Risk           RiskLevel      `json:"risk"`
-	Status         string         `json:"status"`
-	ExitCode       int            `json:"exit_code"`
-	StdoutRedacted string         `json:"stdout_redacted,omitempty"`
-	StderrRedacted string         `json:"stderr_redacted,omitempty"`
-	StdoutCipher   string         `json:"-"`
-	StderrCipher   string         `json:"-"`
-	Error          string         `json:"error,omitempty"`
-	AIReviewJSON   string         `json:"-"`
-	AIReview       *CommandReview `json:"ai_review,omitempty"`
-	StartedAt      time.Time      `json:"started_at"`
-	CompletedAt    time.Time      `json:"completed_at,omitempty"`
+	ID                string         `json:"id"`
+	SessionID         string         `json:"session_id,omitempty"`
+	HostID            string         `json:"host_id"`
+	ToolName          string         `json:"tool_name,omitempty"`
+	ToolArgumentsJSON string         `json:"tool_arguments_json,omitempty"`
+	RequestJSON       string         `json:"request_json"`
+	RequestCipher     string         `json:"-"`
+	SearchText        string         `json:"-"`
+	RequestDigest     string         `json:"request_digest"`
+	Risk              RiskLevel      `json:"risk"`
+	Status            string         `json:"status"`
+	ExitCode          int            `json:"exit_code"`
+	StdoutRedacted    string         `json:"stdout_redacted,omitempty"`
+	StderrRedacted    string         `json:"stderr_redacted,omitempty"`
+	StdoutCipher      string         `json:"-"`
+	StderrCipher      string         `json:"-"`
+	Error             string         `json:"error,omitempty"`
+	AIReviewJSON      string         `json:"-"`
+	AIReview          *CommandReview `json:"ai_review,omitempty"`
+	StartedAt         time.Time      `json:"started_at"`
+	CompletedAt       time.Time      `json:"completed_at,omitempty"`
 }
 
 type Approval struct {

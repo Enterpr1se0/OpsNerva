@@ -7,17 +7,17 @@ LLM、Prompt、Skill、远程输出和 MCP Client 都不属于可信计算基。
 1. 从 SQLite 按 `host_id` 解析目标与认证策略，忽略模型提供的任何连接凭据。
 2. 规范化请求并计算原始载荷 SHA-256。
 3. 使用 Bash AST 和 YAML 规则得到最终风险等级。
-4. 永久拒绝 Forbidden；为 Change/Critical 创建审批；仅自动执行 ReadOnly。
+4. 应用审批模式：Manual 保持 Policy 结果，Auto 审查 Change/Critical，Full access 对主 Agent 放行。
 5. 仅在实际执行前解密所需 SSH/sudo 密码，获取并发令牌，通过审批绑定的内置 SSH Transport 执行。
 6. 加密原始请求和输出，生成脱敏视图并追加审计事件。
 
 Eino Tool、MCP Tool、HTTP 和 CLI 都是这个 Service 的适配器。预期失败被规范化为带 `code/retryable/next_action` 的 Tool 结果；只有上下文取消或内部持久化损坏会成为 ToolNode fatal error。
 
-这里的 MCP Tool 分为两个方向。`ops-agent mcp` 把受控 SSH Service 暴露为 stdio MCP Server，因此完整复用 Policy、审批和审计。管理员配置的外部 MCP Server 则属于独立信任域：它的工具在远端/子进程自身权限下执行，不自动继承 SSH Policy。Web 会明确提示该边界，只有启用状态为 ready 且未被 func 管理单独关闭的外部工具才进入主 Agent，评审 SubAgent 仍保持无 Tool。
+这里的 MCP Tool 分为两个方向。`ops-agent mcp` 把受控 SSH Service 暴露为 stdio MCP Server，因此完整复用 Policy、审批模式和审计。管理员配置的外部 MCP Server 则属于独立信任域：它的工具在远端/子进程自身权限下执行，不自动继承 SSH Policy。Web 会明确提示该边界，只有启用状态为 ready 且未被 func 管理单独关闭的外部工具才进入主 Agent，审批 Agent 仍保持无 Tool。
 
 Web/API 位于单管理员认证边界之后。数据库尚无管理员凭据时，Web 首次初始化页允许用户创建密码，并以仅首次插入的方式保存 Argon2id 哈希；初始化完成后该接口永久拒绝再次写入。后续请求使用服务端 Session、HttpOnly/SameSite Cookie 和 CSRF Token。MCP stdio 与 CLI 仍属于本机进程边界，不复用浏览器 Cookie。
 
-对于确定性 Policy 已判为 Change 或 Critical 的请求，Service 在创建审批后异步调用 `CommandExplainerAgent`。它是一个 `MaxIterations=1`、无 Tool 的独立 Eino `ChatModelAgent`，只返回面向操作员的机制、影响、风险提示和回滚说明。它不能修改确定性风险、批准请求或执行命令；失败按 degraded/unavailable 持久化并继续走原审批路径。
+`ApprovalAgent` 是一个 `MaxIterations=1`、无 Tool 的独立 Eino `ChatModelAgent`，结构化返回 `allow/reject`、原因、操作机制和风险。Auto 模式同步使用其决定；不可用、超时或格式无效时回退 Manual。Manual 可异步调用它生成审批建议，但建议不代替用户决定。确定性风险始终保留在 Run 中。
 
 ## Packages
 
@@ -48,7 +48,7 @@ stdio 通过 `exec.Command(command,args...)` 启动，不解析 Shell；Streamab
 
 `ssh_run_script` 将脚本通过 stdin 传给远端 `bash -se`。脚本先由 `mvdan.cc/sh` 完整解析；解析失败、命令替换、动态执行、下载后管道到 shell 等模式会升级为 Critical。
 
-`ssh_tunnel` 的 `start` 进入同一套 Run、Policy、一次性审批和加密审计状态机；`list` 与 `stop` 直接操作进程内 Tunnel Registry。启动后控制面在 `127.0.0.1` 建立 TCP Listener，使用已解析的 `ConnectionSpec` 创建持久 SSH Client，再以 `direct-tcpip` channel 转发每个本机连接。因此网络代理、ProxyJump 链、认证与严格 Host Key 校验和普通 SSH 操作完全共用一条连接实现。Registry 记录活动连接和双向流量，Service Shutdown 会关闭 Listener、SSH Client 及全部已接受连接并等待 worker 退出；不把隧道恢复为跨重启持久状态。
+`ssh_tunnel` 的 `start` 进入同一套 Run、Policy、审批模式和加密审计状态机；`list` 与 `stop` 直接操作进程内 Tunnel Registry。启动后控制面在 `127.0.0.1` 建立 TCP Listener，使用已解析的 `ConnectionSpec` 创建持久 SSH Client，再以 `direct-tcpip` channel 转发每个本机连接。因此网络代理、ProxyJump 链、认证与严格 Host Key 校验和普通 SSH 操作完全共用一条连接实现。Registry 记录活动连接和双向流量，Service Shutdown 会关闭 Listener、SSH Client 及全部已接受连接并等待 worker 退出；不把隧道恢复为跨重启持久状态。
 
 无 PTY 的交互式 Shell、编辑器与 `systemctl edit` 会在 Service 层拒绝；apt/dnf/yum/pacman 的变更操作必须显式提供对应非交互参数。脚本、argv、环境和路径还有独立大小与格式上限，检测到秘密的环境变量不会进入执行请求。
 
@@ -66,9 +66,9 @@ Workspace 在 `workspace_dir` 下按 ID 托管；SQLite 的 Workspace 登记只�
 
 Sandbox 后端仅在 Linux 使用配置的 Bubblewrap；不存在或 namespace 创建失败时关闭失败，绝不回退到 Host Shell。沙箱新建 user/mount/PID/network namespace、丢弃 capabilities、禁用嵌套 user namespace 和网络，只读挂载 `/usr` 与动态链接库目录，创建独立 `/proc`、`/dev`、`/tmp`，并按 Workspace access 只读或读写挂载到 `/workspace`。预存的 `.env*`、`.ssh`、`.opspilot-*`、`.data`、`master.key` 与 credential 命名路径，以及 socket、FIFO 和 device 等特殊文件，在 mount namespace 内被遮蔽。
 
-Host 后端直接以服务账户执行，拥有宿主机文件系统与网络权限；Unix 选择 Bash，Windows 依次查找 `pwsh.exe` 与 `powershell.exe`。Host 仅允许 `read_write` Workspace，强制每次一次性人工审批，后端同时跳过会话授权查询并拒绝会话级授权创建。两种后端都使用清理后的环境、有界输出、统一脱敏并隐藏 Workspace 宿主根路径。配置中固定的 Workspace validator 仍使用 argv 和固定环境单独执行，不经过 Shell。
+Host 后端直接以服务账户执行，拥有宿主机文件系统与网络权限；Unix 选择 Bash，Windows 依次查找 `pwsh.exe` 与 `powershell.exe`。Host 仅允许 `read_write` Workspace，并遵循当前审批模式。两种后端都使用清理后的环境、有界输出、统一脱敏并隐藏 Workspace 宿主根路径。配置中固定的 Workspace validator 仍使用 argv 和固定环境单独执行，不经过 Shell。
 
-目标主机和最多四级跳板链的非秘密连接字段及更新时间组成 `ssh_connection_digest`，与命令一起进入审批和会话授权摘要；批准后修改地址、用户、认证方式、known_hosts、网络代理或跳板链会导致执行失败。主机间文件传输对源端和目标端分别计算并校验该摘要。
+目标主机和最多四级跳板链的非秘密连接字段及更新时间组成 `ssh_connection_digest`，与命令一起进入请求摘要；人工批准后修改地址、用户、认证方式、known_hosts、网络代理或跳板链会导致执行失败。主机间文件传输对源端和目标端分别计算并校验该摘要。
 
 内置实现使用 `golang.org/x/crypto/ssh`、`knownhosts` 和 `github.com/pkg/sftp`。密码只作为进程内 AuthMethod；Keyboard Interactive 只回答一次无回显的密码提示。Unix Agent 连接 `SSH_AUTH_SOCK`，Windows Agent 通过 named pipe 连接系统 OpenSSH Agent。Web/CLI 上传的未加密 OpenSSH 格式私钥限制为 1 MiB，使用 AES-256-GCM 写入 `private_key_cipher`，对外只返回 `has_private_key` 并只在内存解析；不接受或保存宿主机私钥路径。主机只保存共享 `proxy_id`，连接时解析 SOCKS5、SOCKS5H 或 HTTP CONNECT 参数；代理密码只在内存解密。ProxyJump 只能引用注册主机，逐跳验证 host key、检测环路并限制最大深度；与网络代理组合时，代理只负责连接第一台跳板机。
 
@@ -81,14 +81,16 @@ Host 后端直接以服务账户执行，拥有宿主机文件系统与网络权
 ## Approval state machine
 
 ```text
-created ── ReadOnly ──> running ──> completed / failed
-   │
-   ├── Change/Critical ──> approval_required ──> approved ──> running
-   │                                     └─────> rejected / expired
-   └── Forbidden ──> denied
+Policy decision
+   ├── Manual ── approval_required ── approved ── running ── completed / failed
+   │                              └── rejected / expired
+   ├── Auto ── ApprovalAgent allow ── running ── completed / failed
+   │          ├── reject ── rejected
+   │          └── unavailable/invalid ── approval_required
+   └── Full access ── running ── completed / failed
 ```
 
-Critical 审批除摘要外还要求逐次确认并填写原因，不能创建会话级授权。审批写入后，服务再次解密原始载荷并重新计算摘要，避免 TOCTOU 或载荷替换。
+Manual 下 Critical 审批要求填写原因。系统不保存会话级授权。审批写入后，服务再次解密原始载荷并重新计算摘要，避免 TOCTOU 或载荷替换。
 
 Eino Agent 请求会在 context 中启用 blocking approval。Service 创建审批后先通过 SSE notifier 立即通知 Web，再让原 Tool goroutine 轮询持久化的 approval/run 状态；批准接口负责执行精确载荷，完成后结果回到原 Tool Call，拒绝说明则以 `operator_instruction` 回到模型。CLI、MCP 和直接 HTTP 执行保持非阻塞的 `approval_required` 返回契约。等待期间每 15 秒发送一次 SSE approval heartbeat。
 
@@ -128,7 +130,7 @@ Runner 在调用工具前通过 Go context 绑定当前 session ID，Service 创
 
 SQLite 使用部分唯一索引保证最多只有一个 active provider。切换时服务更新 active route，构建新的 ChatModelAgent 与 Runner，再通过互斥锁原子替换运行时指针；已经取得旧 Runner 的请求可以正常结束，新请求使用新配置。没有 active provider 时才回退到 `OPENAI_*` 环境变量。
 
-命令解释 Agent 默认继承 active provider，也可以通过 `system_settings.subagent_model_provider_id` 固定使用任一已保存 provider。显式选择的 provider 不会静默回退，且在解除引用前禁止删除。其业务截止时间来自 `subagent_timeout_seconds`，允许 5–120 秒、默认 30 秒；底层 HTTP 客户端仅增加固定清理余量，避免维护两套相互竞争的超时配置。
+审批 Agent 默认继承 active provider，也可以通过 `system_settings.subagent_model_provider_id` 固定使用任一已保存 provider。显式选择的 provider 不会静默回退，且在解除引用前禁止删除。其业务截止时间来自 `subagent_timeout_seconds`，允许 5–120 秒、默认 30 秒；底层 HTTP 客户端仅增加固定清理余量，避免维护两套相互竞争的超时配置。
 
 模型发现统一请求配置 Base URL 下的 `GET /models`，兼容 OpenAI 标准的 `data[].id`，同时容忍部分实现的 `models[]` 包装。请求最长 15 秒、响应最大 2 MiB，并禁止 HTTP 重定向，避免 Authorization Header 被转发到其他地址；上游错误在返回 Web 前会经过密钥替换和通用脱敏。
 

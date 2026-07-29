@@ -15,6 +15,7 @@ type executionOwnerContextKey struct{}
 type executionOwner struct {
 	ToolCallID string
 	ToolName   string
+	Arguments  string
 }
 
 // WithSessionID binds an Agent conversation to all audited runs created by
@@ -37,13 +38,14 @@ func SessionIDFromContext(ctx context.Context) string {
 
 // WithExecutionOwner binds a service run to the Agent tool card that started
 // it. The binding is copied into approved and background execution events.
-func WithExecutionOwner(ctx context.Context, toolCallID, toolName string) context.Context {
-	if ctx == nil || (strings.TrimSpace(toolCallID) == "" && strings.TrimSpace(toolName) == "") {
+func WithExecutionOwner(ctx context.Context, toolCallID, toolName, arguments string) context.Context {
+	if ctx == nil || (strings.TrimSpace(toolCallID) == "" && strings.TrimSpace(toolName) == "" && strings.TrimSpace(arguments) == "") {
 		return ctx
 	}
 	return context.WithValue(ctx, executionOwnerContextKey{}, executionOwner{
 		ToolCallID: strings.TrimSpace(toolCallID),
 		ToolName:   strings.TrimSpace(toolName),
+		Arguments:  strings.TrimSpace(arguments),
 	})
 }
 
@@ -52,7 +54,7 @@ func executionOwnerFromContext(ctx context.Context) (executionOwner, bool) {
 		return executionOwner{}, false
 	}
 	owner, ok := ctx.Value(executionOwnerContextKey{}).(executionOwner)
-	return owner, ok && (owner.ToolCallID != "" || owner.ToolName != "")
+	return owner, ok && (owner.ToolCallID != "" || owner.ToolName != "" || owner.Arguments != "")
 }
 
 // WithBlockingApprovals makes approval-producing Submit calls wait for the

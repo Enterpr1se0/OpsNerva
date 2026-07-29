@@ -24,6 +24,8 @@ var (
 	ErrInvalidPlanTransition = errors.New("invalid plan transition")
 )
 
+const persistedToolEvidenceLeakMarker = "[Persisted operational tool evidence from the previous turn."
+
 type PlanTransitionError struct {
 	StepNumber int
 	Status     string
@@ -302,6 +304,7 @@ CREATE TABLE IF NOT EXISTS hosts (
   address TEXT NOT NULL,
   port INTEGER NOT NULL,
   username TEXT NOT NULL,
+  agent_enabled INTEGER NOT NULL DEFAULT 1,
   auth_type TEXT NOT NULL DEFAULT 'agent',
 	  private_key_cipher TEXT NOT NULL DEFAULT '',
   known_hosts_file TEXT NOT NULL DEFAULT '',
@@ -317,6 +320,8 @@ CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL DEFAULT '',
   host_id TEXT NOT NULL,
+  tool_name TEXT NOT NULL DEFAULT '',
+  tool_arguments_json TEXT NOT NULL DEFAULT '',
   request_json TEXT NOT NULL,
   request_cipher TEXT NOT NULL DEFAULT '',
   search_text TEXT NOT NULL DEFAULT '',
@@ -407,13 +412,6 @@ CREATE TABLE IF NOT EXISTS agent_plan_steps (
   FOREIGN KEY(session_id) REFERENCES agent_plans(session_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_agent_plan_steps_session ON agent_plan_steps(session_id,step_number);
-CREATE TABLE IF NOT EXISTS session_approval_grants (
-  session_id TEXT NOT NULL,
-  request_fingerprint TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  expires_at TEXT NOT NULL,
-  PRIMARY KEY(session_id, request_fingerprint)
-);
 	CREATE TABLE IF NOT EXISTS admin_credentials (
 	  id INTEGER PRIMARY KEY CHECK(id=1),
 	  password_hash TEXT NOT NULL,
@@ -438,7 +436,43 @@ CREATE TABLE IF NOT EXISTS tasks (
   FOREIGN KEY(host_id) REFERENCES hosts(id)
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_started ON tasks(started_at DESC);
-CREATE INDEX IF NOT EXISTS idx_session_approval_grants_expiry ON session_approval_grants(expires_at);
+CREATE TABLE IF NOT EXISTS ssh_shell_sessions (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL UNIQUE,
+  session_id TEXT NOT NULL,
+  surface TEXT NOT NULL,
+  host_id TEXT NOT NULL,
+  host_name TEXT NOT NULL,
+  username TEXT NOT NULL,
+  elevated INTEGER NOT NULL DEFAULT 0,
+  cwd TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL,
+  cols INTEGER NOT NULL,
+  rows INTEGER NOT NULL,
+  last_sequence INTEGER NOT NULL DEFAULT 0,
+  recent_output TEXT NOT NULL DEFAULT '',
+  exit_code INTEGER,
+  termination_reason TEXT NOT NULL DEFAULT '',
+  error TEXT NOT NULL DEFAULT '',
+  started_at TEXT NOT NULL,
+  ended_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ssh_shell_sessions_conversation ON ssh_shell_sessions(session_id,started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ssh_shell_sessions_status ON ssh_shell_sessions(status,started_at DESC);
+CREATE TABLE IF NOT EXISTS ssh_shell_events (
+  shell_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL,
+  stream TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT '',
+  content_redacted TEXT NOT NULL DEFAULT '',
+  sensitive INTEGER NOT NULL DEFAULT 0,
+  input_bytes INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(shell_id,sequence),
+  FOREIGN KEY(shell_id) REFERENCES ssh_shell_sessions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_ssh_shell_events_sequence ON ssh_shell_events(shell_id,sequence);
 CREATE TABLE IF NOT EXISTS checkpoints (
   id TEXT PRIMARY KEY,
   data BLOB NOT NULL,
@@ -471,6 +505,7 @@ CREATE TABLE IF NOT EXISTS system_settings (
   id INTEGER PRIMARY KEY CHECK(id=1),
   agent_max_iterations INTEGER NOT NULL,
   system_prompt TEXT DEFAULT NULL,
+  approval_mode TEXT NOT NULL DEFAULT 'manual',
   approval_explanations_enabled INTEGER NOT NULL DEFAULT 1,
   subagent_model_provider_id TEXT NOT NULL DEFAULT '',
   subagent_timeout_seconds INTEGER NOT NULL DEFAULT 30,
@@ -524,6 +559,12 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return err
 	}
+	if err := s.dropLegacySSHShellExpiry(ctx); err != nil {
+		return err
+	}
+	if err := s.migrateSSHShellExitCode(ctx); err != nil {
+		return err
+	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO chat_sessions(session_id,workspace_id,created_at,updated_at)
 SELECT session_id,'',min(created_at),max(created_at) FROM chat_messages GROUP BY session_id`); err != nil {
 		return err
@@ -532,6 +573,9 @@ SELECT session_id,'',min(created_at),max(created_at) FROM chat_messages GROUP BY
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `DROP TABLE IF EXISTS file_operations`); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `DROP TABLE IF EXISTS session_approval_grants`); err != nil {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM agent_tool_settings WHERE name IN ('ssh_approval_status','ssh_task_start','ssh_task_status','ssh_task_tail','ssh_task_list','ssh_file_restore','ssh_file_create','workspace_file_create','ssh_file_search','workspace_file_search','workspace_list')`); err != nil {
@@ -545,6 +589,7 @@ SELECT session_id,'',min(created_at),max(created_at) FROM chat_messages GROUP BY
 		`ALTER TABLE runs ADD COLUMN request_cipher TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE approvals ADD COLUMN request_cipher TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE hosts ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'agent'`,
+		`ALTER TABLE hosts ADD COLUMN agent_enabled INTEGER NOT NULL DEFAULT 1`,
 		`ALTER TABLE hosts ADD COLUMN proxy_jump_host_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE hosts ADD COLUMN proxy_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE hosts ADD COLUMN password_cipher TEXT NOT NULL DEFAULT ''`,
@@ -553,15 +598,45 @@ SELECT session_id,'',min(created_at),max(created_at) FROM chat_messages GROUP BY
 		`ALTER TABLE chat_messages ADD COLUMN tool_name TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE chat_messages ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'`,
 		`ALTER TABLE runs ADD COLUMN ai_review_json TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE runs ADD COLUMN tool_name TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE runs ADD COLUMN tool_arguments_json TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE model_providers ADD COLUMN proxy_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE model_providers ADD COLUMN user_agent TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE web_search_settings ADD COLUMN proxy_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE system_settings ADD COLUMN chat_image_allowed_types_json TEXT NOT NULL DEFAULT '["image/png","image/jpeg","image/webp","image/gif"]'`,
 		`ALTER TABLE system_settings ADD COLUMN system_prompt TEXT DEFAULT NULL`,
+		`ALTER TABLE system_settings ADD COLUMN approval_mode TEXT NOT NULL DEFAULT 'manual'`,
+		`ALTER TABLE ssh_shell_sessions ADD COLUMN recent_output TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE ssh_shell_events ADD COLUMN source TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE ssh_shell_events ADD COLUMN sensitive INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE ssh_shell_events ADD COLUMN input_bytes INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE ssh_shell_sessions ADD COLUMN termination_reason TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE ssh_shell_sessions ADD COLUMN surface TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return err
 		}
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM chat_messages
+WHERE role='assistant' AND instr(content,?)>0`, persistedToolEvidenceLeakMarker); err != nil {
+		return fmt.Errorf("remove leaked internal Agent context: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE ssh_shell_sessions SET termination_reason=
+CASE
+  WHEN status='closed' THEN 'requested_close'
+  WHEN status='interrupted' THEN 'service_stopped'
+  WHEN status='completed' THEN 'remote_exit'
+  WHEN status='failed' AND exit_code IS NOT NULL THEN 'remote_exit'
+  WHEN status='failed' THEN 'connection_lost'
+  ELSE termination_reason
+END
+WHERE termination_reason=''`); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE ssh_shell_sessions SET surface=
+CASE WHEN session_id='' THEN 'quick' ELSE 'agent' END
+WHERE surface=''`); err != nil {
+		return err
 	}
 	// Migrate the former two-Agent toggles once. Existing installations keep an
 	// explicit disable from either legacy setting; fresh databases already have
@@ -610,6 +685,81 @@ CASE WHEN subagent_reviews_enabled<>0 AND beginner_explanations_enabled<>0 THEN 
 		return err
 	}
 	return s.migrateNativeOnlyHosts(ctx)
+}
+
+func (s *Store) dropLegacySSHShellExpiry(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(ssh_shell_sessions)`)
+	if err != nil {
+		return err
+	}
+	hasExpiry := false
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		hasExpiry = hasExpiry || name == "expires_at"
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if !hasExpiry {
+		return nil
+	}
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE ssh_shell_sessions DROP COLUMN expires_at`); err != nil {
+		return fmt.Errorf("drop legacy SSH shell expiry: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) migrateSSHShellExitCode(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(ssh_shell_sessions)`)
+	if err != nil {
+		return err
+	}
+	hasExitCode, exitCodeNotNull := false, false
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "exit_code" {
+			hasExitCode = true
+			exitCodeNotNull = notNull != 0
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if !hasExitCode {
+		_, err := s.db.ExecContext(ctx, `ALTER TABLE ssh_shell_sessions ADD COLUMN exit_code INTEGER`)
+		return err
+	}
+	if !exitCodeNotNull {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, statement := range []string{
+		`ALTER TABLE ssh_shell_sessions ADD COLUMN nullable_exit_code INTEGER`,
+		`UPDATE ssh_shell_sessions SET nullable_exit_code=CASE WHEN status IN ('completed','failed') AND exit_code>=0 THEN exit_code ELSE NULL END`,
+		`ALTER TABLE ssh_shell_sessions DROP COLUMN exit_code`,
+		`ALTER TABLE ssh_shell_sessions RENAME COLUMN nullable_exit_code TO exit_code`,
+	} {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("migrate SSH shell exit code: %w", err)
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) migrateSharedProxies(ctx context.Context) error {
@@ -873,14 +1023,14 @@ func (s *Store) UpsertHost(ctx context.Context, host domain.Host) (domain.Host, 
 	}
 	host.UpdatedAt = now
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO hosts(id,name,address,port,username,auth_type,private_key_cipher,known_hosts_file,proxy_jump_host_id,proxy_id,password_cipher,sudo_mode,sudo_password_cipher,created_at,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+INSERT INTO hosts(id,name,address,port,username,agent_enabled,auth_type,private_key_cipher,known_hosts_file,proxy_jump_host_id,proxy_id,password_cipher,sudo_mode,sudo_password_cipher,created_at,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET name=excluded.name,address=excluded.address,port=excluded.port,
-username=excluded.username,auth_type=excluded.auth_type,private_key_cipher=excluded.private_key_cipher,
+username=excluded.username,agent_enabled=excluded.agent_enabled,auth_type=excluded.auth_type,private_key_cipher=excluded.private_key_cipher,
 known_hosts_file=excluded.known_hosts_file,proxy_jump_host_id=excluded.proxy_jump_host_id,
 proxy_id=excluded.proxy_id,password_cipher=excluded.password_cipher,
 sudo_mode=excluded.sudo_mode,sudo_password_cipher=excluded.sudo_password_cipher,updated_at=excluded.updated_at`,
-		host.ID, host.Name, host.Address, host.Port, host.User, host.AuthType, host.PrivateKeyCipher,
+		host.ID, host.Name, host.Address, host.Port, host.User, boolInt(host.AgentEnabled), host.AuthType, host.PrivateKeyCipher,
 		host.KnownHostsFile, host.ProxyJumpHostID, host.ProxyID,
 		host.PasswordCipher, host.SudoMode, host.SudoCipher,
 		formatTime(host.CreatedAt), formatTime(host.UpdatedAt))
@@ -891,7 +1041,7 @@ sudo_mode=excluded.sudo_mode,sudo_password_cipher=excluded.sudo_password_cipher,
 }
 
 func (s *Store) GetHost(ctx context.Context, id string) (domain.Host, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id,name,address,port,username,auth_type,private_key_cipher,
+	row := s.db.QueryRowContext(ctx, `SELECT id,name,address,port,username,agent_enabled,auth_type,private_key_cipher,
 known_hosts_file,proxy_jump_host_id,proxy_id,password_cipher,
 sudo_mode,sudo_password_cipher,created_at,updated_at FROM hosts WHERE id=? OR name=?`, id, id)
 	return scanHost(row)
@@ -1170,14 +1320,15 @@ func (s *Store) GetSystemSettings(ctx context.Context) (domain.SystemSettings, e
 	var imageTypesJSON string
 	var systemPrompt sql.NullString
 	var updated string
-	err := s.db.QueryRowContext(ctx, `SELECT agent_max_iterations,system_prompt,approval_explanations_enabled,subagent_model_provider_id,subagent_timeout_seconds,
+	err := s.db.QueryRowContext(ctx, `SELECT agent_max_iterations,system_prompt,approval_mode,approval_explanations_enabled,subagent_model_provider_id,subagent_timeout_seconds,
 chat_image_allowed_types_json,workspace_shell_mode,updated_at FROM system_settings WHERE id=1`).Scan(
-		&settings.AgentMaxIterations, &systemPrompt, &explanationsEnabled, &settings.SubagentModelProviderID, &settings.SubagentTimeoutSeconds,
+		&settings.AgentMaxIterations, &systemPrompt, &settings.ApprovalMode, &explanationsEnabled, &settings.SubagentModelProviderID, &settings.SubagentTimeoutSeconds,
 		&imageTypesJSON, &settings.WorkspaceShellMode, &updated,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.SystemSettings{
 			AgentMaxIterations: domain.DefaultAgentMaxIterations, ApprovalExplanationsEnabled: true,
+			ApprovalMode: domain.ApprovalModeManual,
 			SystemPrompt: domain.DefaultSystemPrompt, DefaultSystemPrompt: domain.DefaultSystemPrompt,
 			SubagentTimeoutSeconds: domain.DefaultSubagentTimeoutSeconds, WorkspaceShellMode: domain.WorkspaceShellModeSandbox,
 			ChatImageAllowedTypes: append([]string(nil), domain.DefaultChatImageAllowedTypes...),
@@ -1194,6 +1345,11 @@ chat_image_allowed_types_json,workspace_shell_mode,updated_at FROM system_settin
 		settings.SystemPrompt = domain.DefaultSystemPrompt
 	}
 	settings.ApprovalExplanationsEnabled = explanationsEnabled != 0
+	switch settings.ApprovalMode {
+	case domain.ApprovalModeManual, domain.ApprovalModeAuto, domain.ApprovalModeFullAccess:
+	default:
+		settings.ApprovalMode = domain.ApprovalModeManual
+	}
 	if err := json.Unmarshal([]byte(imageTypesJSON), &settings.ChatImageAllowedTypes); err != nil || len(settings.ChatImageAllowedTypes) == 0 {
 		settings.ChatImageAllowedTypes = append([]string(nil), domain.DefaultChatImageAllowedTypes...)
 	}
@@ -1209,15 +1365,16 @@ func (s *Store) SaveSystemSettings(ctx context.Context, settings domain.SystemSe
 	if err != nil {
 		return domain.SystemSettings{}, err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO system_settings(id,agent_max_iterations,system_prompt,approval_explanations_enabled,subagent_model_provider_id,subagent_timeout_seconds,chat_image_allowed_types_json,workspace_shell_mode,updated_at) VALUES(1,?,?,?,?,?,?,?,?)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO system_settings(id,agent_max_iterations,system_prompt,approval_mode,approval_explanations_enabled,subagent_model_provider_id,subagent_timeout_seconds,chat_image_allowed_types_json,workspace_shell_mode,updated_at) VALUES(1,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET agent_max_iterations=excluded.agent_max_iterations,
 system_prompt=excluded.system_prompt,
+approval_mode=excluded.approval_mode,
 approval_explanations_enabled=excluded.approval_explanations_enabled,
 subagent_model_provider_id=excluded.subagent_model_provider_id,
 subagent_timeout_seconds=excluded.subagent_timeout_seconds,
 chat_image_allowed_types_json=excluded.chat_image_allowed_types_json,
 workspace_shell_mode=excluded.workspace_shell_mode,updated_at=excluded.updated_at`,
-		settings.AgentMaxIterations, settings.SystemPrompt, boolInt(settings.ApprovalExplanationsEnabled), settings.SubagentModelProviderID,
+		settings.AgentMaxIterations, settings.SystemPrompt, settings.ApprovalMode, boolInt(settings.ApprovalExplanationsEnabled), settings.SubagentModelProviderID,
 		settings.SubagentTimeoutSeconds, string(imageTypesJSON), settings.WorkspaceShellMode, formatTime(settings.UpdatedAt))
 	if err != nil {
 		return domain.SystemSettings{}, err
@@ -1284,7 +1441,7 @@ func scanModelProvider(row scanner) (domain.ModelProvider, error) {
 }
 
 func (s *Store) ListHosts(ctx context.Context) ([]domain.Host, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,address,port,username,auth_type,private_key_cipher,
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,address,port,username,agent_enabled,auth_type,private_key_cipher,
 known_hosts_file,proxy_jump_host_id,proxy_id,password_cipher,
 sudo_mode,sudo_password_cipher,created_at,updated_at FROM hosts WHERE auth_type<>'workspace' ORDER BY name`)
 	if err != nil {
@@ -1311,7 +1468,7 @@ func (s *Store) DeleteHost(ctx context.Context, id string) error {
 		query string
 		args  []any
 	}{
-		{`DELETE FROM session_approval_grants WHERE session_id IN (SELECT DISTINCT session_id FROM runs WHERE host_id=? AND session_id<>'')`, []any{id}},
+		{`DELETE FROM ssh_shell_sessions WHERE host_id=? OR run_id IN (SELECT id FROM runs WHERE host_id=?)`, []any{id, id}},
 		{`DELETE FROM approvals WHERE host_id=? OR run_id IN (SELECT id FROM runs WHERE host_id=?)`, []any{id, id}},
 		{`DELETE FROM tasks WHERE host_id=? OR run_id IN (SELECT id FROM runs WHERE host_id=?)`, []any{id, id}},
 		{`DELETE FROM runs WHERE host_id=?`, []any{id}},
@@ -1339,8 +1496,9 @@ type scanner interface{ Scan(...any) error }
 
 func scanHost(row scanner) (domain.Host, error) {
 	var host domain.Host
+	var agentEnabled int
 	var created, updated string
-	err := row.Scan(&host.ID, &host.Name, &host.Address, &host.Port, &host.User, &host.AuthType,
+	err := row.Scan(&host.ID, &host.Name, &host.Address, &host.Port, &host.User, &agentEnabled, &host.AuthType,
 		&host.PrivateKeyCipher, &host.KnownHostsFile, &host.ProxyJumpHostID, &host.ProxyID,
 		&host.PasswordCipher, &host.SudoMode, &host.SudoCipher, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1348,6 +1506,7 @@ func scanHost(row scanner) (domain.Host, error) {
 	}
 	host.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 	host.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	host.AgentEnabled = agentEnabled != 0
 	host.HasPassword = host.PasswordCipher != ""
 	host.HasSudoPassword = host.SudoCipher != ""
 	host.HasPrivateKey = host.PrivateKeyCipher != ""
@@ -1404,8 +1563,8 @@ func (s *Store) backfillRunSearchText(ctx context.Context) error {
 }
 
 func (s *Store) CreateRun(ctx context.Context, run domain.Run) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO runs(id,session_id,host_id,request_json,request_cipher,search_text,request_digest,risk,status,ai_review_json,
-started_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, run.ID, run.SessionID, run.HostID, run.RequestJSON, run.RequestCipher, run.SearchText, run.RequestDigest,
+	_, err := s.db.ExecContext(ctx, `INSERT INTO runs(id,session_id,host_id,tool_name,tool_arguments_json,request_json,request_cipher,search_text,request_digest,risk,status,ai_review_json,
+started_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, run.ID, run.SessionID, run.HostID, run.ToolName, run.ToolArgumentsJSON, run.RequestJSON, run.RequestCipher, run.SearchText, run.RequestDigest,
 		run.Risk, run.Status, run.AIReviewJSON, formatTime(run.StartedAt))
 	return err
 }
@@ -1422,7 +1581,7 @@ stdout_cipher=?,stderr_cipher=?,error=?,completed_at=? WHERE id=?`, run.Status, 
 }
 
 func (s *Store) GetRun(ctx context.Context, id string) (domain.Run, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id,session_id,host_id,request_json,request_cipher,request_digest,risk,status,
+	row := s.db.QueryRowContext(ctx, `SELECT id,session_id,host_id,tool_name,tool_arguments_json,request_json,request_cipher,request_digest,risk,status,
 exit_code,stdout_redacted,stderr_redacted,stdout_cipher,stderr_cipher,error,ai_review_json,started_at,completed_at
 FROM runs WHERE id=?`, id)
 	return scanRun(row)
@@ -1437,11 +1596,11 @@ func likePattern(query string) string {
 
 func (s *Store) SearchRuns(ctx context.Context, query, hostID, sessionID string, limit int) ([]domain.Run, error) {
 	pattern := likePattern(query)
-	statement := `SELECT id,session_id,host_id,request_json,request_cipher,request_digest,risk,status,
+	statement := `SELECT id,session_id,host_id,tool_name,tool_arguments_json,request_json,request_cipher,request_digest,risk,status,
 exit_code,stdout_redacted,stderr_redacted,stdout_cipher,stderr_cipher,error,ai_review_json,started_at,completed_at
 FROM runs WHERE (?='' OR session_id=?) AND (?='' OR host_id=?) AND (?='' OR search_text LIKE ? ESCAPE '\' OR request_json LIKE ? ESCAPE '\'
-		OR stdout_redacted LIKE ? ESCAPE '\' OR stderr_redacted LIKE ? ESCAPE '\') ORDER BY started_at DESC`
-	arguments := []any{sessionID, sessionID, hostID, hostID, query, pattern, pattern, pattern, pattern}
+		OR tool_arguments_json LIKE ? ESCAPE '\' OR stdout_redacted LIKE ? ESCAPE '\' OR stderr_redacted LIKE ? ESCAPE '\') ORDER BY started_at DESC`
+	arguments := []any{sessionID, sessionID, hostID, hostID, query, pattern, pattern, pattern, pattern, pattern}
 	if limit > 0 {
 		statement += " LIMIT ?"
 		arguments = append(arguments, limit)
@@ -1466,7 +1625,7 @@ func scanRun(row scanner) (domain.Run, error) {
 	var run domain.Run
 	var started string
 	var completed sql.NullString
-	err := row.Scan(&run.ID, &run.SessionID, &run.HostID, &run.RequestJSON, &run.RequestCipher, &run.RequestDigest, &run.Risk,
+	err := row.Scan(&run.ID, &run.SessionID, &run.HostID, &run.ToolName, &run.ToolArgumentsJSON, &run.RequestJSON, &run.RequestCipher, &run.RequestDigest, &run.Risk,
 		&run.Status, &run.ExitCode, &run.StdoutRedacted, &run.StderrRedacted, &run.StdoutCipher,
 		&run.StderrCipher, &run.Error, &run.AIReviewJSON, &started, &completed)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1618,50 +1777,6 @@ func (s *Store) UpdateRunAIReview(ctx context.Context, runID, reviewJSON string)
 		return ErrNotFound
 	}
 	return nil
-}
-
-func (s *Store) ApprovePendingWithSessionGrantAndStartRun(ctx context.Context, id, runID, reason, sessionID, fingerprint string, expiresAt time.Time, expectedRisk domain.RiskLevel) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, `UPDATE approvals SET status='approved',reason=?,decided_at=?
-WHERE id=? AND run_id=? AND status='pending' AND risk=?`, reason, formatTime(time.Now().UTC()), id, runID, expectedRisk)
-	if err != nil {
-		return err
-	}
-	count, _ := result.RowsAffected()
-	if count == 0 {
-		return fmt.Errorf("approval changed or is no longer pending; refresh and review the latest risk")
-	}
-	result, err = tx.ExecContext(ctx, `UPDATE runs SET status='running' WHERE id=? AND status='approval_required'`, runID)
-	if err != nil {
-		return err
-	}
-	count, _ = result.RowsAffected()
-	if count == 0 {
-		return fmt.Errorf("approval run changed or is no longer awaiting approval")
-	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO session_approval_grants(session_id,request_fingerprint,created_at,expires_at)
-VALUES(?,?,?,?) ON CONFLICT(session_id,request_fingerprint) DO UPDATE SET expires_at=excluded.expires_at`,
-		sessionID, fingerprint, formatTime(time.Now().UTC()), formatTime(expiresAt))
-	if err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-func (s *Store) HasSessionApprovalGrant(ctx context.Context, sessionID, fingerprint string) (bool, error) {
-	now := formatTime(time.Now().UTC())
-	_, _ = s.db.ExecContext(ctx, `DELETE FROM session_approval_grants WHERE expires_at<=?`, now)
-	var exists int
-	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM session_approval_grants
-WHERE session_id=? AND request_fingerprint=? AND expires_at>? LIMIT 1`, sessionID, fingerprint, now).Scan(&exists)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	return err == nil, err
 }
 
 func scanApproval(row scanner) (domain.Approval, error) {
@@ -2196,7 +2311,7 @@ func (s *Store) DeleteChatSession(ctx context.Context, sessionID string) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM checkpoints WHERE id=?`, sessionID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM session_approval_grants WHERE session_id=?`, sessionID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM ssh_shell_sessions WHERE session_id=?`, sessionID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM agent_plans WHERE session_id=?`, sessionID); err != nil {
