@@ -13,9 +13,9 @@ LLM、Prompt、Skill、远程输出和 MCP Client 都不属于可信计算基。
 
 Eino Tool、MCP Tool、HTTP 和 CLI 都是这个 Service 的适配器。预期失败被规范化为带 `code/retryable/next_action` 的 Tool 结果；只有上下文取消或内部持久化损坏会成为 ToolNode fatal error。
 
-这里的 MCP Tool 分为两个方向。`ops-agent mcp` 把受控 SSH Service 暴露为 stdio MCP Server，因此完整复用 Policy、审批模式和审计。管理员配置的外部 MCP Server 则属于独立信任域：它的工具在远端/子进程自身权限下执行，不自动继承 SSH Policy。Web 会明确提示该边界，只有启用状态为 ready 且未被 func 管理单独关闭的外部工具才进入主 Agent，审批 Agent 仍保持无 Tool。
+这里的 MCP Tool 分为两个方向。`ops-agent mcp` 通过 stdio、设置中的 MCP Server Mode 通过同一 HTTP 服务上的 `/mcp`，把受控 SSH Service 暴露给 MCP Client，因此完整复用 Policy、审批模式和审计。HTTP 传输采用无状态 Streamable HTTP；设置开关按请求即时生效，独立高熵 Bearer Token 仅在生成时返回，SQLite 只保存 SHA-256 摘要。管理员配置的外部 MCP Server 则属于独立信任域：它的工具在远端/子进程自身权限下执行，不自动继承 SSH Policy。Web 会明确提示该边界，只有启用状态为 ready 且未被 func 管理单独关闭的外部工具才进入主 Agent，审批 Agent 仍保持无 Tool。
 
-Web/API 位于单管理员认证边界之后。数据库尚无管理员凭据时，Web 首次初始化页允许用户创建密码，并以仅首次插入的方式保存 Argon2id 哈希；初始化完成后该接口永久拒绝再次写入。后续请求使用服务端 Session、HttpOnly/SameSite Cookie 和 CSRF Token。MCP stdio 与 CLI 仍属于本机进程边界，不复用浏览器 Cookie。
+Web/API 位于单管理员认证边界之后。数据库尚无管理员凭据时，Web 首次初始化页允许用户创建密码，并以仅首次插入的方式保存 Argon2id 哈希；初始化完成后该接口永久拒绝再次写入。后续请求使用服务端 Session、HttpOnly/SameSite Cookie 和 CSRF Token。MCP HTTP 使用独立 Bearer Token，不接受浏览器 Cookie；MCP stdio 与 CLI 仍属于本机进程边界。
 
 `ApprovalAgent` 是一个 `MaxIterations=1`、无 Tool 的独立 Eino `ChatModelAgent`，结构化返回 `allow/reject`、原因、操作机制和风险。Auto 模式同步使用其决定；不可用、超时或格式无效时回退 Manual。Manual 可异步调用它生成审批建议，但建议不代替用户决定。确定性风险始终保留在 Run 中。
 
@@ -27,14 +27,14 @@ Web/API 位于单管理员认证边界之后。数据库尚无管理员凭据时
 - `internal/service`：审批状态机、摘要绑定、执行并发、任务、审计事务，以及外部 MCP Client Session 与动态工具生命周期。
 - `internal/store`：SQLite hosts、runs、approvals、events、chat、加密模型/MCP 配置与 Eino checkpoints。
 - `internal/agent`：Eino ChatModelAgent、强类型 Tools、消息历史、事件流与并发安全的 Runner 热切换。
-- `internal/mcpserver`：官方 MCP Go SDK stdio 适配器。
+- `internal/mcpserver`：官方 MCP Go SDK stdio 与 Streamable HTTP 适配器。
 - `internal/httpapi`：本地 HTTP API、SSE 和嵌入 Go 二进制的 React 静态资源。
 - `internal/observability`：`slog` 多路 Handler、字段脱敏、JSONL 文件轮转与 Web 内存日志缓冲。
 - `internal/skills`：可上传、永久删除和启停的无权限运维方法论注册表。
 
 ## Dynamic extensions
 
-Skill Registry 位于控制面数据目录，每个 Skill 目录必须包含 `SKILL.md`，启用状态写入独立 `skill.json`。管理员列表包含全部 Skill；`ops_skill` 不传 `name` 时列出启用项，传入 `name` 时加载完整内容。状态修改后主 Eino Agent 和 OpsPilot 自身的 MCP Server 看到一致的动态集合，删除是不可恢复的物理删除。
+Skill Registry 位于控制面数据目录，每个 Skill 目录必须包含 `SKILL.md`，启用状态写入独立 `skill.json`。管理员列表包含全部 Skill；主 Eino Agent 的 `ops_skill` 不传 `name` 时列出启用项，传入 `name` 时加载完整内容。OpsPilot 自身的 MCP Server 不暴露 Skill，删除是不可恢复的物理删除。
 
 主 Agent 的 func 启用状态保存在 `agent_tool_settings`。未写入状态的 func 默认启用；管理员可在 Loaded functions 中逐项关闭或重新启用。每次修改都会写入审计并重建 Eino runner，关闭项仍保留在管理目录中，但不会传给 ChatModel，也不会注册到 ToolNode。
 

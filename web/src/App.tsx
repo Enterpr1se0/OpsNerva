@@ -5,9 +5,10 @@ import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
 import type { Terminal as XTermInstance } from '@xterm/xterm'
+import { invoke } from '@tauri-apps/api/core'
 import '@xterm/xterm/css/xterm.css'
 import {
-  Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronLeft, ChevronRight, CircleDot, Clock3, Cpu, Edit3, Eye, EyeOff, FileText, FolderOpen, FunctionSquare, History, ImagePlus, KeyRound, LockKeyhole, LogOut,
+  Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronLeft, ChevronRight, CircleDot, Clock3, Copy, Cpu, Edit3, Eye, EyeOff, FileText, FolderOpen, FunctionSquare, History, ImagePlus, KeyRound, LockKeyhole, LogOut, Minimize2,
   Cable, Download, ListChecks, LoaderCircle, Plus, Power, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, Square, TerminalSquare, Trash2, UploadCloud, UserRound, X, Zap,
 } from 'lucide-react'
 import { api, chatAttachmentURL, sftpDownloadURL, sshShellEventsURL, streamChat, workspaceFileEventsURL } from './api'
@@ -127,6 +128,7 @@ function errorText(error: unknown) {
 
 const newSessionMarker = '__new__'
 const defaultChatImageTypes=['image/png','image/jpeg','image/webp','image/gif']
+const desktopRuntime='__TAURI_INTERNALS__' in window
 function rememberSession(id: string) { try { localStorage.setItem('opspilot.activeSession', id) } catch { /* storage may be disabled */ } }
 function recalledSession() { try { return localStorage.getItem('opspilot.activeSession') || '' } catch { return '' } }
 function rememberWorkspace(id:string){try{if(id)localStorage.setItem('opspilot.activeWorkspace',id)}catch{/* storage may be disabled */}}
@@ -179,7 +181,7 @@ function App() {
 		})()
 	},[])
 	useEffect(()=>{
-		if(!('__TAURI_INTERNALS__' in window))return
+		if(!desktopRuntime)return
 		const handleContextMenu=(event:MouseEvent)=>{
 			const target=event.target instanceof Element?event.target:null
 			if(target?.closest('input, textarea, [contenteditable="true"]'))return
@@ -188,6 +190,10 @@ function App() {
 		document.addEventListener('contextmenu',handleContextMenu)
 		return()=>document.removeEventListener('contextmenu',handleContextMenu)
 	},[])
+	useEffect(()=>{
+		if(!desktopRuntime||!settings)return
+		void invoke('set_tray_mode',{enabled:settings.mcp_http_enabled}).catch(()=>{})
+	},[settings?.mcp_http_enabled])
 	useEffect(() => { if(auth==='authenticated')void refresh() }, [auth,refresh])
 	useEffect(() => {
 		if(auth!=='authenticated'||agentStreaming)return
@@ -245,7 +251,7 @@ function App() {
       </div></header>
       {error && <div className="global-error"><ShieldAlert size={17}/>{error}<button onClick={() => setError('')}><X size={15}/></button></div>}
       <section className="workspace">
-			{page === 'chat' && <ChatPage hosts={hosts} tunnels={sshTunnels} approvals={approvals} runs={runs} capabilities={capabilities} settings={settings} imageTypes={settings?.chat_image_allowed_types||defaultChatImageTypes} agentAvailable={!!health?.agent_available} modelName={health?.model?.model} refresh={refresh} refreshApprovals={refreshApprovals} onSettingsChanged={setSettings} onError={setError} onStreamingChange={setAgentStreaming}/>}
+			{page === 'chat' && <ChatPage hosts={hosts} approvals={approvals} runs={runs} capabilities={capabilities} settings={settings} imageTypes={settings?.chat_image_allowed_types||defaultChatImageTypes} agentAvailable={!!health?.agent_available} modelName={health?.model?.model} refresh={refresh} refreshApprovals={refreshApprovals} onSettingsChanged={setSettings} onError={setError} onStreamingChange={setAgentStreaming}/>}
 			{page === 'ssh' && <SSHWorkspacePage hosts={hosts} shells={sshShells.filter(shell=>shell.surface==='workspace')} onCreated={rememberSSHShell} refresh={refresh} onError={message=>setError(message)}/>}
 		{page === 'config' && <ConfigurationPage hosts={hosts} providers={providers} proxies={proxies} settings={settings} capabilities={capabilities} health={health} refresh={refresh}/>}
 		{page === 'extensions' && <ExtensionsPage skills={skills} mcpServers={mcpServers} toolCatalog={toolCatalog} refresh={refresh}/>}
@@ -1085,6 +1091,7 @@ function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus
 			</SettingsDisclosure>
 		</div>
 	<WorkspaceSettingsPanel workspaces={capabilities.workspaces} refresh={refresh} onNotice={setNotice}/>
+	<MCPServerModePanel settings={settings} refresh={refresh}/>
 	<WebSearchSettingsPanel proxies={proxies} refresh={refresh}/>
 	<AdminPasswordPanel/>
   </div>
@@ -1103,6 +1110,50 @@ function WorkspaceSettingsPanel({workspaces,refresh,onNotice}:{workspaces:Worksp
 }
 
 const defaultWebSearchInput:WebSearchSettingsInput={enabled:false,base_url:'https://api.tavily.com',api_key:'',proxy_id:'',timeout_seconds:20,max_results:10}
+
+function MCPServerModePanel({settings,refresh}:{settings:SystemSettings|null;refresh:()=>Promise<void>}){
+	const {t}=useTranslation()
+	const [busy,setBusy]=useState<'start'|'stop'|'rotate'|''>(''),[token,setToken]=useState(''),[notice,setNotice]=useState('')
+	const enabled=!!settings?.mcp_http_enabled
+	const endpoint=`${window.location.origin}/mcp`
+	useEffect(()=>{if(!enabled)setToken('')},[enabled])
+	const update=async(nextEnabled:boolean,rotate=false)=>{
+		if(!settings)return
+		setBusy(rotate?'rotate':nextEnabled?'start':'stop')
+		setNotice('')
+		try{
+			const result=await api.saveSystemSettings({
+				agent_max_iterations:settings.agent_max_iterations,
+				mcp_http_enabled:nextEnabled,
+				rotate_mcp_http_token:rotate,
+			})
+			setToken(result.mcp_http_token||'')
+			setNotice(t(nextEnabled?'mcpServerMode.started':'mcpServerMode.stopped'))
+			if(desktopRuntime)await invoke('set_tray_mode',{enabled:result.mcp_http_enabled}).catch(()=>{})
+			await refresh()
+		}catch(err){setNotice(errorText(err))}finally{setBusy('')}
+	}
+	const copy=async(value:string,message:string)=>{
+		try{await navigator.clipboard.writeText(value);setNotice(message)}
+		catch(err){setNotice(errorText(err))}
+	}
+	const hideToTray=async()=>{
+		try{await invoke('hide_to_tray')}
+		catch(err){setNotice(errorText(err))}
+	}
+	return <SettingsDisclosure className="mcp-server-mode" icon={<Braces size={18}/>} title={t('mcpServerMode.title')} meta={enabled?t('common.enabled'):t('common.disabled')}>
+		<div className="mcp-server-mode-fields">
+			<label><span>{t('mcpServerMode.endpoint')}</span><div><input readOnly value={endpoint}/><button type="button" title={t('common.copy')} onClick={()=>void copy(endpoint,t('mcpServerMode.endpointCopied'))}><Copy size={13}/></button></div></label>
+			{enabled&&<label><span>{t('mcpServerMode.token')}</span><div><input readOnly type={token?'text':'password'} value={token||'••••••••••••••••'} /><button type="button" disabled={!token} title={t('common.copy')} onClick={()=>void copy(token,t('mcpServerMode.tokenCopied'))}><Copy size={13}/></button></div>{!token&&settings?.mcp_http_token_configured&&<small>{t('mcpServerMode.tokenStored')}</small>}</label>}
+		</div>
+		{notice&&<p>{notice}</p>}
+		<footer>
+			{enabled&&desktopRuntime&&<button type="button" disabled={!!busy} onClick={()=>void hideToTray()}><Minimize2 size={13}/>{t('mcpServerMode.hideToTray')}</button>}
+			{enabled&&<button type="button" disabled={!!busy} onClick={()=>void update(true,true)}>{busy==='rotate'?<LoaderCircle className="spin" size={13}/>:<RefreshCw size={13}/>} {t('mcpServerMode.rotate')}</button>}
+			<button type="button" className={enabled?'danger':'primary'} disabled={!!busy||!settings} onClick={()=>void update(!enabled)}>{busy?<LoaderCircle className="spin" size={13}/>:<Power size={13}/>} {t(enabled?'mcpServerMode.stop':'mcpServerMode.start')}</button>
+		</footer>
+	</SettingsDisclosure>
+}
 
 function WebSearchSettingsPanel({proxies,refresh}:{proxies:Proxy[];refresh:()=>Promise<void>}){
 	const {t}=useTranslation()
@@ -1130,7 +1181,7 @@ function Nav({ active, icon, label, count, warn, onClick }: {active:boolean;icon
   return <button className={`nav-item ${active ? 'active' : ''}`} onClick={onClick}>{icon}<span>{label}</span>{count !== undefined && <em className={warn ? 'warn' : ''}>{count}</em>}</button>
 }
 
-function ChatPage({ hosts, tunnels, approvals, runs, capabilities, settings, imageTypes, agentAvailable, modelName, refresh, refreshApprovals, onSettingsChanged, onError, onStreamingChange }: {hosts:Host[];tunnels:SSHTunnel[];approvals:Approval[];runs:Run[];capabilities:ToolCapabilities;settings:SystemSettings|null;imageTypes:string[];agentAvailable:boolean;modelName?:string;refresh:()=>Promise<void>;refreshApprovals:(decidedID?:string)=>Promise<void>;onSettingsChanged:(settings:SystemSettings)=>void;onError:(message:string)=>void;onStreamingChange:(streaming:boolean)=>void}) {
+function ChatPage({ hosts, approvals, runs, capabilities, settings, imageTypes, agentAvailable, modelName, refresh, refreshApprovals, onSettingsChanged, onError, onStreamingChange }: {hosts:Host[];approvals:Approval[];runs:Run[];capabilities:ToolCapabilities;settings:SystemSettings|null;imageTypes:string[];agentAvailable:boolean;modelName?:string;refresh:()=>Promise<void>;refreshApprovals:(decidedID?:string)=>Promise<void>;onSettingsChanged:(settings:SystemSettings)=>void;onError:(message:string)=>void;onStreamingChange:(streaming:boolean)=>void}) {
 	const {t,i18n:instance}=useTranslation()
   const [entries, setEntries] = useState<ChatEntry[]>([])
 	  const [message, setMessage] = useState('')
@@ -1162,7 +1213,6 @@ function ChatPage({ hosts, tunnels, approvals, runs, capabilities, settings, ima
   const sessionLoadRef=useRef('')
   const agentHosts = useMemo(() => hosts.filter(host => host.agent_enabled), [hosts])
   const hostNames = useMemo(() => agentHosts.map(host => host.name).join(', '), [agentHosts])
-  const tunnelSummary=tunnels.length?tunnels.map(tunnel=>`${tunnel.host_name||tunnel.host_id}:${tunnel.remote_host}:${tunnel.remote_port} → localhost:${tunnel.local_port}`).join(' · '):t('tunnels.none')
   const currentApprovals=useMemo(()=>sessionId?approvals.filter(item=>item.session_id===sessionId):[],[approvals,sessionId])
 	const pendingExplanationID=currentApprovals.find(item=>item.ai_review?.status==='pending')?.id||''
 	const sessionBusy=running||detachedRunning
@@ -1408,7 +1458,7 @@ function ChatPage({ hosts, tunnels, approvals, runs, capabilities, settings, ima
       </div>
 		  <form className="composer" onSubmit={submit}>
 			  {sessionBusy&&<div className="llm-work-status" role="status" aria-live="polite"><LoaderCircle className="spin" size={13}/><b>{stopping?t('chat.stopping'):modelRetryLabel||t('chat.running')}</b><button type="button" className="agent-stop-button" onClick={()=>void stopAgent()} disabled={stopping||!(activeStreamRef.current?.sessionId||sessionId)} title={t('chat.stopTitle')}><Square size={11} fill="currentColor"/>{t('chat.stop')}</button></div>}
-			  <div className="context-line"><ApprovalModeStatus settings={settings} onChanged={onSettingsChanged} onError={onError}/><span className={`composer-tunnels ${tunnels.length?'active':''}`} title={tunnelSummary}><Cable size={13}/><code>{tunnelSummary}</code></span><span className="composer-model" title={modelName || t('chat.noModel')}><Cpu size={13}/>{modelName || t('chat.noModel')}</span><span className="composer-hosts" title={agentHosts.length?t('chat.hostsCount',{count:agentHosts.length,names:hostNames}):t('chat.noHosts')}><Server size={13}/>{agentHosts.length?t('chat.hostsCount',{count:agentHosts.length,names:hostNames}):t('chat.noHosts')}</span></div>
+			  <div className="context-line"><ApprovalModeStatus settings={settings} onChanged={onSettingsChanged} onError={onError}/><span className="composer-hosts" title={agentHosts.length?t('chat.hostsCount',{count:agentHosts.length,names:hostNames}):t('chat.noHosts')}><Server size={13}/>{agentHosts.length?t('chat.hostsCount',{count:agentHosts.length,names:hostNames}):t('chat.noHosts')}</span><span className="composer-model" title={modelName || t('chat.noModel')}><Cpu size={13}/>{modelName || t('chat.noModel')}</span></div>
 			  {pendingImages.length>0&&<div className="composer-images">{pendingImages.map(image=><div key={image.id}><img src={image.url} alt={image.file.name}/><span title={image.file.name}>{image.file.name}</span><button type="button" onClick={()=>removePendingImage(image.id)} title={t('chat.removeImage')}><X size={11}/></button></div>)}</div>}
 			  {imageNotice&&<div className="composer-image-notice">{imageNotice}<button type="button" onClick={()=>setImageNotice('')}><X size={11}/></button></div>}
 			  <div className="input-row"><label className="image-attach-button" title={t('chat.addImages')}><ImagePlus size={18}/><input key={imageInputKey} type="file" accept={imageTypes.join(',')} multiple disabled={!agentAvailable||sessionBusy||workspaceSwitching||!!loadingSession} onChange={event=>addImages(Array.from(event.target.files||[]))}/></label><textarea value={message} onChange={(event) => setMessage(event.target.value)} onPaste={event=>{const files=Array.from(event.clipboardData.files).filter(file=>file.type.startsWith('image/'));if(files.length)addImages(files)}} placeholder={!agentAvailable?t('chat.configureModel'):loadingSession?t('chat.loadingConversation'):sessionBusy?t('chat.busyPlaceholder'):t('chat.prompt')} disabled={!agentAvailable||sessionBusy||workspaceSwitching||!!loadingSession} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }}/><button aria-label={t('common.next')} disabled={!agentAvailable || sessionBusy || workspaceSwitching || !!loadingSession || (!message.trim()&&!pendingImages.length)}><Send size={18}/></button></div>

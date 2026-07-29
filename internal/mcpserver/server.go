@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"net/http"
 
 	"eino-ops-agent/internal/agent"
 	"eino-ops-agent/internal/domain"
@@ -72,11 +73,6 @@ func New(svc *service.Service, version string) *Server {
 			output, err := agent.ReadHistoryTool(ctx, svc, input)
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ops_skill", Description: "List enabled operational skills, or load one complete skill by name."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.SkillInput) (*mcp.CallToolResult, agent.SkillOutput, error) {
-			output, err := agent.ReadSkillTool(ctx, svc, input, "mcp-client")
-			return nil, output, err
-		})
 	return &Server{server: server}
 }
 
@@ -95,6 +91,18 @@ func fileSearchInputSchema[T any]() *jsonschema.Schema {
 
 func (s *Server) Run(ctx context.Context) error {
 	return s.server.Run(ctx, &mcp.StdioTransport{})
+}
+
+func (s *Server) HTTPHandler() http.Handler {
+	return mcp.NewStreamableHTTPHandler(
+		func(*http.Request) *mcp.Server { return s.server },
+		&mcp.StreamableHTTPOptions{
+			Stateless:                    true,
+			JSONResponse:                 true,
+			MaxRequestBodyBytes:          mcp.DefaultMaxRequestBodyBytes,
+			PropagateRequestCancellation: true,
+		},
+	)
 }
 
 func execRequest(input agent.ExecInput) domain.ExecRequest {

@@ -769,6 +769,62 @@ func TestSystemSettingsValidatePersistAndReturnDefault(t *testing.T) {
 	}
 }
 
+func TestMCPHTTPSettingsGenerateRotateAndAuthorizeToken(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	ctx := context.Background()
+	enabled := true
+	started, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{
+		AgentMaxIterations: domain.DefaultAgentMaxIterations,
+		MCPHTTPEnabled:     &enabled,
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !started.MCPHTTPEnabled || started.MCPHTTPToken == "" || !started.MCPHTTPTokenConfigured || started.MCPHTTPTokenHash == "" {
+		t.Fatalf("MCP HTTP start did not generate a token: %#v", started)
+	}
+	firstToken := started.MCPHTTPToken
+	reloaded, err := svc.SystemSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.MCPHTTPToken != "" || !reloaded.MCPHTTPTokenConfigured {
+		t.Fatalf("stored MCP HTTP token was exposed or lost: %#v", reloaded)
+	}
+	accessEnabled, authorized, err := svc.MCPHTTPAccess(ctx, firstToken)
+	if err != nil || !accessEnabled || !authorized {
+		t.Fatalf("generated MCP HTTP token was not authorized: enabled=%v authorized=%v err=%v", accessEnabled, authorized, err)
+	}
+	if _, authorized, err := svc.MCPHTTPAccess(ctx, "wrong-token"); err != nil || authorized {
+		t.Fatalf("invalid MCP HTTP token was accepted: authorized=%v err=%v", authorized, err)
+	}
+	rotated, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{
+		AgentMaxIterations: domain.DefaultAgentMaxIterations,
+		MCPHTTPEnabled:     &enabled,
+		RotateMCPHTTPToken: true,
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rotated.MCPHTTPToken == "" || rotated.MCPHTTPToken == firstToken {
+		t.Fatal("MCP HTTP token was not rotated")
+	}
+	if _, authorized, err := svc.MCPHTTPAccess(ctx, firstToken); err != nil || authorized {
+		t.Fatalf("rotated MCP HTTP token remained valid: authorized=%v err=%v", authorized, err)
+	}
+	disabled := false
+	if _, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{
+		AgentMaxIterations: domain.DefaultAgentMaxIterations,
+		MCPHTTPEnabled:     &disabled,
+	}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	accessEnabled, authorized, err = svc.MCPHTTPAccess(ctx, rotated.MCPHTTPToken)
+	if err != nil || accessEnabled || authorized {
+		t.Fatalf("disabled MCP HTTP endpoint remained accessible: enabled=%v authorized=%v err=%v", accessEnabled, authorized, err)
+	}
+}
+
 func TestManualApprovalModeKeepsHumanApproval(t *testing.T) {
 	svc, transport, host := newTestService(t)
 	svc.SetApprovalReviewer(&fakeCommandExplainer{review: domain.CommandReview{

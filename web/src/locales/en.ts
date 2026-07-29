@@ -7,7 +7,7 @@ const en = {
     notConfigured: 'Not configured', unavailable: 'Unavailable', dismiss: 'Dismiss', new: 'New', image: 'image',
     status: 'Status', risk: 'Risk', time: 'Time', host: 'Host', model: 'Model', agent: 'Agent', functions: 'Function tools', arguments: 'Arguments',
     files: 'Files', size: 'Size', updated: 'Updated', workspace: 'Workspace', operation: 'Operation', next: 'Next', operator: 'Operator', error: 'Error',
-    showPassword: 'Show password', hidePassword: 'Hide password', proxy: 'Proxy', direct: 'Direct',
+    showPassword: 'Show password', hidePassword: 'Hide password', copy: 'Copy', proxy: 'Proxy', direct: 'Direct',
   },
   errors: {
     apiUnavailable: 'Cannot reach the OpsPilot API. Check that the server is running on port 8080, then retry.',
@@ -24,7 +24,7 @@ const en = {
   tunnels: {
     short: 'Tunnels', title: 'SSH port forwarding', localOnly: 'Listens only on local 127.0.0.1', empty: 'No SSH forwarding is active.',
     connections: 'Connections', traffic: 'Traffic', started: 'Started', viaProxy: 'Using proxy / jump chain', direct: 'Direct SSH',
-    stop: 'Stop', automaticPort: 'auto', forwarding: 'SSH port forwarding', remoteEndpoint: 'Remote endpoint', none: 'No port forwarding',
+    stop: 'Stop', automaticPort: 'auto', forwarding: 'SSH port forwarding', remoteEndpoint: 'Remote endpoint',
     create: 'New forward', start: 'Start forwarding', starting: 'Connecting...', remoteHost: 'Host-side target', remotePort: 'Host-side target port', localPort: 'Local port',
   },
   sshShell: {
@@ -141,6 +141,11 @@ const en = {
   webSearch: {
     title: 'Tavily Web', baseURL: 'API URL', apiKey: 'API Key',
     timeout: 'Timeout (seconds)', maxResults: 'Search result limit', savedSecret: 'Saved; leave blank to keep', saved: 'Tavily Web settings saved.', testPassed: 'Connection passed with {{count}} result.', clearKey: 'Clear Key',
+  },
+  mcpServerMode: {
+    title: 'MCP Server Mode', endpoint: 'Endpoint', token: 'Access token', tokenStored: 'Saved; regenerate to display',
+    start: 'Start', stop: 'Stop', rotate: 'Regenerate token', hideToTray: 'Hide to tray',
+    started: 'MCP Server started.', stopped: 'MCP Server stopped.', endpointCopied: 'Endpoint copied.', tokenCopied: 'Token copied.',
   },
   chat: {
     session: 'OpsPilot session', newSession: 'NEW SESSION', conversations: 'Conversations', openConversations: 'Open conversations', closeConversations: 'Close conversations',

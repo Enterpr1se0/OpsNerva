@@ -4,7 +4,11 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
-use tauri::{Manager, RunEvent};
+use tauri::{
+    Manager, RunEvent, WindowEvent,
+    menu::MenuBuilder,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+};
 use tauri_plugin_shell::{ShellExt, process::CommandEvent};
 
 const READY_PREFIX: &str = "OPSPILOT_DESKTOP_READY=";
@@ -12,9 +16,17 @@ const READY_PREFIX: &str = "OPSPILOT_DESKTOP_READY=";
 #[derive(Default)]
 struct SidecarState(Mutex<Option<tauri_plugin_shell::process::CommandChild>>);
 
+#[derive(Default)]
+struct TrayState {
+    enabled: AtomicBool,
+    exiting: AtomicBool,
+}
+
 #[derive(Debug, Deserialize, PartialEq)]
 struct DesktopReady {
     url: String,
+    #[serde(default)]
+    mcp_http_enabled: bool,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -28,7 +40,21 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_shell::init())
         .manage(SidecarState::default())
-        .setup(start_sidecar)
+        .manage(TrayState::default())
+        .invoke_handler(tauri::generate_handler![set_tray_mode, hide_to_tray])
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                let tray = window.state::<TrayState>();
+                if tray.enabled.load(Ordering::Acquire) && !tray.exiting.load(Ordering::Acquire) {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
+        .setup(|app| {
+            setup_tray(app)?;
+            start_sidecar(app)
+        })
         .build(tauri::generate_context!())
         .expect("failed to build OpsPilot desktop application");
 
@@ -39,6 +65,66 @@ pub fn run() {
             }
         }
     });
+}
+
+#[tauri::command]
+fn set_tray_mode(enabled: bool, state: tauri::State<'_, TrayState>) {
+    state.enabled.store(enabled, Ordering::Release);
+}
+
+#[tauri::command]
+fn hide_to_tray(app: tauri::AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window is unavailable".to_string())?;
+    window.hide().map_err(|error| error.to_string())
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let menu = MenuBuilder::new(app)
+        .text("open", "打开 OpsPilot")
+        .separator()
+        .text("quit", "退出")
+        .build()?;
+    let mut tray = TrayIconBuilder::with_id("opspilot")
+        .menu(&menu)
+        .tooltip("OpsPilot")
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "open" => show_main_window(app),
+            "quit" => {
+                app.state::<TrayState>()
+                    .exiting
+                    .store(true, Ordering::Release);
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if matches!(
+                event,
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                }
+            ) {
+                show_main_window(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
 }
 
 fn start_sidecar(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
@@ -120,6 +206,9 @@ fn open_application(app: &tauri::AppHandle, ready: DesktopReady) {
             return;
         }
     };
+    app.state::<TrayState>()
+        .enabled
+        .store(ready.mcp_http_enabled, Ordering::Release);
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.navigate(destination);
     }
@@ -164,15 +253,14 @@ mod tests {
     #[test]
     fn parses_desktop_ready_event() {
         assert_eq!(parse_ready("ordinary log line").unwrap(), None);
-        let ready = parse_ready(
-            r#"OPSPILOT_DESKTOP_READY={"url":"http://127.0.0.1:49152"}"#,
-        )
-        .unwrap()
-        .unwrap();
+        let ready = parse_ready(r#"OPSPILOT_DESKTOP_READY={"url":"http://127.0.0.1:49152"}"#)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             ready,
             DesktopReady {
                 url: "http://127.0.0.1:49152".into(),
+                mcp_http_enabled: false,
             }
         );
     }
@@ -181,6 +269,7 @@ mod tests {
     fn uses_backend_url_without_credentials() {
         let ready = DesktopReady {
             url: "http://127.0.0.1:49152".into(),
+            mcp_http_enabled: true,
         };
         let url = application_url(&ready).unwrap();
         assert_eq!(url.as_str(), "http://127.0.0.1:49152/");
@@ -190,6 +279,7 @@ mod tests {
     fn rejects_non_loopback_backend_url() {
         let ready = DesktopReady {
             url: "https://example.com/".into(),
+            mcp_http_enabled: false,
         };
         assert!(application_url(&ready).is_err());
     }

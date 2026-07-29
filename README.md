@@ -34,7 +34,7 @@ flowchart LR
 
 ### 桌面 App（Windows / Linux）
 
-从 [GitHub Releases](https://github.com/Enterpr1se0/eino-ops-agent/releases) 下载安装包。桌面版内置 Go sidecar，后端仅监听本机随机端口，关闭窗口时一并退出。从源码打包见[使用手册](docs/guide.md#桌面-app)。
+从 [GitHub Releases](https://github.com/Enterpr1se0/eino-ops-agent/releases) 下载安装包。桌面版内置 Go sidecar，后端仅监听本机随机端口；启用 MCP Server Mode 后可隐藏到系统托盘继续运行。从源码打包见[使用手册](docs/guide.md#桌面-app)。
 
 ### Docker
 

@@ -3,7 +3,10 @@ package service
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -519,6 +522,26 @@ func (s *Service) SaveSystemSettings(ctx context.Context, input domain.SystemSet
 			return domain.SystemSettings{}, fmt.Errorf("workspace_shell_mode must be sandbox, host, or disabled")
 		}
 	}
+	rotatedMCPHTTPToken := false
+	var mcpHTTPToken string
+	if input.MCPHTTPEnabled != nil {
+		wasEnabled := current.MCPHTTPEnabled
+		current.MCPHTTPEnabled = *input.MCPHTTPEnabled
+		if current.MCPHTTPEnabled && (!wasEnabled || current.MCPHTTPTokenHash == "") {
+			input.RotateMCPHTTPToken = true
+		}
+	}
+	if input.RotateMCPHTTPToken {
+		if !current.MCPHTTPEnabled {
+			return domain.SystemSettings{}, fmt.Errorf("MCP HTTP server must be enabled before rotating its token")
+		}
+		mcpHTTPToken, err = generateMCPHTTPToken()
+		if err != nil {
+			return domain.SystemSettings{}, err
+		}
+		current.MCPHTTPTokenHash = hashMCPHTTPToken(mcpHTTPToken)
+		rotatedMCPHTTPToken = true
+	}
 	saved, err := s.store.SaveSystemSettings(ctx, current)
 	if err != nil {
 		return domain.SystemSettings{}, err
@@ -530,8 +553,44 @@ func (s *Service) SaveSystemSettings(ctx context.Context, input domain.SystemSet
 		"subagent_model_provider_id": saved.SubagentModelProviderID, "subagent_timeout_seconds": saved.SubagentTimeoutSeconds,
 		"chat_image_allowed_types": saved.ChatImageAllowedTypes,
 		"workspace_shell_mode":     saved.WorkspaceShellMode,
+		"mcp_http_enabled":         saved.MCPHTTPEnabled,
+		"mcp_http_token_rotated":   rotatedMCPHTTPToken,
 	})
+	saved.MCPHTTPToken = mcpHTTPToken
 	return s.decorateWorkspaceShellSettings(saved), nil
+}
+
+func generateMCPHTTPToken() (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate MCP HTTP token: %w", err)
+	}
+	return "opspilot_mcp_" + base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+func hashMCPHTTPToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+func (s *Service) MCPHTTPAccess(ctx context.Context, token string) (enabled bool, authorized bool, err error) {
+	settings, err := s.store.GetSystemSettings(ctx)
+	if err != nil {
+		return false, false, err
+	}
+	if !settings.MCPHTTPEnabled {
+		return false, false, nil
+	}
+	token = strings.TrimSpace(token)
+	if token == "" || settings.MCPHTTPTokenHash == "" {
+		return true, false, nil
+	}
+	expected, decodeErr := hex.DecodeString(settings.MCPHTTPTokenHash)
+	if decodeErr != nil || len(expected) != sha256.Size {
+		return true, false, nil
+	}
+	actual := sha256.Sum256([]byte(token))
+	return true, subtle.ConstantTimeCompare(expected, actual[:]) == 1, nil
 }
 
 func (s *Service) SetApprovalReviewer(reviewer ApprovalReviewer) {

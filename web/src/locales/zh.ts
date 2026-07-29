@@ -7,7 +7,7 @@ const zh = {
     notConfigured: '未配置', unavailable: '不可用', dismiss: '关闭', new: '新建', image: '图片',
     status: '状态', risk: '风险', time: '时间', host: '主机', model: '模型', agent: 'Agent', functions: '函数工具', arguments: '参数',
     files: '文件', size: '大小', updated: '更新时间', workspace: 'Workspace', operation: '操作', next: '下一步', operator: '操作员', error: '错误',
-    showPassword: '显示密码', hidePassword: '隐藏密码', proxy: '代理', direct: '直连',
+    showPassword: '显示密码', hidePassword: '隐藏密码', copy: '复制', proxy: '代理', direct: '直连',
   },
   errors: {
     apiUnavailable: '无法连接 OpsPilot API。请确认服务正在 8080 端口运行后重试。',
@@ -24,7 +24,7 @@ const zh = {
   tunnels: {
     short: '隧道', title: 'SSH 端口转发', localOnly: '仅监听本机 127.0.0.1', empty: '当前没有 SSH 转发。',
     connections: '连接', traffic: '流量', started: '启动时间', viaProxy: '使用代理 / 跳板链路', direct: 'SSH 直连',
-    stop: '停止', automaticPort: '自动端口', forwarding: 'SSH 端口转发', remoteEndpoint: '远程端点', none: '无端口转发',
+    stop: '停止', automaticPort: '自动端口', forwarding: 'SSH 端口转发', remoteEndpoint: '远程端点',
     create: '新建转发', start: '开始转发', starting: '正在连接...', remoteHost: '主机侧目标地址', remotePort: '主机侧目标端口', localPort: '本机端口',
   },
   sshShell: {
@@ -142,6 +142,11 @@ const zh = {
   webSearch: {
     title: 'Tavily Web', baseURL: 'API 地址', apiKey: 'API Key',
     timeout: '超时时间（秒）', maxResults: '搜索结果上限', savedSecret: '已保存，留空不变', saved: 'Tavily Web 设置已保存。', testPassed: '连接正常，返回 {{count}} 条结果。', clearKey: '清除 Key',
+  },
+  mcpServerMode: {
+    title: 'MCP Server Mode', endpoint: 'Endpoint', token: '访问令牌', tokenStored: '已保存，重新生成后显示',
+    start: '启动', stop: '停止', rotate: '重新生成令牌', hideToTray: '隐藏到托盘',
+    started: 'MCP Server 已启动。', stopped: 'MCP Server 已停止。', endpointCopied: 'Endpoint 已复制。', tokenCopied: '令牌已复制。',
   },
   chat: {
     session: 'OpsPilot 会话', newSession: '新会话', conversations: '会话记录', openConversations: '打开会话记录', closeConversations: '关闭会话记录',

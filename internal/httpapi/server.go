@@ -26,6 +26,7 @@ import (
 	"eino-ops-agent/internal/config"
 	"eino-ops-agent/internal/domain"
 	"eino-ops-agent/internal/ids"
+	"eino-ops-agent/internal/mcpserver"
 	"eino-ops-agent/internal/observability"
 	"eino-ops-agent/internal/security"
 	"eino-ops-agent/internal/service"
@@ -46,6 +47,7 @@ type Server struct {
 	mux           *http.ServeMux
 	loginMu       sync.Mutex
 	loginAttempts map[string]loginAttempt
+	mcpHTTP       http.Handler
 	options       Options
 }
 
@@ -68,7 +70,11 @@ func New(svc *service.Service, agentRuntime *agent.Runtime, auth *security.WebAu
 	if strings.TrimSpace(options.Version) == "" {
 		options.Version = "unknown"
 	}
-	s := &Server{service: svc, agent: agentRuntime, auth: auth, secureCookies: options.SecureCookies, mux: http.NewServeMux(), loginAttempts: make(map[string]loginAttempt), options: options}
+	s := &Server{
+		service: svc, agent: agentRuntime, auth: auth, secureCookies: options.SecureCookies,
+		mux: http.NewServeMux(), loginAttempts: make(map[string]loginAttempt),
+		mcpHTTP: mcpserver.New(svc, options.Version).HTTPHandler(), options: options,
+	}
 	s.routes()
 	return s
 }
@@ -78,6 +84,7 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) routes() {
+	s.mux.HandleFunc("/mcp", s.serveMCP)
 	s.mux.HandleFunc("GET /api/v1/health", s.health)
 	s.mux.HandleFunc("GET /api/v1/auth/status", s.authStatus)
 	s.mux.HandleFunc("POST /api/v1/auth/initialize", s.initializePassword)
@@ -180,6 +187,28 @@ func (s *Server) routes() {
 		writeErrorStatus(w, fmt.Errorf("API endpoint not found"), http.StatusNotFound)
 	})
 	s.mux.Handle("/", spaHandler(webui.Assets()))
+}
+
+func (s *Server) serveMCP(w http.ResponseWriter, r *http.Request) {
+	token := ""
+	if scheme, value, ok := strings.Cut(strings.TrimSpace(r.Header.Get("Authorization")), " "); ok && strings.EqualFold(scheme, "Bearer") {
+		token = strings.TrimSpace(value)
+	}
+	enabled, authorized, err := s.service.MCPHTTPAccess(r.Context(), token)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if !enabled {
+		writeErrorStatus(w, fmt.Errorf("MCP HTTP server is disabled"), http.StatusNotFound)
+		return
+	}
+	if !authorized {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		writeErrorStatus(w, fmt.Errorf("invalid MCP HTTP token"), http.StatusUnauthorized)
+		return
+	}
+	s.mcpHTTP.ServeHTTP(w, r)
 }
 
 func (s *Server) capabilities(w http.ResponseWriter, _ *http.Request) {

@@ -511,6 +511,8 @@ CREATE TABLE IF NOT EXISTS system_settings (
   subagent_timeout_seconds INTEGER NOT NULL DEFAULT 30,
   chat_image_allowed_types_json TEXT NOT NULL DEFAULT '["image/png","image/jpeg","image/webp","image/gif"]',
   workspace_shell_mode TEXT NOT NULL DEFAULT 'sandbox',
+  mcp_http_enabled INTEGER NOT NULL DEFAULT 0,
+  mcp_http_token_hash TEXT NOT NULL DEFAULT '',
   updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS mcp_servers (
@@ -606,6 +608,8 @@ SELECT session_id,'',min(created_at),max(created_at) FROM chat_messages GROUP BY
 		`ALTER TABLE system_settings ADD COLUMN chat_image_allowed_types_json TEXT NOT NULL DEFAULT '["image/png","image/jpeg","image/webp","image/gif"]'`,
 		`ALTER TABLE system_settings ADD COLUMN system_prompt TEXT DEFAULT NULL`,
 		`ALTER TABLE system_settings ADD COLUMN approval_mode TEXT NOT NULL DEFAULT 'manual'`,
+		`ALTER TABLE system_settings ADD COLUMN mcp_http_enabled INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE system_settings ADD COLUMN mcp_http_token_hash TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE ssh_shell_sessions ADD COLUMN recent_output TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE ssh_shell_events ADD COLUMN source TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE ssh_shell_events ADD COLUMN sensitive INTEGER NOT NULL DEFAULT 0`,
@@ -1317,13 +1321,14 @@ func scanMCPServer(row scanner) (domain.MCPServer, error) {
 func (s *Store) GetSystemSettings(ctx context.Context) (domain.SystemSettings, error) {
 	var settings domain.SystemSettings
 	var explanationsEnabled int
+	var mcpHTTPEnabled int
 	var imageTypesJSON string
 	var systemPrompt sql.NullString
 	var updated string
 	err := s.db.QueryRowContext(ctx, `SELECT agent_max_iterations,system_prompt,approval_mode,approval_explanations_enabled,subagent_model_provider_id,subagent_timeout_seconds,
-chat_image_allowed_types_json,workspace_shell_mode,updated_at FROM system_settings WHERE id=1`).Scan(
+chat_image_allowed_types_json,workspace_shell_mode,mcp_http_enabled,mcp_http_token_hash,updated_at FROM system_settings WHERE id=1`).Scan(
 		&settings.AgentMaxIterations, &systemPrompt, &settings.ApprovalMode, &explanationsEnabled, &settings.SubagentModelProviderID, &settings.SubagentTimeoutSeconds,
-		&imageTypesJSON, &settings.WorkspaceShellMode, &updated,
+		&imageTypesJSON, &settings.WorkspaceShellMode, &mcpHTTPEnabled, &settings.MCPHTTPTokenHash, &updated,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.SystemSettings{
@@ -1345,6 +1350,8 @@ chat_image_allowed_types_json,workspace_shell_mode,updated_at FROM system_settin
 		settings.SystemPrompt = domain.DefaultSystemPrompt
 	}
 	settings.ApprovalExplanationsEnabled = explanationsEnabled != 0
+	settings.MCPHTTPEnabled = mcpHTTPEnabled != 0
+	settings.MCPHTTPTokenConfigured = settings.MCPHTTPTokenHash != ""
 	switch settings.ApprovalMode {
 	case domain.ApprovalModeManual, domain.ApprovalModeAuto, domain.ApprovalModeFullAccess:
 	default:
@@ -1365,7 +1372,7 @@ func (s *Store) SaveSystemSettings(ctx context.Context, settings domain.SystemSe
 	if err != nil {
 		return domain.SystemSettings{}, err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO system_settings(id,agent_max_iterations,system_prompt,approval_mode,approval_explanations_enabled,subagent_model_provider_id,subagent_timeout_seconds,chat_image_allowed_types_json,workspace_shell_mode,updated_at) VALUES(1,?,?,?,?,?,?,?,?,?)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO system_settings(id,agent_max_iterations,system_prompt,approval_mode,approval_explanations_enabled,subagent_model_provider_id,subagent_timeout_seconds,chat_image_allowed_types_json,workspace_shell_mode,mcp_http_enabled,mcp_http_token_hash,updated_at) VALUES(1,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET agent_max_iterations=excluded.agent_max_iterations,
 system_prompt=excluded.system_prompt,
 approval_mode=excluded.approval_mode,
@@ -1373,12 +1380,16 @@ approval_explanations_enabled=excluded.approval_explanations_enabled,
 subagent_model_provider_id=excluded.subagent_model_provider_id,
 subagent_timeout_seconds=excluded.subagent_timeout_seconds,
 chat_image_allowed_types_json=excluded.chat_image_allowed_types_json,
-workspace_shell_mode=excluded.workspace_shell_mode,updated_at=excluded.updated_at`,
+workspace_shell_mode=excluded.workspace_shell_mode,
+mcp_http_enabled=excluded.mcp_http_enabled,
+mcp_http_token_hash=excluded.mcp_http_token_hash,
+updated_at=excluded.updated_at`,
 		settings.AgentMaxIterations, settings.SystemPrompt, settings.ApprovalMode, boolInt(settings.ApprovalExplanationsEnabled), settings.SubagentModelProviderID,
-		settings.SubagentTimeoutSeconds, string(imageTypesJSON), settings.WorkspaceShellMode, formatTime(settings.UpdatedAt))
+		settings.SubagentTimeoutSeconds, string(imageTypesJSON), settings.WorkspaceShellMode, boolInt(settings.MCPHTTPEnabled), settings.MCPHTTPTokenHash, formatTime(settings.UpdatedAt))
 	if err != nil {
 		return domain.SystemSettings{}, err
 	}
+	settings.MCPHTTPTokenConfigured = settings.MCPHTTPTokenHash != ""
 	return settings, nil
 }
 

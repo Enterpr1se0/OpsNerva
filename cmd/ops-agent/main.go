@@ -45,10 +45,11 @@ type application struct {
 }
 
 type serveOptions struct {
-	QuickStart    bool
-	Desktop       bool
-	ConfigPath    string
-	ConfigCreated bool
+	QuickStart     bool
+	Desktop        bool
+	ConfigPath     string
+	ConfigCreated  bool
+	MCPHTTPEnabled bool
 }
 
 func main() {
@@ -234,6 +235,13 @@ func serve(ctx context.Context, app *application, options serveOptions) error {
 	slog.Info("Ops Agent listening", "component", "server", "address", address, "agent_available", app.agent.Available())
 	if options.QuickStart {
 		url := localWebURL(listener.Addr())
+		if options.Desktop {
+			settings, settingsErr := app.service.SystemSettings(ctx)
+			if settingsErr != nil {
+				return fmt.Errorf("read desktop MCP mode: %w", settingsErr)
+			}
+			options.MCPHTTPEnabled = settings.MCPHTTPEnabled
+		}
 		printQuickStart(options, url)
 		if !options.Desktop {
 			if err := openQuickStartBrowser(url); err != nil {
@@ -282,9 +290,11 @@ func desktopReadyLine(options serveOptions, url string) string {
 		URL               string `json:"url"`
 		ConfigPath        string `json:"config_path"`
 		ConfigurationMade bool   `json:"configuration_created"`
+		MCPHTTPEnabled    bool   `json:"mcp_http_enabled"`
 	}{
 		URL: url, ConfigPath: options.ConfigPath,
 		ConfigurationMade: options.ConfigCreated,
+		MCPHTTPEnabled:    options.MCPHTTPEnabled,
 	})
 	return "OPSPILOT_DESKTOP_READY=" + string(payload)
 }

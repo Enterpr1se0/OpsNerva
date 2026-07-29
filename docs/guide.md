@@ -34,7 +34,7 @@ flowchart LR
 
 ### 桌面 App
 
-桌面版适用于 Windows 和 Linux。Tauri 会启动内置 Go sidecar，等待本地服务就绪后再显示主界面；再次启动只会聚焦已有窗口。后端仅监听随机的 `127.0.0.1` 端口，关闭 App 时一并结束。
+桌面版适用于 Windows 和 Linux。Tauri 会启动内置 Go sidecar，等待本地服务就绪后再显示主界面；再次启动只会聚焦已有窗口。后端仅监听随机的 `127.0.0.1` 端口。启用 MCP Server Mode 后，关闭窗口或点击“隐藏到托盘”会保持 sidecar 与 MCP Endpoint 运行；通过托盘图标或菜单恢复窗口，选择“退出”才会结束服务。未启用 MCP Server Mode 时关闭窗口会直接退出。
 
 首次启动会在系统应用数据目录创建 `io.opspilot.desktop/config.yaml`、`.data/` 和 `workspace/`。桌面壳打开统一的 Web 初始化页面，由用户创建管理员密码；之后可在配置页面修改密码。
 
@@ -288,6 +288,23 @@ CLI 审批示例：
 
 MCP 与 Eino 复用同一个 Service、Policy 和 Audit Store；不存在权限更宽的旁路。
 
+也可以在 **配置 / 系统设置 / MCP Server Mode** 启动 Streamable HTTP 服务。启动后复制界面显示的 Endpoint 和访问令牌；令牌只在启动或重新生成时显示，服务端仅保存 SHA-256 摘要。其他 Agent 的 MCP 配置示例：
+
+```json
+{
+  "mcpServers": {
+    "opspilot": {
+      "url": "http://HOST:8080/mcp",
+      "headers": {
+        "Authorization": "Bearer opspilot_mcp_REPLACE_ME"
+      }
+    }
+  }
+}
+```
+
+停止 MCP Server Mode 后 `/mcp` 立即不可用；重新启动或重新生成令牌会使旧令牌失效。远程使用时应通过 HTTPS 反向代理暴露该 Endpoint。
+
 Web 的 **Extensions / MCP Servers** 还支持反向角色：让 OpsPilot 作为 MCP Client 连接外部工具服务。支持两种标准传输：
 
 - `stdio`：使用 command + 独立 args 数组直接启动子进程，不经过宿主 Shell；可配置绝对工作目录和加密环境变量。
@@ -307,7 +324,7 @@ Web 的 **Extensions / MCP Servers** 还支持反向角色：让 OpsPilot 作为
 - `ssh_file_edit` / `ssh_file_transfer`
 - `workspace_file_list` / `workspace_file_read`（可选 `pattern` 搜索模式）/ `workspace_file_edit` / `workspace_file_upload` / `workspace_shell`。这些工具只在 Eino Agent 中提供，Workspace 由 Web 会话绑定，模型不能列出或自行选择其他 Workspace；无会话语义的 MCP Server 不暴露这组工具。
 - `ssh_history`（Agent 仅搜索当前会话的命令与脱敏输出，或按 `run_id` 精确读取当前会话记录；密文以 `[REDACTED]` 存储）
-- `ops_skill`（列出或按 `name` 加载）
+- `ops_skill` 仅提供给 OpsPilot 主 Agent，不通过自身 MCP Server 暴露。
 
 ## 数据安全
 

@@ -217,6 +217,10 @@ type SystemSettings struct {
 	WorkspaceShellName          string    `json:"workspace_shell_name,omitempty"`
 	WorkspaceSandboxAvailable   bool      `json:"workspace_sandbox_available"`
 	WorkspaceHostShellAvailable bool      `json:"workspace_host_shell_available"`
+	MCPHTTPEnabled              bool      `json:"mcp_http_enabled"`
+	MCPHTTPTokenHash            string    `json:"-"`
+	MCPHTTPTokenConfigured      bool      `json:"mcp_http_token_configured"`
+	MCPHTTPToken                string    `json:"mcp_http_token,omitempty"`
 	UpdatedAt                   time.Time `json:"updated_at"`
 }
 
@@ -229,6 +233,8 @@ type SystemSettingsInput struct {
 	SubagentTimeoutSeconds      *int     `json:"subagent_timeout_seconds,omitempty"`
 	ChatImageAllowedTypes       []string `json:"chat_image_allowed_types,omitempty"`
 	WorkspaceShellMode          *string  `json:"workspace_shell_mode,omitempty"`
+	MCPHTTPEnabled              *bool    `json:"mcp_http_enabled,omitempty"`
+	RotateMCPHTTPToken          bool     `json:"rotate_mcp_http_token,omitempty"`
 }
 
 const (

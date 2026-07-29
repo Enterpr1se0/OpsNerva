@@ -76,6 +76,8 @@ INSERT INTO session_approval_grants VALUES('session','fingerprint','2026-01-01T0
 	settings.SubagentTimeoutSeconds = 45
 	settings.ApprovalMode = domain.ApprovalModeAuto
 	settings.WorkspaceShellMode = domain.WorkspaceShellModeDisabled
+	settings.MCPHTTPEnabled = true
+	settings.MCPHTTPTokenHash = "fixture-token-hash"
 	if _, err := st.SaveSystemSettings(ctx, settings); err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +94,7 @@ INSERT INTO session_approval_grants VALUES('session','fingerprint','2026-01-01T0
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !settings.ApprovalExplanationsEnabled || settings.AgentMaxIterations != 20 || settings.ApprovalMode != domain.ApprovalModeAuto || settings.SubagentModelProviderID != "model_fixture" || settings.SubagentTimeoutSeconds != 45 || settings.WorkspaceShellMode != domain.WorkspaceShellModeDisabled {
+	if !settings.ApprovalExplanationsEnabled || settings.AgentMaxIterations != 20 || settings.ApprovalMode != domain.ApprovalModeAuto || settings.SubagentModelProviderID != "model_fixture" || settings.SubagentTimeoutSeconds != 45 || settings.WorkspaceShellMode != domain.WorkspaceShellModeDisabled || !settings.MCPHTTPEnabled || !settings.MCPHTTPTokenConfigured || settings.MCPHTTPTokenHash != "fixture-token-hash" {
 		// Existing installations retain their explicitly stored iteration value.
 		t.Fatalf("migrated explanation setting did not persist: %#v", settings)
 	}

@@ -417,6 +417,9 @@ export interface SystemSettings {
   workspace_shell_name?: string
   workspace_sandbox_available: boolean
   workspace_host_shell_available: boolean
+  mcp_http_enabled: boolean
+  mcp_http_token_configured: boolean
+  mcp_http_token?: string
   updated_at: string
 }
 
@@ -432,6 +435,8 @@ export interface SystemSettingsInput {
   subagent_timeout_seconds?: number
 	chat_image_allowed_types?: string[]
   workspace_shell_mode?: WorkspaceShellMode
+  mcp_http_enabled?: boolean
+  rotate_mcp_http_token?: boolean
 }
 
 export interface WebSearchSettings {
