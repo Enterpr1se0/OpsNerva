@@ -18,7 +18,7 @@ execFileSync('go', [
   env: { ...process.env, CGO_ENABLED: '0', GOOS: target.goos, GOARCH: target.goarch },
   stdio: 'inherit',
 })
-console.log(`Prepared OpsPilot sidecar: ${output}`)
+console.log(`Prepared OpsNerva sidecar: ${output}`)
 
 function hostTriple() {
   const details = execFileSync('rustc', ['-vV'], { encoding: 'utf8' })

@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -19,7 +20,6 @@ import (
 
 	"eino-ops-agent/internal/config"
 	"eino-ops-agent/internal/domain"
-	"eino-ops-agent/internal/policy"
 	"eino-ops-agent/internal/security"
 	"eino-ops-agent/internal/sshx"
 	"eino-ops-agent/internal/store"
@@ -184,6 +184,7 @@ func (f *fakeTransport) Exec(ctx context.Context, connection sshx.ConnectionSpec
 
 func TestExecutionPreservesCompleteOutput(t *testing.T) {
 	svc, transport, host := newTestService(t)
+	saveApprovalMode(t, svc, domain.ApprovalModeFullAccess)
 	wantStdout := strings.Repeat("stdout-data-", 30_000) + "stdout-end"
 	wantStderr := strings.Repeat("stderr-data-", 12_000) + "stderr-end"
 	transport.mu.Lock()
@@ -193,7 +194,7 @@ func TestExecutionPreservesCompleteOutput(t *testing.T) {
 
 	result, err := svc.Submit(context.Background(), domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "uname", Args: []string{"-a"}, Reason: "verify complete output capture",
-	}, "test")
+	}, "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,11 +255,14 @@ func TestExecutionWithNonzeroExitAndNoOutputRemainsFailed(t *testing.T) {
 	}
 }
 
-func (f *fakeTransport) TransferFile(_ context.Context, source, destination sshx.ConnectionSpec, req domain.ExecRequest) (sshx.RawResult, error) {
+func (f *fakeTransport) TransferFile(_ context.Context, source, destination sshx.ConnectionSpec, req domain.ExecRequest, progress func(int64, int64)) (sshx.RawResult, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, req)
 	f.hosts = append(f.hosts, source.Target, destination.Target)
 	f.mu.Unlock()
+	if progress != nil {
+		progress(12, 12)
+	}
 	return sshx.RawResult{ExitCode: 0, Stdout: []byte(`{"bytes":12,"sha256":"transfer-digest"}` + "\n"), Duration: time.Millisecond}, nil
 }
 
@@ -408,11 +412,11 @@ func TestElevatedExecutionUsesManagedSecretAfterApproval(t *testing.T) {
 	callArguments := `{"host_id":"sudo-host","program":"id","elevated":true,"reason":"verify managed root access"}`
 	result, err := svc.Submit(WithExecutionOwner(context.Background(), "call-elevated", "ssh_exec", callArguments), domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "id", Elevated: true, Reason: "verify managed root access",
-	}, "test")
+	}, "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Risk != domain.RiskCritical || result.Status != "approval_required" {
+	if result.Status != "approval_required" {
 		t.Fatalf("elevated request bypassed approval: %#v", result)
 	}
 	stored, err := svc.store.GetRun(context.Background(), result.RunID)
@@ -465,7 +469,7 @@ func TestApprovedRequestRejectsChangedSSHConnection(t *testing.T) {
 	result, err := svc.Submit(context.Background(), domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "example.service"},
 		Reason: "restart the example service",
-	}, "test")
+	}, "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -531,6 +535,78 @@ func TestProxyJumpChainResolutionAndCycleDetection(t *testing.T) {
 	}
 }
 
+func TestWaitTaskBlocksUntilNewOutput(t *testing.T) {
+	svc, _, host := newTestService(t)
+	state := &taskState{
+		task:   domain.Task{ID: "task-wait", HostID: host.ID, Status: "running", StartedAt: time.Now().UTC()},
+		result: domain.ExecResult{Status: "running", Stdout: "old"},
+	}
+	svc.taskMu.Lock()
+	svc.tasks[state.task.ID] = state
+	svc.taskMu.Unlock()
+	t.Cleanup(func() {
+		svc.taskMu.Lock()
+		delete(svc.tasks, state.task.ID)
+		svc.taskMu.Unlock()
+	})
+	go func() {
+		time.Sleep(120 * time.Millisecond)
+		svc.taskMu.Lock()
+		state.result.Stdout = "old-new"
+		svc.taskMu.Unlock()
+	}()
+	started := time.Now()
+	task, result, _, waitDeadlineReached, err := svc.WaitTask(context.Background(), state.task.ID, len("old"), 0, time.Second, "output")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.ID != state.task.ID || result.Stdout != "old-new" || waitDeadlineReached || time.Since(started) < 100*time.Millisecond {
+		t.Fatalf("task wait returned early or lost output: task=%#v result=%#v elapsed=%s", task, result, time.Since(started))
+	}
+}
+
+func TestWaitTaskDeadlineDoesNotChangeRunningTask(t *testing.T) {
+	svc, _, host := newTestService(t)
+	state := &taskState{
+		task:   domain.Task{ID: "task-wait-deadline", HostID: host.ID, Status: "running", StartedAt: time.Now().UTC()},
+		result: domain.ExecResult{Status: "running", Stdout: "unchanged"},
+	}
+	svc.taskMu.Lock()
+	svc.tasks[state.task.ID] = state
+	svc.taskMu.Unlock()
+	t.Cleanup(func() {
+		svc.taskMu.Lock()
+		delete(svc.tasks, state.task.ID)
+		svc.taskMu.Unlock()
+	})
+	task, result, _, waitDeadlineReached, err := svc.WaitTask(context.Background(), state.task.ID, len("unchanged"), 0, 30*time.Millisecond, "terminal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !waitDeadlineReached || task.Status != "running" || result.Status != "running" || result.Stdout != "unchanged" {
+		t.Fatalf("task wait deadline mutated the task: task=%#v result=%#v deadline=%t", task, result, waitDeadlineReached)
+	}
+}
+
+func TestNormalizeRequestUsesSeparateSyncAndBackgroundTimeoutDefaults(t *testing.T) {
+	limits := config.Limits{SyncTimeoutSeconds: 60, MaxTimeoutSeconds: 600}
+	synchronous := domain.ExecRequest{Mode: domain.ExecProgram}
+	normalizeRequest(&synchronous, limits)
+	if synchronous.TimeoutSeconds != 60 {
+		t.Fatalf("synchronous default timeout = %d, want 60", synchronous.TimeoutSeconds)
+	}
+	background := domain.ExecRequest{Mode: domain.ExecProgram, Background: true}
+	normalizeRequest(&background, limits)
+	if background.TimeoutSeconds != 600 {
+		t.Fatalf("background default timeout = %d, want 600", background.TimeoutSeconds)
+	}
+	explicit := domain.ExecRequest{Mode: domain.ExecProgram, Background: true, TimeoutSeconds: 90}
+	normalizeRequest(&explicit, limits)
+	if explicit.TimeoutSeconds != 90 {
+		t.Fatalf("explicit background timeout = %d, want 90", explicit.TimeoutSeconds)
+	}
+}
+
 func (f *fakeTransport) Probe(context.Context, sshx.ConnectionSpec) (sshx.HostInfo, error) {
 	return sshx.HostInfo{Hostname: "fixture"}, nil
 }
@@ -555,14 +631,13 @@ func newTestService(t *testing.T) (*Service, *fakeTransport, domain.Host) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	engine, _ := policy.Load("")
 	encryptor, err := security.NewEncryptor("", t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	transport := &fakeTransport{}
 	limits := config.Default().Limits
-	svc := New(st, engine, transport, encryptor, security.NewRedactor(), limits)
+	svc := New(st, transport, encryptor, security.NewRedactor(), limits)
 	t.Cleanup(func() { svc.explainWG.Wait() })
 	t.Cleanup(func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -697,7 +772,7 @@ func TestSystemSettingsValidatePersistAndReturnDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settings.AgentMaxIterations != domain.DefaultAgentMaxIterations || settings.ApprovalMode != domain.ApprovalModeManual || !settings.ApprovalExplanationsEnabled || settings.SubagentModelProviderID != "" || settings.SubagentTimeoutSeconds != domain.DefaultSubagentTimeoutSeconds || settings.WorkspaceShellMode != domain.WorkspaceShellModeSandbox {
+	if settings.AgentMaxIterations != domain.DefaultAgentMaxIterations || settings.ApprovalMode != domain.ApprovalModeManual || !settings.ApprovalExplanationsEnabled || settings.SubagentModelProviderID != "" || settings.SubagentTimeoutSeconds != domain.DefaultSubagentTimeoutSeconds || settings.WorkspaceShellMode != domain.DefaultWorkspaceShellMode(runtime.GOOS) {
 		t.Fatalf("unexpected default max iterations: %#v", settings)
 	}
 	if strings.Join(settings.ChatImageAllowedTypes, ",") != strings.Join(domain.DefaultChatImageAllowedTypes, ",") {
@@ -854,7 +929,7 @@ func TestAutoApprovalModeExecutesAllowedOperation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "completed" || len(transport.calls) != 1 || !containsString(result.PolicyHits, "approval_agent_allowed") {
+	if result.Status != "completed" || len(transport.calls) != 1 {
 		t.Fatalf("approval Agent did not allow execution: result=%#v calls=%d", result, len(transport.calls))
 	}
 	run, err := svc.store.GetRun(context.Background(), result.RunID)
@@ -896,7 +971,7 @@ func TestAutoApprovalModeFallsBackToHuman(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "approval_required" || result.ApprovalID == "" || len(transport.calls) != 0 || !containsString(result.PolicyHits, "approval_agent_human_fallback") {
+	if result.Status != "approval_required" || result.ApprovalID == "" || len(transport.calls) != 0 {
 		t.Fatalf("unavailable approval Agent did not fall back to a human: result=%#v calls=%d", result, len(transport.calls))
 	}
 	approval := waitForApproval(t, svc, result.ApprovalID, func(value domain.Approval) bool {
@@ -934,8 +1009,8 @@ func TestFullAccessModeBypassesPolicyOnlyForAgent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "completed" || len(transport.calls) != 1 || !containsString(result.PolicyHits, "approval_mode_full_access") {
-		t.Fatalf("full access did not bypass the Agent policy gate: result=%#v calls=%d", result, len(transport.calls))
+	if result.Status != "completed" || len(transport.calls) != 1 {
+		t.Fatalf("full access did not execute the Agent request directly: result=%#v calls=%d", result, len(transport.calls))
 	}
 	mcpResult, err := svc.Submit(context.Background(), request, "mcp-client")
 	if err != nil {
@@ -948,8 +1023,8 @@ func TestFullAccessModeBypassesPolicyOnlyForAgent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if operatorResult.Status != "denied" || len(transport.calls) != 2 {
-		t.Fatalf("full access leaked into a non-Agent request: result=%#v calls=%d", operatorResult, len(transport.calls))
+	if operatorResult.Status != "completed" || len(transport.calls) != 3 {
+		t.Fatalf("authenticated operator request did not execute directly: result=%#v calls=%d", operatorResult, len(transport.calls))
 	}
 }
 
@@ -958,7 +1033,6 @@ func TestCommandReviewDeadlineUsesReadableConfiguredTimeout(t *testing.T) {
 	review := svc.normalizeCommandReview(
 		domain.CommandReview{Model: "small-model"},
 		fmt.Errorf("[NodeRunError] failed to create chat completion: %w", context.DeadlineExceeded),
-		domain.RiskChange,
 		45,
 	)
 	if review.Status != "unavailable" || review.Model != "small-model" || len(review.Errors) != 1 || review.Errors[0] != "approval Agent did not respond within 45 seconds" {
@@ -973,7 +1047,7 @@ func TestCommandReviewRedactsModelOutput(t *testing.T) {
 		Explanation: &domain.CommandExplanation{
 			Summary: "password=summary-secret", Mechanism: "api_key=mechanism-secret", Risks: []string{"password=risk-secret"},
 		},
-	}, nil, domain.RiskCritical, 30)
+	}, nil, 30)
 	encoded, err := json.Marshal(review)
 	if err != nil {
 		t.Fatal(err)
@@ -985,10 +1059,10 @@ func TestCommandReviewRedactsModelOutput(t *testing.T) {
 	}
 }
 
-func TestCommandExplainerPersistsAdviceWithoutChangingPolicyRisk(t *testing.T) {
+func TestCommandExplainerPersistsAdviceForManualApproval(t *testing.T) {
 	svc, _, host := newTestService(t)
 	explainer := &fakeCommandExplainer{review: domain.CommandReview{
-		Status: "completed", DeterministicRisk: domain.RiskReadOnly,
+		Status:      "completed",
 		Explanation: &domain.CommandExplanation{Summary: "重启服务", Mechanism: "由 systemd 停止并重新启动单元"},
 		ReviewedAt:  time.Now().UTC(),
 	}}
@@ -996,12 +1070,12 @@ func TestCommandExplainerPersistsAdviceWithoutChangingPolicyRisk(t *testing.T) {
 	result, err := svc.Submit(context.Background(), domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
 		Reason: "recover demo",
-	}, "test")
+	}, "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "approval_required" || result.Risk != domain.RiskChange {
-		t.Fatalf("explainer changed deterministic approval: %#v", result)
+	if result.Status != "approval_required" {
+		t.Fatalf("manual approval was bypassed: %#v", result)
 	}
 	waitForApproval(t, svc, result.ApprovalID, func(approval domain.Approval) bool {
 		return approval.AIReview != nil && approval.AIReview.Status != "pending"
@@ -1010,7 +1084,7 @@ func TestCommandExplainerPersistsAdviceWithoutChangingPolicyRisk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(approvals) != 1 || approvals[0].AIReview == nil || approvals[0].AIReview.DeterministicRisk != domain.RiskChange || approvals[0].AIReview.Explanation == nil {
+	if len(approvals) != 1 || approvals[0].AIReview == nil || approvals[0].AIReview.Explanation == nil {
 		t.Fatalf("structured explanation was not normalized and persisted: %#v", approvals)
 	}
 	inputs := explainer.Inputs()
@@ -1044,7 +1118,7 @@ func TestApprovalIsCreatedWithoutWaitingForCommandExplanation(t *testing.T) {
 		result, err := svc.Submit(context.Background(), domain.ExecRequest{
 			HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
 			Reason: "recover demo",
-		}, "test")
+		}, "eino-agent")
 		done <- outcome{result: result, err: err}
 	}()
 
@@ -1062,21 +1136,14 @@ func TestApprovalIsCreatedWithoutWaitingForCommandExplanation(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("background explanation did not start")
 	}
-	pending := waitForApproval(t, svc, submitted.result.ApprovalID, func(approval domain.Approval) bool {
+	waitForApproval(t, svc, submitted.result.ApprovalID, func(approval domain.Approval) bool {
 		return approval.AIReview != nil && approval.AIReview.Status == "pending"
 	})
-	if pending.Risk != domain.RiskChange {
-		t.Fatalf("pending advisory review changed deterministic approval: %#v", pending)
-	}
-
 	close(explainer.release)
 	released = true
-	completed := waitForApproval(t, svc, submitted.result.ApprovalID, func(approval domain.Approval) bool {
+	waitForApproval(t, svc, submitted.result.ApprovalID, func(approval domain.Approval) bool {
 		return approval.AIReview != nil && approval.AIReview.Status == "completed"
 	})
-	if completed.Risk != domain.RiskChange {
-		t.Fatalf("completed advisory review unexpectedly changed risk: %#v", completed)
-	}
 }
 
 func TestApprovalDecisionCancelsCommandExplanation(t *testing.T) {
@@ -1091,7 +1158,7 @@ func TestApprovalDecisionCancelsCommandExplanation(t *testing.T) {
 	pending, err := svc.Submit(context.Background(), domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
 		Reason: "recover demo",
-	}, "test")
+	}, "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1100,7 +1167,7 @@ func TestApprovalDecisionCancelsCommandExplanation(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("background explanation did not start")
 	}
-	if _, err := svc.Approve(context.Background(), pending.ApprovalID, "deterministic policy reviewed", "operator"); err != nil {
+	if _, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed operation", "operator"); err != nil {
 		t.Fatal(err)
 	}
 	svc.explainWG.Wait()
@@ -1109,7 +1176,7 @@ func TestApprovalDecisionCancelsCommandExplanation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if approval.Status != "approved" || approval.Risk != domain.RiskChange {
+	if approval.Status != "approved" {
 		t.Fatalf("late explanation overwrote the approval decision: %#v", approval)
 	}
 	run, err := svc.store.GetRun(context.Background(), pending.RunID)
@@ -1133,7 +1200,7 @@ func TestCommandExplanationConcurrencyIsBounded(t *testing.T) {
 		result, err := svc.Submit(context.Background(), domain.ExecRequest{
 			HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", fmt.Sprintf("demo-%d", index)},
 			Reason: "recover demo",
-		}, "test")
+		}, "eino-agent")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1179,7 +1246,7 @@ func TestCommandExplanationQueueIsBounded(t *testing.T) {
 	first, err := svc.Submit(context.Background(), domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo-one"},
 		Reason: "recover demo",
-	}, "test")
+	}, "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1191,7 +1258,7 @@ func TestCommandExplanationQueueIsBounded(t *testing.T) {
 	second, err := svc.Submit(context.Background(), domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo-two"},
 		Reason: "recover demo",
-	}, "test")
+	}, "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1210,18 +1277,15 @@ func TestCommandExplanationQueueIsBounded(t *testing.T) {
 	svc.explainWG.Wait()
 }
 
-func TestRetryApprovalExplanationKeepsPolicyRiskAndDoesNotExecute(t *testing.T) {
+func TestRetryApprovalExplanationDoesNotExecute(t *testing.T) {
 	svc, transport, host := newTestService(t)
 	ctx := context.Background()
 	pending, err := svc.Submit(ctx, domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
 		Reason: "recover demo",
-	}, "test")
+	}, "eino-agent")
 	if err != nil {
 		t.Fatal(err)
-	}
-	if pending.Risk != domain.RiskChange {
-		t.Fatalf("unexpected initial approval: %#v", pending)
 	}
 	explainer := &fakeCommandExplainer{review: domain.CommandReview{
 		Status: "completed", Explanation: &domain.CommandExplanation{
@@ -1235,8 +1299,8 @@ func TestRetryApprovalExplanationKeepsPolicyRiskAndDoesNotExecute(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.Status != "pending" || updated.Risk != domain.RiskChange || updated.AIReview == nil || updated.AIReview.Explanation == nil {
-		t.Fatalf("explanation retry changed the policy-owned approval: %#v", updated)
+	if updated.Status != "pending" || updated.AIReview == nil || updated.AIReview.Explanation == nil {
+		t.Fatalf("explanation retry changed the pending approval: %#v", updated)
 	}
 	if len(transport.calls) != 0 {
 		t.Fatalf("explanation retry executed the operation: %#v", transport.calls)
@@ -1245,7 +1309,7 @@ func TestRetryApprovalExplanationKeepsPolicyRiskAndDoesNotExecute(t *testing.T) 
 	if len(inputs) != 1 || inputs[0].RequestDigest != updated.RequestDigest {
 		t.Fatalf("explanation retry did not receive the exact pending request: %#v", inputs)
 	}
-	if _, err := svc.Approve(ctx, updated.ID, "reviewed deterministic policy", "operator"); err != nil {
+	if _, err := svc.Approve(ctx, updated.ID, "reviewed operation", "operator"); err != nil {
 		t.Fatal(err)
 	}
 	if len(transport.calls) != 1 {
@@ -1259,7 +1323,7 @@ func TestRetryApprovalExplanationPersistsDegradedResultAndKeepsPending(t *testin
 	pending, err := svc.Submit(ctx, domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
 		Reason: "recover demo",
-	}, "test")
+	}, "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1268,7 +1332,7 @@ func TestRetryApprovalExplanationPersistsDegradedResultAndKeepsPending(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.Status != "pending" || updated.Risk != domain.RiskChange || updated.AIReview == nil || updated.AIReview.Status != "unavailable" {
+	if updated.Status != "pending" || updated.AIReview == nil || updated.AIReview.Status != "unavailable" {
 		t.Fatalf("degraded retry changed the approval boundary: %#v", updated)
 	}
 	if len(updated.AIReview.Errors) != 1 || !strings.Contains(updated.AIReview.Errors[0], "model timed out") {
@@ -1290,7 +1354,7 @@ func TestApprovalDecisionCancelsRetriedCommandExplanation(t *testing.T) {
 	pending, err := svc.Submit(context.Background(), domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
 		Reason: "recover demo",
-	}, "test")
+	}, "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1323,7 +1387,7 @@ func TestApprovalDecisionCancelsRetriedCommandExplanation(t *testing.T) {
 	}
 }
 
-func TestAgentPlanAdvancesStrictlyOneStepAtATime(t *testing.T) {
+func TestAgentPlanTransitionsPreserveFinishedHistory(t *testing.T) {
 	svc, _, _ := newTestService(t)
 	ctx := WithSessionID(context.Background(), "session_plan_test")
 	plan, err := svc.CreateAgentPlan(ctx, "Deploy and verify the service", []string{
@@ -1357,8 +1421,34 @@ func TestAgentPlanAdvancesStrictlyOneStepAtATime(t *testing.T) {
 	if plan.Status != "blocked" || plan.Steps[1].Status != "blocked" || plan.Steps[2].Status != "pending" {
 		t.Fatalf("blocked plan state is inconsistent: %#v", plan)
 	}
+	plan, err = svc.UpdateAgentPlanStep(ctx, 2, "in_progress", "Package mirror recovered", "test")
+	if err != nil || plan.Status != "active" || plan.Steps[1].Status != "in_progress" {
+		t.Fatalf("blocked step did not resume: plan=%#v err=%v", plan, err)
+	}
+	plan, err = svc.UpdateAgentPlanStep(ctx, 2, "skipped", "Deployment is already current", "test")
+	if err != nil || plan.Steps[1].Status != "skipped" || plan.Steps[2].Status != "in_progress" {
+		t.Fatalf("skipped step did not advance: plan=%#v err=%v", plan, err)
+	}
+	plan, err = svc.ReviseAgentPlan(ctx, []string{"Verify the endpoint", "Record the outcome"}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Steps) != 4 || plan.Steps[0].Status != "completed" || plan.Steps[0].Evidence == "" || plan.Steps[1].Status != "skipped" || plan.Steps[1].Evidence == "" || plan.Steps[2].Title != "Verify the endpoint" || plan.Steps[2].Status != "in_progress" || plan.Steps[3].Status != "pending" {
+		t.Fatalf("revision did not preserve finished history and replace remaining steps: %#v", plan)
+	}
+	plan, err = svc.UpdateAgentPlanStep(ctx, 3, "completed", "Endpoint returned healthy", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err = svc.UpdateAgentPlanStep(ctx, 4, "completed", "Outcome recorded", "test")
+	if err != nil || plan.Status != "completed" {
+		t.Fatalf("revised plan did not complete: plan=%#v err=%v", plan, err)
+	}
+	if _, err := svc.ReviseAgentPlan(ctx, []string{"Unexpected extra work"}, "test"); err == nil || !strings.Contains(err.Error(), "completed plans cannot be revised") {
+		t.Fatalf("completed plan history was mutable: %v", err)
+	}
 	loaded, err := svc.GetAgentPlan(context.Background(), "session_plan_test")
-	if err != nil || loaded.Status != "blocked" {
+	if err != nil || loaded.Status != "completed" || len(loaded.Steps) != 4 {
 		t.Fatalf("plan was not persisted: plan=%#v err=%v", loaded, err)
 	}
 }
@@ -1402,7 +1492,7 @@ func TestRunCapturesAgentSessionFromContext(t *testing.T) {
 
 func TestChangeRequiresApprovalThenExecutes(t *testing.T) {
 	svc, transport, host := newTestService(t)
-	result, err := svc.Submit(context.Background(), domain.ExecRequest{HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"}, Reason: "recover service"}, "test")
+	result, err := svc.Submit(context.Background(), domain.ExecRequest{HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"}, Reason: "recover service"}, "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1734,7 +1824,7 @@ func TestApproveAsyncReturnsBeforeExecutionAndSurvivesRequestCancellation(t *tes
 
 	pending, err := svc.Submit(WithSessionID(context.Background(), "async_approval"), domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"}, Reason: "restart demo service",
-	}, "test")
+	}, "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1807,7 +1897,7 @@ func TestApprovedExecutionStreamsRedactedOutputToAgentSession(t *testing.T) {
 	runCtx := WithExecutionOwner(WithSessionID(context.Background(), sessionID), toolCallID, "ssh_exec", `{"host_id":"test","program":"systemctl","args":["restart","demo"]}`)
 	pending, err := svc.Submit(runCtx, domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"}, Reason: "restart demo service",
-	}, "test")
+	}, "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1909,7 +1999,7 @@ func TestApproveAsyncExecutesConcurrentDecisionOnlyOnce(t *testing.T) {
 	svc, transport, host := newTestService(t)
 	pending, err := svc.Submit(WithSessionID(context.Background(), "concurrent_approval"), domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"}, Reason: "restart demo service",
-	}, "test")
+	}, "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1949,22 +2039,16 @@ func TestApproveAsyncExecutesConcurrentDecisionOnlyOnce(t *testing.T) {
 	t.Fatalf("approved operation executed %d times, want once", callCount)
 }
 
-func TestCriticalRequiresApprovalReason(t *testing.T) {
+func TestManualApprovalReasonIsOptional(t *testing.T) {
 	svc, transport, host := newTestService(t)
-	result, err := svc.Submit(context.Background(), domain.ExecRequest{HostID: host.ID, Mode: domain.ExecProgram, Program: "rm", Args: []string{"-rf", "/tmp/demo"}, Reason: "clean fixture"}, "test")
+	result, err := svc.Submit(context.Background(), domain.ExecRequest{HostID: host.ID, Mode: domain.ExecProgram, Program: "rm", Args: []string{"-rf", "/tmp/demo"}, Reason: "clean fixture"}, "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Risk != domain.RiskCritical || result.Status != "approval_required" {
-		t.Fatalf("unexpected critical result %#v", result)
+	if result.Status != "approval_required" {
+		t.Fatalf("unexpected manual approval result %#v", result)
 	}
-	if _, err := svc.Approve(context.Background(), result.ApprovalID, "", "operator"); err == nil {
-		t.Fatal("critical approval without a reason was accepted")
-	}
-	if len(transport.calls) != 0 {
-		t.Fatal("critical command executed before approval")
-	}
-	approved, err := svc.Approve(context.Background(), result.ApprovalID, "fixture cleanup reviewed", "operator")
+	approved, err := svc.Approve(context.Background(), result.ApprovalID, "", "operator")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1973,14 +2057,17 @@ func TestCriticalRequiresApprovalReason(t *testing.T) {
 	}
 }
 
-func TestForbiddenNeverCreatesApproval(t *testing.T) {
+func TestCredentialReadUsesManualApproval(t *testing.T) {
 	svc, transport, host := newTestService(t)
-	result, err := svc.Submit(context.Background(), domain.ExecRequest{HostID: host.ID, Mode: domain.ExecScript, Script: "cat ~/.ssh/id_ed25519", Reason: "bad request"}, "test")
+	result, err := svc.Submit(context.Background(), domain.ExecRequest{HostID: host.ID, Mode: domain.ExecScript, Script: "cat ~/.ssh/id_ed25519", Reason: "inspect configured credential"}, "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "denied" || result.ApprovalID != "" || len(transport.calls) != 0 {
-		t.Fatalf("unexpected forbidden result %#v", result)
+	if result.Status != "approval_required" || result.ApprovalID == "" || len(transport.calls) != 0 {
+		t.Fatalf("credential read bypassed manual approval: %#v", result)
+	}
+	if err := svc.Reject(context.Background(), result.ApprovalID, "not approved", "operator"); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -2191,7 +2278,7 @@ func TestDiscoverModelsAnthropic(t *testing.T) {
 			http.Error(w, "missing anthropic auth headers", http.StatusUnauthorized)
 			return
 		}
-		if r.Header.Get("User-Agent") != "OpsPilot-Test/1.0" {
+		if r.Header.Get("User-Agent") != "OpsNerva-Test/1.0" {
 			http.Error(w, "user agent was not rewritten", http.StatusForbidden)
 			return
 		}
@@ -2222,7 +2309,7 @@ func TestDiscoverModelsAnthropic(t *testing.T) {
 	}
 	provider, err := svc.SaveModelProvider(ctx, domain.ModelProviderInput{
 		Name: "claude", Kind: "anthropic", BaseURL: server.URL + "/v1", Model: "claude-opus-4-8", APIKey: secret,
-		UserAgent: ptr("OpsPilot-Test/1.0"),
+		UserAgent: ptr("OpsNerva-Test/1.0"),
 	}, "test")
 	if err != nil {
 		t.Fatal(err)
@@ -2230,7 +2317,7 @@ func TestDiscoverModelsAnthropic(t *testing.T) {
 	if provider.BaseURL != server.URL {
 		t.Fatalf("expected version segment stripped from base URL, got %q", provider.BaseURL)
 	}
-	if provider.UserAgent != "OpsPilot-Test/1.0" {
+	if provider.UserAgent != "OpsNerva-Test/1.0" {
 		t.Fatalf("user agent was not persisted, got %q", provider.UserAgent)
 	}
 	renamed, err := svc.SaveModelProvider(ctx, domain.ModelProviderInput{
@@ -2239,7 +2326,7 @@ func TestDiscoverModelsAnthropic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if renamed.UserAgent != "OpsPilot-Test/1.0" {
+	if renamed.UserAgent != "OpsNerva-Test/1.0" {
 		t.Fatalf("omitting user_agent on edit should keep the stored value, got %q", renamed.UserAgent)
 	}
 	cleared, err := svc.SaveModelProvider(ctx, domain.ModelProviderInput{
@@ -2254,7 +2341,7 @@ func TestDiscoverModelsAnthropic(t *testing.T) {
 	}
 	if _, err := svc.SaveModelProvider(ctx, domain.ModelProviderInput{
 		ID: provider.ID, Name: "claude renamed", Kind: "anthropic", BaseURL: server.URL, Model: "claude-opus-4-8",
-		UserAgent: ptr("OpsPilot-Test/1.0"),
+		UserAgent: ptr("OpsNerva-Test/1.0"),
 	}, "test"); err != nil {
 		t.Fatal(err)
 	}

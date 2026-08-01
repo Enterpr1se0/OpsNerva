@@ -1,10 +1,10 @@
-# OpsPilot — AI SSH 运维 Agent
+# OpsNerva — AI SSH 运维 Agent
 
-OpsPilot 是一个使用 Go 与 Eino 构建的个人 AI 运维 Agent：LLM 通过受控工具完成 SSH 诊断、部署和恢复，服务端统一执行风险分级、可配置审批、加密审计和输出脱敏。
+OpsNerva 是一个使用 Go 与 Eino 构建的个人 AI 运维 Agent：LLM 通过受控工具完成 SSH 诊断、部署和恢复，服务端统一执行审批、输入校验、加密审计和输出脱敏。
 
 ## 特性
 
-- **受控执行**：命令由确定性策略分级，并支持 Manual、Auto 和 Full access 三种审批模式。
+- **受控执行**：支持 Manual、Auto 和 Full access 三种审批模式，所有模式共用输入校验、连接绑定和审计。
 - **内置跨平台 SSH**：支持 `ssh-agent`、上传私钥、密码、SOCKS5/HTTP 代理、ProxyJump 链、托管 sudo 和严格 Host Key 校验，不依赖系统 `ssh` 命令。
 - **多模型**：任意 OpenAI 兼容提供商，共享代理配置、连接测试、运行时热切换；支持向视觉模型发送图片。
 - **Workspace**：托管目录内的文件管理、补丁编辑和 Shell；Linux 可用 Bubblewrap 沙箱。
@@ -21,11 +21,11 @@ flowchart LR
     API --> Eino[Eino ChatModelAgent]
     MCP[MCP Client] --> Tools[Typed SSH Tools]
     Eino --> Tools
-    Tools --> Policy[AST Policy + YAML]
-    Policy --> Approval[User Approval]
-    Policy --> Explain[Command Explainer]
-    Explain -. Educational context .-> Approval
-    Approval --> SSH[Built-in SSH]
+    Tools --> Validate[Validation + Binding]
+    Validate --> Mode[Manual / Auto / Full access]
+    Mode --> Approval[User or Approval Agent]
+    Mode --> SSH[Built-in SSH]
+    Approval --> SSH
     SSH --> Host[Linux Hosts]
     Tools --> Audit[(Encrypted SQLite Audit)]
 ```
@@ -39,11 +39,11 @@ flowchart LR
 ### Docker
 
 ```bash
-docker build -t opspilot .
+docker build -t opsnerva .
 docker run --rm -p 8080:8080 \
-  -v opspilot-data:/app/.data \
-  -v opspilot-workspace:/app/workspace \
-  opspilot
+  -v opsnerva-data:/app/.data \
+  -v opsnerva-workspace:/app/workspace \
+  opsnerva
 ```
 
 ### 从源码构建
@@ -68,16 +68,13 @@ make build
 
 局域网或公网部署应使用 HTTPS 反向代理，并设置 `OPS_AGENT_SECURE_COOKIES=true`；监听地址等配置详见[使用手册](docs/guide.md#修改监听地址)。
 
-## 风险与审批
+## 审批模式
 
-| 风险 | 例子 | 默认行为 |
-|---|---|---|
-| `read_only` | `ps`、`df`、`journalctl` | 自动执行 |
-| `change` | 写文件、安装依赖、重启服务 | Manual 下人工审批 |
-| `critical` | `rm`、`dd`、防火墙、磁盘操作 | Manual 下人工审批并填写原因 |
-| `forbidden` | 读取私钥、关闭审计 | Manual/Auto 下拒绝 |
+- `Manual`：主 Agent 和 MCP Client 的执行请求全部等待用户允许或拒绝。
+- `Auto`：全部请求交给无 Tool 的独立审批 Agent；模型不可用、超时或响应无效时回退人工审批。
+- `Full access`：主 Agent 和 MCP Client 直接执行。
 
-`Manual` 由用户审批；`Auto` 由无 Tool 的独立审批 Agent 审查原本需要审批的请求，异常时回退人工；`Full access` 允许主 Agent 跳过策略拦截和审批。三种模式都不会掩盖参数、连接、权限或命令本身的真实错误。审批摘要绑定主机、命令、参数、环境和文件内容的 SHA-256。自定义规则见 [configs/policy.yaml](configs/policy.yaml)。
+三种模式都保留参数校验、主机与 Workspace 边界、SSH Host Key、连接摘要、凭据脱敏和审计。人工审批摘要绑定主机、命令、参数、环境和文件内容的 SHA-256。
 
 ## 开发
 

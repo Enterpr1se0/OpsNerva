@@ -19,7 +19,6 @@ type Config struct {
 	DatabasePath         string        `yaml:"database_path"`
 	Logging              Logging       `yaml:"logging"`
 	MasterKey            string        `yaml:"-"`
-	PolicyPath           string        `yaml:"policy_path"`
 	SSH                  SSH           `yaml:"ssh"`
 	Model                Model         `yaml:"model"`
 	Limits               Limits        `yaml:"limits"`
@@ -87,7 +86,6 @@ func Default() Config {
 		ListenAddress: "0.0.0.0:8080",
 		DataDir:       ".data",
 		DatabasePath:  ".data/ops-agent.db",
-		PolicyPath:    "configs/policy.yaml",
 		Logging: Logging{
 			Level: "debug", Format: "text", File: ".data/ops-agent.log",
 			MaxSizeMB: 20, MaxBackups: 3, RecentLimit: 2000,
@@ -191,7 +189,6 @@ func applyEnv(cfg *Config) {
 	setString(&cfg.ListenAddress, "OPS_AGENT_LISTEN")
 	setString(&cfg.DataDir, "OPS_AGENT_DATA_DIR")
 	setString(&cfg.DatabasePath, "OPS_AGENT_DATABASE")
-	setString(&cfg.PolicyPath, "OPS_AGENT_POLICY")
 	setString(&cfg.Logging.Level, "OPS_AGENT_LOG_LEVEL")
 	setString(&cfg.Logging.Format, "OPS_AGENT_LOG_FORMAT")
 	setString(&cfg.Logging.File, "OPS_AGENT_LOG_FILE")

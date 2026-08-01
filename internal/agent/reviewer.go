@@ -67,9 +67,7 @@ func (c *ApprovalCoordinator) ReviewFresh(ctx context.Context, input domain.Comm
 }
 
 func (c *ApprovalCoordinator) review(ctx context.Context, input domain.CommandReviewInput) (domain.CommandReview, error) {
-	review := domain.CommandReview{
-		DeterministicRisk: input.Policy.Risk, ReviewedAt: time.Now().UTC(),
-	}
+	review := domain.CommandReview{ReviewedAt: time.Now().UTC()}
 	if c == nil || c.runner == nil {
 		return review, fmt.Errorf("approval Agent is unavailable")
 	}

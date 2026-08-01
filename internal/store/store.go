@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -29,10 +30,11 @@ const persistedToolEvidenceLeakMarker = "[Persisted operational tool evidence fr
 type PlanTransitionError struct {
 	StepNumber int
 	Status     string
+	Target     string
 }
 
 func (e *PlanTransitionError) Error() string {
-	return fmt.Sprintf("invalid plan transition: step %d is %s, not in_progress", e.StepNumber, e.Status)
+	return fmt.Sprintf("invalid plan transition: step %d cannot change from %s to %s", e.StepNumber, e.Status, e.Target)
 }
 
 func (e *PlanTransitionError) Unwrap() error {
@@ -326,7 +328,6 @@ CREATE TABLE IF NOT EXISTS runs (
   request_cipher TEXT NOT NULL DEFAULT '',
   search_text TEXT NOT NULL DEFAULT '',
   request_digest TEXT NOT NULL,
-  risk TEXT NOT NULL,
   status TEXT NOT NULL,
   exit_code INTEGER NOT NULL DEFAULT 0,
   stdout_redacted TEXT NOT NULL DEFAULT '',
@@ -348,7 +349,6 @@ CREATE TABLE IF NOT EXISTS approvals (
   request_json TEXT NOT NULL,
   request_cipher TEXT NOT NULL DEFAULT '',
   request_digest TEXT NOT NULL,
-  risk TEXT NOT NULL,
   status TEXT NOT NULL,
   reason TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
@@ -440,9 +440,12 @@ CREATE TABLE IF NOT EXISTS ssh_shell_sessions (
   id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL UNIQUE,
   session_id TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'ssh',
   surface TEXT NOT NULL,
   host_id TEXT NOT NULL,
   host_name TEXT NOT NULL,
+  workspace_id TEXT NOT NULL DEFAULT '',
+  backend TEXT NOT NULL DEFAULT '',
   username TEXT NOT NULL,
   elevated INTEGER NOT NULL DEFAULT 0,
   cwd TEXT NOT NULL DEFAULT '',
@@ -561,6 +564,9 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return err
 	}
+	if err := s.dropLegacyRiskColumns(ctx); err != nil {
+		return err
+	}
 	if err := s.dropLegacySSHShellExpiry(ctx); err != nil {
 		return err
 	}
@@ -616,6 +622,9 @@ SELECT session_id,'',min(created_at),max(created_at) FROM chat_messages GROUP BY
 		`ALTER TABLE ssh_shell_events ADD COLUMN input_bytes INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE ssh_shell_sessions ADD COLUMN termination_reason TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE ssh_shell_sessions ADD COLUMN surface TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE ssh_shell_sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'ssh'`,
+		`ALTER TABLE ssh_shell_sessions ADD COLUMN workspace_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE ssh_shell_sessions ADD COLUMN backend TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return err
@@ -676,6 +685,9 @@ CASE WHEN subagent_reviews_enabled<>0 AND beginner_explanations_enabled<>0 THEN 
 	if _, err := s.db.ExecContext(ctx, `ALTER TABLE system_settings ADD COLUMN workspace_shell_mode TEXT NOT NULL DEFAULT 'sandbox'`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 		return err
 	}
+	if err := s.applyWorkspaceShellPlatformDefault(ctx, runtime.GOOS); err != nil {
+		return err
+	}
 	if _, err := s.db.ExecContext(ctx, `ALTER TABLE system_settings ADD COLUMN subagent_model_provider_id TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 		return err
 	}
@@ -689,6 +701,14 @@ CASE WHEN subagent_reviews_enabled<>0 AND beginner_explanations_enabled<>0 THEN 
 		return err
 	}
 	return s.migrateNativeOnlyHosts(ctx)
+}
+
+func (s *Store) applyWorkspaceShellPlatformDefault(ctx context.Context, goos string) error {
+	if domain.DefaultWorkspaceShellMode(goos) != domain.WorkspaceShellModeHost {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE system_settings SET workspace_shell_mode='host' WHERE workspace_shell_mode='sandbox'`)
+	return err
 }
 
 func (s *Store) dropLegacySSHShellExpiry(ctx context.Context) error {
@@ -715,6 +735,35 @@ func (s *Store) dropLegacySSHShellExpiry(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `ALTER TABLE ssh_shell_sessions DROP COLUMN expires_at`); err != nil {
 		return fmt.Errorf("drop legacy SSH shell expiry: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) dropLegacyRiskColumns(ctx context.Context) error {
+	for _, table := range []string{"approvals", "runs"} {
+		rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+		if err != nil {
+			return err
+		}
+		hasRisk := false
+		for rows.Next() {
+			var cid, notNull, primaryKey int
+			var name, columnType string
+			var defaultValue any
+			if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+				rows.Close()
+				return err
+			}
+			hasRisk = hasRisk || name == "risk"
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if hasRisk {
+			if _, err := s.db.ExecContext(ctx, `ALTER TABLE `+table+` DROP COLUMN risk`); err != nil {
+				return fmt.Errorf("drop legacy %s.risk: %w", table, err)
+			}
+		}
 	}
 	return nil
 }
@@ -1335,7 +1384,7 @@ chat_image_allowed_types_json,workspace_shell_mode,mcp_http_enabled,mcp_http_tok
 			AgentMaxIterations: domain.DefaultAgentMaxIterations, ApprovalExplanationsEnabled: true,
 			ApprovalMode: domain.ApprovalModeManual,
 			SystemPrompt: domain.DefaultSystemPrompt, DefaultSystemPrompt: domain.DefaultSystemPrompt,
-			SubagentTimeoutSeconds: domain.DefaultSubagentTimeoutSeconds, WorkspaceShellMode: domain.WorkspaceShellModeSandbox,
+			SubagentTimeoutSeconds: domain.DefaultSubagentTimeoutSeconds, WorkspaceShellMode: domain.DefaultWorkspaceShellMode(runtime.GOOS),
 			ChatImageAllowedTypes: append([]string(nil), domain.DefaultChatImageAllowedTypes...),
 		}, nil
 	}
@@ -1574,9 +1623,9 @@ func (s *Store) backfillRunSearchText(ctx context.Context) error {
 }
 
 func (s *Store) CreateRun(ctx context.Context, run domain.Run) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO runs(id,session_id,host_id,tool_name,tool_arguments_json,request_json,request_cipher,search_text,request_digest,risk,status,ai_review_json,
-started_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, run.ID, run.SessionID, run.HostID, run.ToolName, run.ToolArgumentsJSON, run.RequestJSON, run.RequestCipher, run.SearchText, run.RequestDigest,
-		run.Risk, run.Status, run.AIReviewJSON, formatTime(run.StartedAt))
+	_, err := s.db.ExecContext(ctx, `INSERT INTO runs(id,session_id,host_id,tool_name,tool_arguments_json,request_json,request_cipher,search_text,request_digest,status,ai_review_json,
+started_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, run.ID, run.SessionID, run.HostID, run.ToolName, run.ToolArgumentsJSON, run.RequestJSON, run.RequestCipher, run.SearchText, run.RequestDigest,
+		run.Status, run.AIReviewJSON, formatTime(run.StartedAt))
 	return err
 }
 
@@ -1592,7 +1641,7 @@ stdout_cipher=?,stderr_cipher=?,error=?,completed_at=? WHERE id=?`, run.Status, 
 }
 
 func (s *Store) GetRun(ctx context.Context, id string) (domain.Run, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id,session_id,host_id,tool_name,tool_arguments_json,request_json,request_cipher,request_digest,risk,status,
+	row := s.db.QueryRowContext(ctx, `SELECT id,session_id,host_id,tool_name,tool_arguments_json,request_json,request_cipher,request_digest,status,
 exit_code,stdout_redacted,stderr_redacted,stdout_cipher,stderr_cipher,error,ai_review_json,started_at,completed_at
 FROM runs WHERE id=?`, id)
 	return scanRun(row)
@@ -1607,7 +1656,7 @@ func likePattern(query string) string {
 
 func (s *Store) SearchRuns(ctx context.Context, query, hostID, sessionID string, limit int) ([]domain.Run, error) {
 	pattern := likePattern(query)
-	statement := `SELECT id,session_id,host_id,tool_name,tool_arguments_json,request_json,request_cipher,request_digest,risk,status,
+	statement := `SELECT id,session_id,host_id,tool_name,tool_arguments_json,request_json,request_cipher,request_digest,status,
 exit_code,stdout_redacted,stderr_redacted,stdout_cipher,stderr_cipher,error,ai_review_json,started_at,completed_at
 FROM runs WHERE (?='' OR session_id=?) AND (?='' OR host_id=?) AND (?='' OR search_text LIKE ? ESCAPE '\' OR request_json LIKE ? ESCAPE '\'
 		OR tool_arguments_json LIKE ? ESCAPE '\' OR stdout_redacted LIKE ? ESCAPE '\' OR stderr_redacted LIKE ? ESCAPE '\') ORDER BY started_at DESC`
@@ -1636,7 +1685,7 @@ func scanRun(row scanner) (domain.Run, error) {
 	var run domain.Run
 	var started string
 	var completed sql.NullString
-	err := row.Scan(&run.ID, &run.SessionID, &run.HostID, &run.ToolName, &run.ToolArgumentsJSON, &run.RequestJSON, &run.RequestCipher, &run.RequestDigest, &run.Risk,
+	err := row.Scan(&run.ID, &run.SessionID, &run.HostID, &run.ToolName, &run.ToolArgumentsJSON, &run.RequestJSON, &run.RequestCipher, &run.RequestDigest,
 		&run.Status, &run.ExitCode, &run.StdoutRedacted, &run.StderrRedacted, &run.StdoutCipher,
 		&run.StderrCipher, &run.Error, &run.AIReviewJSON, &started, &completed)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1659,16 +1708,16 @@ func scanRun(row scanner) (domain.Run, error) {
 }
 
 func (s *Store) CreateApproval(ctx context.Context, approval domain.Approval) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO approvals(id,run_id,host_id,request_json,request_cipher,request_digest,risk,
-status,reason,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, approval.ID, approval.RunID,
-		approval.HostID, approval.RequestJSON, approval.RequestCipher, approval.RequestDigest, approval.Risk, approval.Status,
+	_, err := s.db.ExecContext(ctx, `INSERT INTO approvals(id,run_id,host_id,request_json,request_cipher,request_digest,
+status,reason,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, approval.ID, approval.RunID,
+		approval.HostID, approval.RequestJSON, approval.RequestCipher, approval.RequestDigest, approval.Status,
 		approval.Reason, formatTime(approval.CreatedAt), formatTime(approval.ExpiresAt))
 	return err
 }
 
 func (s *Store) GetApproval(ctx context.Context, id string) (domain.Approval, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT approvals.id,approvals.run_id,runs.session_id,approvals.host_id,approvals.request_json,
-approvals.request_cipher,approvals.request_digest,approvals.risk,approvals.status,approvals.reason,
+approvals.request_cipher,approvals.request_digest,approvals.status,approvals.reason,
 approvals.created_at,approvals.expires_at,approvals.decided_at FROM approvals
 JOIN runs ON runs.id=approvals.run_id WHERE approvals.id=?`, id)
 	return scanApproval(row)
@@ -1684,7 +1733,7 @@ WHERE id IN (SELECT run_id FROM approvals WHERE status='pending' AND expires_at 
 	_, _ = s.db.ExecContext(ctx, `UPDATE approvals SET status='expired',reason='approval expired',decided_at=?
 WHERE status='pending' AND expires_at < ?`, now, now)
 	rows, err := s.db.QueryContext(ctx, `SELECT approvals.id,approvals.run_id,runs.session_id,approvals.host_id,
-approvals.request_json,approvals.request_cipher,approvals.request_digest,approvals.risk,approvals.status,
+approvals.request_json,approvals.request_cipher,approvals.request_digest,approvals.status,
 approvals.reason,approvals.created_at,approvals.expires_at,approvals.decided_at FROM approvals
 JOIN runs ON runs.id=approvals.run_id WHERE (?='' OR approvals.status=?)
 ORDER BY approvals.created_at DESC LIMIT ?`, status, status, limit)
@@ -1705,7 +1754,7 @@ ORDER BY approvals.created_at DESC LIMIT ?`, status, status, limit)
 
 func (s *Store) ListPendingApprovalsForSession(ctx context.Context, sessionID string) ([]domain.Approval, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT approvals.id,approvals.run_id,runs.session_id,approvals.host_id,
-approvals.request_json,approvals.request_cipher,approvals.request_digest,approvals.risk,approvals.status,
+approvals.request_json,approvals.request_cipher,approvals.request_digest,approvals.status,
 approvals.reason,approvals.created_at,approvals.expires_at,approvals.decided_at FROM approvals
 JOIN runs ON runs.id=approvals.run_id WHERE runs.session_id=? AND approvals.status='pending'
 ORDER BY approvals.created_at`, sessionID)
@@ -1737,20 +1786,20 @@ func (s *Store) DecideApproval(ctx context.Context, id, status, reason string) e
 	return nil
 }
 
-func (s *Store) ApprovePendingAndStartRun(ctx context.Context, id, runID, reason string, expectedRisk domain.RiskLevel) error {
+func (s *Store) ApprovePendingAndStartRun(ctx context.Context, id, runID, reason string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	result, err := tx.ExecContext(ctx, `UPDATE approvals SET status='approved',reason=?,decided_at=?
-WHERE id=? AND run_id=? AND status='pending' AND risk=?`, reason, formatTime(time.Now().UTC()), id, runID, expectedRisk)
+WHERE id=? AND run_id=? AND status='pending'`, reason, formatTime(time.Now().UTC()), id, runID)
 	if err != nil {
 		return err
 	}
 	count, _ := result.RowsAffected()
 	if count == 0 {
-		return fmt.Errorf("approval changed or is no longer pending; refresh and review the latest risk")
+		return fmt.Errorf("approval changed or is no longer pending; refresh and review it again")
 	}
 	result, err = tx.ExecContext(ctx, `UPDATE runs SET status='running' WHERE id=? AND status='approval_required'`, runID)
 	if err != nil {
@@ -1795,7 +1844,7 @@ func scanApproval(row scanner) (domain.Approval, error) {
 	var created, expires string
 	var decided sql.NullString
 	err := row.Scan(&approval.ID, &approval.RunID, &approval.SessionID, &approval.HostID, &approval.RequestJSON, &approval.RequestCipher,
-		&approval.RequestDigest, &approval.Risk, &approval.Status, &approval.Reason,
+		&approval.RequestDigest, &approval.Status, &approval.Reason,
 		&created, &expires, &decided)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Approval{}, ErrNotFound
@@ -2049,7 +2098,7 @@ func (s *Store) GetAgentPlan(ctx context.Context, sessionID string) (domain.Agen
 	return plan, rows.Err()
 }
 
-func (s *Store) AdvanceAgentPlan(ctx context.Context, sessionID string, stepNumber int, status, evidence string) (domain.AgentPlan, error) {
+func (s *Store) TransitionAgentPlanStep(ctx context.Context, sessionID string, stepNumber int, status, evidence string) (domain.AgentPlan, error) {
 	now := time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -2064,15 +2113,19 @@ func (s *Store) AdvanceAgentPlan(ctx context.Context, sessionID string, stepNumb
 	if err != nil {
 		return domain.AgentPlan{}, err
 	}
-	if currentStatus != "in_progress" {
-		return domain.AgentPlan{}, &PlanTransitionError{StepNumber: stepNumber, Status: currentStatus}
+	validTransition := currentStatus == "in_progress" && (status == "completed" || status == "blocked" || status == "skipped") ||
+		currentStatus == "blocked" && status == "in_progress"
+	if !validTransition {
+		return domain.AgentPlan{}, &PlanTransitionError{StepNumber: stepNumber, Status: currentStatus, Target: status}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE agent_plan_steps SET status=?,evidence=?,updated_at=? WHERE session_id=? AND step_number=?`,
 		status, evidence, formatTime(now), sessionID, stepNumber); err != nil {
 		return domain.AgentPlan{}, err
 	}
 	planStatus := "blocked"
-	if status == "completed" {
+	if status == "in_progress" {
+		planStatus = "active"
+	} else if status == "completed" || status == "skipped" {
 		var next int
 		err := tx.QueryRowContext(ctx, `SELECT step_number FROM agent_plan_steps WHERE session_id=? AND step_number>? ORDER BY step_number LIMIT 1`, sessionID, stepNumber).Scan(&next)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -2093,6 +2146,83 @@ func (s *Store) AdvanceAgentPlan(ctx context.Context, sessionID string, stepNumb
 	}
 	if count, _ := result.RowsAffected(); count == 0 {
 		return domain.AgentPlan{}, ErrNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.AgentPlan{}, err
+	}
+	return s.GetAgentPlan(ctx, sessionID)
+}
+
+// ReviseAgentPlanRemaining replaces only the mutable portion of a plan. Steps
+// already completed or skipped remain immutable history with their original
+// evidence and timestamps.
+func (s *Store) ReviseAgentPlanRemaining(ctx context.Context, sessionID string, titles []string) (domain.AgentPlan, error) {
+	now := time.Now().UTC()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.AgentPlan{}, err
+	}
+	defer tx.Rollback()
+
+	var planStatus string
+	if err := tx.QueryRowContext(ctx, `SELECT status FROM agent_plans WHERE session_id=?`, sessionID).Scan(&planStatus); errors.Is(err, sql.ErrNoRows) {
+		return domain.AgentPlan{}, ErrNotFound
+	} else if err != nil {
+		return domain.AgentPlan{}, err
+	}
+	if planStatus == "completed" {
+		return domain.AgentPlan{}, fmt.Errorf("completed plans cannot be revised")
+	}
+
+	rows, err := tx.QueryContext(ctx, `SELECT step_number,status FROM agent_plan_steps WHERE session_id=? ORDER BY step_number`, sessionID)
+	if err != nil {
+		return domain.AgentPlan{}, err
+	}
+	retained := 0
+	mutableSeen := false
+	for rows.Next() {
+		var number int
+		var status string
+		if err := rows.Scan(&number, &status); err != nil {
+			rows.Close()
+			return domain.AgentPlan{}, err
+		}
+		terminal := status == "completed" || status == "skipped"
+		if terminal && mutableSeen {
+			rows.Close()
+			return domain.AgentPlan{}, fmt.Errorf("plan history is inconsistent at step %d", number)
+		}
+		if terminal {
+			retained++
+		} else {
+			mutableSeen = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return domain.AgentPlan{}, err
+	}
+	if err := rows.Close(); err != nil {
+		return domain.AgentPlan{}, err
+	}
+	if retained+len(titles) > 8 {
+		return domain.AgentPlan{}, fmt.Errorf("revised plan exceeds the 8-step limit after preserving %d finished steps", retained)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM agent_plan_steps WHERE session_id=? AND step_number>?`, sessionID, retained); err != nil {
+		return domain.AgentPlan{}, err
+	}
+	for index, title := range titles {
+		status := "pending"
+		if index == 0 {
+			status = "in_progress"
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO agent_plan_steps(session_id,step_number,title,status,evidence,updated_at) VALUES(?,?,?,?,?,?)`,
+			sessionID, retained+index+1, title, status, "", formatTime(now)); err != nil {
+			return domain.AgentPlan{}, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE agent_plans SET status='active',updated_at=? WHERE session_id=?`, formatTime(now), sessionID); err != nil {
+		return domain.AgentPlan{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return domain.AgentPlan{}, err

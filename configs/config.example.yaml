@@ -1,13 +1,12 @@
 listen_address: 0.0.0.0:8080
 data_dir: .data
 database_path: .data/ops-agent.db
-policy_path: configs/policy.yaml
 
 web_auth:
   # Enable secure cookies when the Web UI is served over HTTPS.
   secure_cookies: false
 
-# OpsPilot creates one directory per Workspace below this managed root.
+# OpsNerva creates one directory per Workspace below this managed root.
 # Relative paths use the startup working directory. Override with
 # OPS_AGENT_WORKSPACE_DIR.
 workspace_dir: workspace

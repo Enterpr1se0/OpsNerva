@@ -14,7 +14,7 @@ const operatorConnectionReason = "started directly by the operator from the Web 
 
 // StartOperatorSSHTunnel starts a tunnel after an authenticated Web operator has
 // explicitly submitted the form. Agent-initiated tunnels continue through
-// StartSSHTunnel and the normal approval policy.
+// StartSSHTunnel and the normal execution path.
 func (s *Service) StartOperatorSSHTunnel(ctx context.Context, hostID, remoteHost string, remotePort, localPort int, actor string) (domain.SSHTunnel, error) {
 	remoteHost = strings.Trim(strings.TrimSpace(remoteHost), "[]")
 	if remoteHost == "" {
@@ -64,7 +64,7 @@ func (s *Service) StartOperatorSSHShell(ctx context.Context, hostID, surface, ac
 
 func (s *Service) executeOperatorConnection(ctx context.Context, req domain.ExecRequest, actor string) (domain.ExecResult, error) {
 	normalizeRequest(&req, s.limits)
-	if req.Mode != domain.ExecSSHTunnelStart && req.Mode != domain.ExecSSHShellStart {
+	if req.Mode != domain.ExecSSHTunnelStart && req.Mode != domain.ExecSSHShellStart && req.Mode != domain.ExecWorkspaceShellStart {
 		return domain.ExecResult{}, fmt.Errorf("invalid operator connection mode")
 	}
 	if err := validateRequestLimits(req, s.limits, s.redactor); err != nil {
@@ -74,11 +74,13 @@ func (s *Service) executeOperatorConnection(ctx context.Context, req domain.Exec
 	if err != nil {
 		return domain.ExecResult{}, err
 	}
-	_, connectionDigest, err := s.resolveSSHConnection(ctx, host)
-	if err != nil {
-		return domain.ExecResult{}, err
+	if req.Mode != domain.ExecWorkspaceShellStart {
+		_, connectionDigest, err := s.resolveSSHConnection(ctx, host)
+		if err != nil {
+			return domain.ExecResult{}, err
+		}
+		bindSSHRequest(&req, connectionDigest)
 	}
-	bindSSHRequest(&req, connectionDigest)
 	if err := validateExecutionRequest(host, req); err != nil {
 		return domain.ExecResult{}, err
 	}
@@ -94,7 +96,7 @@ func (s *Service) executeOperatorConnection(ctx context.Context, req domain.Exec
 		ID: ids.New("run"), HostID: host.ID,
 		RequestJSON: s.redactor.Redact(requestJSON), RequestCipher: requestCipher,
 		SearchText: s.redactor.Redact(req.SearchText()), RequestDigest: requestDigest,
-		Risk: domain.RiskChange, Status: "running", StartedAt: time.Now().UTC(),
+		Status: "running", StartedAt: time.Now().UTC(),
 	}
 	if err := s.store.CreateRun(ctx, run); err != nil {
 		return domain.ExecResult{}, err
@@ -102,5 +104,5 @@ func (s *Service) executeOperatorConnection(ctx context.Context, req domain.Exec
 	s.audit(context.WithoutCancel(ctx), run.ID, "operator_connection_requested", actor, map[string]any{
 		"host_id": host.ID, "mode": req.Mode,
 	})
-	return s.execute(ctx, host, req, run, actor, []string{"authenticated_web_operator"}, nil)
+	return s.execute(ctx, host, req, run, actor, nil)
 }

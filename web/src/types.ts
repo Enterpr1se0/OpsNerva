@@ -1,5 +1,3 @@
-export type Risk = 'read_only' | 'change' | 'critical' | 'forbidden'
-
 export type HostAuthType = 'agent' | 'key' | 'password'
 export type HostSudoMode = 'none' | 'nopasswd' | 'password'
 
@@ -53,7 +51,6 @@ export interface Approval {
   host_id: string
   request_json: string
   request_digest: string
-  risk: Risk
   status: string
   reason?: string
   ai_review?: CommandReview
@@ -64,7 +61,6 @@ export interface Approval {
 export interface ApprovalExecutionResult {
   run_id: string
   status: string
-  risk: Risk
   operator_instruction?: string
   exit_code?: number
   stdout?: string
@@ -80,7 +76,6 @@ export interface Run {
   tool_name?: string
   tool_arguments_json?: string
   request_json: string
-  risk: Risk
   status: string
   exit_code: number
   stdout_redacted?: string
@@ -125,9 +120,12 @@ export interface SSHShell {
   id: string
   run_id: string
   session_id: string
-  surface: 'agent' | 'quick' | 'workspace'
+  kind: 'ssh' | 'workspace'
+  surface: 'agent' | 'mcp' | 'quick' | 'workspace' | 'workspace_agent' | 'workspace_operator'
   host_id: string
   host_name: string
+  workspace_id?: string
+  backend?: 'sandbox' | 'host'
   user: string
   elevated: boolean
   cwd?: string
@@ -136,7 +134,7 @@ export interface SSHShell {
   rows: number
   last_sequence: number
   exit_code?: number
-  termination_reason?: 'requested_close' | 'service_stopped' | 'remote_exit' | 'remote_signal' | 'connection_lost' | 'start_failed'
+  termination_reason?: 'requested_close' | 'service_stopped' | 'remote_exit' | 'remote_signal' | 'connection_lost' | 'process_exit' | 'process_signal' | 'process_lost' | 'start_failed'
   error?: string
   started_at: string
   ended_at?: string
@@ -165,10 +163,13 @@ export interface SSHShellSnapshot {
 export interface SSHShellList {
   shells: SSHShell[]
   count: number
+  workspace_id?: string
 }
 
 export interface SSHShellStartInput {
-  host_id: string
+  host_id?: string
+  workspace_id?: string
+  cwd?: string
   surface?: 'quick' | 'workspace'
 }
 
@@ -209,7 +210,6 @@ export interface CommandReview {
   model?: string
   decision?: 'allow' | 'reject'
   reason?: string
-  deterministic_risk: Risk
   explanation?: CommandExplanation
   errors?: string[]
   reviewed_at: string
@@ -239,12 +239,13 @@ export interface AgentEvent {
   segment_id?: string
   session_id?: string
   run_id?: string
-  stream?: 'stdout' | 'stderr'
+  stream?: 'stdout' | 'stderr' | 'progress'
   sequence?: number
+	transferred_bytes?: number
+	total_bytes?: number
   error?: string
   approval_id?: string
   status?: string
-  risk?: Risk
   retry_attempt?: number
   retry_max?: number
   retry_delay_ms?: number
@@ -279,7 +280,7 @@ export interface ChatAttachment {
 export interface AgentPlanStep {
   number: number
   title: string
-  status: 'pending' | 'in_progress' | 'completed' | 'blocked'
+  status: 'pending' | 'in_progress' | 'completed' | 'blocked' | 'skipped'
   evidence?: string
   updated_at: string
 }
@@ -544,7 +545,7 @@ export interface ToolCapabilities {
   workspaces: WorkspaceCapability[]
 }
 
-export type LLMToolGuard = 'read_only' | 'policy_checked' | 'approval_required' | 'agent_state' | 'audited_control' | 'external_mcp'
+export type LLMToolGuard = 'read_only' | 'approval_required' | 'agent_state' | 'audited_control' | 'external_mcp'
 
 export interface LLMToolDescriptor {
   name: string

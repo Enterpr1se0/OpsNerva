@@ -57,7 +57,7 @@ INSERT INTO ssh_shell_sessions VALUES
 	if err != nil {
 		t.Fatal(err)
 	}
-	if closed.ExitCode != nil || closed.TerminationReason != "requested_close" || closed.Surface != domain.SSHShellSurfaceAgent {
+	if closed.ExitCode != nil || closed.TerminationReason != "requested_close" || closed.Surface != domain.SSHShellSurfaceAgent || closed.Kind != domain.SSHShellKindSSH {
 		t.Fatalf("closed shell metadata was not normalized: %#v", closed)
 	}
 	failed, err := st.GetSSHShell(ctx, "shell_failed")
@@ -68,7 +68,7 @@ INSERT INTO ssh_shell_sessions VALUES
 		t.Fatalf("reported remote exit metadata was not preserved: %#v", failed)
 	}
 
-	var expiryColumns, exitCodeNotNull, surfaceColumns int
+	var expiryColumns, exitCodeNotNull, surfaceColumns, kindColumns, workspaceColumns, backendColumns int
 	if err := st.db.QueryRow(`SELECT count(*) FROM pragma_table_info('ssh_shell_sessions') WHERE name='expires_at'`).Scan(&expiryColumns); err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,12 @@ INSERT INTO ssh_shell_sessions VALUES
 	if err := st.db.QueryRow(`SELECT count(*) FROM pragma_table_info('ssh_shell_sessions') WHERE name='surface'`).Scan(&surfaceColumns); err != nil {
 		t.Fatal(err)
 	}
-	if expiryColumns != 0 || exitCodeNotNull != 0 || surfaceColumns != 1 {
-		t.Fatalf("shell schema migration incomplete: expiry_columns=%d exit_code_not_null=%d surface_columns=%d", expiryColumns, exitCodeNotNull, surfaceColumns)
+	for name, target := range map[string]*int{"kind": &kindColumns, "workspace_id": &workspaceColumns, "backend": &backendColumns} {
+		if err := st.db.QueryRow(`SELECT count(*) FROM pragma_table_info('ssh_shell_sessions') WHERE name=?`, name).Scan(target); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if expiryColumns != 0 || exitCodeNotNull != 0 || surfaceColumns != 1 || kindColumns != 1 || workspaceColumns != 1 || backendColumns != 1 {
+		t.Fatalf("shell schema migration incomplete: expiry_columns=%d exit_code_not_null=%d surface_columns=%d kind_columns=%d workspace_columns=%d backend_columns=%d", expiryColumns, exitCodeNotNull, surfaceColumns, kindColumns, workspaceColumns, backendColumns)
 	}
 }

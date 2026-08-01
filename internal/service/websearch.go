@@ -306,7 +306,7 @@ func (s *Service) requestTavily(ctx context.Context, settings resolvedWebSearchS
 	httpRequest.Header.Set("Authorization", "Bearer "+settings.APIKey)
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set("Accept", "application/json")
-	httpRequest.Header.Set("User-Agent", "OpsPilot-Tavily/1.0")
+	httpRequest.Header.Set("User-Agent", "OpsNerva-Tavily/1.0")
 	client, err := webSearchHTTPClient(settings)
 	if err != nil {
 		return err

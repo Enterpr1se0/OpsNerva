@@ -91,7 +91,11 @@ func normalizePlanToolResult(ctx context.Context, svc *service.Service, toolName
 		result.Plan = &current
 		for _, step := range current.Steps {
 			if step.Status == "in_progress" {
-				result.NextAction = fmt.Sprintf("continue or finish the current in-progress step %d before updating another step", step.Number)
+				result.NextAction = fmt.Sprintf("update step %d, or revise the remaining plan if its order or scope changed", step.Number)
+				break
+			}
+			if step.Status == "blocked" {
+				result.NextAction = fmt.Sprintf("resume, skip, or revise blocked step %d", step.Number)
 				break
 			}
 		}
@@ -147,7 +151,7 @@ func classifyAgentToolError(toolName string, err error) (code, message string, r
 	var inputValidation *toolInputValidationError
 	switch {
 	case errors.As(err, &transition):
-		return "invalid_state", transition.Error(), false, "continue or finish the current in-progress plan step before updating another step"
+		return "invalid_state", transition.Error(), false, "update the current step or revise the remaining plan"
 	case errors.As(err, &inputValidation):
 		return "validation_failed", inputValidation.Error(), false, "correct the function tool input using this error; do not repeat unchanged input"
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, skills.ErrNotFound):
@@ -174,7 +178,7 @@ func classifyAgentToolError(toolName string, err error) (code, message string, r
 	case strings.Contains(messageLower, "changed"), strings.Contains(messageLower, "conflict"):
 		return "conflict", rootMessage, true, "read the current state again before proposing another change"
 	case strings.Contains(messageLower, "denied"), strings.Contains(messageLower, "forbidden"):
-		return "denied", rootMessage, false, "respect the policy decision and choose a permitted operation"
+		return "denied", rootMessage, false, "respect the denial and choose a permitted operation"
 	case strings.HasPrefix(toolName, "mcp__") && strings.Contains(messageLower, "not ready"):
 		return "provider_failed", "the external MCP server is not ready", false, "tell the operator to check or reconnect the MCP server"
 	case strings.HasPrefix(toolName, "mcp__"):

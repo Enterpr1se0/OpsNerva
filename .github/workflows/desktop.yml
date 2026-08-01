@@ -27,14 +27,14 @@ jobs:
           - name: Linux x64
             os: ubuntu-22.04
             run_tests: true
-            artifact: opspilot-linux-x64
+            artifact: opsnerva-linux-x64
             paths: |
               web/src-tauri/target/release/bundle/appimage/*.AppImage
               web/src-tauri/target/release/bundle/deb/*.deb
           - name: Windows x64
             os: windows-latest
             run_tests: false
-            artifact: opspilot-windows-x64
+            artifact: opsnerva-windows-x64
             paths: web/src-tauri/target/release/bundle/nsis/*-setup.exe
     runs-on: ${{ matrix.os }}
     steps:
@@ -97,7 +97,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist
-          pattern: opspilot-*
+          pattern: opsnerva-*
           merge-multiple: true
 
       - name: Publish release

@@ -1,4 +1,6 @@
 use serde::Deserialize;
+use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -17,6 +19,9 @@ const READY_PREFIX: &str = "OPSPILOT_DESKTOP_READY=";
 struct SidecarState(Mutex<Option<tauri_plugin_shell::process::CommandChild>>);
 
 #[derive(Default)]
+struct DesktopWorkspaceState(Mutex<Option<PathBuf>>);
+
+#[derive(Default)]
 struct TrayState {
     enabled: AtomicBool,
     exiting: AtomicBool,
@@ -27,6 +32,8 @@ struct DesktopReady {
     url: String,
     #[serde(default)]
     mcp_http_enabled: bool,
+    #[serde(default)]
+    workspace_root: String,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -40,8 +47,13 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_shell::init())
         .manage(SidecarState::default())
+        .manage(DesktopWorkspaceState::default())
         .manage(TrayState::default())
-        .invoke_handler(tauri::generate_handler![set_tray_mode, hide_to_tray])
+        .invoke_handler(tauri::generate_handler![
+            set_tray_mode,
+            hide_to_tray,
+            open_workspace_directory
+        ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let tray = window.state::<TrayState>();
@@ -56,7 +68,7 @@ pub fn run() {
             start_sidecar(app)
         })
         .build(tauri::generate_context!())
-        .expect("failed to build OpsPilot desktop application");
+        .expect("failed to build OpsNerva desktop application");
 
     app.run(|handle, event| {
         if let RunEvent::Exit = event {
@@ -80,6 +92,104 @@ fn hide_to_tray(app: tauri::AppHandle) -> Result<(), String> {
     window.hide().map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn open_workspace_directory(
+    workspace_id: String,
+    relative_path: String,
+    state: tauri::State<'_, DesktopWorkspaceState>,
+) -> Result<(), String> {
+    let root = state
+        .0
+        .lock()
+        .map_err(|_| "Workspace state is unavailable".to_string())?
+        .clone()
+        .ok_or_else(|| "Workspace directory is unavailable".to_string())?;
+    let directory = resolve_workspace_directory(&root, &workspace_id, &relative_path)?;
+    open_directory(&directory)
+}
+
+fn resolve_workspace_directory(
+    workspace_root: &Path,
+    workspace_id: &str,
+    relative_path: &str,
+) -> Result<PathBuf, String> {
+    let workspace_id = workspace_id.trim();
+    if workspace_id.is_empty()
+        || workspace_id.len() > 64
+        || workspace_id == "."
+        || workspace_id == ".."
+        || !workspace_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err("Invalid Workspace identifier".into());
+    }
+    let relative = if relative_path.is_empty() {
+        Path::new(".")
+    } else {
+        Path::new(relative_path)
+    };
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::CurDir | Component::Normal(_)))
+    {
+        return Err("Invalid Workspace directory".into());
+    }
+    let workspace = workspace_root
+        .join(workspace_id)
+        .canonicalize()
+        .map_err(|error| format!("Workspace directory is unavailable: {error}"))?;
+    let target = workspace
+        .join(relative)
+        .canonicalize()
+        .map_err(|error| format!("Workspace directory is unavailable: {error}"))?;
+    if !target.starts_with(&workspace) {
+        return Err("Workspace directory escapes its root".into());
+    }
+    if !target.is_dir() {
+        return Err("Workspace path is not a directory".into());
+    }
+    Ok(target)
+}
+
+fn open_directory(directory: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let mut command = Command::new("explorer.exe");
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = Command::new("xdg-open");
+    #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
+    return Err("Opening a file manager is unsupported on this platform".into());
+
+    let mut child = command
+        .arg(file_manager_path(directory))
+        .spawn()
+        .map_err(|error| format!("Open file manager: {error}"))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn file_manager_path(path: &Path) -> PathBuf {
+    let value = path.to_string_lossy();
+    if let Some(value) = value.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{value}"));
+    }
+    if let Some(value) = value.strip_prefix(r"\\?\") {
+        return PathBuf::from(value);
+    }
+    path.to_path_buf()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn file_manager_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -90,13 +200,13 @@ fn show_main_window(app: &tauri::AppHandle) {
 
 fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let menu = MenuBuilder::new(app)
-        .text("open", "打开 OpsPilot")
+        .text("open", "打开 OpsNerva")
         .separator()
         .text("quit", "退出")
         .build()?;
     let mut tray = TrayIconBuilder::with_id("opspilot")
         .menu(&menu)
-        .tooltip("OpsPilot")
+        .tooltip("OpsNerva")
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => show_main_window(app),
@@ -209,6 +319,13 @@ fn open_application(app: &tauri::AppHandle, ready: DesktopReady) {
     app.state::<TrayState>()
         .enabled
         .store(ready.mcp_http_enabled, Ordering::Release);
+    if !ready.workspace_root.trim().is_empty() {
+        app.state::<DesktopWorkspaceState>()
+            .0
+            .lock()
+            .unwrap()
+            .replace(PathBuf::from(&ready.workspace_root));
+    }
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.navigate(destination);
     }
@@ -253,16 +370,25 @@ mod tests {
     #[test]
     fn parses_desktop_ready_event() {
         assert_eq!(parse_ready("ordinary log line").unwrap(), None);
-        let ready = parse_ready(r#"OPSPILOT_DESKTOP_READY={"url":"http://127.0.0.1:49152"}"#)
-            .unwrap()
-            .unwrap();
+        let ready = parse_ready(
+            r#"OPSPILOT_DESKTOP_READY={"url":"http://127.0.0.1:49152","workspace_root":"/tmp/opspilot/workspace"}"#,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(
             ready,
             DesktopReady {
                 url: "http://127.0.0.1:49152".into(),
                 mcp_http_enabled: false,
+                workspace_root: "/tmp/opspilot/workspace".into(),
             }
         );
+    }
+
+    #[test]
+    fn rejects_workspace_directory_traversal_before_filesystem_access() {
+        assert!(resolve_workspace_directory(Path::new("/unused"), "default", "../secret").is_err());
+        assert!(resolve_workspace_directory(Path::new("/unused"), "../default", ".").is_err());
     }
 
     #[test]
@@ -270,6 +396,7 @@ mod tests {
         let ready = DesktopReady {
             url: "http://127.0.0.1:49152".into(),
             mcp_http_enabled: true,
+            workspace_root: String::new(),
         };
         let url = application_url(&ready).unwrap();
         assert_eq!(url.as_str(), "http://127.0.0.1:49152/");
@@ -280,6 +407,7 @@ mod tests {
         let ready = DesktopReady {
             url: "https://example.com/".into(),
             mcp_http_enabled: false,
+            workspace_root: String::new(),
         };
         assert!(application_url(&ready).is_err());
     }

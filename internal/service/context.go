@@ -18,6 +18,8 @@ type executionOwner struct {
 	Arguments  string
 }
 
+const mcpClientSessionID = "mcp-server"
+
 // WithSessionID binds an Agent conversation to all audited runs created by
 // tools below this context. Session IDs never come from model tool arguments.
 func WithSessionID(ctx context.Context, sessionID string) context.Context {
@@ -34,6 +36,12 @@ func SessionIDFromContext(ctx context.Context) string {
 	}
 	value, _ := ctx.Value(sessionContextKey{}).(string)
 	return value
+}
+
+// WithMCPClientSession isolates MCP-owned interactive shells from Agent
+// conversations and operator terminals without trusting a model-supplied ID.
+func WithMCPClientSession(ctx context.Context) context.Context {
+	return WithSessionID(ctx, mcpClientSessionID)
 }
 
 // WithExecutionOwner binds a service run to the Agent tool card that started

@@ -7,14 +7,16 @@ import (
 )
 
 type ExecutionEvent struct {
-	SessionID  string `json:"session_id"`
-	RunID      string `json:"run_id"`
-	ToolCallID string `json:"tool_call_id,omitempty"`
-	ToolName   string `json:"tool_name,omitempty"`
-	Stream     string `json:"stream,omitempty"`
-	Content    string `json:"content,omitempty"`
-	Status     string `json:"status,omitempty"`
-	Sequence   uint64 `json:"sequence"`
+	SessionID        string `json:"session_id"`
+	RunID            string `json:"run_id"`
+	ToolCallID       string `json:"tool_call_id,omitempty"`
+	ToolName         string `json:"tool_name,omitempty"`
+	Stream           string `json:"stream,omitempty"`
+	Content          string `json:"content,omitempty"`
+	Status           string `json:"status,omitempty"`
+	TransferredBytes int64  `json:"transferred_bytes,omitempty"`
+	TotalBytes       int64  `json:"total_bytes,omitempty"`
+	Sequence         uint64 `json:"sequence"`
 }
 
 type executionSubscriber struct {

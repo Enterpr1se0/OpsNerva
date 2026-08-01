@@ -10,6 +10,9 @@ import (
 )
 
 func (s *Store) CreateSSHShell(ctx context.Context, shell domain.SSHShell) error {
+	if shell.Kind == "" {
+		shell.Kind = domain.SSHShellKindSSH
+	}
 	elevated := 0
 	if shell.Elevated {
 		elevated = 1
@@ -19,9 +22,10 @@ func (s *Store) CreateSSHShell(ctx context.Context, shell domain.SSHShell) error
 		exitCode = *shell.ExitCode
 	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO ssh_shell_sessions(
-id,run_id,session_id,surface,host_id,host_name,username,elevated,cwd,status,cols,rows,last_sequence,
-exit_code,termination_reason,error,started_at,ended_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)`,
-		shell.ID, shell.RunID, shell.SessionID, shell.Surface, shell.HostID, shell.HostName, shell.User,
+id,run_id,session_id,kind,surface,host_id,host_name,workspace_id,backend,username,elevated,cwd,status,cols,rows,last_sequence,
+exit_code,termination_reason,error,started_at,ended_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)`,
+		shell.ID, shell.RunID, shell.SessionID, shell.Kind, shell.Surface, shell.HostID, shell.HostName,
+		shell.WorkspaceID, shell.Backend, shell.User,
 		elevated, shell.Cwd, shell.Status, shell.Cols, shell.Rows, shell.LastSequence,
 		exitCode, shell.TerminationReason, shell.Error, formatTime(shell.StartedAt))
 	return err
@@ -41,8 +45,8 @@ func (s *Store) UpdateSSHShell(ctx context.Context, shell domain.SSHShell) error
 		exitCode = *shell.ExitCode
 	}
 	result, err := s.db.ExecContext(ctx, `UPDATE ssh_shell_sessions SET
-host_name=?,username=?,elevated=?,cwd=?,status=?,cols=?,rows=?,last_sequence=?,exit_code=?,termination_reason=?,error=?,ended_at=?
-WHERE id=?`, shell.HostName, shell.User, elevated, shell.Cwd, shell.Status, shell.Cols, shell.Rows,
+kind=?,surface=?,host_name=?,workspace_id=?,backend=?,username=?,elevated=?,cwd=?,status=?,cols=?,rows=?,last_sequence=?,exit_code=?,termination_reason=?,error=?,ended_at=?
+WHERE id=?`, shell.Kind, shell.Surface, shell.HostName, shell.WorkspaceID, shell.Backend, shell.User, elevated, shell.Cwd, shell.Status, shell.Cols, shell.Rows,
 		shell.LastSequence, exitCode, shell.TerminationReason, shell.Error, ended, shell.ID)
 	if err != nil {
 		return err
@@ -74,7 +78,7 @@ shell_id,sequence,stream,source,content_redacted,sensitive,input_bytes,status,cr
 }
 
 func (s *Store) GetSSHShell(ctx context.Context, id string) (domain.SSHShell, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id,run_id,session_id,surface,host_id,host_name,username,elevated,cwd,
+	row := s.db.QueryRowContext(ctx, `SELECT id,run_id,session_id,kind,surface,host_id,host_name,workspace_id,backend,username,elevated,cwd,
 status,cols,rows,last_sequence,exit_code,termination_reason,error,started_at,ended_at
 FROM ssh_shell_sessions WHERE id=?`, id)
 	return scanSSHShell(row)
@@ -85,7 +89,7 @@ func (s *Store) ListSSHShells(ctx context.Context, sessionID string, activeOnly 
 	if activeOnly {
 		active = 1
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id,run_id,session_id,surface,host_id,host_name,username,elevated,cwd,
+	rows, err := s.db.QueryContext(ctx, `SELECT id,run_id,session_id,kind,surface,host_id,host_name,workspace_id,backend,username,elevated,cwd,
 status,cols,rows,last_sequence,exit_code,termination_reason,error,started_at,ended_at
 FROM ssh_shell_sessions
 WHERE (?='' OR session_id=?) AND (?=0 OR status IN ('starting','running','stopping'))
@@ -152,8 +156,8 @@ func scanSSHShell(row scanner) (domain.SSHShell, error) {
 	var exitCode sql.NullInt64
 	var started string
 	var ended sql.NullString
-	err := row.Scan(&shell.ID, &shell.RunID, &shell.SessionID, &shell.Surface, &shell.HostID, &shell.HostName,
-		&shell.User, &elevated, &shell.Cwd, &shell.Status, &shell.Cols, &shell.Rows,
+	err := row.Scan(&shell.ID, &shell.RunID, &shell.SessionID, &shell.Kind, &shell.Surface, &shell.HostID, &shell.HostName,
+		&shell.WorkspaceID, &shell.Backend, &shell.User, &elevated, &shell.Cwd, &shell.Status, &shell.Cols, &shell.Rows,
 		&shell.LastSequence, &exitCode, &shell.TerminationReason, &shell.Error, &started, &ended)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.SSHShell{}, ErrNotFound

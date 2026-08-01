@@ -59,12 +59,26 @@ func TestRemoteFileReadScriptKeepsParseableMetadata(t *testing.T) {
 	}
 }
 
+func TestDecorateFileReadPageReportsNextOffset(t *testing.T) {
+	metadata := domain.FileMetadata{Size: 300000, OffsetBytes: 131072}
+	decorateFileReadPage(&metadata, 131072, 0)
+	if !metadata.HasMore || metadata.NextOffset != 262144 {
+		t.Fatalf("next file page was not exposed: %#v", metadata)
+	}
+
+	lastPage := domain.FileMetadata{Size: 200000, OffsetBytes: 131072}
+	decorateFileReadPage(&lastPage, 131072, 0)
+	if lastPage.HasMore || lastPage.NextOffset != 0 {
+		t.Fatalf("completed file read incorrectly advertised another page: %#v", lastPage)
+	}
+}
+
 func TestRemoteFileEditApprovesDeclarativeDiffAndBuildsScriptAfterApproval(t *testing.T) {
 	svc, transport, host := newTestService(t)
 	svc.validators["nginx"] = config.Validator{ID: "nginx", Scope: "remote", Program: "nginx", Args: []string{"-t", "-c", "{{path}}"}, TimeoutSeconds: 15, PathPatterns: []string{"/etc/nginx/**"}}
 	transport.stdout = []byte(fileValidationMarker + "\n" + fileAfterMarker + "\n" + strings.Repeat("a", 64) + "  /etc/nginx/nginx.conf\n")
 	diff := "@@ -1 +1 @@\n-events {}\n+events { worker_connections 1024; }\n"
-	pending, err := svc.EditRemoteFile(context.Background(), host.ID, "/etc/nginx/nginx.conf", diff, "nginx", false, "update nginx", "test")
+	pending, err := svc.EditRemoteFile(context.Background(), host.ID, "/etc/nginx/nginx.conf", diff, "nginx", false, "update nginx", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +159,7 @@ func TestRemoteFileSearchSupportsExplicitModesAndNoMatchSuccess(t *testing.T) {
 func TestRemoteFileSearchReturnsStructuredNoMatchResult(t *testing.T) {
 	svc, transport, host := newTestService(t)
 	transport.stdout = []byte{}
-	pending, err := svc.SearchFile(context.Background(), host.ID, "/etc/app.conf", "port|socks", domain.FileSearchRegex, 0, false, "test")
+	pending, err := svc.SearchFile(context.Background(), host.ID, "/etc/app.conf", "port|socks", domain.FileSearchRegex, 0, false, "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +178,7 @@ func TestRemoteFileSearchReturnsStructuredNoMatchResult(t *testing.T) {
 	}
 	transport.stderr = []byte("grep: /etc/app.conf: Permission denied\n")
 	transport.exitCode = 2
-	failedPending, err := svc.SearchFile(context.Background(), host.ID, "/etc/app.conf", "port", domain.FileSearchLiteral, 0, false, "test")
+	failedPending, err := svc.SearchFile(context.Background(), host.ID, "/etc/app.conf", "port", domain.FileSearchLiteral, 0, false, "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}

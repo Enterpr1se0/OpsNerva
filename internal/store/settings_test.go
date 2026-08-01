@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"runtime"
 	"testing"
 
 	"eino-ops-agent/internal/domain"
@@ -49,8 +50,8 @@ INSERT INTO session_approval_grants VALUES('session','fingerprint','2026-01-01T0
 	if settings.ApprovalExplanationsEnabled {
 		t.Fatalf("legacy disabled explanation was not preserved: %#v", settings)
 	}
-	if settings.WorkspaceShellMode != domain.WorkspaceShellModeSandbox {
-		t.Fatalf("legacy settings did not receive the fail-safe sandbox mode: %#v", settings)
+	if settings.WorkspaceShellMode != domain.DefaultWorkspaceShellMode(runtime.GOOS) {
+		t.Fatalf("legacy settings did not receive the platform Workspace Shell mode: %#v", settings)
 	}
 	if settings.SubagentTimeoutSeconds != domain.DefaultSubagentTimeoutSeconds || settings.SubagentModelProviderID != "" {
 		t.Fatalf("legacy settings did not receive subagent defaults: %#v", settings)
@@ -97,6 +98,41 @@ INSERT INTO session_approval_grants VALUES('session','fingerprint','2026-01-01T0
 	if !settings.ApprovalExplanationsEnabled || settings.AgentMaxIterations != 20 || settings.ApprovalMode != domain.ApprovalModeAuto || settings.SubagentModelProviderID != "model_fixture" || settings.SubagentTimeoutSeconds != 45 || settings.WorkspaceShellMode != domain.WorkspaceShellModeDisabled || !settings.MCPHTTPEnabled || !settings.MCPHTTPTokenConfigured || settings.MCPHTTPTokenHash != "fixture-token-hash" {
 		// Existing installations retain their explicitly stored iteration value.
 		t.Fatalf("migrated explanation setting did not persist: %#v", settings)
+	}
+}
+
+func TestWorkspaceShellPlatformDefaultUsesHostOnWindows(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, t.TempDir()+"/settings.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := st.db.ExecContext(ctx, `UPDATE system_settings SET workspace_shell_mode='sandbox' WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.applyWorkspaceShellPlatformDefault(ctx, "windows"); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := st.GetSystemSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.WorkspaceShellMode != domain.WorkspaceShellModeHost {
+		t.Fatalf("Windows default did not select Host Shell: %#v", settings)
+	}
+	if _, err := st.db.ExecContext(ctx, `UPDATE system_settings SET workspace_shell_mode='disabled' WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.applyWorkspaceShellPlatformDefault(ctx, "windows"); err != nil {
+		t.Fatal(err)
+	}
+	settings, err = st.GetSystemSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.WorkspaceShellMode != domain.WorkspaceShellModeDisabled {
+		t.Fatalf("Windows migration overwrote an explicit disabled mode: %#v", settings)
 	}
 }
 

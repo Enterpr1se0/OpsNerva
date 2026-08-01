@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,7 +15,6 @@ import (
 
 	"eino-ops-agent/internal/config"
 	"eino-ops-agent/internal/domain"
-	"eino-ops-agent/internal/policy"
 	"eino-ops-agent/internal/security"
 	"eino-ops-agent/internal/store"
 )
@@ -33,10 +33,16 @@ func newWorkspaceService(t *testing.T, access string) (*Service, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine, _ := policy.Load("")
 	cfg := config.Default()
 	cfg.DataDir = dataDir
-	svc := New(st, engine, nil, encryptor, security.NewRedactor(), cfg.Limits, cfg)
+	svc := New(st, nil, encryptor, security.NewRedactor(), cfg.Limits, cfg)
+	t.Cleanup(func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := svc.Shutdown(shutdownCtx); err != nil {
+			t.Errorf("shutdown service: %v", err)
+		}
+	})
 	if err := svc.InitializeWorkspaces(ctx, workspaceRoot); err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +129,7 @@ func runApprovedWorkspaceAccess(t *testing.T, svc *Service, invoke func(context.
 	case <-base.Done():
 		t.Fatal("timed out waiting for Workspace file approval")
 	}
-	if pending.Status != "approval_required" || pending.Risk != domain.RiskReadOnly || pending.ApprovalID == "" {
+	if pending.Status != "approval_required" || pending.ApprovalID == "" {
 		t.Fatalf("Workspace file access skipped approval: %#v", pending)
 	}
 	select {
@@ -230,13 +236,13 @@ func TestWorkspaceReadPatchAndTraversalProtection(t *testing.T) {
 		t.Fatal(err)
 	}
 	read := runApprovedWorkspaceAccess(t, svc, func(ctx context.Context) (domain.ExecResult, error) {
-		return svc.ReadWorkspaceFile(ctx, "project", "app.conf", 0, 0, "test")
+		return svc.ReadWorkspaceFile(ctx, "project", "app.conf", 0, 0, "eino-agent")
 	})
 	if read.Status != "completed" || read.Stdout != "port=8080\n" || read.File == nil || read.File.SHA256 == "" {
 		t.Fatalf("unexpected workspace read: %#v", read)
 	}
 	patch := "--- app.conf\n+++ app.conf\n@@ -1,1 +1,1 @@\n-port=8080\n+port=9090\n"
-	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", patch, "", "change port", "test")
+	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", patch, "", "change port", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +269,7 @@ func TestWorkspaceReadPreservesCompleteLargeFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := runApprovedWorkspaceAccess(t, svc, func(ctx context.Context) (domain.ExecResult, error) {
-		return svc.ReadWorkspaceFile(ctx, "project", "large.log", 0, 0, "test")
+		return svc.ReadWorkspaceFile(ctx, "project", "large.log", 0, 0, "eino-agent")
 	})
 	if result.Stdout != want || result.File == nil || result.File.ReturnedBytes != len(want) {
 		t.Fatalf("complete workspace file was not returned: got=%d want=%d metadata=%#v", len(result.Stdout), len(want), result.File)
@@ -276,14 +282,14 @@ func TestWorkspaceReadNegativeOffsetReadsFromFileEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := runApprovedWorkspaceAccess(t, svc, func(ctx context.Context) (domain.ExecResult, error) {
-		return svc.ReadWorkspaceFile(ctx, "project", "tail.log", 0, -4, "test")
+		return svc.ReadWorkspaceFile(ctx, "project", "tail.log", 0, -4, "eino-agent")
 	})
 	if result.Stdout != "6789" || result.File == nil || result.File.OffsetBytes != 6 || result.File.ReturnedBytes != 4 {
 		t.Fatalf("negative Workspace offset returned %#v", result)
 	}
 
 	result = runApprovedWorkspaceAccess(t, svc, func(ctx context.Context) (domain.ExecResult, error) {
-		return svc.ReadWorkspaceFile(ctx, "project", "tail.log", 0, -100, "test")
+		return svc.ReadWorkspaceFile(ctx, "project", "tail.log", 0, -100, "eino-agent")
 	})
 	if result.Stdout != "0123456789" || result.File == nil || result.File.OffsetBytes != 0 {
 		t.Fatalf("oversized negative Workspace offset returned %#v", result)
@@ -297,7 +303,7 @@ func TestWorkspaceSearchReturnsLiteralMatchesWithContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := runApprovedWorkspaceAccess(t, svc, func(ctx context.Context) (domain.ExecResult, error) {
-		return svc.SearchWorkspace(ctx, "project", "search.log", "needle", domain.FileSearchLiteral, 1, "test")
+		return svc.SearchWorkspace(ctx, "project", "search.log", "needle", domain.FileSearchLiteral, 1, "eino-agent")
 	})
 	want := "1-before\n2:needle one\n3-middle\n4:needle two\n5-after\n"
 	if result.Stdout != want {
@@ -307,19 +313,19 @@ func TestWorkspaceSearchReturnsLiteralMatchesWithContext(t *testing.T) {
 		t.Fatalf("Workspace literal search metadata = %#v", result.Search)
 	}
 	literalPipe := runApprovedWorkspaceAccess(t, svc, func(ctx context.Context) (domain.ExecResult, error) {
-		return svc.SearchWorkspace(ctx, "project", "search.log", "port|socks", domain.FileSearchLiteral, 0, "test")
+		return svc.SearchWorkspace(ctx, "project", "search.log", "port|socks", domain.FileSearchLiteral, 0, "eino-agent")
 	})
 	if literalPipe.Stdout != "6:port|socks\n" {
 		t.Fatalf("Workspace literal search interpreted pipe as regex: %q", literalPipe.Stdout)
 	}
 	regex := runApprovedWorkspaceAccess(t, svc, func(ctx context.Context) (domain.ExecResult, error) {
-		return svc.SearchWorkspace(ctx, "project", "search.log", "needle|port", domain.FileSearchRegex, 0, "test")
+		return svc.SearchWorkspace(ctx, "project", "search.log", "needle|port", domain.FileSearchRegex, 0, "eino-agent")
 	})
 	if regex.Stdout != "2:needle one\n4:needle two\n6:port|socks\n" || regex.Search == nil || !regex.Search.Found {
 		t.Fatalf("Workspace regex search = %#v", regex)
 	}
 	noMatches := runApprovedWorkspaceAccess(t, svc, func(ctx context.Context) (domain.ExecResult, error) {
-		return svc.SearchWorkspace(ctx, "project", "search.log", "absent", domain.FileSearchLiteral, 0, "test")
+		return svc.SearchWorkspace(ctx, "project", "search.log", "absent", domain.FileSearchLiteral, 0, "eino-agent")
 	})
 	if noMatches.Status != "completed" || noMatches.Stdout != "" || noMatches.Search == nil || noMatches.Search.Found || noMatches.Message != "no matches found" {
 		t.Fatalf("Workspace no-match result = %#v", noMatches)
@@ -338,11 +344,11 @@ func TestWorkspaceFileAccessRequiresFreshApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := WithSessionID(context.Background(), "file-read-session")
-	pending, err := svc.ReadWorkspaceFile(ctx, "project", "config.yaml", 0, 0, "test")
+	pending, err := svc.ReadWorkspaceFile(ctx, "project", "config.yaml", 0, 0, "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pending.Status != "approval_required" || pending.Risk != domain.RiskReadOnly || pending.Stdout != "" {
+	if pending.Status != "approval_required" || pending.Stdout != "" {
 		t.Fatalf("file content was available before approval: %#v", pending)
 	}
 	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed", "operator")
@@ -356,7 +362,7 @@ func TestWorkspacePatchUsesCurrentContextWithoutSHABinding(t *testing.T) {
 	path := filepath.Join(root, "app.conf")
 	_ = os.WriteFile(path, []byte("a\n"), 0o600)
 	patch := "--- app.conf\n+++ app.conf\n@@ -1 +1 @@\n-a\n+b\n"
-	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", patch, "", "change", "test")
+	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", patch, "", "change", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -377,7 +383,7 @@ func TestWorkspaceFileEditPreservesMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	patch := "@@ -1 +1 @@\n-enabled=false\n+enabled=true\n"
-	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", patch, "", "enable app", "test")
+	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", patch, "", "enable app", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,7 +405,7 @@ func TestWorkspaceFileEditRejectsMalformedDiffAndMissingTarget(t *testing.T) {
 	if _, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", "not a diff", "", "change", "test"); err == nil || !strings.Contains(err.Error(), "unified diff") {
 		t.Fatalf("malformed diff was accepted: %v", err)
 	}
-	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "missing.conf", "@@ -1 +1 @@\n-old\n+new\n", "", "change", "test")
+	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "missing.conf", "@@ -1 +1 @@\n-old\n+new\n", "", "change", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -428,12 +434,43 @@ func TestWorkspaceListHidesSensitiveControlPlaneNames(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	result, err := svc.ListWorkspaceFiles(context.Background(), "project", ".", "test")
+	result, err := svc.ListWorkspaceFiles(context.Background(), "project", "", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(result.Stdout, "README.md") || strings.Contains(result.Stdout, ".env") || strings.Contains(result.Stdout, "credentials") || strings.Contains(result.Stdout, "master.key") {
 		t.Fatalf("workspace listing exposed sensitive names: %s", result.Stdout)
+	}
+	run, err := svc.store.GetRun(context.Background(), result.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request domain.ExecRequest
+	if err := json.Unmarshal([]byte(run.RequestJSON), &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.RelativePath != "." {
+		t.Fatalf("omitted Workspace list path was not normalized to root: %#v", request)
+	}
+}
+
+func TestWorkspaceListRejectsAbsoluteDisplayPathBeforeRun(t *testing.T) {
+	svc, _ := newWorkspaceService(t, "read_only")
+	ctx := context.Background()
+	before, err := svc.store.SearchRuns(ctx, "", "", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.ListWorkspaceFiles(ctx, "project", "/workspace", "test")
+	if err == nil || !strings.Contains(err.Error(), `omit path or use "."`) || !strings.Contains(err.Error(), "must be relative") {
+		t.Fatalf("absolute Workspace display path returned unclear error: %v", err)
+	}
+	after, searchErr := svc.store.SearchRuns(ctx, "", "", "", 0)
+	if searchErr != nil {
+		t.Fatal(searchErr)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("invalid Workspace path created an execution Run: before=%d after=%d", len(before), len(after))
 	}
 }
 
@@ -450,7 +487,7 @@ func TestWorkspacePreValidationFailureDoesNotTouchOriginal(t *testing.T) {
 	}
 	svc.validators["fixture"] = config.Validator{ID: "fixture", Scope: "workspace", Program: validator, Args: []string{"{{path}}"}, TimeoutSeconds: 5, PathPatterns: []string{filepath.Join(root, "**")}}
 	patch := "@@ -1 +1 @@\n-port=8080\n+port=9090\n"
-	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", patch, "fixture", "change port", "test")
+	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", patch, "fixture", "change port", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -683,11 +720,11 @@ func TestWorkspaceDirectUploadUsesOneVersionBoundApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := fmt.Sprintf("%x", sha256.Sum256(content))
-	pending, err := svc.UploadWorkspaceFileToHost(context.Background(), host.ID, "project", "deploy.yaml", digest, "/tmp/deploy.yaml", "deploy exact fixture", "test")
+	pending, err := svc.UploadWorkspaceFileToHost(context.Background(), host.ID, "project", "deploy.yaml", digest, "/tmp/deploy.yaml", "deploy exact fixture", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pending.Status != "approval_required" || pending.Risk != domain.RiskChange {
+	if pending.Status != "approval_required" {
 		t.Fatalf("direct Workspace upload bypassed one approval: %#v", pending)
 	}
 	approval, err := svc.Store().GetApproval(context.Background(), pending.ApprovalID)
@@ -705,7 +742,7 @@ func TestWorkspaceDirectUploadUsesOneVersionBoundApproval(t *testing.T) {
 		t.Fatalf("transport did not receive the resolved version-bound source: %#v", transport.calls)
 	}
 
-	stale, err := svc.UploadWorkspaceFileToHost(context.Background(), host.ID, "project", "deploy.yaml", digest, "/tmp/deploy-2.yaml", "detect source change", "test")
+	stale, err := svc.UploadWorkspaceFileToHost(context.Background(), host.ID, "project", "deploy.yaml", digest, "/tmp/deploy-2.yaml", "detect source change", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -732,11 +769,11 @@ func TestWorkspaceShellRunsInApprovalGatedSandbox(t *testing.T) {
 		t.Fatalf("workspace shell traversal cwd was not rejected before approval: %v", err)
 	}
 
-	pending, err := svc.RunWorkspaceShell(context.Background(), "project", "test ! -e /home/pig\npwd\nmkdir -p extracted\nprintf 'ready\\n' > extracted/value.txt\ncat .env || true\n", ".", nil, 10, "extract a release archive", "test")
+	pending, err := svc.RunWorkspaceShell(context.Background(), "project", "test ! -e /home/pig\npwd\nmkdir -p extracted\nprintf 'ready\\n' > extracted/value.txt\ncat .env || true\n", ".", nil, 10, "extract a release archive", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pending.Status != "approval_required" || pending.Risk != domain.RiskChange {
+	if pending.Status != "approval_required" {
 		t.Fatalf("workspace shell skipped exact approval: %#v", pending)
 	}
 	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed sandboxed extraction", "operator")
@@ -769,7 +806,7 @@ func TestReadOnlyWorkspaceShellCannotPersistChanges(t *testing.T) {
 		t.Skip("bubblewrap is not installed")
 	}
 	svc, root := newWorkspaceService(t, "read_only")
-	pending, err := svc.RunWorkspaceShell(context.Background(), "project", "printf 'blocked\\n' > created.txt", ".", nil, 10, "verify read-only mount", "test")
+	pending, err := svc.RunWorkspaceShell(context.Background(), "project", "printf 'blocked\\n' > created.txt", ".", nil, 10, "verify read-only mount", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -800,11 +837,11 @@ func TestHostWorkspaceShellRequiresFreshOneTimeApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := WithSessionID(context.Background(), "host-shell-session")
-	pending, err := svc.RunWorkspaceShell(ctx, "project", "pwd\nprintf 'ok\\n' > host-created.txt", ".", nil, 10, "exercise host shell", "test")
+	pending, err := svc.RunWorkspaceShell(ctx, "project", "pwd\nprintf 'ok\\n' > host-created.txt", ".", nil, 10, "exercise host shell", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pending.Status != "approval_required" || !containsString(pending.PolicyHits, "workspace_host_shell") {
+	if pending.Status != "approval_required" {
 		t.Fatalf("host shell did not request explicit approval: %#v", pending)
 	}
 	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed once", "operator")
@@ -817,9 +854,122 @@ func TestHostWorkspaceShellRequiresFreshOneTimeApproval(t *testing.T) {
 	if content, err := os.ReadFile(filepath.Join(root, "host-created.txt")); err != nil || string(content) != "ok\n" {
 		t.Fatalf("host shell did not write the workspace fixture: content=%q err=%v", content, err)
 	}
-	repeated, err := svc.RunWorkspaceShell(ctx, "project", "pwd\nprintf 'ok\\n' > host-created.txt", ".", nil, 10, "exercise host shell", "test")
+	repeated, err := svc.RunWorkspaceShell(ctx, "project", "pwd\nprintf 'ok\\n' > host-created.txt", ".", nil, 10, "exercise host shell", "eino-agent")
 	if err != nil || repeated.Status != "approval_required" {
 		t.Fatalf("repeated host shell reused approval: %#v err=%v", repeated, err)
+	}
+}
+
+func TestInteractiveHostWorkspaceShellStreamsInputAndOutput(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is not installed")
+	}
+	svc, _ := newWorkspaceService(t, "read_write")
+	hostMode := domain.WorkspaceShellModeHost
+	if _, err := svc.SaveSystemSettings(context.Background(), domain.SystemSettingsInput{
+		AgentMaxIterations: domain.DefaultAgentMaxIterations, WorkspaceShellMode: &hostMode,
+	}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.PrepareChatSession(context.Background(), "workspace-pty-session", "project", "test"); err != nil {
+		t.Fatal(err)
+	}
+	ctx := WithSessionID(context.Background(), "workspace-pty-session")
+	pending, err := svc.StartWorkspaceShell(ctx, "project", ".", map[string]string{"PTY_FIXTURE": "ready"}, 100, 28, "open project terminal", "eino-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status != "approval_required" {
+		t.Fatalf("interactive Workspace shell skipped approval: %#v", pending)
+	}
+	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed interactive shell", "operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approved.Shell == nil {
+		t.Fatalf("approved result omitted shell: %#v", approved)
+	}
+	shell := *approved.Shell
+	if shell.Kind != domain.SSHShellKindWorkspace || shell.WorkspaceID != "project" || shell.Backend != domain.WorkspaceShellModeHost || shell.SessionID != "workspace-pty-session" || shell.Surface != domain.WorkspaceShellSurfaceAgent {
+		t.Fatalf("unexpected Workspace PTY metadata: %#v", shell)
+	}
+	if _, err := svc.SetChatSessionWorkspace(context.Background(), shell.SessionID, "", "test"); err == nil {
+		t.Fatal("active Workspace terminal allowed conversation Workspace switch")
+	}
+	if _, err := svc.WriteWorkspaceShell(ctx, shell.ID, shell.SessionID, shell.WorkspaceID, "printf 'workspace-pty:%s\\n' \"$PTY_FIXTURE\"\r", "", "eino-agent"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		snapshot, snapshotErr := svc.GetWorkspaceShellSnapshot(ctx, shell.ID, shell.SessionID, shell.WorkspaceID, 0, 200*time.Millisecond, true, "", "eino-agent")
+		if snapshotErr != nil {
+			t.Fatal(snapshotErr)
+		}
+		if strings.Contains(snapshot.RecentOutput, "workspace-pty:ready") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Workspace PTY output did not arrive: %#v", snapshot)
+		}
+	}
+	if _, err := svc.WriteWorkspaceShell(ctx, shell.ID, shell.SessionID, shell.WorkspaceID, "sleep 10\r", "", "eino-agent"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if _, err := svc.InterruptWorkspaceShell(ctx, shell.ID, shell.SessionID, shell.WorkspaceID, "", "eino-agent"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.WriteWorkspaceShell(ctx, shell.ID, shell.SessionID, shell.WorkspaceID, "printf 'workspace-interrupt-ok\\n'\r", "", "eino-agent"); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		snapshot, snapshotErr := svc.GetWorkspaceShellSnapshot(ctx, shell.ID, shell.SessionID, shell.WorkspaceID, 0, 200*time.Millisecond, true, "", "eino-agent")
+		if snapshotErr != nil {
+			t.Fatal(snapshotErr)
+		}
+		if strings.Contains(snapshot.RecentOutput, "workspace-interrupt-ok") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Workspace PTY interrupt did not restore the prompt: %#v", snapshot)
+		}
+	}
+	if _, err := svc.CloseWorkspaceShell(ctx, shell.ID, shell.SessionID, shell.WorkspaceID, "", "eino-agent"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInteractiveSandboxWorkspaceShellHasTTY(t *testing.T) {
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		t.Skip("bubblewrap is not installed")
+	}
+	svc, _ := newWorkspaceService(t, "read_write")
+	shell, err := svc.StartOperatorWorkspaceShell(context.Background(), "project", ".", "admin-web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shell.Backend != domain.WorkspaceShellModeSandbox {
+		t.Fatalf("unexpected Workspace PTY backend: %#v", shell)
+	}
+	if err := svc.SendSSHShellInput(context.Background(), shell.ID, "", "test -t 0 && printf 'sandbox-tty-ok\\n'\r", "", "admin-web"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		snapshot, snapshotErr := svc.GetSSHShellSnapshot(context.Background(), shell.ID, "", 0, 200*time.Millisecond, true, "", "")
+		if snapshotErr != nil {
+			t.Fatal(snapshotErr)
+		}
+		if strings.Contains(snapshot.RecentOutput, "sandbox-tty-ok") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("sandbox Workspace PTY has no working TTY: %#v", snapshot)
+		}
+	}
+	if _, err := svc.CloseSSHShell(context.Background(), shell.ID, "", "", "admin-web"); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -882,7 +1032,7 @@ func TestHostWorkspaceShellRejectsReadOnlyDisabledAndBackendSwitch(t *testing.T)
 	}, "test"); err != nil {
 		t.Fatal(err)
 	}
-	pending, err := svc.RunWorkspaceShell(context.Background(), "project", "pwd", ".", nil, 10, "inspect", "test")
+	pending, err := svc.RunWorkspaceShell(context.Background(), "project", "pwd", ".", nil, 10, "inspect", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -905,6 +1055,7 @@ func TestWorkspaceShellBackendValidation(t *testing.T) {
 	for _, req := range []domain.ExecRequest{
 		{Mode: domain.ExecWorkspaceShell, WorkspaceID: "project", Script: "pwd"},
 		{Mode: domain.ExecWorkspaceShell, WorkspaceID: "project", WorkspaceShellBackend: "automatic", Script: "pwd"},
+		{Mode: domain.ExecWorkspaceShellStart, WorkspaceID: "project", WorkspaceShellBackend: "automatic", ShellCols: 120, ShellRows: 32},
 		{Mode: domain.ExecProgram, Program: "pwd", WorkspaceShellBackend: domain.WorkspaceShellModeHost},
 	} {
 		if err := validateRequestLimits(req, limits, nil); err == nil {
@@ -917,6 +1068,13 @@ func TestWorkspaceShellBackendValidation(t *testing.T) {
 	}
 	if err := validateRequestLimits(valid, limits, nil); err != nil {
 		t.Fatalf("valid workspace shell backend was rejected: %v", err)
+	}
+	validStart := domain.ExecRequest{
+		Mode: domain.ExecWorkspaceShellStart, WorkspaceID: "project", WorkspaceShellBackend: domain.WorkspaceShellModeSandbox,
+		Cwd: ".", ShellCols: 120, ShellRows: 32,
+	}
+	if err := validateRequestLimits(validStart, limits, nil); err != nil {
+		t.Fatalf("valid interactive Workspace shell was rejected: %v", err)
 	}
 }
 

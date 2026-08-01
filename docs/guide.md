@@ -1,13 +1,13 @@
-# OpsPilot 使用手册
+# OpsNerva 使用手册
 
-本文是 OpsPilot 的完整使用与配置手册，覆盖安装、模型与主机配置、Workspace、审批与审计等全部功能。项目概览与快速上手见仓库根目录的 [README](../README.md)，实现边界与安全设计见[架构文档](architecture.md)。
+本文是 OpsNerva 的完整使用与配置手册，覆盖安装、模型与主机配置、Workspace、审批与审计等全部功能。项目概览与快速上手见仓库根目录的 [README](../README.md)，实现边界与安全设计见[架构文档](architecture.md)。
 
 ## 功能总览
 
 - 支持多个 OpenAI 兼容模型提供商、共享代理配置、连接测试和运行时切换。
 - 内置跨平台 SSH，支持 `ssh-agent`、上传私钥、密码、网络代理、ProxyJump、sudo 和严格 Host Key 校验。
 - Agent 可建立仅监听本机的 SSH 端口转发，Web 全局显示活动链路、连接数和流量。
-- 命令由确定性策略分级，并由 Manual、Auto 或 Full access 模式决定是否审批。
+- Manual、Auto 或 Full access 模式统一决定 Agent 请求的审批路径。
 - 会话、工具结果、任务和审批状态持久化，刷新页面不会中断正在运行的 Agent。
 - 支持在会话中选择或粘贴图片，并把文字和图片一起发送给支持视觉输入的模型。
 - Workspace 支持文件管理、补丁和 Shell；Linux 可使用 Bubblewrap 沙箱。
@@ -21,11 +21,11 @@ flowchart LR
     API --> Eino[Eino ChatModelAgent]
     MCP[MCP Client] --> Tools[Typed SSH Tools]
     Eino --> Tools
-    Tools --> Policy[AST Policy + YAML]
-    Policy --> Approval[User Approval]
-    Policy --> Explain[Command Explainer]
-    Explain -. Educational context .-> Approval
-    Approval --> SSH[Built-in SSH]
+    Tools --> Validate[Validation + Binding]
+    Validate --> Mode[Manual / Auto / Full access]
+    Mode --> Approval[User or Approval Agent]
+    Mode --> SSH[Built-in SSH]
+    Approval --> SSH
     SSH --> Host[Linux Hosts]
     Tools --> Audit[(Encrypted SQLite Audit)]
 ```
@@ -67,11 +67,11 @@ npm --prefix web run desktop:dev
 Docker 保持独立的 Web 服务部署方式，不包含 Tauri 或 Rust 运行时：
 
 ```bash
-docker build -t opspilot .
+docker build -t opsnerva .
 docker run --rm -p 8080:8080 \
-  -v opspilot-data:/app/.data \
-  -v opspilot-workspace:/app/workspace \
-  opspilot
+  -v opsnerva-data:/app/.data \
+  -v opsnerva-workspace:/app/workspace \
+  opsnerva
 ```
 
 浏览器打开 [http://127.0.0.1:8080](http://127.0.0.1:8080)。生产环境应使用 HTTPS 反向代理，并设置 `OPS_AGENT_SECURE_COOKIES=true`。
@@ -183,7 +183,7 @@ make dev-web
 
 ## 会话与上下文
 
-Agent 页面右侧的 Conversations 会列出最近会话，标题取首条用户消息。刷新页面会恢复上次选择的会话并自动定位到最新消息；向上查看旧内容后，新增内容不会强制抢走滚动位置。可以新建、切换或删除历史会话。用户消息、最终 Assistant 回复、模型提供商实际返回的 reasoning 和工具结果卡片都保存在 SQLite；reasoning 卡片默认折叠并只显示最新一行，展开后查看该次模型调用的完整思考过程。不支持 reasoning 的模型不会显示伪造内容。reasoning 仅用于界面历史，不会作为新消息重复发送给模型。跨轮模型上下文按完整用户轮次恢复：脱敏工具结果会作为明确标记的不可信历史证据回放，失败或中断轮次只要已经执行过工具也会保留；较长会话按最近完整轮次和 256 KiB 总预算裁剪。执行真实性仍以审计 Run 为权威记录。工具真正开始执行时，当前 SSE 会立即显示带实际参数的“执行中”卡片；待审批、完成或失败都按同一个 Tool Call ID 原位更新，不会等待最终结果后才出现，也不会生成重复卡片。命令类 Tool 卡片会直接展示服务端标准化后的完整 program/argv 或完整 Bash 脚本，以及目标主机、工作目录、环境、提权、风险、退出码和分离的 stdout/stderr；原始 JSON 只作为折叠的排错信息。受控操作的审批不会再堆在独立页面中，而是只在发起它的当前会话上方弹出，并同样直接显示 LLM 请求执行的完整命令或脚本。
+Agent 页面右侧的 Conversations 会列出最近会话，标题取首条用户消息。刷新页面会恢复上次选择的会话并自动定位到最新消息；向上查看旧内容后，新增内容不会强制抢走滚动位置。可以新建、切换或删除历史会话。用户消息、最终 Assistant 回复、模型提供商实际返回的 reasoning 和工具结果卡片都保存在 SQLite；reasoning 卡片默认折叠并只显示最新一行，展开后查看该次模型调用的完整思考过程。不支持 reasoning 的模型不会显示伪造内容。reasoning 仅用于界面历史，不会作为新消息重复发送给模型。跨轮模型上下文按完整用户轮次恢复：脱敏工具结果会作为明确标记的不可信历史证据回放，失败或中断轮次只要已经执行过工具也会保留；较长会话按最近完整轮次和 256 KiB 总预算裁剪。执行真实性仍以审计 Run 为权威记录。工具真正开始执行时，当前 SSE 会立即显示带实际参数的“执行中”卡片；待审批、完成或失败都按同一个 Tool Call ID 原位更新，不会等待最终结果后才出现，也不会生成重复卡片。命令类 Tool 卡片会直接展示服务端标准化后的完整 program/argv 或完整 Bash 脚本，以及目标主机、工作目录、环境、提权、状态、退出码和分离的 stdout/stderr；`ssh_exec` 与 `ssh_run_script` 默认返回完整输出，也可用 `max_output_bytes` 配合 `output_view=head|tail|head_tail` 精炼交给模型的每个输出流，结果会明确返回总字节数和省略字节数，前端不会把精炼结果伪装成完整输出。原始 JSON 只作为折叠的排错信息。受控操作的审批不会再堆在独立页面中，而是只在发起它的当前会话上方弹出，并同样直接显示 LLM 请求执行的完整命令或脚本。
 
 聊天框支持多选和粘贴图片，也允许只发送图片。管理员可在 Agent 设置中选择 PNG、JPEG、WebP 和 GIF 格式；服务端不设置图片张数、单张大小或模型上下文图片预算。图片原始数据随消息保存在 SQLite，历史页面通过鉴权接口读取；被文本上下文规则选中的历史轮次会携带该轮全部图片重新发送给模型。活动模型必须兼容 OpenAI 风格的 `image_url` 内容块，否则提供商会返回不支持多模态的错误。
 
@@ -191,17 +191,17 @@ Agent 页面右侧的 Conversations 会列出最近会话，标题取首条用�
 
 服务在 `workspace_dir`（默认启动目录下的 `workspace/`）中托管全部 Workspace。首次初始化会创建 `default/read_write`，之后可在系统设置中按名称新增、修改权限或移除；每个 Workspace 固定使用 `<workspace_dir>/<名称>/`，无需填写或查看宿主机绝对路径。在系统设置中删除 Workspace 会先解除登记（Agent 立即失去访问权），再永久删除对应目录及其中全部文件，无法恢复；审计事件会记录目录路径与删除结果。每个 Agent 会话持久化绑定一个 Workspace；对话左侧的选择器负责首次绑定和后续切换，运行中的 Agent 禁止切换。模型没有 Workspace 列表工具，所有 `workspace_*` Tool 都由服务端读取当前会话绑定，Tool schema 不接受 `workspace_id`。文件面板仍可进入子目录、点击上传或拖入多个不超过 100 MiB 的文件，并预览文本。服务端通过操作系统文件事件监听当前打开的目录，再以 SSE 通知 Web 静默刷新，因此 Web 上传、Agent Tool、Workspace Shell 和外部编辑器产生的变化使用同一条刷新链路；监听不会递归扫描整个项目。Web 删除会直接永久删除宿主机文件或目录，确认后无法恢复。这些操作不会自动改写提示词或触发 LLM。文本预览上限为 1 MiB，二进制文件只显示元数据和 SHA256。Web 上传使用 CSRF、防路径穿越、敏感文件名拒绝、禁止覆盖、同目录临时文件、`fsync` 和原子落盘。
 
-`workspace_shell` 用于解压、构建、测试和打包等通用本地操作。系统设置提供 `Sandbox`、`Host Shell`、`Disabled` 三种明确模式，默认是 Sandbox，设置变化不会让已审批请求切换执行边界。Sandbox 仅支持 Linux，通过 `workspace_sandbox_path`（默认 `bwrap`，也可用 `OPS_AGENT_WORKSPACE_SANDBOX`）启动隔离的 user/mount/PID/network namespace，只挂载只读系统运行目录、独立 `/tmp` 和目标 Workspace，并禁用网络与嵌套 user namespace；缺少 Bubblewrap 或 namespace 权限时直接失败，不会降级执行。Workspace 的 `read_only/read_write` 决定沙箱挂载权限，`.env*`、`.ssh` 和系统隐藏文件等敏感路径会被遮蔽。
+`workspace_shell` 用于解压、构建、测试、打包和交互式调试。`action=run` 执行一次性脚本并一次返回完整输出；`start/input/status/list/interrupt/close` 管理持续 PTY，`input.wait_seconds` 可等待本次输入的输出稳定后再返回。Agent 创建的 Workspace Shell 会进入右上角统一 Shell 列表并可直接打开观察；Workspace 文件栏中用户手动新建的终端只保留在当前 Workspace，不重复展示。交互 Sandbox 保留专用 PTY 的控制终端，因此 Bash 作业控制及 `vim`、`top` 等全屏程序可用。Web 终端接收原始 ANSI 事件，Agent Tool 结果使用跨输出块清理后的可读文本。系统设置提供 `Sandbox`、`Host Shell`、`Disabled` 三种模式；Linux 默认 Sandbox，Windows 默认 Host Shell，设置变化不会让已审批请求切换执行边界。Sandbox 仅支持 Linux，通过 `workspace_sandbox_path`（默认 `bwrap`，也可用 `OPS_AGENT_WORKSPACE_SANDBOX`）启动隔离的 user/mount/PID/network namespace，只挂载只读系统运行目录、独立 `/tmp` 和目标 Workspace，并禁用网络与嵌套 user namespace；缺少 Bubblewrap 或 namespace 权限时直接失败，不会降级执行。Workspace 的 `read_only/read_write` 决定沙箱挂载权限，`.env*`、`.ssh` 和系统隐藏文件等敏感路径会被遮蔽。交互会话持续到主动关闭、进程退出或服务停止，不设置 TTL。
 
 Host Shell 直接拥有当前服务账户可用的宿主机文件系统与网络权限：Unix 使用 Bash，Windows 优先使用 PowerShell 7 (`pwsh.exe`) 并回退 Windows PowerShell。它仅允许 `read_write` Workspace，并遵循当前审批模式。实际后端、Workspace、脚本、相对工作目录、环境与超时全部进入加密请求摘要；模式或请求内容变化不会修改已经开始的执行。`Disabled` 会在审批前拒绝调用。
 
 Agent 向远端发送 Workspace 文件只使用 `workspace_file_upload`：源相对路径、读取所得 SHA256、目标主机和远端路径进入同一个审批摘要，批准执行前会再次校验源版本。托管根目录仅在服务内部使用，不写入数据库、API、审计或模型上下文。可通过 `workspace_dir` 或 `OPS_AGENT_WORKSPACE_DIR` 修改统一根目录。
 
-`workspace_file_read` 和 `ssh_file_read` 默认读取完整文件；显式设置 `offset_bytes` 时，非负值表示从文件开头计算的零基偏移，负值表示读取末尾对应字节数，例如 `-12000` 读取最后 12,000 字节。设置 `pattern` 会切换为搜索模式，并且必须同时设置 `match_mode`：`literal` 匹配完整字面量，`regex` 使用 POSIX 正则表达式；可选的 `context_lines` 返回上下文，搜索结果不会截断。未找到匹配项是成功结果并返回 `search.found=false`；搜索参数与内容范围参数互斥，不再提供独立的 file search Tool。
+`workspace_file_read` 和 `ssh_file_read` 默认读取 128 KiB；内容未读完时返回 `file.has_more=true` 与下一页 `file.next_offset`。只有文件大小合理且确实需要完整内容时才设置 `full_content=true`。显式设置 `offset_bytes` 时，非负值表示从文件开头计算的零基偏移，负值表示读取末尾对应字节数，例如 `-12000` 读取最后 12,000 字节。设置 `pattern` 会切换为搜索模式，并且必须同时设置 `match_mode`：`literal` 匹配完整字面量，`regex` 使用 POSIX 正则表达式；可选的 `context_lines` 返回上下文，搜索结果不会截断。未找到匹配项是成功结果并返回 `search.found=false`；搜索参数与内容范围参数互斥，不再提供独立的 file search Tool。
 
-SSH 主机间迁移单个普通文件使用 `ssh_file_transfer`。OpsPilot 分别连接源主机和目标主机，通过内置 SFTP 在内存中中继数据，因此两台主机无需彼此可达，也不会调用远端 `scp`。调用前先用 `ssh_file_read(metadata_only=true)` 获取源文件 SHA256；覆盖目标文件时还必须绑定目标文件当前 SHA256。两端连接配置、路径、版本、覆盖标记和超时进入同一个受控请求。目标端先写同目录临时文件，源 SHA256 匹配后再原子改名；版本冲突、取消或超时不会留下半文件。
+SSH 主机间迁移单个普通文件使用 `ssh_file_transfer`。OpsNerva 分别连接源主机和目标主机，通过内置 SFTP 在内存中中继数据，因此两台主机无需彼此可达，也不会调用远端 `scp`。调用前先用 `ssh_file_read(metadata_only=true)` 获取源文件 SHA256。目标不存在时省略 `expected_destination_sha256` 即可创建；目标存在时提供其当前 SHA256，服务只替换该精确版本。两端连接配置、路径、版本和超时进入同一个受控请求。目标端先写同目录临时文件，源 SHA256 匹配后再原子改名；版本冲突、取消或超时不会留下半文件。传输中的字节进度会实时显示在 Tool 卡片。
 
-文件编辑 Tool 把变更作为一等数据展示：审批和执行结果都显示完整 unified diff、行号以及新增/删除统计。`ssh_file_edit` 与 `workspace_file_edit` 只修改现有文件，不提供专用的新建文件 Tool。远程事务脚本只在批准后由执行层生成，不进入审批内容。编辑不再绑定 SHA256、不保存备份，也不提供自动恢复 Tool；validator 仅对临时文件执行，失败时目标文件不会被修改。Tool 的不存在资源、参数错误、超时和远端失败统一返回 `code/message/retryable/next_action`，不会用普通运行错误中断 Eino ToolNode。
+文件编辑 Tool 把变更作为一等数据展示：审批和执行结果都显示完整 unified diff、行号以及新增/删除统计。`ssh_file_edit` 与 `workspace_file_edit` 只修改现有文件，不提供专用的新建文件 Tool。远程事务脚本只在批准后由执行层生成，不进入审批内容。编辑不再绑定 SHA256、不保存备份，也不提供自动恢复 Tool。可选的 `validator_id` 只能填写 `validators` 配置中对应 scope 的 ID，不能填写 `grep -q ...` 等命令行；Agent Tool 描述和当前 Workspace 上下文会列出可用 ID，没有可用 ID 时必须省略。validator 仅对临时文件执行，失败时目标文件不会被修改。执行类 Tool 结果只返回状态、有效输出和必要标识；错误额外返回 `code/message/retryable` 与可用的结构化校验信息，不再重复审计、耗时、风险和通用下一步字段。不存在资源、参数错误、超时和远端失败不会用普通运行错误中断 Eino ToolNode。
 
 ## 日志
 
@@ -216,7 +216,7 @@ tail -f .data/ops-agent.log | jq
 
 ## 注册第一个主机
 
-OpsPilot 默认不接受未知 host key。先注册、扫描并人工核对指纹：
+OpsNerva 默认不接受未知 host key。先注册、扫描并人工核对指纹：
 
 ```bash
 ./bin/ops-agent host add \
@@ -233,34 +233,25 @@ OpsPilot 默认不接受未知 host key。先注册、扫描并人工核对指�
 
 主机可选择当前 `ssh-agent`、上传未加密 OpenSSH 格式私钥或账号密码；Windows Agent 使用系统 OpenSSH Agent named pipe。上传私钥限制为 1 MiB，与 SSH、sudo 和代理密码一样使用 AES-256-GCM 加密保存，API 只返回是否已配置，不返回内容或宿主机路径。执行时只在内存中解密和解析，密钥和密码都不会发送给模型。SSH 主机可选择共享代理中的 SOCKS5、SOCKS5H 或 HTTP CONNECT 代理；HTTPS 代理不会出现在 SSH 选择器中，也会被服务端拒绝。ProxyJump 必须引用另一个已注册且已信任 host key 的主机，每一级都会独立认证并校验 host key，最多四级且拒绝环路。两者同时配置时，代理用于连接第一台跳板机。
 
-Eino Agent 的 `ssh_tunnel` 支持 `start`、`list` 和 `stop`。`start` 把目标主机能够访问的 `remote_host:remote_port` 转发到运行 OpsPilot 的机器，并固定只监听 `127.0.0.1`；`local_port=0` 自动选择空闲端口。建立链路遵循当前审批模式。连接自动复用该主机已有的网络代理、ProxyJump、认证和 Host Key 校验。Web 顶栏显示当前链路、活动/累计连接、流量和故障，可直接停止。隧道只存在于当前服务进程中，停止服务或关闭桌面 App 会立即关闭监听和活动连接。
+Eino Agent 的 `ssh_tunnel` 支持 `start`、`list` 和 `stop`。`start` 把目标主机能够访问的 `remote_host:remote_port` 转发到运行 OpsNerva 的机器，并固定只监听 `127.0.0.1`；`local_port=0` 自动选择空闲端口。建立链路遵循当前审批模式。连接自动复用该主机已有的网络代理、ProxyJump、认证和 Host Key 校验。Web 顶栏显示当前链路、活动/累计连接、流量和故障，可直接停止。隧道只存在于当前服务进程中，停止服务或关闭桌面 App 会立即关闭监听和活动连接。
 
 从双后端版本升级时会执行一次破坏性 SSH schema 迁移：旧主机及其关联的运行、审批、任务和文件操作记录会被删除，同时移除 System OpenSSH、`ssh_config` 别名和自由格式 ProxyJump 字段。聊天记录、模型设置和 Workspace 文件不受影响。
 
-主机可选择三种 sudo 策略：禁用、目标机已配置最小权限 `NOPASSWD`，或由 OpsPilot 托管 sudo 密码。LLM 不调用 `sudo`，只在 `ssh_exec`、`ssh_run_script` 或 `ssh_file_edit` 中设置 `elevated: true`。服务端再按主机策略生成 `sudo -n` 或 `sudo -S` 调用；所有 `elevated` 请求固定升级为 Critical，并遵循当前审批模式。
+主机可选择三种 sudo 策略：禁用、目标机已配置最小权限 `NOPASSWD`，或由 OpsNerva 托管 sudo 密码。LLM 不调用 `sudo`，只在 `ssh_exec`、`ssh_run_script` 或 `ssh_file_edit` 中设置 `elevated: true`。服务端再按主机配置生成 `sudo -n` 或 `sudo -S` 调用，并遵循当前审批模式。
 
-## 风险与审批
+## 审批模式
 
-| 风险 | 例子 | 默认行为 |
-|---|---|---|
-| `read_only` | `ps`、`df`、`journalctl`、读取有限日志 | 自动执行 |
-| `change` | 写文件、安装依赖、重启服务、部署 | Manual 下人工审批 |
-| `critical` | `rm`、`dd`、防火墙、磁盘和 SSH 配置 | Manual 下人工审批并填写原因 |
-| `forbidden` | 读取私钥、关闭审计、获取主密钥 | Manual/Auto 下拒绝 |
+- `Manual`：主 Agent 和 MCP Client 的执行请求暂停并等待用户允许或拒绝。
+- `Auto`：无 Tool 的独立审批 Agent 审查全部请求。允许时立即执行，拒绝时终止；模型不可用、超时或响应无效时回退人工审批。
+- `Full access`：主 Agent 和 MCP Client 的请求直接执行。
 
-系统设置提供三种审批模式：
-
-- `Manual`：保持默认策略；需要审批的请求暂停并等待用户允许或拒绝。
-- `Auto`：无 Tool 的独立审批 Agent 审查原本需要审批的请求。结构化结果为允许时立即执行，为拒绝时终止；模型不可用、超时或响应无效时回退人工审批。确定性 `deny` 仍然拒绝。
-- `Full access`：主 Agent 发起的请求跳过策略拦截和审批。参数校验、主机授权、SSH 认证、文件版本、系统权限和命令退出状态仍按真实结果处理。
-
-审批 Agent 与主 Agent 使用独立 Runner，可单独选择模型和超时。它只接收标准化请求、确定性策略结果、目标主机能力、当前计划步骤和请求摘要；没有 Tool，也不调用批准 API。审查结果与操作说明随 Run 持久化。Manual 下开启“人工审批说明”时，同一审批 Agent 会在后台生成建议，建议不代替用户决定。
+三种模式都保留参数校验、主机与 Workspace 授权、SSH 认证与 Host Key、文件版本绑定、凭据脱敏、系统权限和审计。审批 Agent 与主 Agent 使用独立 Runner，可单独选择模型和超时。它只接收标准化请求、目标主机能力、当前计划步骤和请求摘要；没有 Tool，也不调用批准 API。审查结果与操作说明随 Run 持久化。Manual 下开启“人工审批说明”时，同一审批 Agent 会在后台生成建议，建议不代替用户决定。
 
 人工审批绑定主机、目录、命令/脚本、参数、环境和文件内容的 SHA-256。审批后任何修改都会使摘要失效。Web 审批框只提供“允许本次”和“拒绝并说明”，不保存会话级授权。主 Agent 的原始 Tool 调用会在 Service 层真正暂停；刷新页面或临时断网不会取消 Agent Loop。批准并执行完成后，真实结果返回同一个 Tool Call。拒绝时填写的内容会作为 `operator_instruction` 返回被暂停的 Tool。
 
 如果主 Agent 已产生 Tool 结果却以空正文结束，Runtime 不会重跑原 Agent Loop。它会把本轮已持久化的脱敏 Tool 结果和最新计划交给一个 `MaxIterations=1`、无 Tool、无 checkpoint 的独立总结 Agent，仅补生成最终回复；该路径不能再次执行操作。总结仍失败时会返回明确错误，并保留原 Tool 结果供下一轮继续。
 
-部署、修复、迁移和多组件诊断等复杂任务会先调用 `ops_plan_create` 创建 2–8 个可验证步骤。第一步自动进入 `in_progress`，模型只有在提供实际结果后才能通过 `ops_plan_step_update` 完成当前步骤，后端随后自动启动下一步；越级完成会被拒绝，真实阻塞则保留 blocker。计划存储在 SQLite 并由会话 state 返回，Web 在对话顶部持续显示进度、当前步骤和完成证据；后端会在每次模型请求中自动注入当前计划，刷新、断网或达到 Agent 迭代上限后可从原步骤继续。
+部署、修复、迁移和多组件诊断等复杂任务会先调用 `ops_plan_create` 创建 2–8 个可验证步骤。`ops_plan_step_update` 可完成、阻塞、跳过当前步骤或恢复已阻塞步骤；完成和跳过都会自动启动下一步，越级更新仍会被拒绝。顺序或范围变化时，`ops_plan_revise` 可替换全部未完成步骤，已完成和已跳过的历史保持不变。计划存储在 SQLite 并由会话 state 返回，Web 持续显示当前状态；刷新、断网或达到 Agent 迭代上限后可从原步骤继续。
 
 CLI 审批示例：
 
@@ -269,8 +260,6 @@ CLI 审批示例：
 ./bin/ops-agent approval approve APPROVAL_ID --reason "reviewed command"
 ```
 
-自定义规则位于 [configs/policy.yaml](../configs/policy.yaml)，可以按主机、程序、命令片段和路径配置 `allow`、`approval`、`critical` 或 `deny`。
-
 ## MCP 使用
 
 `ops-agent mcp` 使用官方 MCP Go SDK 启动 stdio Server。以支持 MCP 的客户端为例：
@@ -278,7 +267,7 @@ CLI 审批示例：
 ```json
 {
   "mcpServers": {
-    "opspilot": {
+    "opsnerva": {
       "command": "/absolute/path/to/bin/ops-agent",
       "args": ["--config", "/absolute/path/to/configs/config.local.yaml", "mcp"]
     }
@@ -286,17 +275,17 @@ CLI 审批示例：
 }
 ```
 
-MCP 与 Eino 复用同一个 Service、Policy 和 Audit Store；不存在权限更宽的旁路。
+MCP 与 Eino 复用同一个 Service、审批模式和 Audit Store；不存在权限更宽的旁路。
 
 也可以在 **配置 / 系统设置 / MCP Server Mode** 启动 Streamable HTTP 服务。启动后复制界面显示的 Endpoint 和访问令牌；令牌只在启动或重新生成时显示，服务端仅保存 SHA-256 摘要。其他 Agent 的 MCP 配置示例：
 
 ```json
 {
   "mcpServers": {
-    "opspilot": {
+    "opsnerva": {
       "url": "http://HOST:8080/mcp",
       "headers": {
-        "Authorization": "Bearer opspilot_mcp_REPLACE_ME"
+        "Authorization": "Bearer opsnerva_mcp_REPLACE_ME"
       }
     }
   }
@@ -305,26 +294,26 @@ MCP 与 Eino 复用同一个 Service、Policy 和 Audit Store；不存在权限�
 
 停止 MCP Server Mode 后 `/mcp` 立即不可用；重新启动或重新生成令牌会使旧令牌失效。远程使用时应通过 HTTPS 反向代理暴露该 Endpoint。
 
-Web 的 **Extensions / MCP Servers** 还支持反向角色：让 OpsPilot 作为 MCP Client 连接外部工具服务。支持两种标准传输：
+Web 的 **Extensions / MCP Servers** 还支持反向角色：让 OpsNerva 作为 MCP Client 连接外部工具服务。支持两种标准传输：
 
 - `stdio`：使用 command + 独立 args 数组直接启动子进程，不经过宿主 Shell；可配置绝对工作目录和加密环境变量。
 - `streamable_http`：连接绝对 HTTP(S) MCP endpoint，可配置加密 HTTP Header。
 
-保存后的服务器可以 Test、Retry、Enable、Disable、Edit 或永久 Delete。启用时 OpsPilot 连接服务器、分页发现 `tools/list`，再以 `mcp__<server-hash>__<tool>` 名称注入主 Eino Agent；禁用会关闭 MCP Session，旧 Tool 句柄立即失效，并热重建模型函数列表。环境变量和 Header 使用 AES-256-GCM 加密，Web 只显示键名，不回显值。当前仅导入 MCP Tools，不导入 Resources、Prompts 或 Sampling。
+保存后的服务器可以 Test、Retry、Enable、Disable、Edit 或永久 Delete。启用时 OpsNerva 连接服务器、分页发现 `tools/list`，再以 `mcp__<server-hash>__<tool>` 名称注入主 Eino Agent；禁用会关闭 MCP Session，旧 Tool 句柄立即失效，并热重建模型函数列表。环境变量和 Header 使用 AES-256-GCM 加密，Web 只显示键名，不回显值。当前仅导入 MCP Tools，不导入 Resources、Prompts 或 Sampling。
 
-外部 MCP Tool 拥有对应 MCP Server 自身的执行权限，不会自动经过 OpsPilot 的 SSH Policy 或审批模式。因此只应启用管理员信任的服务器；这与 OpsPilot 自己作为 MCP Server 时复用受控 SSH Service 的安全语义不同。
+外部 MCP Tool 拥有对应 MCP Server 自身的执行权限，不会自动经过 OpsNerva 的审批模式。因此只应启用管理员信任的服务器；这与 OpsNerva 自己作为 MCP Server 时复用受控 SSH Service 的安全语义不同。
 
 主要工具：
 
 - `ssh_host_list` / `ssh_host_inspect`
 - `ssh_exec` / `ssh_run_script`（可选 `background: true` 启动后台任务，默认同步执行）
-- `ssh_tunnel`（Eino Agent 专用，`action=start|list|stop`；本机监听固定为 `127.0.0.1`）
-- `ssh_task`（`action=status|cancel`）
+- `ssh_tunnel`（`action=start|list|stop`；本机监听固定为 `127.0.0.1`）
+- `ssh_shell`（`action=start|input|status|list|interrupt|close`；MCP 终端与 Web、会话终端隔离）
+- `ssh_task`（`action=status|cancel`；status 可用 `wait_seconds`、`block_until=terminal|output` 阻塞等待，并用输出字节偏移只取增量；单次等待截止返回 `wait_deadline_reached=true`，不会改变任务状态。后台命令未填写 `timeout_seconds` 时使用 `max_timeout_seconds`）
 - `ssh_file_read`（可选 `metadata_only=true` 或 `pattern` 搜索模式）/ `ssh_file_list`
 - `ssh_file_edit` / `ssh_file_transfer`
 - `workspace_file_list` / `workspace_file_read`（可选 `pattern` 搜索模式）/ `workspace_file_edit` / `workspace_file_upload` / `workspace_shell`。这些工具只在 Eino Agent 中提供，Workspace 由 Web 会话绑定，模型不能列出或自行选择其他 Workspace；无会话语义的 MCP Server 不暴露这组工具。
-- `ssh_history`（Agent 仅搜索当前会话的命令与脱敏输出，或按 `run_id` 精确读取当前会话记录；密文以 `[REDACTED]` 存储）
-- `ops_skill` 仅提供给 OpsPilot 主 Agent，不通过自身 MCP Server 暴露。
+- `ssh_history` 和 `ops_skill` 仅提供给 OpsNerva 主 Agent，不通过自身 MCP Server 暴露。完整执行历史只在 Web 管理端查看。
 
 ## 数据安全
 
@@ -333,7 +322,7 @@ Web 的 **Extensions / MCP Servers** 还支持反向角色：让 OpsPilot 作为
 - 主机 SSH/sudo 密码采用 AES-256-GCM 加密保存；HTTP 和 LLM 工具只暴露 `has_password`、`has_sudo_password` 能力标记。
 - 原始请求和 stdout/stderr 加密保存；数据库只额外保存脱敏视图用于检索和模型上下文。
 - HTTP 默认监听 `0.0.0.0:8080` 便于局域网测试。单管理员登录、CSRF 和登录限速已经启用；公网使用仍必须增加 TLS、防火墙和可信反向代理。
-- 远程输出被标记为不可信数据，不能改变系统提示词或策略判定。
+- 远程输出被标记为不可信数据，不能改变系统提示词、输入校验或审批结果。
 - 密码认证仍保持非交互、超时和单次提示限制；优先推荐 SSH 证书/密钥与最小化 `sudo -n`，托管密码用于兼容无法立即改造的目标机。
 
 更详细的实现边界见 [架构文档](architecture.md)，可复现演示见 [演示脚本](demo.md)。

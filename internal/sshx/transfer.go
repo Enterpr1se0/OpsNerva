@@ -33,7 +33,7 @@ type transferSummary struct {
 	Overwritten       bool   `json:"overwritten"`
 }
 
-func (t *NativeSSHTransport) TransferFile(ctx context.Context, source, destination ConnectionSpec, req domain.ExecRequest) (RawResult, error) {
+func (t *NativeSSHTransport) TransferFile(ctx context.Context, source, destination ConnectionSpec, req domain.ExecRequest, progress func(transferredBytes, totalBytes int64)) (RawResult, error) {
 	if err := validateNativeConnection(source); err != nil {
 		return RawResult{}, fmt.Errorf("invalid source SSH connection: %w", err)
 	}
@@ -109,7 +109,9 @@ func (t *NativeSSHTransport) TransferFile(ctx context.Context, source, destinati
 	}()
 
 	digest := sha256.New()
-	written, copyErr := io.Copy(io.MultiWriter(destinationFile, digest), sourceFile)
+	progressWriter := newTransferProgressWriter(io.MultiWriter(destinationFile, digest), sourceInfo.Size(), progress)
+	written, copyErr := io.Copy(progressWriter, sourceFile)
+	progressWriter.Finish()
 	sourceCloseErr := sourceFile.Close()
 	destinationCloseErr := destinationFile.Close()
 	if copyErr == nil {
@@ -134,7 +136,8 @@ func (t *NativeSSHTransport) TransferFile(ctx context.Context, source, destinati
 		}
 		return RawResult{ExitCode: -1, Duration: time.Since(started)}, err
 	}
-	if req.Overwrite {
+	replaceDestination := req.ExpectedDestinationSHA256 != ""
+	if replaceDestination {
 		if err := destinationSFTP.PosixRename(tempPath, req.RemotePath); err != nil {
 			return transferFailure(ctx, transferCtx, timeout, started, "atomically replace destination file", err)
 		}
@@ -146,9 +149,51 @@ func (t *NativeSSHTransport) TransferFile(ctx context.Context, source, destinati
 	encoded, _ := json.Marshal(transferSummary{
 		SourceHostID: req.SourceHostID, SourcePath: req.SourcePath,
 		DestinationHostID: req.HostID, DestinationPath: req.RemotePath,
-		Bytes: written, SHA256: actualDigest, Mode: sourceInfo.Mode().Perm().String(), Overwritten: req.Overwrite,
+		Bytes: written, SHA256: actualDigest, Mode: sourceInfo.Mode().Perm().String(), Overwritten: replaceDestination,
 	})
 	return RawResult{ExitCode: 0, Stdout: append(encoded, '\n'), Duration: time.Since(started)}, nil
+}
+
+type transferProgressWriter struct {
+	writer      io.Writer
+	total       int64
+	written     int64
+	next        int64
+	step        int64
+	lastEmitted int64
+	progress    func(int64, int64)
+}
+
+func newTransferProgressWriter(writer io.Writer, total int64, progress func(int64, int64)) *transferProgressWriter {
+	step := total / 100
+	if step < 256*1024 {
+		step = 256 * 1024
+	}
+	reporter := &transferProgressWriter{writer: writer, total: total, next: step, step: step, progress: progress}
+	if progress != nil {
+		progress(0, total)
+	}
+	return reporter
+}
+
+func (w *transferProgressWriter) Write(data []byte) (int, error) {
+	n, err := w.writer.Write(data)
+	w.written += int64(n)
+	if w.progress != nil && (w.written >= w.next || w.written == w.total) {
+		w.progress(w.written, w.total)
+		w.lastEmitted = w.written
+		for w.next <= w.written {
+			w.next += w.step
+		}
+	}
+	return n, err
+}
+
+func (w *transferProgressWriter) Finish() {
+	if w.progress != nil && w.lastEmitted != w.written {
+		w.progress(w.written, w.total)
+		w.lastEmitted = w.written
+	}
 }
 
 func validateHostTransferRequest(req domain.ExecRequest) error {
@@ -166,11 +211,8 @@ func validateHostTransferRequest(req domain.ExecRequest) error {
 	if !transferDigestPattern.MatchString(req.ExpectedSHA256) {
 		return fmt.Errorf("source expected SHA256 is invalid")
 	}
-	if req.Overwrite && !transferDigestPattern.MatchString(req.ExpectedDestinationSHA256) {
-		return fmt.Errorf("destination expected SHA256 is required when overwriting")
-	}
-	if !req.Overwrite && req.ExpectedDestinationSHA256 != "" {
-		return fmt.Errorf("destination expected SHA256 is only valid when overwriting")
+	if req.ExpectedDestinationSHA256 != "" && !transferDigestPattern.MatchString(req.ExpectedDestinationSHA256) {
+		return fmt.Errorf("destination expected SHA256 is invalid")
 	}
 	return nil
 }
@@ -179,15 +221,15 @@ func verifyTransferDestination(client *sftp.Client, req domain.ExecRequest) erro
 	info, err := client.Lstat(req.RemotePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if req.Overwrite {
+			if req.ExpectedDestinationSHA256 != "" {
 				return fmt.Errorf("destination file version conflict: expected an existing file")
 			}
 			return nil
 		}
 		return fmt.Errorf("inspect destination file: %w", err)
 	}
-	if !req.Overwrite {
-		return fmt.Errorf("destination file already exists; inspect it and set overwrite with its expected SHA256 to replace it")
+	if req.ExpectedDestinationSHA256 == "" {
+		return fmt.Errorf("destination file already exists; inspect it and provide its expected_destination_sha256 to replace that exact version")
 	}
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("destination path is not a regular file")

@@ -37,7 +37,7 @@ func insertRunForRequest(t *testing.T, st *Store, ctx context.Context, id, hostI
 	}
 	run := domain.Run{
 		ID: id, HostID: hostID, RequestJSON: string(encoded), SearchText: req.SearchText(),
-		RequestDigest: "digest-" + id, Risk: domain.RiskReadOnly, Status: "completed", StartedAt: startedAt,
+		RequestDigest: "digest-" + id, Status: "completed", StartedAt: startedAt,
 	}
 	if err := st.CreateRun(ctx, run); err != nil {
 		t.Fatal(err)
@@ -114,7 +114,7 @@ func TestSearchRunsFiltersAndFallbacks(t *testing.T) {
 	// Rows without search_text (legacy or hand-inserted) still match via request_json.
 	legacy := domain.Run{
 		ID: "run-legacy", HostID: "host-a", RequestJSON: `{"program":"nginx"}`,
-		RequestDigest: "digest-legacy", Risk: domain.RiskReadOnly, Status: "completed", StartedAt: now,
+		RequestDigest: "digest-legacy", Status: "completed", StartedAt: now,
 	}
 	if err := st.CreateRun(ctx, legacy); err != nil {
 		t.Fatal(err)
@@ -139,12 +139,12 @@ func TestSearchRunsFiltersBySession(t *testing.T) {
 		{
 			ID: "run-session-a", SessionID: "session-a", HostID: "host-a",
 			RequestJSON: `{"program":"uptime"}`, SearchText: "uptime",
-			RequestDigest: "digest-session-a", Risk: domain.RiskReadOnly, Status: "completed", StartedAt: now.Add(-time.Minute),
+			RequestDigest: "digest-session-a", Status: "completed", StartedAt: now.Add(-time.Minute),
 		},
 		{
 			ID: "run-session-b", SessionID: "session-b", HostID: "host-a",
 			RequestJSON: `{"program":"uptime"}`, SearchText: "uptime",
-			RequestDigest: "digest-session-b", Risk: domain.RiskReadOnly, Status: "completed", StartedAt: now,
+			RequestDigest: "digest-session-b", Status: "completed", StartedAt: now,
 		},
 	} {
 		if err := st.CreateRun(ctx, run); err != nil {

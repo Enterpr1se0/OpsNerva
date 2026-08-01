@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"eino-ops-agent/internal/config"
-	"eino-ops-agent/internal/policy"
 	"eino-ops-agent/internal/security"
 	"eino-ops-agent/internal/service"
 	"eino-ops-agent/internal/store"
@@ -32,13 +31,9 @@ func TestWorkspaceFileEventsStreamsExternalChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine, err := policy.Load("")
-	if err != nil {
-		t.Fatal(err)
-	}
 	cfg := config.Default()
 	cfg.DataDir = dataDir
-	svc := service.New(st, engine, nil, encryptor, security.NewRedactor(), cfg.Limits, cfg)
+	svc := service.New(st, nil, encryptor, security.NewRedactor(), cfg.Limits, cfg)
 	if err := svc.InitializeWorkspaces(ctx, workspaceRoot); err != nil {
 		t.Fatal(err)
 	}

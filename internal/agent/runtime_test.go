@@ -15,7 +15,6 @@ import (
 
 	"eino-ops-agent/internal/config"
 	"eino-ops-agent/internal/domain"
-	"eino-ops-agent/internal/policy"
 	"eino-ops-agent/internal/security"
 	"eino-ops-agent/internal/service"
 	"eino-ops-agent/internal/store"
@@ -178,7 +177,7 @@ func TestProviderRejectsEmptyResponse(t *testing.T) {
 func TestProviderAnthropicUsesNativeMessagesRequest(t *testing.T) {
 	const (
 		apiKey    = "anthropic-fixture-key"
-		userAgent = "OpsPilot-Test/1.0"
+		userAgent = "OpsNerva-Test/1.0"
 	)
 	requestPaths := make(chan string, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -311,17 +310,13 @@ func TestRuntimeReloadAppliesCompleteSystemPromptToExistingConversation(t *testi
 		t.Fatal(err)
 	}
 	defer st.Close()
-	engine, err := policy.Load("")
-	if err != nil {
-		t.Fatal(err)
-	}
 	encryptor, err := security.NewEncryptor("", t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg := config.Default()
 	cfg.Model = config.Model{APIKey: "fixture-key", BaseURL: server.URL + "/v1", Name: "fixture-model"}
-	svc := service.New(st, engine, nil, encryptor, security.NewRedactor(), cfg.Limits, cfg)
+	svc := service.New(st, nil, encryptor, security.NewRedactor(), cfg.Limits, cfg)
 	firstPrompt := "first complete system prompt"
 	if _, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{
 		AgentMaxIterations: domain.DefaultAgentMaxIterations, SystemPrompt: &firstPrompt,
@@ -1229,7 +1224,7 @@ func TestToolHistoryIsEnrichedWithCompleteAuditedCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := domain.Run{
-		ID: "run_display", HostID: "host_display", Risk: domain.RiskReadOnly, Status: "completed",
+		ID: "run_display", HostID: "host_display", Status: "completed",
 		RequestJSON:   `{"host_id":"host_display","mode":"program","program":"journalctl","args":["-u","demo service","-n","100"],"cwd":"/srv/demo","reason":"inspect logs"}`,
 		RequestDigest: "digest", StartedAt: time.Now().UTC(), CompletedAt: time.Now().UTC(),
 	}

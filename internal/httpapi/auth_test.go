@@ -182,7 +182,7 @@ func TestLogExportReturnsDownloadableZip(t *testing.T) {
 	if contentType := response.Header().Get("Content-Type"); contentType != "application/zip" {
 		t.Fatalf("log export content type = %q", contentType)
 	}
-	if disposition := response.Header().Get("Content-Disposition"); !strings.HasPrefix(disposition, "attachment;") || !strings.Contains(disposition, "opspilot-diagnostics-") {
+	if disposition := response.Header().Get("Content-Disposition"); !strings.HasPrefix(disposition, "attachment;") || !strings.Contains(disposition, "opsnerva-diagnostics-") {
 		t.Fatalf("log export content disposition = %q", disposition)
 	}
 	archive, err := zip.NewReader(bytes.NewReader(response.Body.Bytes()), int64(response.Body.Len()))

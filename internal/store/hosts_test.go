@@ -167,14 +167,14 @@ func TestDeleteHostRemovesRelatedRecords(t *testing.T) {
 	}
 	run := domain.Run{
 		ID: "run-delete", SessionID: "session-delete", HostID: host.ID, RequestJSON: `{}`,
-		RequestDigest: "digest", Risk: domain.RiskChange, Status: "approval_required", StartedAt: now,
+		RequestDigest: "digest", Status: "approval_required", StartedAt: now,
 	}
 	if err := st.CreateRun(ctx, run); err != nil {
 		t.Fatal(err)
 	}
 	approval := domain.Approval{
 		ID: "approval-delete", RunID: run.ID, HostID: host.ID, RequestJSON: `{}`,
-		RequestDigest: run.RequestDigest, Risk: run.Risk, Status: "pending", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+		RequestDigest: run.RequestDigest, Status: "pending", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
 	}
 	if err := st.CreateApproval(ctx, approval); err != nil {
 		t.Fatal(err)
@@ -189,7 +189,7 @@ func TestDeleteHostRemovesRelatedRecords(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.ApprovePendingAndStartRun(ctx, approval.ID, run.ID, "reviewed", approval.Risk); err != nil {
+	if err := st.ApprovePendingAndStartRun(ctx, approval.ID, run.ID, "reviewed"); err != nil {
 		t.Fatal(err)
 	}
 

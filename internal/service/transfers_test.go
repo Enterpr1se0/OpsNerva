@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"eino-ops-agent/internal/domain"
 )
@@ -25,11 +26,11 @@ func TestSSHFileTransferBindsBothHostsAndFileVersionsToApproval(t *testing.T) {
 	}
 	sourceSHA := strings.Repeat("a", 64)
 	destinationSHA := strings.Repeat("b", 64)
-	pending, err := svc.TransferFileBetweenHosts(ctx, source.ID, "/srv/releases/app.tar", sourceSHA, destination.ID, "/srv/releases/app.tar", true, destinationSHA, 300, "migrate the reviewed release artifact", "test")
+	pending, err := svc.TransferFileBetweenHosts(ctx, source.ID, "/srv/releases/app.tar", sourceSHA, destination.ID, "/srv/releases/app.tar", destinationSHA, 300, "migrate the reviewed release artifact", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pending.Status != "approval_required" || pending.Risk != domain.RiskChange {
+	if pending.Status != "approval_required" {
 		t.Fatalf("transfer did not require change approval: %#v", pending)
 	}
 	approval, err := svc.store.GetApproval(ctx, pending.ApprovalID)
@@ -53,6 +54,47 @@ func TestSSHFileTransferBindsBothHostsAndFileVersionsToApproval(t *testing.T) {
 	}
 }
 
+func TestSSHFileTransferPublishesByteProgress(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	source, err := svc.SaveHost(context.Background(), domain.HostInput{
+		Name: "progress-source", Address: "192.0.2.61", Port: 22, User: "ops", AuthType: "agent", SudoMode: "none",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination, err := svc.SaveHost(context.Background(), domain.HostInput{
+		Name: "progress-destination", Address: "192.0.2.62", Port: 22, User: "ops", AuthType: "agent", SudoMode: "none",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sessionID = "transfer_progress"
+	events, unsubscribe := svc.SubscribeExecutionEvents(sessionID)
+	defer unsubscribe()
+	ctx := WithExecutionOwner(WithSessionID(context.Background(), sessionID), "call_transfer", "ssh_file_transfer", `{}`)
+	pending, err := svc.TransferFileBetweenHosts(ctx, source.ID, "/tmp/source.bin", strings.Repeat("a", 64), destination.ID, "/tmp/destination.bin", "", 60, "transfer the artifact", "eino-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ApproveAsync(context.Background(), pending.ApprovalID, "reviewed", "operator"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case event := <-events:
+			if event.Stream == "progress" {
+				if event.ToolCallID != "call_transfer" || event.TransferredBytes != 12 || event.TotalBytes != 12 {
+					t.Fatalf("unexpected transfer progress event: %#v", event)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("transfer progress event was not published")
+		}
+	}
+}
+
 func TestSSHFileTransferRejectsChangedSourceConnectionAfterApproval(t *testing.T) {
 	svc, transport, _ := newTestService(t)
 	ctx := context.Background()
@@ -68,7 +110,7 @@ func TestSSHFileTransferRejectsChangedSourceConnectionAfterApproval(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := svc.TransferFileBetweenHosts(ctx, source.ID, "/tmp/source.bin", strings.Repeat("c", 64), destination.ID, "/tmp/destination.bin", false, "", 60, "move a versioned artifact", "test")
+	pending, err := svc.TransferFileBetweenHosts(ctx, source.ID, "/tmp/source.bin", strings.Repeat("c", 64), destination.ID, "/tmp/destination.bin", "", 60, "move a versioned artifact", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,13 +128,13 @@ func TestSSHFileTransferRejectsChangedSourceConnectionAfterApproval(t *testing.T
 	}
 }
 
-func TestSSHFileTransferRequiresDestinationVersionForOverwrite(t *testing.T) {
+func TestSSHFileTransferRejectsMalformedDestinationVersion(t *testing.T) {
 	svc, _, _ := newTestService(t)
 	ctx := context.Background()
 	source, _ := svc.SaveHost(ctx, domain.HostInput{Name: "source", Address: "192.0.2.51", Port: 22, User: "ops", AuthType: "agent", SudoMode: "none"}, "test")
 	destination, _ := svc.SaveHost(ctx, domain.HostInput{Name: "destination", Address: "192.0.2.52", Port: 22, User: "ops", AuthType: "agent", SudoMode: "none"}, "test")
-	_, err := svc.TransferFileBetweenHosts(ctx, source.ID, "/tmp/source", strings.Repeat("d", 64), destination.ID, "/tmp/destination", true, "", 60, "replace destination", "test")
+	_, err := svc.TransferFileBetweenHosts(ctx, source.ID, "/tmp/source", strings.Repeat("d", 64), destination.ID, "/tmp/destination", "not-a-sha256", 60, "replace destination", "test")
 	if err == nil || !strings.Contains(err.Error(), "expected_destination_sha256") {
-		t.Fatalf("overwrite without destination version was accepted: %v", err)
+		t.Fatalf("malformed destination version was accepted: %v", err)
 	}
 }

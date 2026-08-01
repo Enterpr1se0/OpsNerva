@@ -455,15 +455,19 @@ func TestNativeSFTPTransfersFileBetweenHostsAtomically(t *testing.T) {
 	}
 	destinationPath := filepath.Join(destinationServer.root, "release.bin")
 	digest := fmt.Sprintf("%x", sha256.Sum256(content))
+	var progress [][2]int64
 	result, err := transport.TransferFile(context.Background(), source, destination, domain.ExecRequest{
 		Mode: domain.ExecSSHFileTransfer, SourceHostID: source.Target.ID, SourcePath: filepath.ToSlash(sourcePath),
 		HostID: destination.Target.ID, RemotePath: filepath.ToSlash(destinationPath), ExpectedSHA256: digest, TimeoutSeconds: 5,
-	})
+	}, func(transferred, total int64) { progress = append(progress, [2]int64{transferred, total}) })
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.ExitCode != 0 || !strings.Contains(string(result.Stdout), digest) {
 		t.Fatalf("unexpected transfer result: %#v", result)
+	}
+	if len(progress) < 2 || progress[0] != [2]int64{0, int64(len(content))} || progress[len(progress)-1] != [2]int64{int64(len(content)), int64(len(content))} {
+		t.Fatalf("unexpected transfer progress: %#v", progress)
 	}
 	transferred, err := os.ReadFile(destinationPath)
 	if err != nil {
@@ -513,8 +517,8 @@ func TestNativeSFTPTransferConflictLeavesDestinationUntouched(t *testing.T) {
 	_, err := transport.TransferFile(context.Background(), source, destination, domain.ExecRequest{
 		Mode: domain.ExecSSHFileTransfer, SourceHostID: source.Target.ID, SourcePath: filepath.ToSlash(sourcePath),
 		HostID: destination.Target.ID, RemotePath: filepath.ToSlash(destinationPath), ExpectedSHA256: strings.Repeat("0", 64),
-		Overwrite: true, ExpectedDestinationSHA256: destinationDigest, TimeoutSeconds: 5,
-	})
+		ExpectedDestinationSHA256: destinationDigest, TimeoutSeconds: 5,
+	}, nil)
 	if err == nil || !strings.Contains(err.Error(), "source file version conflict") {
 		t.Fatalf("source version conflict was not reported: %v", err)
 	}

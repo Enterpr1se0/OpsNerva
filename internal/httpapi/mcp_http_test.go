@@ -12,7 +12,6 @@ import (
 
 	"eino-ops-agent/internal/config"
 	"eino-ops-agent/internal/domain"
-	"eino-ops-agent/internal/policy"
 	"eino-ops-agent/internal/security"
 	"eino-ops-agent/internal/service"
 	"eino-ops-agent/internal/store"
@@ -26,16 +25,12 @@ func TestMCPHTTPServerRequiresEnabledModeAndBearerToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	engine, err := policy.Load("")
-	if err != nil {
-		t.Fatal(err)
-	}
 	encryptor, err := security.NewEncryptor("", dataDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg := config.Default()
-	svc := service.New(st, engine, nil, encryptor, security.NewRedactor(), cfg.Limits, cfg)
+	svc := service.New(st, nil, encryptor, security.NewRedactor(), cfg.Limits, cfg)
 	t.Cleanup(func() { _ = svc.Shutdown(context.Background()) })
 	handler := New(svc, nil, nil, Options{Version: "test"}).Handler()
 
@@ -74,7 +69,7 @@ func TestMCPHTTPServerRequiresEnabledModeAndBearerToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.Code != http.StatusOK || !strings.Contains(string(result), `"serverInfo":{"name":"eino-ops-agent","version":"test"}`) {
+	if response.Code != http.StatusOK || !strings.Contains(string(result), `"serverInfo":{"name":"opsnerva","version":"test"}`) {
 		t.Fatalf("authorized MCP initialize returned %d: %s", response.Code, result)
 	}
 }

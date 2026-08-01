@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"os/exec"
 	"testing"
 
 	"eino-ops-agent/internal/domain"
@@ -19,6 +20,42 @@ func TestOperatorCanStartTunnelWithoutAgentApproval(t *testing.T) {
 	}
 	assertNoPendingApprovals(t, svc)
 	if _, err := svc.StopSSHTunnel(context.Background(), tunnel.ID, "admin-web"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOperatorCanStartWorkspaceShellWithoutApproval(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is not installed")
+	}
+	svc, _ := newWorkspaceService(t, "read_write")
+	hostMode := domain.WorkspaceShellModeHost
+	if _, err := svc.SaveSystemSettings(context.Background(), domain.SystemSettingsInput{
+		AgentMaxIterations: domain.DefaultAgentMaxIterations, WorkspaceShellMode: &hostMode,
+	}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	shell, err := svc.StartOperatorWorkspaceShell(context.Background(), "project", ".", "admin-web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shell.Kind != domain.SSHShellKindWorkspace || shell.WorkspaceID != "project" || shell.Surface != domain.WorkspaceShellSurfaceOperator || shell.SessionID != "" {
+		t.Fatalf("unexpected operator Workspace shell: %#v", shell)
+	}
+	assertNoPendingApprovals(t, svc)
+	if _, err := svc.UpdateAdminWorkspace(context.Background(), "project", domain.WorkspaceInput{ID: "project", Access: "read_only"}, "admin-web"); err == nil {
+		t.Fatal("active Workspace terminal allowed access downgrade")
+	}
+	sandboxMode := domain.WorkspaceShellModeSandbox
+	if _, err := svc.SaveSystemSettings(context.Background(), domain.SystemSettingsInput{
+		AgentMaxIterations: domain.DefaultAgentMaxIterations, WorkspaceShellMode: &sandboxMode,
+	}, "admin-web"); err == nil {
+		t.Fatal("active Workspace terminal allowed backend switch")
+	}
+	if err := svc.DeleteAdminWorkspace(context.Background(), "project", "admin-web"); err == nil {
+		t.Fatal("active Workspace terminal allowed Workspace deletion")
+	}
+	if _, err := svc.CloseSSHShell(context.Background(), shell.ID, "", "", "admin-web"); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -25,7 +25,6 @@ import (
 	"eino-ops-agent/internal/domain"
 	"eino-ops-agent/internal/ids"
 	"eino-ops-agent/internal/observability"
-	"eino-ops-agent/internal/policy"
 	"eino-ops-agent/internal/security"
 	"eino-ops-agent/internal/skills"
 	"eino-ops-agent/internal/sshx"
@@ -34,7 +33,6 @@ import (
 
 type Service struct {
 	store                *store.Store
-	policy               *policy.Engine
 	transport            sshx.Transport
 	encryptor            *security.Encryptor
 	redactor             *security.Redactor
@@ -110,14 +108,14 @@ type HistoryResult struct {
 	StderrRaw string     `json:"stderr_raw,omitempty"`
 }
 
-func New(st *store.Store, engine *policy.Engine, transport sshx.Transport, encryptor *security.Encryptor, redactor *security.Redactor, limits config.Limits, runtimeConfig ...config.Config) *Service {
+func New(st *store.Store, transport sshx.Transport, encryptor *security.Encryptor, redactor *security.Redactor, limits config.Limits, runtimeConfig ...config.Config) *Service {
 	global := limits.GlobalConcurrency
 	if global <= 0 {
 		global = 8
 	}
 	executionCtx, executionCancel := context.WithCancel(context.Background())
 	result := &Service{
-		store: st, policy: engine, transport: transport, encryptor: encryptor, redactor: redactor, limits: limits,
+		store: st, transport: transport, encryptor: encryptor, redactor: redactor, limits: limits,
 		workspaceSandboxPath: config.Default().WorkspaceSandboxPath,
 		globalSem:            make(chan struct{}, global), hostSems: make(map[string]chan struct{}), tasks: make(map[string]*taskState), workspaces: make(map[string]config.Workspace), validators: make(map[string]config.Validator), mcpRuntime: make(map[string]*mcpRuntimeState),
 		explanationActive: make(map[string]*approvalExplanationTask), explanationSem: make(chan struct{}, maxConcurrentApprovalExplanations), explanationSlots: make(chan struct{}, maxQueuedApprovalExplanations),
@@ -228,6 +226,9 @@ func (s *Service) SetChatSessionWorkspace(ctx context.Context, sessionID, worksp
 	if current.WorkspaceID == workspaceID {
 		return current, nil
 	}
+	if s.hasActiveWorkspaceShellForSession(sessionID) {
+		return domain.ChatSession{}, fmt.Errorf("conversation %q has an active Workspace terminal", sessionID)
+	}
 	session, err := s.store.SetChatSessionWorkspace(ctx, sessionID, workspaceID)
 	if err != nil {
 		return domain.ChatSession{}, err
@@ -270,7 +271,7 @@ func (s *Service) GetChatAttachment(ctx context.Context, sessionID, attachmentID
 
 func (s *Service) DeleteChatSession(ctx context.Context, sessionID, actor string) error {
 	if s.hasActiveSSHShellForSession(sessionID) {
-		return fmt.Errorf("conversation %q has an active SSH shell; close it before deleting the conversation", sessionID)
+		return fmt.Errorf("conversation %q has an active terminal; close it before deleting the conversation", sessionID)
 	}
 	if err := s.store.DeleteChatSession(ctx, sessionID); err != nil {
 		return err
@@ -291,18 +292,12 @@ func (s *Service) CreateAgentPlan(ctx context.Context, goal string, titles []str
 	if len(titles) < 2 || len(titles) > 8 {
 		return domain.AgentPlan{}, fmt.Errorf("invalid plan: provide 2-8 steps")
 	}
-	steps := make([]domain.AgentPlanStep, 0, len(titles))
-	seen := make(map[string]struct{}, len(titles))
-	for index, title := range titles {
-		title = strings.TrimSpace(title)
-		if title == "" || len(title) > 240 {
-			return domain.AgentPlan{}, fmt.Errorf("invalid plan step %d: use 1-240 characters", index+1)
-		}
-		key := strings.ToLower(title)
-		if _, exists := seen[key]; exists {
-			return domain.AgentPlan{}, fmt.Errorf("invalid plan: duplicate step %q", title)
-		}
-		seen[key] = struct{}{}
+	normalizedTitles, err := normalizePlanTitles(titles, nil)
+	if err != nil {
+		return domain.AgentPlan{}, err
+	}
+	steps := make([]domain.AgentPlanStep, 0, len(normalizedTitles))
+	for index, title := range normalizedTitles {
 		status := "pending"
 		if index == 0 {
 			status = "in_progress"
@@ -337,14 +332,14 @@ func (s *Service) UpdateAgentPlanStep(ctx context.Context, stepNumber int, statu
 		return domain.AgentPlan{}, fmt.Errorf("invalid plan step number")
 	}
 	status = strings.TrimSpace(status)
-	if status != "completed" && status != "blocked" {
-		return domain.AgentPlan{}, fmt.Errorf("invalid plan step status: use completed or blocked")
+	if status != "completed" && status != "blocked" && status != "skipped" && status != "in_progress" {
+		return domain.AgentPlan{}, fmt.Errorf("invalid plan step status: use completed, blocked, skipped, or in_progress")
 	}
 	evidence = strings.TrimSpace(evidence)
 	if evidence == "" || len(evidence) > 2000 {
 		return domain.AgentPlan{}, fmt.Errorf("invalid step evidence: use 1-2000 characters")
 	}
-	plan, err := s.store.AdvanceAgentPlan(ctx, sessionID, stepNumber, status, evidence)
+	plan, err := s.store.TransitionAgentPlanStep(ctx, sessionID, stepNumber, status, evidence)
 	if err != nil {
 		return domain.AgentPlan{}, err
 	}
@@ -353,6 +348,68 @@ func (s *Service) UpdateAgentPlanStep(ctx context.Context, stepNumber int, statu
 	})
 	observability.FromContext(ctx).InfoContext(ctx, "agent plan step updated", "component", "agent", "session_id", sessionID, "step_number", stepNumber, "status", status, "plan_status", plan.Status)
 	return plan, nil
+}
+
+func (s *Service) ReviseAgentPlan(ctx context.Context, titles []string, actor string) (domain.AgentPlan, error) {
+	sessionID := SessionIDFromContext(ctx)
+	if sessionID == "" {
+		return domain.AgentPlan{}, fmt.Errorf("agent plan requires a session context")
+	}
+	current, err := s.store.GetAgentPlan(ctx, sessionID)
+	if err != nil {
+		return domain.AgentPlan{}, err
+	}
+	if current.Status == "completed" {
+		return domain.AgentPlan{}, fmt.Errorf("completed plans cannot be revised; create a new plan for new work")
+	}
+	if len(titles) < 1 {
+		return domain.AgentPlan{}, fmt.Errorf("invalid revised plan: provide at least one remaining step")
+	}
+	seen := make(map[string]struct{}, len(current.Steps)+len(titles))
+	finished := 0
+	for _, step := range current.Steps {
+		if step.Status != "completed" && step.Status != "skipped" {
+			break
+		}
+		seen[strings.ToLower(strings.TrimSpace(step.Title))] = struct{}{}
+		finished++
+	}
+	if finished+len(titles) > 8 {
+		return domain.AgentPlan{}, fmt.Errorf("invalid revised plan: at most %d remaining steps are allowed", 8-finished)
+	}
+	normalizedTitles, err := normalizePlanTitles(titles, seen)
+	if err != nil {
+		return domain.AgentPlan{}, err
+	}
+	plan, err := s.store.ReviseAgentPlanRemaining(ctx, sessionID, normalizedTitles)
+	if err != nil {
+		return domain.AgentPlan{}, err
+	}
+	s.audit(ctx, "", "agent_plan_revised", actor, map[string]any{
+		"session_id": sessionID, "finished_steps": finished, "remaining_steps": len(normalizedTitles),
+	})
+	observability.FromContext(ctx).InfoContext(ctx, "agent plan revised", "component", "agent", "session_id", sessionID, "finished_steps", finished, "remaining_steps", len(normalizedTitles))
+	return plan, nil
+}
+
+func normalizePlanTitles(titles []string, seen map[string]struct{}) ([]string, error) {
+	if seen == nil {
+		seen = make(map[string]struct{}, len(titles))
+	}
+	normalized := make([]string, 0, len(titles))
+	for index, title := range titles {
+		title = strings.TrimSpace(title)
+		if title == "" || len(title) > 240 {
+			return nil, fmt.Errorf("invalid plan step %d: use 1-240 characters", index+1)
+		}
+		key := strings.ToLower(title)
+		if _, exists := seen[key]; exists {
+			return nil, fmt.Errorf("invalid plan: duplicate step %q", title)
+		}
+		seen[key] = struct{}{}
+		normalized = append(normalized, title)
+	}
+	return normalized, nil
 }
 
 func (s *Service) SaveModelProvider(ctx context.Context, input domain.ModelProviderInput, actor string) (domain.ModelProvider, error) {
@@ -517,6 +574,9 @@ func (s *Service) SaveSystemSettings(ctx context.Context, input domain.SystemSet
 		mode := strings.ToLower(strings.TrimSpace(*input.WorkspaceShellMode))
 		switch mode {
 		case domain.WorkspaceShellModeSandbox, domain.WorkspaceShellModeHost, domain.WorkspaceShellModeDisabled:
+			if mode != current.WorkspaceShellMode && s.hasAnyActiveWorkspaceShell() {
+				return domain.SystemSettings{}, fmt.Errorf("close active Workspace terminals before changing workspace_shell_mode")
+			}
 			current.WorkspaceShellMode = mode
 		default:
 			return domain.SystemSettings{}, fmt.Errorf("workspace_shell_mode must be sandbox, host, or disabled")
@@ -565,7 +625,7 @@ func generateMCPHTTPToken() (string, error) {
 	if _, err := rand.Read(raw); err != nil {
 		return "", fmt.Errorf("generate MCP HTTP token: %w", err)
 	}
-	return "opspilot_mcp_" + base64.RawURLEncoding.EncodeToString(raw), nil
+	return "opsnerva_mcp_" + base64.RawURLEncoding.EncodeToString(raw), nil
 }
 
 func hashMCPHTTPToken(token string) string {
@@ -987,50 +1047,6 @@ func (s *Service) TrustHostKey(ctx context.Context, id, fingerprint, actor strin
 	return key, err
 }
 
-func (s *Service) Evaluate(ctx context.Context, req domain.ExecRequest) (domain.Decision, error) {
-	host, err := s.store.GetHost(ctx, req.HostID)
-	if err != nil {
-		return domain.Decision{}, err
-	}
-	normalizeRequest(&req, s.limits)
-	if err := validateRequestLimits(req, s.limits, s.redactor); err != nil {
-		return domain.Decision{}, err
-	}
-	if req.Mode == domain.ExecWorkspaceUpload {
-		if _, err := s.prepareWorkspaceUpload(req); err != nil {
-			return domain.Decision{}, err
-		}
-	}
-	var transferSource domain.Host
-	if isWorkspaceMode(req.Mode) {
-		if req.SSHConnectionDigest != "" || req.SourceConnectionDigest != "" {
-			return domain.Decision{}, fmt.Errorf("SSH connection binding is invalid for local Workspace operations")
-		}
-	} else if req.Mode == domain.ExecSSHFileTransfer {
-		transferSource, err = s.bindSSHFileTransfer(ctx, host, &req, "")
-		if err != nil {
-			return domain.Decision{}, err
-		}
-	} else {
-		if req.SourceConnectionDigest != "" {
-			return domain.Decision{}, fmt.Errorf("source SSH connection binding is only valid for host-to-host transfers")
-		}
-		_, digest, err := s.resolveSSHConnection(ctx, host)
-		if err != nil {
-			return domain.Decision{}, err
-		}
-		bindSSHRequest(&req, digest)
-	}
-	if err := validateExecutionRequest(host, req); err != nil {
-		return domain.Decision{}, err
-	}
-	decision := s.policy.Evaluate(ctx, host, req)
-	if req.Mode == domain.ExecSSHFileTransfer {
-		decision = mergeTransferDecisions(decision, s.policy.Evaluate(ctx, transferSource, req))
-	}
-	return decision, nil
-}
-
 func (s *Service) Submit(ctx context.Context, req domain.ExecRequest, actor string) (domain.ExecResult, error) {
 	result, err := s.submit(ctx, req, actor, nil)
 	if err != nil || !blockingApprovalsFromContext(ctx) || result.Status != "approval_required" || result.ApprovalID == "" {
@@ -1057,13 +1073,12 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 	if err != nil {
 		return domain.ExecResult{}, err
 	}
-	var transferSource domain.Host
 	if isWorkspaceMode(req.Mode) {
 		if req.SSHConnectionDigest != "" || req.SourceConnectionDigest != "" {
 			return domain.ExecResult{}, fmt.Errorf("SSH connection binding is invalid for local Workspace operations")
 		}
 	} else if req.Mode == domain.ExecSSHFileTransfer {
-		transferSource, err = s.bindSSHFileTransfer(ctx, host, &req, actor)
+		_, err = s.bindSSHFileTransfer(ctx, host, &req, actor)
 		if err != nil {
 			return domain.ExecResult{}, err
 		}
@@ -1087,24 +1102,16 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 	if err != nil {
 		return domain.ExecResult{}, err
 	}
-	decision := s.policy.Evaluate(ctx, host, req)
-	if req.Mode == domain.ExecSSHFileTransfer {
-		decision = mergeTransferDecisions(decision, s.policy.Evaluate(ctx, transferSource, req))
-	}
 	sessionID := SessionIDFromContext(ctx)
-	if req.Mode == domain.ExecSSHShellStart && sessionID == "" {
-		return domain.ExecResult{}, fmt.Errorf("interactive SSH shells require an Agent conversation")
+	if (req.Mode == domain.ExecSSHShellStart || req.Mode == domain.ExecWorkspaceShellStart) && sessionID == "" {
+		return domain.ExecResult{}, fmt.Errorf("interactive shells require an Agent conversation")
 	}
 	settings, settingsErr := s.store.GetSystemSettings(ctx)
 	if settingsErr != nil {
 		return domain.ExecResult{}, settingsErr
 	}
 	llmRequest := actor == "eino-agent" || actor == "mcp-client"
-	if llmRequest && settings.ApprovalMode == domain.ApprovalModeFullAccess {
-		decision.Action = domain.ActionAllow
-		decision.Reason = "allowed by full access mode"
-		decision.RuleHits = append(decision.RuleHits, "approval_mode_full_access")
-	}
+	approvalRequired := llmRequest && settings.ApprovalMode != domain.ApprovalModeFullAccess
 	requestCipher, err := s.encryptor.Encrypt([]byte(requestJSON))
 	if err != nil {
 		return domain.ExecResult{}, err
@@ -1115,30 +1122,21 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 	var explanationInput *domain.CommandReviewInput
 	var reviewer ApprovalReviewer
 	autoRejected := false
-	approvalRequired := decision.Action == domain.ActionApprove || decision.Action == domain.ActionBreakGlass
 	if approvalRequired {
 		reviewer = s.approvalReviewer()
-		input := s.commandReviewInput(ctx, req, decision, host, digest, sessionID)
+		input := s.commandReviewInput(ctx, req, host, digest, sessionID)
 		explanationInput = &input
 		if llmRequest && settings.ApprovalMode == domain.ApprovalModeAuto {
 			review := s.reviewForAutomaticApproval(ctx, reviewer, input, settings.SubagentTimeoutSeconds)
 			commandExplanation = &review
 			switch {
 			case review.Status == "completed" && review.Decision == domain.ApprovalAgentAllow:
-				decision.Action = domain.ActionAllow
-				decision.Reason = review.Reason
-				decision.RuleHits = append(decision.RuleHits, "approval_agent_allowed")
+				approvalRequired = false
 			case review.Status == "completed" && review.Decision == domain.ApprovalAgentReject:
 				autoRejected = true
-				decision.Reason = review.Reason
-				decision.RuleHits = append(decision.RuleHits, "approval_agent_rejected")
-			default:
-				decision.RuleHits = append(decision.RuleHits, "approval_agent_human_fallback")
 			}
 		} else if settings.ApprovalExplanationsEnabled && reviewer != nil {
-			commandExplanation = &domain.CommandReview{
-				Status: "pending", DeterministicRisk: decision.Risk,
-			}
+			commandExplanation = &domain.CommandReview{Status: "pending"}
 		} else {
 			explanationInput = nil
 		}
@@ -1152,7 +1150,7 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 	run := domain.Run{
 		ID: ids.New("run"), SessionID: sessionID, HostID: host.ID, RequestJSON: requestRedacted, RequestCipher: requestCipher,
 		SearchText: s.redactor.Redact(req.SearchText()), RequestDigest: digest,
-		Risk: decision.Risk, Status: "created", AIReviewJSON: reviewJSON, AIReview: commandExplanation, StartedAt: now,
+		Status: "created", AIReviewJSON: reviewJSON, AIReview: commandExplanation, StartedAt: now,
 	}
 	if owner, ok := executionOwnerFromContext(ctx); ok {
 		run.ToolName = owner.ToolName
@@ -1163,34 +1161,21 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 		"mode", req.Mode, "program", req.Program, "elevated", req.Elevated,
 		"actor", actor, "run_id", run.ID,
 	)
-	policyLogger := logger.With("component", "policy")
-	policyLogger.DebugContext(ctx, "execution policy evaluated", "risk", decision.Risk, "action", decision.Action, "policy_hit_count", len(decision.RuleHits), "request_digest", digest)
+	logger.DebugContext(ctx, "approval route selected", "approval_mode", settings.ApprovalMode, "approval_required", approvalRequired, "request_digest", digest)
 	if autoRejected {
 		run.Status = "rejected"
-		run.Error = decision.Reason
+		run.Error = commandExplanation.Reason
 		run.CompletedAt = time.Now().UTC()
 		if err := s.store.CreateRun(ctx, run); err != nil {
 			return domain.ExecResult{}, err
 		}
 		s.audit(ctx, run.ID, "approval_agent_rejected", "approval-agent", map[string]any{
-			"risk": decision.Risk, "reason": commandExplanation.Reason, "model": commandExplanation.Model,
+			"reason": commandExplanation.Reason, "model": commandExplanation.Model,
 		})
-		logger.With("component", "approval").InfoContext(ctx, "approval Agent rejected execution", "risk", decision.Risk, "model", commandExplanation.Model)
+		logger.With("component", "approval").InfoContext(ctx, "approval Agent rejected execution", "model", commandExplanation.Model)
 		return execResultFromRun(run, "", ""), nil
 	}
-	switch decision.Action {
-	case domain.ActionDeny:
-		run.Status = "denied"
-		run.Error = decision.Reason
-		run.CompletedAt = now
-		if err := s.store.CreateRun(ctx, run); err != nil {
-			return domain.ExecResult{}, err
-		}
-		_ = s.store.UpdateRun(ctx, run)
-		s.audit(ctx, run.ID, "command_denied", actor, map[string]any{"risk": decision.Risk, "hits": decision.RuleHits})
-		policyLogger.WarnContext(ctx, "execution denied by policy", "risk", decision.Risk, "policy_hit_count", len(decision.RuleHits))
-		return domain.ExecResult{RunID: run.ID, Status: run.Status, Risk: decision.Risk, PolicyHits: decision.RuleHits}, nil
-	case domain.ActionApprove, domain.ActionBreakGlass:
+	if approvalRequired {
 		run.Status = "approval_required"
 		if err := s.store.CreateRun(ctx, run); err != nil {
 			return domain.ExecResult{}, err
@@ -1200,39 +1185,36 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 		}
 		approval := domain.Approval{
 			ID: ids.New("approval"), RunID: run.ID, HostID: host.ID, RequestJSON: requestRedacted, RequestCipher: requestCipher,
-			RequestDigest: digest, Risk: decision.Risk, Status: "pending",
+			RequestDigest: digest, Status: "pending",
 			CreatedAt: now, ExpiresAt: now.Add(5 * time.Minute),
 		}
 		if err := s.store.CreateApproval(ctx, approval); err != nil {
 			s.clearExecutionOwner(run.ID)
 			return domain.ExecResult{}, err
 		}
-		s.audit(ctx, run.ID, "approval_requested", actor, map[string]any{"approval_id": approval.ID, "risk": decision.Risk, "hits": decision.RuleHits})
-		logger.With("component", "approval").InfoContext(ctx, "execution awaiting approval", "approval_id", approval.ID, "risk", decision.Risk, "expires_at", approval.ExpiresAt)
+		s.audit(ctx, run.ID, "approval_requested", actor, map[string]any{"approval_id": approval.ID, "mode": settings.ApprovalMode})
+		logger.With("component", "approval").InfoContext(ctx, "execution awaiting approval", "approval_id", approval.ID, "approval_mode", settings.ApprovalMode, "expires_at", approval.ExpiresAt)
 		if commandExplanation != nil && commandExplanation.Status == "pending" && explanationInput != nil && reviewer != nil {
 			s.startPendingApprovalExplanation(ctx, approval, *explanationInput, reviewer, settings.SubagentTimeoutSeconds)
 		}
-		return domain.ExecResult{RunID: run.ID, Status: run.Status, Risk: decision.Risk, ApprovalID: approval.ID, PolicyHits: decision.RuleHits}, nil
-	case domain.ActionAllow:
-		run.Status = "running"
-		if err := s.store.CreateRun(ctx, run); err != nil {
-			return domain.ExecResult{}, err
-		}
-		if owner, ok := executionOwnerFromContext(ctx); ok {
-			s.bindExecutionOwner(run.ID, owner)
-		}
-		if commandExplanation != nil && commandExplanation.Status == "completed" && commandExplanation.Decision == domain.ApprovalAgentAllow {
-			s.audit(ctx, run.ID, "approval_agent_granted", "approval-agent", map[string]any{
-				"risk": decision.Risk, "reason": commandExplanation.Reason, "model": commandExplanation.Model,
-			})
-		}
-		return s.execute(ctx, host, req, run, actor, decision.RuleHits, stream)
-	default:
-		return domain.ExecResult{}, fmt.Errorf("unsupported policy decision %q", decision.Action)
+		return domain.ExecResult{RunID: run.ID, Status: run.Status, ApprovalID: approval.ID}, nil
 	}
+	run.Status = "running"
+	if err := s.store.CreateRun(ctx, run); err != nil {
+		return domain.ExecResult{}, err
+	}
+	if owner, ok := executionOwnerFromContext(ctx); ok {
+		s.bindExecutionOwner(run.ID, owner)
+	}
+	if commandExplanation != nil && commandExplanation.Status == "completed" && commandExplanation.Decision == domain.ApprovalAgentAllow {
+		s.audit(ctx, run.ID, "approval_agent_granted", "approval-agent", map[string]any{
+			"reason": commandExplanation.Reason, "model": commandExplanation.Model,
+		})
+	}
+	return s.execute(ctx, host, req, run, actor, stream)
 }
 
-func (s *Service) commandReviewInput(ctx context.Context, req domain.ExecRequest, decision domain.Decision, host domain.Host, digest, sessionID string) domain.CommandReviewInput {
+func (s *Service) commandReviewInput(ctx context.Context, req domain.ExecRequest, host domain.Host, digest, sessionID string) domain.CommandReviewInput {
 	planStep := ""
 	if sessionID != "" {
 		if plan, err := s.store.GetAgentPlan(ctx, sessionID); err == nil {
@@ -1245,7 +1227,7 @@ func (s *Service) commandReviewInput(ctx context.Context, req domain.ExecRequest
 		}
 	}
 	return domain.CommandReviewInput{
-		Request: req, Policy: decision,
+		Request:       req,
 		Host:          domain.HostCapability{ID: host.ID, Name: host.Name, AuthType: host.AuthType, SudoMode: host.SudoMode},
 		PlanStep:      planStep,
 		RequestDigest: digest,
@@ -1254,7 +1236,7 @@ func (s *Service) commandReviewInput(ctx context.Context, req domain.ExecRequest
 
 func (s *Service) reviewForAutomaticApproval(ctx context.Context, reviewer ApprovalReviewer, input domain.CommandReviewInput, timeoutSeconds int) domain.CommandReview {
 	if reviewer == nil {
-		return s.normalizeCommandReview(domain.CommandReview{}, fmt.Errorf("approval Agent is unavailable for the active model"), input.Policy.Risk, timeoutSeconds)
+		return s.normalizeCommandReview(domain.CommandReview{}, fmt.Errorf("approval Agent is unavailable for the active model"), timeoutSeconds)
 	}
 	timeoutSeconds = effectiveSubagentTimeoutSeconds(timeoutSeconds)
 	reviewCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
@@ -1263,10 +1245,10 @@ func (s *Service) reviewForAutomaticApproval(ctx context.Context, reviewer Appro
 	case s.explanationSem <- struct{}{}:
 		defer func() { <-s.explanationSem }()
 	case <-reviewCtx.Done():
-		return s.normalizeCommandReview(domain.CommandReview{}, reviewCtx.Err(), input.Policy.Risk, timeoutSeconds)
+		return s.normalizeCommandReview(domain.CommandReview{}, reviewCtx.Err(), timeoutSeconds)
 	}
 	review, err := reviewer.Review(reviewCtx, input)
-	review = s.normalizeCommandReview(review, err, input.Policy.Risk, timeoutSeconds)
+	review = s.normalizeCommandReview(review, err, timeoutSeconds)
 	if review.Status == "completed" && review.Decision != domain.ApprovalAgentAllow && review.Decision != domain.ApprovalAgentReject {
 		review.Status = "degraded"
 		review.Errors = append(review.Errors, "approval Agent returned an invalid decision")
@@ -1279,7 +1261,7 @@ func (s *Service) reviewForAutomaticApproval(ctx context.Context, reviewer Appro
 }
 
 // startPendingApprovalExplanation keeps model latency outside the human
-// approval critical path. Explanation work is bounded globally and canceled as
+// approval response path. Explanation work is bounded globally and canceled as
 // soon as its approval is no longer pending.
 func (s *Service) startPendingApprovalExplanation(parent context.Context, approval domain.Approval, input domain.CommandReviewInput, reviewer ApprovalReviewer, timeoutSeconds int) {
 	baseCtx := context.WithoutCancel(parent)
@@ -1291,11 +1273,11 @@ func (s *Service) startPendingApprovalExplanation(parent context.Context, approv
 	case s.explanationSlots <- struct{}{}:
 	default:
 		review := domain.CommandReview{
-			Status: "unavailable", DeterministicRisk: input.Policy.Risk,
+			Status: "unavailable",
 			Errors: []string{"approval Agent review skipped because the local queue is full"}, ReviewedAt: time.Now().UTC(),
 		}
 		persistCtx, cancelPersist := context.WithTimeout(baseCtx, 3*time.Second)
-		err := s.persistPendingApprovalExplanation(persistCtx, approval, input.Policy.Risk, review, 0)
+		err := s.persistPendingApprovalExplanation(persistCtx, approval, review, 0)
 		cancelPersist()
 		if err != nil {
 			logger.ErrorContext(baseCtx, "persist skipped approval explanation failed", "error", err)
@@ -1329,9 +1311,9 @@ func (s *Service) startPendingApprovalExplanation(parent context.Context, approv
 				logger.InfoContext(baseCtx, "approval explanation canceled while queued", "queue_ms", time.Since(queuedAt).Milliseconds())
 				return
 			}
-			review := s.normalizeCommandReview(domain.CommandReview{}, explanationCtx.Err(), input.Policy.Risk, timeoutSeconds)
+			review := s.normalizeCommandReview(domain.CommandReview{}, explanationCtx.Err(), timeoutSeconds)
 			persistCtx, cancelPersist := context.WithTimeout(baseCtx, 3*time.Second)
-			err := s.persistPendingApprovalExplanation(persistCtx, approval, input.Policy.Risk, review, time.Since(queuedAt))
+			err := s.persistPendingApprovalExplanation(persistCtx, approval, review, time.Since(queuedAt))
 			cancelPersist()
 			if err != nil {
 				logger.ErrorContext(baseCtx, "persist queued approval explanation timeout failed", "error", err)
@@ -1340,15 +1322,15 @@ func (s *Service) startPendingApprovalExplanation(parent context.Context, approv
 		}
 
 		started := time.Now()
-		logger.InfoContext(baseCtx, "approval explanation started", "risk", approval.Risk, "queue_ms", started.Sub(queuedAt).Milliseconds())
+		logger.InfoContext(baseCtx, "approval explanation started", "queue_ms", started.Sub(queuedAt).Milliseconds())
 		review, reviewErr := reviewer.Review(explanationCtx, input)
 		if errors.Is(explanationCtx.Err(), context.Canceled) {
 			logger.InfoContext(baseCtx, "approval explanation canceled", "duration_ms", time.Since(started).Milliseconds())
 			return
 		}
-		review = s.normalizeCommandReview(review, reviewErr, input.Policy.Risk, timeoutSeconds)
+		review = s.normalizeCommandReview(review, reviewErr, timeoutSeconds)
 		persistCtx, cancelPersist := context.WithTimeout(baseCtx, 3*time.Second)
-		err := s.persistPendingApprovalExplanation(persistCtx, approval, input.Policy.Risk, review, time.Since(started))
+		err := s.persistPendingApprovalExplanation(persistCtx, approval, review, time.Since(started))
 		cancelPersist()
 		if err != nil {
 			current, getErr := s.store.GetApproval(baseCtx, approval.ID)
@@ -1363,7 +1345,7 @@ func (s *Service) startPendingApprovalExplanation(parent context.Context, approv
 	}()
 }
 
-func (s *Service) persistPendingApprovalExplanation(ctx context.Context, approval domain.Approval, risk domain.RiskLevel, review domain.CommandReview, duration time.Duration) error {
+func (s *Service) persistPendingApprovalExplanation(ctx context.Context, approval domain.Approval, review domain.CommandReview, duration time.Duration) error {
 	reviewJSON, err := json.Marshal(review)
 	if err != nil {
 		return fmt.Errorf("encode approval explanation: %w", err)
@@ -1372,17 +1354,17 @@ func (s *Service) persistPendingApprovalExplanation(ctx context.Context, approva
 		return err
 	}
 	s.audit(ctx, approval.RunID, "approval_agent_reviewed", "approval-agent", map[string]any{
-		"approval_id": approval.ID, "status": review.Status, "deterministic_risk": risk,
+		"approval_id": approval.ID, "status": review.Status,
 		"model": review.Model, "duration_ms": duration.Milliseconds(),
 	})
 	notifyApproval(ctx, domain.ExecResult{
-		RunID: approval.RunID, Status: "approval_required", Risk: approval.Risk,
+		RunID: approval.RunID, Status: "approval_required",
 		ApprovalID: approval.ID,
 	})
 	return nil
 }
 
-func (s *Service) normalizeCommandReview(review domain.CommandReview, reviewErr error, deterministicRisk domain.RiskLevel, timeoutSeconds int) domain.CommandReview {
+func (s *Service) normalizeCommandReview(review domain.CommandReview, reviewErr error, timeoutSeconds int) domain.CommandReview {
 	if reviewErr != nil {
 		model := review.Model
 		message := reviewErr.Error()
@@ -1390,7 +1372,7 @@ func (s *Service) normalizeCommandReview(review domain.CommandReview, reviewErr 
 			message = fmt.Sprintf("approval Agent did not respond within %d seconds", effectiveSubagentTimeoutSeconds(timeoutSeconds))
 		}
 		review = domain.CommandReview{
-			Status: "unavailable", Model: model, DeterministicRisk: deterministicRisk,
+			Status: "unavailable", Model: model,
 			Errors: []string{message}, ReviewedAt: time.Now().UTC(),
 		}
 	}
@@ -1400,7 +1382,6 @@ func (s *Service) normalizeCommandReview(review domain.CommandReview, reviewErr 
 	if review.ReviewedAt.IsZero() {
 		review.ReviewedAt = time.Now().UTC()
 	}
-	review.DeterministicRisk = deterministicRisk
 	review.Decision = strings.ToLower(strings.TrimSpace(review.Decision))
 	review.Reason = s.redactor.Redact(strings.TrimSpace(review.Reason))
 	if len(review.Reason) > 1000 {
@@ -1476,11 +1457,6 @@ func (s *Service) approveForExecution(ctx context.Context, approvalID, reason, a
 		logger.WarnContext(ctx, "approval expired before decision", "run_id", approval.RunID)
 		return approvedExecution{}, fmt.Errorf("approval expired")
 	}
-	if approval.Risk == domain.RiskCritical {
-		if strings.TrimSpace(reason) == "" {
-			return approvedExecution{}, fmt.Errorf("approval reason is required for critical operations")
-		}
-	}
 	requestData, err := s.encryptor.Decrypt(approval.RequestCipher)
 	if err != nil {
 		return approvedExecution{}, err
@@ -1504,13 +1480,13 @@ func (s *Service) approveForExecution(ctx context.Context, approvalID, reason, a
 	if err != nil {
 		return approvedExecution{}, err
 	}
-	if err := s.store.ApprovePendingAndStartRun(ctx, approval.ID, run.ID, reason, approval.Risk); err != nil {
+	if err := s.store.ApprovePendingAndStartRun(ctx, approval.ID, run.ID, reason); err != nil {
 		return approvedExecution{}, err
 	}
 	s.cancelApprovalExplanation(ctx, approval.ID, approval.RunID)
 	run.Status = "running"
 	s.audit(ctx, run.ID, "approval_granted", actor, map[string]any{"approval_id": approval.ID, "reason": reason, "session_id": approval.SessionID})
-	logger.InfoContext(ctx, "approval granted", "run_id", run.ID, "risk", approval.Risk, "session_id", approval.SessionID)
+	logger.InfoContext(ctx, "approval granted", "run_id", run.ID, "session_id", approval.SessionID)
 	return approvedExecution{approval: approval, request: req, run: run, host: host, actor: actor}, nil
 }
 
@@ -1572,7 +1548,7 @@ func (s *Service) cancelApprovedExecution(runID string) bool {
 }
 
 func (s *Service) executeApproved(ctx context.Context, approved approvedExecution) (domain.ExecResult, error) {
-	result, err := s.execute(ctx, approved.host, approved.request, approved.run, approved.actor, nil, nil)
+	result, err := s.execute(ctx, approved.host, approved.request, approved.run, approved.actor, nil)
 	if err == nil {
 		return result, nil
 	}
@@ -1723,7 +1699,7 @@ func execResultFromRun(run domain.Run, approvalID, operatorInstruction string) d
 		duration = run.CompletedAt.Sub(run.StartedAt)
 	}
 	result := domain.ExecResult{
-		RunID: run.ID, Status: run.Status, Risk: run.Risk, ApprovalID: approvalID,
+		RunID: run.ID, Status: run.Status, ApprovalID: approvalID,
 		OperatorInstruction: operatorInstruction, ExitCode: run.ExitCode,
 		Stdout: run.StdoutRedacted, Stderr: stderr,
 		Duration: duration, CompletedAt: run.CompletedAt,
@@ -1735,7 +1711,7 @@ func execResultFromRun(run domain.Run, approvalID, operatorInstruction string) d
 			result.Tunnel = &tunnel
 		}
 	}
-	if request.Mode == domain.ExecSSHShellStart {
+	if request.Mode == domain.ExecSSHShellStart || request.Mode == domain.ExecWorkspaceShellStart {
 		var shell domain.SSHShell
 		if json.Unmarshal([]byte(run.StdoutRedacted), &shell) == nil && shell.ID != "" {
 			result.Shell = &shell
@@ -1745,11 +1721,11 @@ func execResultFromRun(run domain.Run, approvalID, operatorInstruction string) d
 	return result
 }
 
-func (s *Service) execute(ctx context.Context, host domain.Host, req domain.ExecRequest, run domain.Run, actor string, hits []string, stream func(string, []byte)) (domain.ExecResult, error) {
+func (s *Service) execute(ctx context.Context, host domain.Host, req domain.ExecRequest, run domain.Run, actor string, stream func(string, []byte)) (domain.ExecResult, error) {
 	defer s.clearExecutionOwner(run.ID)
 	logger := observability.FromContext(ctx).With(
-		"component", "ssh", "run_id", run.ID, "session_id", run.SessionID, "host_id", host.ID,
-		"mode", req.Mode, "program", req.Program, "elevated", req.Elevated, "risk", run.Risk,
+		"component", "execution", "run_id", run.ID, "session_id", run.SessionID, "host_id", host.ID,
+		"mode", req.Mode, "program", req.Program, "elevated", req.Elevated,
 	)
 	logger.InfoContext(ctx, "operation execution started")
 	if req.Mode == domain.ExecWorkspaceUpload {
@@ -1761,7 +1737,7 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 			_ = s.store.UpdateRun(ctx, run)
 			s.audit(ctx, run.ID, "command_failed", actor, map[string]any{"error": prepareErr.Error()})
 			logger.ErrorContext(ctx, "Workspace upload source validation failed", "error", prepareErr)
-			return domain.ExecResult{RunID: run.ID, Status: run.Status, Risk: run.Risk, Stderr: prepareErr.Error(), CompletedAt: run.CompletedAt}, prepareErr
+			return domain.ExecResult{RunID: run.ID, Status: run.Status, Stderr: prepareErr.Error(), CompletedAt: run.CompletedAt}, prepareErr
 		}
 		req = prepared
 	}
@@ -1784,7 +1760,7 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 			_ = s.store.UpdateRun(ctx, run)
 			s.audit(ctx, run.ID, "command_failed", actor, map[string]any{"error": prepareErr.Error()})
 			logger.ErrorContext(ctx, "remote file change preparation failed", "error", prepareErr)
-			return domain.ExecResult{RunID: run.ID, Status: run.Status, Risk: run.Risk, Stderr: prepareErr.Error(), Change: req.Change, CompletedAt: run.CompletedAt}, prepareErr
+			return domain.ExecResult{RunID: run.ID, Status: run.Status, Stderr: prepareErr.Error(), Change: req.Change, CompletedAt: run.CompletedAt}, prepareErr
 		}
 		transportReq = prepared
 	}
@@ -1796,7 +1772,7 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 	var err error
 	release, err = s.acquire(ctx, hostIDs...)
 	if err != nil {
-		logger.WarnContext(ctx, "SSH execution canceled before acquiring capacity", "error", err)
+		logger.WarnContext(ctx, "operation canceled before acquiring capacity", "error", err)
 		return domain.ExecResult{}, err
 	}
 	defer release()
@@ -1822,9 +1798,9 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 		_ = s.store.UpdateRun(ctx, run)
 		s.audit(ctx, run.ID, "command_failed", actor, map[string]any{"error": err.Error()})
 		logger.ErrorContext(ctx, "SSH credential preparation failed", "error", err)
-		return domain.ExecResult{RunID: run.ID, Status: run.Status, Risk: run.Risk, CompletedAt: run.CompletedAt}, err
+		return domain.ExecResult{RunID: run.ID, Status: run.Status, CompletedAt: run.CompletedAt}, err
 	}
-	s.audit(ctx, run.ID, "command_started", actor, map[string]any{"risk": run.Risk, "digest": run.RequestDigest})
+	s.audit(ctx, run.ID, "command_started", actor, map[string]any{"digest": run.RequestDigest})
 	s.publishExecutionEvent(ExecutionEvent{
 		SessionID: run.SessionID,
 		RunID:     run.ID,
@@ -1862,8 +1838,20 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 		} else {
 			raw.ExitCode = -1
 		}
+	} else if req.Mode == domain.ExecWorkspaceShellStart {
+		started := time.Now()
+		created, shellErr := s.openWorkspaceShell(ctx, host, req, run, actor)
+		execErr = shellErr
+		raw.Duration = time.Since(started)
+		if shellErr == nil {
+			shell = &created
+			raw.ExitCode = 0
+			raw.Stdout, execErr = marshalSSHShell(created)
+		} else {
+			raw.ExitCode = -1
+		}
 	} else if req.Mode == domain.ExecSSHFileTransfer {
-		raw, execErr = s.executeSSHFileTransfer(ctx, req)
+		raw, execErr = s.executeSSHFileTransfer(ctx, run, req)
 	} else if isWorkspaceMode(req.Mode) {
 		raw, execErr = s.executeWorkspace(ctx, req)
 	} else if streaming, ok := s.transport.(sshx.StreamingTransport); ok && outputSink != nil {
@@ -1899,7 +1887,7 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 	}
 	persistCtx := context.WithoutCancel(ctx)
 	if err := s.store.UpdateRun(persistCtx, run); err != nil {
-		logger.ErrorContext(ctx, "persist SSH execution result failed", "error", err)
+		logger.ErrorContext(ctx, "persist execution result failed", "error", err)
 		return domain.ExecResult{}, err
 	}
 	s.publishExecutionEvent(ExecutionEvent{
@@ -1912,14 +1900,14 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 	if run.Status == "failed" {
 		completion = logger.ErrorContext
 	}
-	completion(ctx, "SSH execution completed", "status", run.Status, "exit_code", run.ExitCode, "duration_ms", raw.Duration.Milliseconds(), "stdout_bytes", len(raw.Stdout), "stderr_bytes", len(raw.Stderr), "error", execErr)
+	completion(ctx, "operation execution completed", "status", run.Status, "exit_code", run.ExitCode, "duration_ms", raw.Duration.Milliseconds(), "stdout_bytes", len(raw.Stdout), "stderr_bytes", len(raw.Stderr), "error", execErr)
 	result := domain.ExecResult{
-		RunID: run.ID, Status: run.Status, Risk: run.Risk, ExitCode: run.ExitCode,
+		RunID: run.ID, Status: run.Status, ExitCode: run.ExitCode,
 		Stdout: run.StdoutRedacted, Stderr: run.StderrRedacted,
-		Duration: raw.Duration, PolicyHits: hits, Change: approvedReq.Change, Tunnel: tunnel, CompletedAt: run.CompletedAt,
+		Duration: raw.Duration, Change: approvedReq.Change, Tunnel: tunnel, CompletedAt: run.CompletedAt,
 		Shell: shell,
 	}
-	if approvedReq.Mode == domain.ExecSSHShellStart && run.Status == "completed" {
+	if (approvedReq.Mode == domain.ExecSSHShellStart || approvedReq.Mode == domain.ExecWorkspaceShellStart) && run.Status == "completed" {
 		result.ShellUsage = sshShellUsage()
 	}
 	if run.Status == "completed" && (approvedReq.Mode == domain.ExecRemoteSearch || approvedReq.Mode == domain.ExecWorkspaceSearch) {
@@ -1973,6 +1961,12 @@ func validateExecutionRequest(host domain.Host, req domain.ExecRequest) error {
 		if host.AuthType != "workspace" || req.Elevated {
 			return fmt.Errorf("invalid workspace execution target")
 		}
+		if req.WorkspaceID == "" {
+			return fmt.Errorf("workspace operation requires a workspace")
+		}
+		if req.Mode == domain.ExecWorkspaceShellStart {
+			return validateInteractiveShellSize(req)
+		}
 		if req.Mode == domain.ExecWorkspaceSearch {
 			if req.WorkspaceID == "" || req.RelativePath == "" {
 				return fmt.Errorf("workspace file search requires a workspace, path, and pattern")
@@ -2013,7 +2007,7 @@ func validateExecutionRequest(host domain.Host, req domain.ExecRequest) error {
 	if req.Mode == domain.ExecSSHFileTransfer && req.Elevated {
 		return fmt.Errorf("elevated mode is not supported for SFTP transfers")
 	}
-	usesSudo, err := policy.ContainsProgram(req, "sudo")
+	usesSudo, err := containsShellProgram(req, "sudo")
 	if err == nil && usesSudo {
 		return fmt.Errorf("do not invoke sudo directly; set elevated=true and provide the underlying program")
 	}
@@ -2049,10 +2043,16 @@ func validateRequestLimits(req domain.ExecRequest, limits config.Limits, redacto
 			req.TunnelRemotePort != 0 || req.TunnelLocalPort != 0 {
 			return fmt.Errorf("SSH shell requests cannot include command, file, transfer, Workspace, environment, or tunnel fields")
 		}
+	} else if req.Mode == domain.ExecWorkspaceShellStart {
+		if req.Program != "" || len(req.Args) != 0 || req.Script != "" || req.RemotePath != "" ||
+			req.SourceHostID != "" || req.SourcePath != "" || req.RelativePath != "" || req.Change != nil ||
+			req.TunnelRemoteHost != "" || req.TunnelRemotePort != 0 || req.TunnelLocalPort != 0 || req.Elevated {
+			return fmt.Errorf("Workspace shell start requests cannot include command, remote file, transfer, change, tunnel, or elevated fields")
+		}
 	} else if req.ShellCols != 0 || req.ShellRows != 0 {
-		return fmt.Errorf("SSH shell fields are only valid for ssh_shell_start requests")
+		return fmt.Errorf("interactive shell fields are only valid for shell start requests")
 	}
-	if req.Mode == domain.ExecWorkspaceShell {
+	if req.Mode == domain.ExecWorkspaceShell || req.Mode == domain.ExecWorkspaceShellStart {
 		switch req.WorkspaceShellBackend {
 		case domain.WorkspaceShellModeSandbox, domain.WorkspaceShellModeHost:
 		default:
@@ -2074,7 +2074,7 @@ func validateRequestLimits(req domain.ExecRequest, limits config.Limits, redacto
 		}
 	}
 	if req.Cwd != "" {
-		if req.Mode == domain.ExecWorkspaceShell {
+		if req.Mode == domain.ExecWorkspaceShell || req.Mode == domain.ExecWorkspaceShellStart {
 			if filepath.IsAbs(req.Cwd) || filepath.Clean(req.Cwd) != req.Cwd || strings.ContainsAny(req.Cwd, "\x00\r\n") {
 				return fmt.Errorf("workspace shell cwd must be a clean relative path")
 			}
@@ -2134,10 +2134,6 @@ func validateRequestLimits(req domain.ExecRequest, limits config.Limits, redacto
 	return nil
 }
 
-func isHostWorkspaceShell(req domain.ExecRequest) bool {
-	return req.Mode == domain.ExecWorkspaceShell && req.WorkspaceShellBackend == domain.WorkspaceShellModeHost
-}
-
 func packageMutation(args []string) bool {
 	for _, argument := range args {
 		switch strings.ToLower(argument) {
@@ -2165,6 +2161,10 @@ func containsCredentialControl(value string) bool {
 
 func (s *Service) StartTask(ctx context.Context, req domain.ExecRequest, actor string) (domain.Task, error) {
 	req.Background = true
+	host, err := s.store.GetHost(ctx, strings.TrimSpace(req.HostID))
+	if err != nil {
+		return domain.Task{}, err
+	}
 	background := s.executionCtx
 	if background == nil {
 		background = context.Background()
@@ -2176,15 +2176,18 @@ func (s *Service) StartTask(ctx context.Context, req domain.ExecRequest, actor s
 		background = WithExecutionOwner(background, owner.ToolCallID, owner.ToolName, owner.Arguments)
 	}
 	taskCtx, cancel := context.WithCancel(background)
-	task := domain.Task{ID: ids.New("task"), HostID: req.HostID, Status: "running", StartedAt: time.Now().UTC()}
+	// GetHost accepts either an ID or a display name, while tasks.host_id is a
+	// foreign key and must always persist the canonical ID. Keep req unchanged
+	// so the execution audit still records the identifier the caller supplied.
+	task := domain.Task{ID: ids.New("task"), HostID: host.ID, Status: "running", StartedAt: time.Now().UTC()}
 	state := &taskState{task: task, result: domain.ExecResult{Status: "running"}, cancel: cancel}
-	s.taskMu.Lock()
-	s.tasks[task.ID] = state
-	s.taskMu.Unlock()
 	if err := s.store.UpsertTask(context.Background(), task, state.result, ""); err != nil {
 		cancel()
 		return domain.Task{}, err
 	}
+	s.taskMu.Lock()
+	s.tasks[task.ID] = state
+	s.taskMu.Unlock()
 	go func() {
 		result, err := s.submit(taskCtx, req, actor, func(streamName string, data []byte) {
 			s.taskMu.Lock()
@@ -2335,6 +2338,36 @@ func (s *Service) GetTask(id string) (domain.Task, domain.ExecResult, string, er
 	return s.store.GetTask(context.Background(), id)
 }
 
+// WaitTask waits inside the control plane so callers do not need to spend one
+// Tool invocation per poll. It always returns immediately for terminal tasks.
+func (s *Service) WaitTask(ctx context.Context, id string, afterStdout, afterStderr int, wait time.Duration, blockUntil string) (domain.Task, domain.ExecResult, string, bool, error) {
+	if wait <= 0 {
+		task, result, taskErr, err := s.GetTask(id)
+		return task, result, taskErr, false, err
+	}
+	deadline := time.NewTimer(wait)
+	defer deadline.Stop()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		task, result, taskErr, err := s.GetTask(id)
+		if err != nil {
+			return task, result, taskErr, false, err
+		}
+		terminal := terminalExecutionStatus(task.Status)
+		if terminal || (blockUntil == "output" && (len(result.Stdout) > afterStdout || len(result.Stderr) > afterStderr)) {
+			return task, result, taskErr, false, nil
+		}
+		select {
+		case <-ctx.Done():
+			return domain.Task{}, domain.ExecResult{}, "", false, ctx.Err()
+		case <-deadline.C:
+			return task, result, taskErr, true, nil
+		case <-ticker.C:
+		}
+	}
+}
+
 func (s *Service) CancelTask(id, actor string) error {
 	s.taskMu.Lock()
 	state, ok := s.tasks[id]
@@ -2355,6 +2388,7 @@ func (s *Service) CancelTask(id, actor string) error {
 	state.task.Status = "cancelled"
 	state.task.EndedAt = time.Now().UTC()
 	state.result.Status = "cancelled"
+	state.result.CompletedAt = state.task.EndedAt
 	taskSnapshot, resultSnapshot, taskErr := state.task, state.result, state.err
 	delete(s.tasks, id)
 	s.taskMu.Unlock()
@@ -2417,7 +2451,7 @@ func (s *Service) SearchRuns(ctx context.Context, query, hostID string, limit in
 }
 
 // RetryApprovalExplanation reruns the tool-free command explainer for an
-// existing pending approval. It never changes risk, decides the approval, or
+// existing pending approval. It never decides the approval or
 // executes the operation.
 func (s *Service) RetryApprovalExplanation(ctx context.Context, approvalID, actor string) (domain.Approval, error) {
 	logger := observability.FromContext(ctx).With("component", "approval", "approval_id", approvalID, "actor", actor)
@@ -2467,10 +2501,6 @@ func (s *Service) RetryApprovalExplanation(ctx context.Context, approvalID, acto
 		return domain.Approval{}, err
 	}
 
-	action := domain.ActionApprove
-	if approval.Risk == domain.RiskCritical {
-		action = domain.ActionBreakGlass
-	}
 	planStep := ""
 	if approval.SessionID != "" {
 		if plan, planErr := s.store.GetAgentPlan(ctx, approval.SessionID); planErr == nil {
@@ -2484,7 +2514,6 @@ func (s *Service) RetryApprovalExplanation(ctx context.Context, approvalID, acto
 	}
 	input := domain.CommandReviewInput{
 		Request:  req,
-		Policy:   domain.Decision{Risk: approval.Risk, Action: action, Reason: "pending operation requires human approval"},
 		Host:     domain.HostCapability{ID: host.ID, Name: host.Name, AuthType: host.AuthType, SudoMode: host.SudoMode},
 		PlanStep: planStep, RequestDigest: digest,
 	}
@@ -2507,7 +2536,7 @@ func (s *Service) RetryApprovalExplanation(ctx context.Context, approvalID, acto
 		return domain.Approval{}, err
 	}
 
-	logger.InfoContext(ctx, "approval explanation retry started", "run_id", run.ID, "risk", approval.Risk)
+	logger.InfoContext(ctx, "approval explanation retry started", "run_id", run.ID)
 	started := time.Now()
 	timeoutSeconds := effectiveSubagentTimeoutSeconds(settings.SubagentTimeoutSeconds)
 	explanationCtx, cancel := context.WithTimeout(retryCtx, time.Duration(timeoutSeconds)*time.Second)
@@ -2529,7 +2558,7 @@ func (s *Service) RetryApprovalExplanation(ctx context.Context, approvalID, acto
 	if retryCtx.Err() != nil {
 		return domain.Approval{}, retryCtx.Err()
 	}
-	review = s.normalizeCommandReview(review, reviewErr, approval.Risk, timeoutSeconds)
+	review = s.normalizeCommandReview(review, reviewErr, timeoutSeconds)
 	reviewJSON, err := json.Marshal(review)
 	if err != nil {
 		return domain.Approval{}, err
@@ -2538,7 +2567,7 @@ func (s *Service) RetryApprovalExplanation(ctx context.Context, approvalID, acto
 		return domain.Approval{}, err
 	}
 	s.audit(ctx, run.ID, "command_ai_explanation_retried", actor, map[string]any{
-		"approval_id": approval.ID, "status": review.Status, "deterministic_risk": approval.Risk,
+		"approval_id": approval.ID, "status": review.Status,
 		"model": review.Model, "duration_ms": time.Since(started).Milliseconds(),
 	})
 	logger.InfoContext(ctx, "approval explanation retry completed", "run_id", run.ID, "status", review.Status,
@@ -2640,8 +2669,13 @@ func normalizeRequest(req *domain.ExecRequest, limits config.Limits) {
 			req.Mode = domain.ExecProgram
 		}
 	}
-	if req.TimeoutSeconds <= 0 {
-		req.TimeoutSeconds = limits.SyncTimeoutSeconds
+	interactiveShell := req.Mode == domain.ExecSSHShellStart || req.Mode == domain.ExecWorkspaceShellStart
+	if req.TimeoutSeconds <= 0 && !interactiveShell {
+		if req.Background && limits.MaxTimeoutSeconds > 0 {
+			req.TimeoutSeconds = limits.MaxTimeoutSeconds
+		} else {
+			req.TimeoutSeconds = limits.SyncTimeoutSeconds
+		}
 	}
 	if req.TimeoutSeconds > limits.MaxTimeoutSeconds {
 		req.TimeoutSeconds = limits.MaxTimeoutSeconds
@@ -2649,7 +2683,7 @@ func normalizeRequest(req *domain.ExecRequest, limits config.Limits) {
 	if req.Env == nil {
 		req.Env = map[string]string{}
 	}
-	if req.Mode == domain.ExecSSHShellStart {
+	if req.Mode == domain.ExecSSHShellStart || req.Mode == domain.ExecWorkspaceShellStart {
 		if req.ShellCols == 0 {
 			req.ShellCols = 120
 		}

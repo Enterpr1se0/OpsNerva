@@ -1,12 +1,12 @@
 [package]
-name = "opspilot-desktop"
-version = "0.1.5"
-description = "OpsPilot desktop application"
-authors = ["OpsPilot contributors"]
+name = "opsnerva-desktop"
+version = "0.1.6"
+description = "OpsNerva desktop application"
+authors = ["OpsNerva contributors"]
 edition = "2024"
 
 [lib]
-name = "opspilot_desktop_lib"
+name = "opsnerva_desktop_lib"
 crate-type = ["rlib"]
 
 [build-dependencies]

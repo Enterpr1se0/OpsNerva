@@ -188,23 +188,24 @@ func (t *toolCallTracker) removeNamed(target capturedToolCall) {
 }
 
 type Event struct {
-	Type         string `json:"type"`
-	Role         string `json:"role,omitempty"`
-	ToolName     string `json:"tool_name,omitempty"`
-	ToolCallID   string `json:"tool_call_id,omitempty"`
-	Content      string `json:"content,omitempty"`
-	SegmentID    string `json:"segment_id,omitempty"`
-	SessionID    string `json:"session_id,omitempty"`
-	RunID        string `json:"run_id,omitempty"`
-	Stream       string `json:"stream,omitempty"`
-	Sequence     uint64 `json:"sequence,omitempty"`
-	Error        string `json:"error,omitempty"`
-	ApprovalID   string `json:"approval_id,omitempty"`
-	Status       string `json:"status,omitempty"`
-	Risk         string `json:"risk,omitempty"`
-	RetryAttempt int    `json:"retry_attempt,omitempty"`
-	RetryMax     int    `json:"retry_max,omitempty"`
-	RetryDelayMS int64  `json:"retry_delay_ms,omitempty"`
+	Type             string `json:"type"`
+	Role             string `json:"role,omitempty"`
+	ToolName         string `json:"tool_name,omitempty"`
+	ToolCallID       string `json:"tool_call_id,omitempty"`
+	Content          string `json:"content,omitempty"`
+	SegmentID        string `json:"segment_id,omitempty"`
+	SessionID        string `json:"session_id,omitempty"`
+	RunID            string `json:"run_id,omitempty"`
+	Stream           string `json:"stream,omitempty"`
+	Sequence         uint64 `json:"sequence,omitempty"`
+	Error            string `json:"error,omitempty"`
+	ApprovalID       string `json:"approval_id,omitempty"`
+	Status           string `json:"status,omitempty"`
+	RetryAttempt     int    `json:"retry_attempt,omitempty"`
+	RetryMax         int    `json:"retry_max,omitempty"`
+	RetryDelayMS     int64  `json:"retry_delay_ms,omitempty"`
+	TransferredBytes int64  `json:"transferred_bytes,omitempty"`
+	TotalBytes       int64  `json:"total_bytes,omitempty"`
 }
 
 type Runtime struct {
@@ -648,6 +649,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 		for _, workspace := range r.service.ListWorkspaceCapabilities() {
 			if workspace.ID == workspaceState.ID {
 				workspaceState.Access = workspace.Access
+				workspaceState.Validators = workspace.Validators
 				break
 			}
 		}
@@ -737,6 +739,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 						Type: "tool_output", ToolName: toolName, ToolCallID: toolCallID,
 						Content: event.Content, SessionID: event.SessionID, RunID: event.RunID,
 						Stream: event.Stream, Sequence: event.Sequence, Status: status,
+						TransferredBytes: event.TransferredBytes, TotalBytes: event.TotalBytes,
 					})
 				}
 			}
@@ -790,7 +793,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 			markActivity()
 			emit(Event{
 				Type: "approval", SessionID: sessionID, ApprovalID: result.ApprovalID,
-				RunID: result.RunID, Status: result.Status, Risk: string(result.Risk),
+				RunID: result.RunID, Status: result.Status,
 			})
 		})
 
@@ -1143,7 +1146,6 @@ func (r *Runtime) enrichToolContent(ctx context.Context, content string, capture
 				request = run.RequestJSON
 			}
 			display["host_id"] = run.HostID
-			display["risk"] = run.Risk
 			display["request_digest"] = run.RequestDigest
 			display["request"] = request
 		}

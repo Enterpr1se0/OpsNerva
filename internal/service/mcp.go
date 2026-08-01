@@ -366,7 +366,7 @@ func (s *Service) connectMCPServer(ctx context.Context, server domain.MCPServer)
 	default:
 		return nil, nil, fmt.Errorf("unsupported MCP transport %q", server.Transport)
 	}
-	client := mcp.NewClient(&mcp.Implementation{Name: "opspilot", Version: "0.1.0"}, nil)
+	client := mcp.NewClient(&mcp.Implementation{Name: "opsnerva", Version: "0.1.0"}, nil)
 	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
 		return nil, nil, err

@@ -15,14 +15,15 @@ import (
 )
 
 type fakeShellSession struct {
-	mu       sync.Mutex
-	callback func(string, []byte)
-	done     chan struct{}
-	once     sync.Once
-	cols     int
-	rows     int
-	inputs   [][]byte
-	exit     sshx.ShellExit
+	mu          sync.Mutex
+	callback    func(string, []byte)
+	done        chan struct{}
+	once        sync.Once
+	cols        int
+	rows        int
+	inputs      [][]byte
+	exit        sshx.ShellExit
+	outputDelay time.Duration
 }
 
 func (f *fakeTransport) OpenShell(_ context.Context, _ sshx.ConnectionSpec, _ domain.ExecRequest, cols, rows int, callback func(string, []byte)) (sshx.ShellSession, error) {
@@ -43,9 +44,60 @@ func (s *fakeShellSession) Write(data []byte) (int, error) {
 	}
 	s.mu.Lock()
 	s.inputs = append(s.inputs, append([]byte(nil), data...))
+	delay := s.outputDelay
 	s.mu.Unlock()
-	s.callback("stdout", append([]byte(nil), data...))
+	output := append([]byte(nil), data...)
+	if delay <= 0 {
+		s.callback("stdout", output)
+	} else {
+		go func() {
+			timer := time.NewTimer(delay)
+			defer timer.Stop()
+			select {
+			case <-s.done:
+			case <-timer.C:
+				s.callback("stdout", output)
+			}
+		}()
+	}
 	return len(data), nil
+}
+
+func TestWriteSSHShellWaitsForDelayedOutput(t *testing.T) {
+	svc, _, host := newTestService(t)
+	ctx := WithSessionID(context.Background(), "session-delayed-shell")
+	if _, err := svc.PrepareChatSession(ctx, "session-delayed-shell", "", "test"); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := svc.StartSSHShell(ctx, host.ID, "", false, 80, 24, "test delayed shell output", "eino-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "approved", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shellID := approved.Shell.ID
+	svc.shellMu.RLock()
+	session := svc.shells[shellID].session.(*fakeShellSession)
+	svc.shellMu.RUnlock()
+	session.mu.Lock()
+	session.outputDelay = 40 * time.Millisecond
+	session.mu.Unlock()
+
+	snapshot, err := svc.WriteSSHShellWithWait(context.Background(), shellID, "session-delayed-shell", "echo delayed\r", time.Second, "", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output strings.Builder
+	for _, event := range snapshot.Events {
+		if event.Stream == "stdout" {
+			output.WriteString(event.Content)
+		}
+	}
+	if output.String() != "echo delayed\r" {
+		t.Fatalf("delayed shell output was not returned with input: %q", output.String())
+	}
 }
 
 func (s *fakeShellSession) Resize(cols, rows int) error {
@@ -85,11 +137,11 @@ func TestInteractiveSSHShellApprovalIsolationCompleteOutputAndSensitiveRedaction
 	if _, err := svc.PrepareChatSession(ctx, "session-shell", "", "test"); err != nil {
 		t.Fatal(err)
 	}
-	pending, err := svc.StartSSHShell(ctx, host.ID, "/tmp", false, 90, 24, "run an interactive test", "test")
+	pending, err := svc.StartSSHShell(ctx, host.ID, "/tmp", false, 90, 24, "run an interactive test", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pending.Status != "approval_required" || pending.ApprovalID == "" || pending.Risk != domain.RiskChange {
+	if pending.Status != "approval_required" || pending.ApprovalID == "" {
 		t.Fatalf("interactive shell did not require one-time approval: %#v", pending)
 	}
 	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "approved for test", "test")
@@ -167,6 +219,26 @@ func TestInteractiveSSHShellApprovalIsolationCompleteOutputAndSensitiveRedaction
 		coalesced.Events[0].FirstSequence == coalesced.Events[0].Sequence {
 		t.Fatalf("adjacent output events were not coalesced losslessly: %#v", coalesced.Events)
 	}
+	fakeSession.callback("stdout", []byte("before\x1b[?20"))
+	shellInsideANSI, err := svc.store.GetSSHShell(context.Background(), shellID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeSession.callback("stdout", []byte("04lafter"))
+	incremental, err := svc.GetSSHShellSnapshot(context.Background(), shellID, "session-shell", shellInsideANSI.LastSequence, 0, false, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	readable, err := svc.ReadableSSHShellSnapshot(context.Background(), incremental, shellInsideANSI.LastSequence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(readable.Events) != 1 || readable.Events[0].Content != "after" || strings.Contains(readable.Events[0].Content, "2004l") {
+		t.Fatalf("incremental ANSI sequence leaked into readable output: %#v", readable.Events)
+	}
+	if strings.Contains(incremental.RecentOutput, "2004l") || !strings.Contains(incremental.RecentOutput, "beforeafter") {
+		t.Fatalf("readable terminal snapshot leaked split ANSI: %q", incremental.RecentOutput)
+	}
 	fakeSession.callback("stdout", []byte("Password:"))
 	if _, err := svc.WriteSSHShell(context.Background(), shellID, "session-shell", "should-not-be-sent\r", "", "test"); err == nil || !strings.Contains(err.Error(), "private Web terminal") {
 		t.Fatalf("Agent input was accepted at a credential prompt: %v", err)
@@ -226,6 +298,37 @@ func TestInteractiveSSHShellApprovalIsolationCompleteOutputAndSensitiveRedaction
 	}
 }
 
+func TestMCPInteractiveSSHShellUsesIsolatedSurface(t *testing.T) {
+	svc, _, host := newTestService(t)
+	ctx := WithMCPClientSession(context.Background())
+	pending, err := svc.StartSSHShell(ctx, host.ID, "", false, 120, 32, "open an MCP test shell", "mcp-client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "approved", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approved.Shell == nil || approved.Shell.Surface != domain.SSHShellSurfaceMCP || approved.Shell.SessionID != mcpClientSessionID {
+		t.Fatalf("MCP shell was not isolated: %#v", approved.Shell)
+	}
+	shellID := approved.Shell.ID
+	snapshot, err := svc.WriteSSHShell(ctx, shellID, mcpClientSessionID, "whoami\r", "", "mcp-client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Events) == 0 || snapshot.Events[0].Stream != "input" || snapshot.Events[0].Source != "agent" {
+		t.Fatalf("MCP shell input source is incorrect: %#v", snapshot.Events)
+	}
+	listed, err := svc.ListSSHShells(ctx, mcpClientSessionID, true, "", "mcp-client")
+	if err != nil || listed.Count != 1 || listed.Shells[0].ID != shellID {
+		t.Fatalf("MCP shell list is not isolated: list=%#v err=%v", listed, err)
+	}
+	if _, err := svc.CloseSSHShell(ctx, shellID, mcpClientSessionID, "", "mcp-client"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestInteractiveSSHShellTerminationClassification(t *testing.T) {
 	testCases := []struct {
 		name         string
@@ -251,7 +354,7 @@ func TestInteractiveSSHShellTerminationClassification(t *testing.T) {
 			if _, err := svc.PrepareChatSession(ctx, sessionID, "", "test"); err != nil {
 				t.Fatal(err)
 			}
-			pending, err := svc.StartSSHShell(ctx, host.ID, "", false, 90, 24, "test shell termination", "test")
+			pending, err := svc.StartSSHShell(ctx, host.ID, "", false, 90, 24, "test shell termination", "eino-agent")
 			if err != nil {
 				t.Fatal(err)
 			}

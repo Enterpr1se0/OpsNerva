@@ -574,7 +574,7 @@ func (t *NativeSSHTransport) connect(ctx context.Context, connection ConnectionS
 		}
 		clientConfig := &ssh.ClientConfig{
 			User: host.User, Auth: auth.methods, HostKeyCallback: callback,
-			ClientVersion: "SSH-2.0-OpsPilot", Timeout: nativeConnectTimeout,
+			ClientVersion: "SSH-2.0-OpsNerva", Timeout: nativeConnectTimeout,
 		}
 		_ = raw.SetDeadline(time.Now().Add(nativeConnectTimeout))
 		stopCancellation := context.AfterFunc(hopCtx, func() { _ = raw.Close() })

@@ -2285,8 +2285,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "opspilot-desktop"
-version = "0.1.5"
+name = "opsnerva-desktop"
+version = "0.1.6"
 dependencies = [
  "serde",
  "serde_json",

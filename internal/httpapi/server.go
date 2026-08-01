@@ -161,7 +161,6 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/ssh-shells/{id}/resize", s.resizeSSHShell)
 	s.mux.HandleFunc("POST /api/v1/ssh-shells/{id}/interrupt", s.interruptSSHShell)
 	s.mux.HandleFunc("DELETE /api/v1/ssh-shells/{id}", s.closeSSHShell)
-	s.mux.HandleFunc("POST /api/v1/policy/evaluate", s.evaluate)
 	s.mux.HandleFunc("POST /api/v1/exec", s.exec)
 	s.mux.HandleFunc("POST /api/v1/tasks", s.startTask)
 	s.mux.HandleFunc("GET /api/v1/tasks/{id}", s.getTask)
@@ -619,13 +618,25 @@ func (s *Server) listSSHShells(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) startSSHShell(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		HostID  string `json:"host_id"`
-		Surface string `json:"surface"`
+		HostID      string `json:"host_id"`
+		WorkspaceID string `json:"workspace_id"`
+		Cwd         string `json:"cwd"`
+		Surface     string `json:"surface"`
 	}
 	if !decode(w, r, &input) {
 		return
 	}
-	result, err := s.service.StartOperatorSSHShell(r.Context(), input.HostID, input.Surface, actor(r))
+	var result domain.SSHShell
+	var err error
+	if strings.TrimSpace(input.WorkspaceID) != "" {
+		if strings.TrimSpace(input.HostID) != "" || strings.TrimSpace(input.Surface) != "" {
+			writeSSHShellError(w, fmt.Errorf("workspace_id cannot be combined with host_id or surface"))
+			return
+		}
+		result, err = s.service.StartOperatorWorkspaceShell(r.Context(), input.WorkspaceID, input.Cwd, actor(r))
+	} else {
+		result, err = s.service.StartOperatorSSHShell(r.Context(), input.HostID, input.Surface, actor(r))
+	}
 	if err != nil {
 		writeSSHShellError(w, err)
 		return
@@ -1004,7 +1015,7 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) exportLogs(w http.ResponseWriter, r *http.Request) {
-	filename := "opspilot-diagnostics-" + time.Now().UTC().Format("20060102-150405") + ".zip"
+	filename := "opsnerva-diagnostics-" + time.Now().UTC().Format("20060102-150405") + ".zip"
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
 	w.Header().Set("Cache-Control", "no-store")
@@ -1549,15 +1560,6 @@ func (s *Server) deleteSFTPEntry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
-}
-
-func (s *Server) evaluate(w http.ResponseWriter, r *http.Request) {
-	var req domain.ExecRequest
-	if !decode(w, r, &req) {
-		return
-	}
-	result, err := s.service.Evaluate(r.Context(), req)
-	respond(w, result, err)
 }
 
 func (s *Server) exec(w http.ResponseWriter, r *http.Request) {

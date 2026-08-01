@@ -80,7 +80,7 @@ type InteractiveTransport interface {
 }
 
 type HostFileTransferTransport interface {
-	TransferFile(context.Context, ConnectionSpec, ConnectionSpec, domain.ExecRequest) (RawResult, error)
+	TransferFile(context.Context, ConnectionSpec, ConnectionSpec, domain.ExecRequest, func(transferredBytes, totalBytes int64)) (RawResult, error)
 }
 
 // TunnelClient is one authenticated SSH connection that can open direct TCP

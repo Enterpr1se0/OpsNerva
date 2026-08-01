@@ -27,6 +27,7 @@ import (
 	"eino-ops-agent/internal/domain"
 	"eino-ops-agent/internal/ids"
 	"eino-ops-agent/internal/sshx"
+	"eino-ops-agent/internal/store"
 )
 
 type WorkspaceCapability struct {
@@ -184,6 +185,9 @@ func (s *Service) UpdateAdminWorkspace(ctx context.Context, id string, input dom
 	if !exists {
 		return AdminWorkspaceCapability{}, fmt.Errorf("workspace %q not found", id)
 	}
+	if workspace.Access != current.Access && s.hasActiveWorkspaceShell(id) {
+		return AdminWorkspaceCapability{}, fmt.Errorf("workspace %q has an active terminal", id)
+	}
 	workspace.Root = current.Root
 	if err := validateWorkspaceIdentity(workspace.ID, workspace.Access); err != nil {
 		return AdminWorkspaceCapability{}, err
@@ -206,6 +210,9 @@ func (s *Service) DeleteAdminWorkspace(ctx context.Context, id, actor string) er
 	workspace, ok := s.workspaceByID(id)
 	if !ok {
 		return fmt.Errorf("workspace %q not found", id)
+	}
+	if s.hasActiveWorkspaceShell(id) {
+		return fmt.Errorf("workspace %q has an active terminal", id)
 	}
 	if err := s.store.DeleteWorkspace(ctx, id); err != nil {
 		return err
@@ -770,6 +777,7 @@ func (s *Service) ReadWorkspaceFile(ctx context.Context, workspaceID, relativePa
 		metadata, content := parseFileReadOutput(relativePath, result.Stdout)
 		metadata.OffsetBytes = resolvedFileOffset(metadata.Size, offset)
 		metadata.ReturnedBytes = len(content)
+		decorateFileReadPage(&metadata, maxBytes, 0)
 		metadata.Sensitive = strings.Contains(content, "[REDACTED]")
 		result.File, result.Stdout = &metadata, content
 	}
@@ -777,6 +785,14 @@ func (s *Service) ReadWorkspaceFile(ctx context.Context, workspaceID, relativePa
 }
 
 func (s *Service) ListWorkspaceFiles(ctx context.Context, workspaceID, relativePath, actor string) (domain.ExecResult, error) {
+	workspace, ok := s.workspaceByID(workspaceID)
+	if !ok {
+		return domain.ExecResult{}, fmt.Errorf("workspace %q not found", workspaceID)
+	}
+	relativePath = normalizedWorkspaceRelativePath(relativePath)
+	if _, err := s.resolveWorkspacePath(workspace, relativePath, false); err != nil {
+		return domain.ExecResult{}, err
+	}
 	host, err := s.workspaceHost(ctx, workspaceID)
 	if err != nil {
 		return domain.ExecResult{}, err
@@ -895,6 +911,202 @@ func (s *Service) RunWorkspaceShell(ctx context.Context, workspaceID, script, cw
 	}, actor)
 }
 
+// StartWorkspaceShell opens a persistent PTY in the Workspace bound to an
+// Agent conversation. The selected backend is captured in the approved
+// request, just like a one-shot workspace_shell execution.
+func (s *Service) StartWorkspaceShell(ctx context.Context, workspaceID, cwd string, env map[string]string, cols, rows int, reason, actor string) (domain.ExecResult, error) {
+	if SessionIDFromContext(ctx) == "" {
+		return domain.ExecResult{}, fmt.Errorf("interactive Workspace shells require an Agent conversation")
+	}
+	req, err := s.workspaceShellStartRequest(ctx, workspaceID, cwd, env, cols, rows, reason)
+	if err != nil {
+		return domain.ExecResult{}, err
+	}
+	return s.Submit(ctx, req, actor)
+}
+
+// StartOperatorWorkspaceShell opens a PTY after an authenticated operator
+// explicitly selects a Workspace in the Web console.
+func (s *Service) StartOperatorWorkspaceShell(ctx context.Context, workspaceID, cwd, actor string) (domain.SSHShell, error) {
+	req, err := s.workspaceShellStartRequest(ctx, workspaceID, cwd, nil, 120, 32, operatorConnectionReason)
+	if err != nil {
+		return domain.SSHShell{}, err
+	}
+	req.ShellSurface = domain.WorkspaceShellSurfaceOperator
+	result, err := s.executeOperatorConnection(ctx, req, actor)
+	if err != nil {
+		return domain.SSHShell{}, err
+	}
+	if result.Shell == nil {
+		return domain.SSHShell{}, fmt.Errorf("Workspace shell start completed without shell state")
+	}
+	return *result.Shell, nil
+}
+
+func (s *Service) workspaceShellStartRequest(ctx context.Context, workspaceID, cwd string, env map[string]string, cols, rows int, reason string) (domain.ExecRequest, error) {
+	workspaceID = strings.TrimSpace(workspaceID)
+	workspace, ok := s.workspaceByID(workspaceID)
+	if !ok {
+		return domain.ExecRequest{}, fmt.Errorf("workspace %q not found", workspaceID)
+	}
+	backend, err := s.configuredWorkspaceShellBackend(ctx)
+	if err != nil {
+		return domain.ExecRequest{}, err
+	}
+	if backend == domain.WorkspaceShellModeHost && workspace.Access != "read_write" {
+		return domain.ExecRequest{}, fmt.Errorf("host shell is unavailable for read_only workspace %q", workspaceID)
+	}
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
+		cwd = "."
+	}
+	resolvedCwd, err := s.resolveWorkspacePath(workspace, cwd, false)
+	if err != nil {
+		return domain.ExecRequest{}, err
+	}
+	if info, statErr := os.Stat(resolvedCwd); statErr != nil || !info.IsDir() {
+		return domain.ExecRequest{}, fmt.Errorf("workspace shell cwd is not a directory")
+	}
+	host, err := s.workspaceHost(ctx, workspaceID)
+	if err != nil {
+		return domain.ExecRequest{}, err
+	}
+	return domain.ExecRequest{
+		HostID: host.ID, Mode: domain.ExecWorkspaceShellStart, WorkspaceID: workspaceID,
+		WorkspaceShellBackend: backend, Cwd: cwd, Env: env,
+		ShellCols: cols, ShellRows: rows, Reason: strings.TrimSpace(reason),
+	}, nil
+}
+
+func (s *Service) openWorkspaceShell(ctx context.Context, host domain.Host, req domain.ExecRequest, run domain.Run, actor string) (domain.SSHShell, error) {
+	if req.Mode != domain.ExecWorkspaceShellStart {
+		return domain.SSHShell{}, fmt.Errorf("invalid Workspace shell request mode")
+	}
+	if err := validateInteractiveShellSize(req); err != nil {
+		return domain.SSHShell{}, err
+	}
+	workspace, ok := s.workspaceByID(req.WorkspaceID)
+	if !ok {
+		return domain.SSHShell{}, fmt.Errorf("workspace %q not found", req.WorkspaceID)
+	}
+	configuredBackend, err := s.configuredWorkspaceShellBackend(ctx)
+	if err != nil {
+		return domain.SSHShell{}, err
+	}
+	if req.WorkspaceShellBackend == "" || req.WorkspaceShellBackend != configuredBackend {
+		return domain.SSHShell{}, fmt.Errorf("approved workspace shell backend %q is no longer enabled", req.WorkspaceShellBackend)
+	}
+	program, args, directory, environment, err := s.workspacePTYCommand(workspace, req)
+	if err != nil {
+		return domain.SSHShell{}, err
+	}
+	user := strings.TrimSpace(os.Getenv("USER"))
+	if runtime.GOOS == "windows" {
+		user = strings.TrimSpace(os.Getenv("USERNAME"))
+	}
+	if user == "" {
+		user = "local"
+	}
+	return s.openInteractiveShell(ctx, host, req, run, actor, interactiveShellOptions{
+		kind: domain.SSHShellKindWorkspace, workspaceID: workspace.ID,
+		backend: req.WorkspaceShellBackend, user: user,
+	}, func(shellCtx context.Context, output func(string, []byte)) (sshx.ShellSession, error) {
+		return startWorkspacePTY(shellCtx, program, args, directory, environment, req.ShellCols, req.ShellRows, output)
+	})
+}
+
+func (s *Service) workspaceShellTarget(ctx context.Context, shellID, sessionID, workspaceID string) (domain.SSHShell, error) {
+	shell, err := s.store.GetSSHShell(ctx, strings.TrimSpace(shellID))
+	if err != nil {
+		return domain.SSHShell{}, err
+	}
+	if shell.Kind != domain.SSHShellKindWorkspace || shell.SessionID != strings.TrimSpace(sessionID) || shell.WorkspaceID != strings.TrimSpace(workspaceID) {
+		return domain.SSHShell{}, store.ErrNotFound
+	}
+	return shell, nil
+}
+
+func (s *Service) ListWorkspaceShells(ctx context.Context, sessionID, workspaceID, reason, actor string) (domain.SSHShellList, error) {
+	shells, err := s.store.ListSSHShells(ctx, strings.TrimSpace(sessionID), true)
+	if err != nil {
+		return domain.SSHShellList{}, err
+	}
+	filtered := shells[:0]
+	for _, shell := range shells {
+		if shell.Kind == domain.SSHShellKindWorkspace && shell.WorkspaceID == strings.TrimSpace(workspaceID) {
+			filtered = append(filtered, shell)
+		}
+	}
+	if reason = strings.TrimSpace(reason); reason != "" {
+		if len(reason) > maxSSHShellReasonBytes {
+			return domain.SSHShellList{}, fmt.Errorf("reason must not exceed %d bytes", maxSSHShellReasonBytes)
+		}
+		s.audit(context.WithoutCancel(ctx), "", "workspace_shell_list", actor, map[string]any{
+			"session_id": strings.TrimSpace(sessionID), "workspace_id": strings.TrimSpace(workspaceID), "reason": s.redactor.Redact(reason),
+		})
+	}
+	return domain.SSHShellList{Shells: filtered, Count: len(filtered), WorkspaceID: strings.TrimSpace(workspaceID)}, nil
+}
+
+func (s *Service) WriteWorkspaceShell(ctx context.Context, shellID, sessionID, workspaceID, input, reason, actor string) (domain.SSHShellSnapshot, error) {
+	return s.WriteWorkspaceShellWithWait(ctx, shellID, sessionID, workspaceID, input, 350*time.Millisecond, reason, actor)
+}
+
+func (s *Service) WriteWorkspaceShellWithWait(ctx context.Context, shellID, sessionID, workspaceID, input string, maxWait time.Duration, reason, actor string) (domain.SSHShellSnapshot, error) {
+	if _, err := s.workspaceShellTarget(ctx, shellID, sessionID, workspaceID); err != nil {
+		return domain.SSHShellSnapshot{}, err
+	}
+	return s.WriteSSHShellWithWait(ctx, shellID, sessionID, input, maxWait, reason, actor)
+}
+
+func (s *Service) GetWorkspaceShellSnapshot(ctx context.Context, shellID, sessionID, workspaceID string, after uint64, wait time.Duration, coalesce bool, reason, actor string) (domain.SSHShellSnapshot, error) {
+	if _, err := s.workspaceShellTarget(ctx, shellID, sessionID, workspaceID); err != nil {
+		return domain.SSHShellSnapshot{}, err
+	}
+	return s.GetSSHShellSnapshot(ctx, shellID, sessionID, after, wait, coalesce, reason, actor)
+}
+
+func (s *Service) InterruptWorkspaceShell(ctx context.Context, shellID, sessionID, workspaceID, reason, actor string) (domain.SSHShell, error) {
+	if _, err := s.workspaceShellTarget(ctx, shellID, sessionID, workspaceID); err != nil {
+		return domain.SSHShell{}, err
+	}
+	return s.InterruptSSHShell(ctx, shellID, sessionID, reason, actor)
+}
+
+func (s *Service) CloseWorkspaceShell(ctx context.Context, shellID, sessionID, workspaceID, reason, actor string) (domain.SSHShell, error) {
+	if _, err := s.workspaceShellTarget(ctx, shellID, sessionID, workspaceID); err != nil {
+		return domain.SSHShell{}, err
+	}
+	return s.CloseSSHShell(ctx, shellID, sessionID, reason, actor)
+}
+
+func (s *Service) workspacePTYCommand(workspace config.Workspace, req domain.ExecRequest) (string, []string, string, []string, error) {
+	switch req.WorkspaceShellBackend {
+	case domain.WorkspaceShellModeSandbox:
+		program, args, environment, err := s.workspaceSandboxCommand(workspace, req, true)
+		return program, args, "", environment, err
+	case domain.WorkspaceShellModeHost:
+		if workspace.Access != "read_write" {
+			return "", nil, "", nil, fmt.Errorf("host shell is unavailable for read_only workspace %q", workspace.ID)
+		}
+		shell, _, err := workspaceHostShellExecutable()
+		if err != nil {
+			return "", nil, "", nil, err
+		}
+		resolvedCwd, err := s.resolveWorkspacePath(workspace, req.Cwd, false)
+		if err != nil {
+			return "", nil, "", nil, err
+		}
+		args := []string{"--noprofile", "--norc", "-i"}
+		if runtime.GOOS == "windows" {
+			args = []string{"-NoLogo", "-NoProfile", "-NoExit", "-Command", workspacePowerShellUTF8Preamble}
+		}
+		return shell, args, resolvedCwd, workspaceHostEnvironment(workspace.Root, req.Env), nil
+	default:
+		return "", nil, "", nil, fmt.Errorf("unsupported workspace shell backend %q", req.WorkspaceShellBackend)
+	}
+}
+
 func (s *Service) prepareWorkspaceUpload(req domain.ExecRequest) (domain.ExecRequest, error) {
 	workspace, ok := s.workspaceByID(req.WorkspaceID)
 	if !ok {
@@ -940,7 +1152,7 @@ func (s *Service) prepareWorkspaceUpload(req domain.ExecRequest) (domain.ExecReq
 
 func isWorkspaceMode(mode domain.ExecMode) bool {
 	switch mode {
-	case domain.ExecWorkspaceRead, domain.ExecWorkspaceDirectoryList, domain.ExecWorkspaceSearch, domain.ExecWorkspaceEdit, domain.ExecWorkspaceShell:
+	case domain.ExecWorkspaceRead, domain.ExecWorkspaceDirectoryList, domain.ExecWorkspaceSearch, domain.ExecWorkspaceEdit, domain.ExecWorkspaceShell, domain.ExecWorkspaceShellStart:
 		return true
 	default:
 		return false
@@ -1008,7 +1220,7 @@ func redactWorkspaceResult(result sshx.RawResult, err error, root string) (sshx.
 
 func (s *Service) decorateWorkspaceShellSettings(settings domain.SystemSettings) domain.SystemSettings {
 	if settings.WorkspaceShellMode == "" {
-		settings.WorkspaceShellMode = domain.WorkspaceShellModeSandbox
+		settings.WorkspaceShellMode = domain.DefaultWorkspaceShellMode(runtime.GOOS)
 	}
 	settings.WorkspaceShellPlatform = runtime.GOOS
 	_, sandboxErr := s.workspaceSandboxExecutable()
@@ -1036,7 +1248,7 @@ func (s *Service) configuredWorkspaceShellBackend(ctx context.Context) (string, 
 		return "", err
 	}
 	if settings.WorkspaceShellMode == "" {
-		settings.WorkspaceShellMode = domain.WorkspaceShellModeSandbox
+		settings.WorkspaceShellMode = domain.DefaultWorkspaceShellMode(runtime.GOOS)
 	}
 	switch settings.WorkspaceShellMode {
 	case domain.WorkspaceShellModeDisabled:
@@ -1156,17 +1368,38 @@ func (s *Service) executeWorkspaceShell(ctx context.Context, workspace config.Wo
 }
 
 func (s *Service) executeWorkspaceSandboxShell(ctx context.Context, workspace config.Workspace, req domain.ExecRequest) (sshx.RawResult, error) {
-	sandbox, err := s.workspaceSandboxExecutable()
+	sandbox, args, environment, err := s.workspaceSandboxCommand(workspace, req, false)
 	if err != nil {
 		return sshx.RawResult{}, err
 	}
+
+	timeout := req.TimeoutSeconds
+	if timeout <= 0 {
+		timeout = s.limits.SyncTimeoutSeconds
+	}
+	if timeout <= 0 {
+		timeout = 60
+	}
+	execCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+	defer cancel()
+	command := exec.CommandContext(execCtx, sandbox, args...)
+	command.Env = environment
+	command.Stdin = strings.NewReader(req.Script)
+	return s.runWorkspaceProcess(execCtx, command, timeout, "shell sandbox")
+}
+
+func (s *Service) workspaceSandboxCommand(workspace config.Workspace, req domain.ExecRequest, interactive bool) (string, []string, []string, error) {
+	sandbox, err := s.workspaceSandboxExecutable()
+	if err != nil {
+		return "", nil, nil, err
+	}
 	root, err := filepath.EvalSymlinks(workspace.Root)
 	if err != nil {
-		return sshx.RawResult{}, fmt.Errorf("resolve workspace root: %w", err)
+		return "", nil, nil, fmt.Errorf("resolve workspace root: %w", err)
 	}
 	for _, systemRoot := range []string{"/usr", "/lib", "/lib64"} {
 		if pathsOverlap(root, systemRoot) {
-			return sshx.RawResult{}, fmt.Errorf("workspace root overlaps sandbox runtime directory %s", systemRoot)
+			return "", nil, nil, fmt.Errorf("workspace root overlaps sandbox runtime directory %s", systemRoot)
 		}
 	}
 	cwd := req.Cwd
@@ -1175,36 +1408,41 @@ func (s *Service) executeWorkspaceSandboxShell(ctx context.Context, workspace co
 	}
 	resolvedCwd, err := s.resolveWorkspacePath(workspace, cwd, false)
 	if err != nil {
-		return sshx.RawResult{}, err
+		return "", nil, nil, err
 	}
 	info, err := os.Stat(resolvedCwd)
 	if err != nil || !info.IsDir() {
-		return sshx.RawResult{}, fmt.Errorf("workspace shell cwd is not a directory")
+		return "", nil, nil, fmt.Errorf("workspace shell cwd is not a directory")
 	}
 	relativeCwd, err := filepath.Rel(root, resolvedCwd)
 	if err != nil {
-		return sshx.RawResult{}, err
+		return "", nil, nil, err
 	}
 	masks, err := workspaceSandboxMasks(root)
 	if err != nil {
-		return sshx.RawResult{}, fmt.Errorf("prepare workspace sandbox masks: %w", err)
+		return "", nil, nil, fmt.Errorf("prepare workspace sandbox masks: %w", err)
 	}
-
 	mountMode := "--bind"
 	if workspace.Access == "read_only" {
 		mountMode = "--ro-bind"
 	}
-	args := []string{
-		"--die-with-parent", "--new-session", "--unshare-all", "--unshare-user", "--cap-drop", "ALL",
+	args := []string{"--die-with-parent"}
+	if !interactive {
+		args = append(args, "--new-session")
+	}
+	// Interactive commands already run as the session leader of a dedicated
+	// PTY. Starting another session inside Bubblewrap detaches Bash from that
+	// controlling terminal and disables job control.
+	args = append(args,
+		"--unshare-all", "--unshare-user", "--cap-drop", "ALL",
 		"--ro-bind", "/usr", "/usr",
 		"--ro-bind-try", "/lib", "/lib",
 		"--ro-bind-try", "/lib64", "/lib64",
 		"--symlink", "usr/bin", "/bin", "--symlink", "usr/sbin", "/sbin",
 		"--dir", "/etc", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
 		"--dir", "/workspace", mountMode, root, "/workspace",
-	}
+	)
 	if workspaceSandboxSupportsDisableUserns(sandbox) {
-		// Older distribution bubblewrap releases reject this optional hardening flag.
 		args = append([]string{"--disable-userns"}, args...)
 	}
 	for _, mask := range masks {
@@ -1224,6 +1462,8 @@ func (s *Service) executeWorkspaceSandboxShell(ctx context.Context, workspace co
 		"--setenv", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 		"--setenv", "HOME", "/workspace",
 		"--setenv", "TMPDIR", "/tmp",
+		"--setenv", "TERM", "xterm-256color",
+		"--setenv", "COLORTERM", "truecolor",
 		"--setenv", "LANG", "C.UTF-8",
 		"--setenv", "LC_ALL", "C.UTF-8",
 	)
@@ -1235,21 +1475,14 @@ func (s *Service) executeWorkspaceSandboxShell(ctx context.Context, workspace co
 	for _, key := range keys {
 		args = append(args, "--setenv", key, req.Env[key])
 	}
-	args = append(args, "--", "/usr/bin/bash", "-se")
-
-	timeout := req.TimeoutSeconds
-	if timeout <= 0 {
-		timeout = s.limits.SyncTimeoutSeconds
+	bashArgs := []string{"-se"}
+	if interactive {
+		bashArgs = []string{"--noprofile", "--norc", "-i"}
 	}
-	if timeout <= 0 {
-		timeout = 60
-	}
-	execCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
-	defer cancel()
-	command := exec.CommandContext(execCtx, sandbox, args...)
-	command.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"}
-	command.Stdin = strings.NewReader(req.Script)
-	return s.runWorkspaceProcess(execCtx, command, timeout, "shell sandbox")
+	args = append(args, "--", "/usr/bin/bash")
+	args = append(args, bashArgs...)
+	environment := []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"}
+	return sandbox, args, environment, nil
 }
 
 func (s *Service) executeWorkspaceHostShell(ctx context.Context, workspace config.Workspace, req domain.ExecRequest) (sshx.RawResult, error) {
@@ -1342,8 +1575,10 @@ func createWorkspacePowerShellScript(script string) (string, func() error, error
 
 func workspaceHostEnvironment(workspaceRoot string, input map[string]string) []string {
 	values := map[string]string{
-		"HOME": workspaceRoot,
-		"PATH": os.Getenv("PATH"),
+		"HOME":      workspaceRoot,
+		"PATH":      os.Getenv("PATH"),
+		"TERM":      "xterm-256color",
+		"COLORTERM": "truecolor",
 	}
 	if runtime.GOOS == "windows" {
 		values["USERPROFILE"] = workspaceRoot
@@ -1430,11 +1665,12 @@ func (s *Service) workspaceHost(ctx context.Context, workspaceID string) (domain
 }
 
 func (s *Service) resolveWorkspacePath(workspace config.Workspace, relative string, allowMissing bool) (string, error) {
-	if relative == "" {
-		relative = "."
+	relative = normalizedWorkspaceRelativePath(relative)
+	if filepath.IsAbs(relative) {
+		return "", fmt.Errorf(`workspace path must be relative; omit path or use "." for the Workspace root (examples: "src", "src/main.go"); absolute paths such as "/workspace" are invalid`)
 	}
-	if filepath.IsAbs(relative) || filepath.Clean(relative) != relative || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || strings.ContainsAny(relative, "\\\x00\r\n") {
-		return "", fmt.Errorf("workspace path must be clean and relative")
+	if filepath.Clean(relative) != relative || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || strings.ContainsAny(relative, "\\\x00\r\n") {
+		return "", fmt.Errorf(`workspace path must be clean and relative (examples: ".", "src", "src/main.go")`)
 	}
 	for _, component := range strings.Split(filepath.ToSlash(relative), "/") {
 		if isSensitiveWorkspaceComponent(component) {
@@ -1464,6 +1700,14 @@ func (s *Service) resolveWorkspacePath(workspace config.Workspace, relative stri
 		return "", fmt.Errorf("workspace symbolic links are denied")
 	}
 	return resolved, nil
+}
+
+func normalizedWorkspaceRelativePath(relative string) string {
+	relative = strings.TrimSpace(relative)
+	if relative == "" {
+		return "."
+	}
+	return relative
 }
 
 func readWorkspaceFile(path, displayPath string, maxBytes int, offset int64) ([]byte, error) {
@@ -1658,10 +1902,14 @@ func (s *Service) workspaceValidator(id string, workspace config.Workspace, rela
 	}
 	validator, ok := s.validators[id]
 	if !ok || validator.Scope != "workspace" {
-		return config.Validator{}, fmt.Errorf("invalid workspace validator %q", id)
+		available := s.ValidatorIDs("workspace")
+		if len(available) == 0 {
+			return config.Validator{}, fmt.Errorf("invalid validator_id %q: no Workspace validator IDs are configured; omit validator_id", id)
+		}
+		return config.Validator{}, fmt.Errorf("invalid Workspace validator_id %q; available IDs: %s", id, strings.Join(available, ", "))
 	}
 	if !validatorAllowsPath(validator, filepath.Join(workspace.Root, relative)) && !validatorAllowsPath(validator, relative) {
-		return config.Validator{}, fmt.Errorf("validator %q is not allowed for workspace path %s", id, relative)
+		return config.Validator{}, fmt.Errorf("validator_id %q is not allowed for Workspace path %s", id, relative)
 	}
 	return validator, nil
 }

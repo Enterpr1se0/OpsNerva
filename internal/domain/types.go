@@ -18,24 +18,6 @@ type WorkspaceInput struct {
 	Access string `json:"access"`
 }
 
-type RiskLevel string
-
-const (
-	RiskReadOnly  RiskLevel = "read_only"
-	RiskChange    RiskLevel = "change"
-	RiskCritical  RiskLevel = "critical"
-	RiskForbidden RiskLevel = "forbidden"
-)
-
-type DecisionAction string
-
-const (
-	ActionAllow      DecisionAction = "allow"
-	ActionApprove    DecisionAction = "approval_required"
-	ActionBreakGlass DecisionAction = "break_glass_required"
-	ActionDeny       DecisionAction = "denied"
-)
-
 type Host struct {
 	ID                  string    `json:"id"`
 	Name                string    `json:"name"`
@@ -201,6 +183,13 @@ const (
 	WorkspaceShellModeHost     = "host"
 	WorkspaceShellModeDisabled = "disabled"
 )
+
+func DefaultWorkspaceShellMode(goos string) string {
+	if strings.EqualFold(strings.TrimSpace(goos), "linux") {
+		return WorkspaceShellModeSandbox
+	}
+	return WorkspaceShellModeHost
+}
 
 type SystemSettings struct {
 	AgentMaxIterations          int       `json:"agent_max_iterations"`
@@ -437,6 +426,7 @@ const (
 	ExecRemoteEdit             ExecMode = "remote_edit"
 	ExecWorkspaceUpload        ExecMode = "workspace_upload"
 	ExecWorkspaceShell         ExecMode = "workspace_shell"
+	ExecWorkspaceShellStart    ExecMode = "workspace_shell_start"
 	ExecSSHFileTransfer        ExecMode = "ssh_file_transfer"
 	ExecSSHTunnelStart         ExecMode = "ssh_tunnel_start"
 	ExecSSHShellStart          ExecMode = "ssh_shell_start"
@@ -460,13 +450,12 @@ type ExecRequest struct {
 	Cwd                       string              `json:"cwd,omitempty" jsonschema:"absolute remote working directory, or a clean workspace-relative directory for workspace_shell"`
 	Env                       map[string]string   `json:"env,omitempty" jsonschema:"non-secret environment values"`
 	Elevated                  bool                `json:"elevated,omitempty" jsonschema:"request root through the host sudo policy; never pass sudo or a password as a program or argument"`
-	TimeoutSeconds            int                 `json:"timeout_seconds,omitempty" jsonschema:"1-600 seconds for synchronous execution"`
+	TimeoutSeconds            int                 `json:"timeout_seconds,omitempty" jsonschema:"execution timeout in seconds"`
 	Reason                    string              `json:"reason" jsonschema:"concise one-sentence purpose of this operation"`
 	RemotePath                string              `json:"remote_path,omitempty" jsonschema:"absolute remote file path for transfers"`
 	SourceHostID              string              `json:"source_host_id,omitempty" jsonschema:"registered source host identifier for host-to-host transfers"`
 	SourcePath                string              `json:"source_path,omitempty" jsonschema:"absolute source path for host-to-host transfers"`
-	Overwrite                 bool                `json:"overwrite,omitempty" jsonschema:"replace an existing transfer destination; defaults to false"`
-	ExpectedDestinationSHA256 string              `json:"expected_destination_sha256,omitempty" jsonschema:"destination SHA256 required when overwriting an existing file"`
+	ExpectedDestinationSHA256 string              `json:"expected_destination_sha256,omitempty" jsonschema:"current destination SHA256; omit to require a new destination, provide it to replace that exact version"`
 	WorkspaceID               string              `json:"workspace_id,omitempty" jsonschema:"registered workspace identifier"`
 	WorkspaceShellBackend     string              `json:"workspace_shell_backend,omitempty" jsonschema:"control-plane-selected workspace shell backend bound into approval"`
 	SSHConnectionDigest       string              `json:"ssh_connection_digest,omitempty" jsonschema:"control-plane-selected SSH connection revision bound into approval"`
@@ -488,6 +477,8 @@ type ExecRequest struct {
 	ShellRows                 int                 `json:"shell_rows,omitempty" jsonschema:"interactive shell terminal rows"`
 	LocalPath                 string              `json:"-"`
 	ShellSurface              string              `json:"-"`
+	MaxOutputBytes            int                 `json:"-"`
+	OutputView                string              `json:"-"`
 }
 
 // SearchText returns the request's human-readable text exactly as submitted,
@@ -497,7 +488,7 @@ func (r ExecRequest) SearchText() string {
 	parts := []string{r.Program}
 	parts = append(parts, r.Args...)
 	parts = append(parts, r.Script, r.Cwd, r.Reason,
-		r.RemotePath, r.SourcePath, r.RelativePath, r.SearchPattern, r.TunnelRemoteHost)
+		r.RemotePath, r.SourcePath, r.WorkspaceID, r.RelativePath, r.SearchPattern, r.TunnelRemoteHost)
 	if r.TunnelRemotePort != 0 {
 		parts = append(parts, strconv.Itoa(r.TunnelRemotePort))
 	}
@@ -544,15 +535,22 @@ type ExecResult struct {
 	RunID               string            `json:"run_id"`
 	TaskID              string            `json:"task_id,omitempty"`
 	Status              string            `json:"status"`
-	Risk                RiskLevel         `json:"risk"`
 	ApprovalID          string            `json:"approval_id,omitempty"`
 	OperatorInstruction string            `json:"operator_instruction,omitempty"`
 	ExitCode            int               `json:"exit_code,omitempty"`
 	Stdout              string            `json:"stdout,omitempty"`
 	Stderr              string            `json:"stderr,omitempty"`
+	OutputView          string            `json:"output_view,omitempty"`
+	OutputLimited       bool              `json:"output_limited,omitempty"`
+	StdoutTotalBytes    int               `json:"stdout_total_bytes,omitempty"`
+	StderrTotalBytes    int               `json:"stderr_total_bytes,omitempty"`
+	StdoutOmittedBytes  int               `json:"stdout_omitted_bytes,omitempty"`
+	StderrOmittedBytes  int               `json:"stderr_omitted_bytes,omitempty"`
+	StdoutOffsetBytes   int               `json:"stdout_offset_bytes,omitempty"`
+	StderrOffsetBytes   int               `json:"stderr_offset_bytes,omitempty"`
+	WaitDeadlineReached bool              `json:"wait_deadline_reached,omitempty"`
 	Duration            time.Duration     `json:"duration,omitempty"`
-	PolicyHits          []string          `json:"policy_hits,omitempty"`
-	CompletedAt         time.Time         `json:"completed_at,omitempty"`
+	CompletedAt         time.Time         `json:"completed_at,omitempty,omitzero"`
 	File                *FileMetadata     `json:"file,omitempty"`
 	Change              *FileChange       `json:"change,omitempty"`
 	Search              *FileSearchResult `json:"search,omitempty"`
@@ -588,9 +586,12 @@ type SSHShell struct {
 	ID                string    `json:"id"`
 	RunID             string    `json:"run_id"`
 	SessionID         string    `json:"session_id"`
+	Kind              string    `json:"kind"`
 	Surface           string    `json:"surface"`
 	HostID            string    `json:"host_id"`
 	HostName          string    `json:"host_name"`
+	WorkspaceID       string    `json:"workspace_id,omitempty"`
+	Backend           string    `json:"backend,omitempty"`
 	User              string    `json:"user"`
 	Elevated          bool      `json:"elevated"`
 	Cwd               string    `json:"cwd,omitempty"`
@@ -602,7 +603,7 @@ type SSHShell struct {
 	TerminationReason string    `json:"termination_reason,omitempty"`
 	Error             string    `json:"error,omitempty"`
 	StartedAt         time.Time `json:"started_at"`
-	EndedAt           time.Time `json:"ended_at,omitempty"`
+	EndedAt           time.Time `json:"ended_at,omitempty,omitzero"`
 }
 
 type SSHShellEvent struct {
@@ -626,8 +627,9 @@ type SSHShellSnapshot struct {
 }
 
 type SSHShellList struct {
-	Shells []SSHShell `json:"shells"`
-	Count  int        `json:"count"`
+	Shells      []SSHShell `json:"shells"`
+	Count       int        `json:"count"`
+	WorkspaceID string     `json:"workspace_id,omitempty"`
 }
 
 type SSHShellUsage struct {
@@ -637,9 +639,14 @@ type SSHShellUsage struct {
 }
 
 const (
-	SSHShellSurfaceAgent     = "agent"
-	SSHShellSurfaceQuick     = "quick"
-	SSHShellSurfaceWorkspace = "workspace"
+	SSHShellKindSSH               = "ssh"
+	SSHShellKindWorkspace         = "workspace"
+	SSHShellSurfaceAgent          = "agent"
+	SSHShellSurfaceMCP            = "mcp"
+	SSHShellSurfaceQuick          = "quick"
+	SSHShellSurfaceWorkspace      = "workspace"
+	WorkspaceShellSurfaceAgent    = "workspace_agent"
+	WorkspaceShellSurfaceOperator = "workspace_operator"
 )
 
 type FileSearchResult struct {
@@ -662,6 +669,8 @@ type FileMetadata struct {
 	Sensitive     bool   `json:"sensitive,omitempty"`
 	OffsetBytes   int64  `json:"offset_bytes,omitempty"`
 	ReturnedBytes int    `json:"returned_bytes,omitempty"`
+	HasMore       bool   `json:"has_more,omitempty"`
+	NextOffset    int64  `json:"next_offset,omitempty"`
 }
 
 type FileChange struct {
@@ -670,16 +679,8 @@ type FileChange struct {
 	Deletions int    `json:"deletions"`
 }
 
-type Decision struct {
-	Risk     RiskLevel      `json:"risk"`
-	Action   DecisionAction `json:"action"`
-	Reason   string         `json:"reason"`
-	RuleHits []string       `json:"rule_hits"`
-}
-
 type CommandReviewInput struct {
 	Request       ExecRequest    `json:"request"`
-	Policy        Decision       `json:"policy"`
 	Host          HostCapability `json:"host"`
 	PlanStep      string         `json:"plan_step,omitempty"`
 	RequestDigest string         `json:"request_digest"`
@@ -697,14 +698,13 @@ const (
 )
 
 type CommandReview struct {
-	Status            string              `json:"status"`
-	Model             string              `json:"model,omitempty"`
-	Decision          string              `json:"decision,omitempty"`
-	Reason            string              `json:"reason,omitempty"`
-	DeterministicRisk RiskLevel           `json:"deterministic_risk"`
-	Explanation       *CommandExplanation `json:"explanation,omitempty"`
-	Errors            []string            `json:"errors,omitempty"`
-	ReviewedAt        time.Time           `json:"reviewed_at"`
+	Status      string              `json:"status"`
+	Model       string              `json:"model,omitempty"`
+	Decision    string              `json:"decision,omitempty"`
+	Reason      string              `json:"reason,omitempty"`
+	Explanation *CommandExplanation `json:"explanation,omitempty"`
+	Errors      []string            `json:"errors,omitempty"`
+	ReviewedAt  time.Time           `json:"reviewed_at"`
 }
 
 type Run struct {
@@ -717,7 +717,6 @@ type Run struct {
 	RequestCipher     string         `json:"-"`
 	SearchText        string         `json:"-"`
 	RequestDigest     string         `json:"request_digest"`
-	Risk              RiskLevel      `json:"risk"`
 	Status            string         `json:"status"`
 	ExitCode          int            `json:"exit_code"`
 	StdoutRedacted    string         `json:"stdout_redacted,omitempty"`
@@ -728,7 +727,7 @@ type Run struct {
 	AIReviewJSON      string         `json:"-"`
 	AIReview          *CommandReview `json:"ai_review,omitempty"`
 	StartedAt         time.Time      `json:"started_at"`
-	CompletedAt       time.Time      `json:"completed_at,omitempty"`
+	CompletedAt       time.Time      `json:"completed_at,omitempty,omitzero"`
 }
 
 type Approval struct {
@@ -739,13 +738,12 @@ type Approval struct {
 	RequestJSON   string         `json:"request_json"`
 	RequestCipher string         `json:"-"`
 	RequestDigest string         `json:"request_digest"`
-	Risk          RiskLevel      `json:"risk"`
 	Status        string         `json:"status"`
 	Reason        string         `json:"reason,omitempty"`
 	AIReview      *CommandReview `json:"ai_review,omitempty"`
 	CreatedAt     time.Time      `json:"created_at"`
 	ExpiresAt     time.Time      `json:"expires_at"`
-	DecidedAt     time.Time      `json:"decided_at,omitempty"`
+	DecidedAt     time.Time      `json:"decided_at,omitempty,omitzero"`
 }
 
 type Task struct {
@@ -756,7 +754,7 @@ type Task struct {
 	Status              string    `json:"status"`
 	OperatorInstruction string    `json:"operator_instruction,omitempty"`
 	StartedAt           time.Time `json:"started_at"`
-	EndedAt             time.Time `json:"ended_at,omitempty"`
+	EndedAt             time.Time `json:"ended_at,omitempty,omitzero"`
 }
 
 type AuditEvent struct {

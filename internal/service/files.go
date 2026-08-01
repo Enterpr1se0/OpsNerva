@@ -5,6 +5,7 @@ import (
 	"fmt"
 	posixpath "path"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +21,20 @@ const (
 	fileAfterMarker      = "__OPS_FILE_AFTER__"
 	fileValidationMarker = "__OPS_FILE_VALIDATION_OK__"
 )
+
+// ValidatorIDs returns the configured validator identifiers for one execution
+// scope. Validators are configuration-owned argv templates, never Tool-supplied
+// shell commands.
+func (s *Service) ValidatorIDs(scope string) []string {
+	ids := make([]string, 0, len(s.validators))
+	for _, validator := range s.validators {
+		if validator.Scope == scope {
+			ids = append(ids, validator.ID)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
 
 func (s *Service) ReadFileAdvanced(ctx context.Context, hostID, path string, metadataOnly bool, maxBytes int, offsetBytes int64, tailLines int, elevated bool, actor string) (domain.ExecResult, error) {
 	if err := validateRemoteFilePath(path); err != nil {
@@ -40,6 +55,7 @@ func (s *Service) ReadFileAdvanced(ctx context.Context, hostID, path string, met
 		metadata, content := parseFileReadOutput(path, result.Stdout)
 		metadata.OffsetBytes = resolvedFileOffset(metadata.Size, offsetBytes)
 		metadata.ReturnedBytes = len(content)
+		decorateFileReadPage(&metadata, maxBytes, tailLines)
 		metadata.Sensitive = strings.Contains(content, "[REDACTED]")
 		result.File = &metadata
 		result.Stdout = content
@@ -48,6 +64,17 @@ func (s *Service) ReadFileAdvanced(ctx context.Context, hostID, path string, met
 		result.Stdout = ""
 	}
 	return result, err
+}
+
+func decorateFileReadPage(metadata *domain.FileMetadata, maxBytes, tailLines int) {
+	if metadata == nil || maxBytes <= 0 || tailLines > 0 {
+		return
+	}
+	next := metadata.OffsetBytes + int64(maxBytes)
+	if next < metadata.Size {
+		metadata.HasMore = true
+		metadata.NextOffset = next
+	}
 }
 
 func buildRemoteFileReadScript(req domain.ExecRequest) string {
@@ -336,10 +363,14 @@ func (s *Service) validatorCommandFor(id, scope, allowedPath, executionPath stri
 	}
 	validator, ok := s.validators[id]
 	if !ok || validator.Scope != scope {
-		return "", fmt.Errorf("invalid validator %q for %s operations", id, scope)
+		available := s.ValidatorIDs(scope)
+		if len(available) == 0 {
+			return "", fmt.Errorf("invalid validator_id %q: no %s validator IDs are configured; omit validator_id", id, scope)
+		}
+		return "", fmt.Errorf("invalid validator_id %q for %s operations; available IDs: %s", id, scope, strings.Join(available, ", "))
 	}
 	if !validatorAllowsPath(validator, allowedPath) {
-		return "", fmt.Errorf("validator %q is not allowed for path %s", id, allowedPath)
+		return "", fmt.Errorf("validator_id %q is not allowed for path %s", id, allowedPath)
 	}
 	parts := []string{"timeout", "--signal=KILL", strconv.Itoa(validator.TimeoutSeconds) + "s", shellQuote(validator.Program)}
 	for _, argument := range validator.Args {

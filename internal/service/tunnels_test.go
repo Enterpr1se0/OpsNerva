@@ -33,7 +33,7 @@ func TestSSHTunnelApprovalReusesResolvedProxyConnectionAndStops(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pending, err := svc.StartSSHTunnel(ctx, target.ID, "", 5432, 0, "access the remote database locally", "test")
+	pending, err := svc.StartSSHTunnel(ctx, target.ID, "", 5432, 0, "access the remote database locally", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestSSHTunnelForwardsLocalTraffic(t *testing.T) {
 	}()
 	remotePort := remoteListener.Addr().(*net.TCPAddr).Port
 
-	pending, err := svc.StartSSHTunnel(context.Background(), host.ID, "127.0.0.1", remotePort, 0, "verify local forwarding", "test")
+	pending, err := svc.StartSSHTunnel(context.Background(), host.ID, "127.0.0.1", remotePort, 0, "verify local forwarding", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}

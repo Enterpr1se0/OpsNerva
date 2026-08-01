@@ -27,14 +27,13 @@ import (
 	"eino-ops-agent/internal/httpapi"
 	"eino-ops-agent/internal/mcpserver"
 	"eino-ops-agent/internal/observability"
-	"eino-ops-agent/internal/policy"
 	"eino-ops-agent/internal/security"
 	"eino-ops-agent/internal/service"
 	"eino-ops-agent/internal/sshx"
 	"eino-ops-agent/internal/store"
 )
 
-const version = "0.1.5"
+const version = "0.1.6"
 
 type application struct {
 	config    config.Config
@@ -50,6 +49,7 @@ type serveOptions struct {
 	ConfigPath     string
 	ConfigCreated  bool
 	MCPHTTPEnabled bool
+	WorkspaceRoot  string
 }
 
 func main() {
@@ -110,7 +110,7 @@ func run(ctx context.Context, args []string) error {
 	case "serve":
 		return serve(ctx, app, serveOptions{
 			QuickStart: quickStart, Desktop: quickStart && envBool("OPS_AGENT_DESKTOP"), ConfigPath: configPath,
-			ConfigCreated: configCreated,
+			ConfigCreated: configCreated, WorkspaceRoot: cfg.WorkspaceDir,
 		})
 	case "mcp":
 		return mcpserver.New(app.service, version).Run(ctx)
@@ -143,13 +143,8 @@ func newApplication(ctx context.Context, cfg config.Config) (*application, error
 		st.Close()
 		return nil, fmt.Errorf("initialize audit encryption: %w", err)
 	}
-	engine, err := policy.Load(cfg.PolicyPath)
-	if err != nil {
-		st.Close()
-		return nil, err
-	}
 	transport := sshx.NewNativeSSHTransport(cfg.SSH, cfg.Limits)
-	svc := service.New(st, engine, transport, encryptor, security.NewRedactor(), cfg.Limits, cfg)
+	svc := service.New(st, transport, encryptor, security.NewRedactor(), cfg.Limits, cfg)
 	if err := svc.InitializeWorkspaces(ctx, cfg.WorkspaceDir); err != nil {
 		st.Close()
 		return nil, fmt.Errorf("initialize workspaces: %w", err)
@@ -232,7 +227,7 @@ func serve(ctx context.Context, app *application, options serveOptions) error {
 		_ = server.Shutdown(graceCtx)
 	}()
 	address := listener.Addr().String()
-	slog.Info("Ops Agent listening", "component", "server", "address", address, "agent_available", app.agent.Available())
+	slog.Info("OpsNerva listening", "component", "server", "address", address, "agent_available", app.agent.Available())
 	if options.QuickStart {
 		url := localWebURL(listener.Addr())
 		if options.Desktop {
@@ -281,7 +276,7 @@ func printQuickStart(options serveOptions, url string) {
 	}
 	fmt.Println("Open:", url)
 	fmt.Println("On first start, create the administrator password in the Web interface.")
-	fmt.Println("Press Ctrl+C to stop OpsPilot.")
+	fmt.Println("Press Ctrl+C to stop OpsNerva.")
 	fmt.Println()
 }
 
@@ -291,10 +286,12 @@ func desktopReadyLine(options serveOptions, url string) string {
 		ConfigPath        string `json:"config_path"`
 		ConfigurationMade bool   `json:"configuration_created"`
 		MCPHTTPEnabled    bool   `json:"mcp_http_enabled"`
+		WorkspaceRoot     string `json:"workspace_root"`
 	}{
 		URL: url, ConfigPath: options.ConfigPath,
 		ConfigurationMade: options.ConfigCreated,
 		MCPHTTPEnabled:    options.MCPHTTPEnabled,
+		WorkspaceRoot:     options.WorkspaceRoot,
 	})
 	return "OPSPILOT_DESKTOP_READY=" + string(payload)
 }
@@ -546,7 +543,7 @@ func printJSON(value any, err error) error {
 }
 
 func usage() {
-	fmt.Println(`Ops Agent ` + version + `
+	fmt.Println(`OpsNerva ` + version + `
 
 Usage:
   ops-agent                         Create/load config.yaml and start the Web UI

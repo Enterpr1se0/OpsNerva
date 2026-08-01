@@ -4,26 +4,24 @@
 
 LLM、Prompt、Skill、远程输出和 MCP Client 都不属于可信计算基。唯一能够执行 SSH 的入口是 `service.Service`，它固定执行以下顺序：
 
-1. 从 SQLite 按 `host_id` 解析目标与认证策略，忽略模型提供的任何连接凭据。
-2. 规范化请求并计算原始载荷 SHA-256。
-3. 使用 Bash AST 和 YAML 规则得到最终风险等级。
-4. 应用审批模式：Manual 保持 Policy 结果，Auto 审查 Change/Critical，Full access 对主 Agent 放行。
-5. 仅在实际执行前解密所需 SSH/sudo 密码，获取并发令牌，通过审批绑定的内置 SSH Transport 执行。
-6. 加密原始请求和输出，生成脱敏视图并追加审计事件。
+1. 从 SQLite 按 `host_id` 解析目标与认证方式，忽略模型提供的任何连接凭据。
+2. 规范化并校验请求，绑定原始载荷与连接配置的 SHA-256。
+3. 应用审批模式：Manual 交给用户，Auto 交给审批 Agent，Full access 直接执行；审批 Agent 不可用时回退用户审批。
+4. 仅在实际执行前解密所需 SSH/sudo 密码，获取并发令牌，通过绑定的内置 SSH Transport 执行。
+5. 加密原始请求和输出，生成脱敏视图并追加审计事件。
 
-Eino Tool、MCP Tool、HTTP 和 CLI 都是这个 Service 的适配器。预期失败被规范化为带 `code/retryable/next_action` 的 Tool 结果；只有上下文取消或内部持久化损坏会成为 ToolNode fatal error。
+Eino Tool、MCP Tool、HTTP 和 CLI 都是这个 Service 的适配器。模型侧执行结果只保留状态、有效输出和必要标识；预期失败额外返回 `code/message/retryable` 与可用的结构化校验信息。只有上下文取消或内部持久化损坏会成为 ToolNode fatal error。
 
-这里的 MCP Tool 分为两个方向。`ops-agent mcp` 通过 stdio、设置中的 MCP Server Mode 通过同一 HTTP 服务上的 `/mcp`，把受控 SSH Service 暴露给 MCP Client，因此完整复用 Policy、审批模式和审计。HTTP 传输采用无状态 Streamable HTTP；设置开关按请求即时生效，独立高熵 Bearer Token 仅在生成时返回，SQLite 只保存 SHA-256 摘要。管理员配置的外部 MCP Server 则属于独立信任域：它的工具在远端/子进程自身权限下执行，不自动继承 SSH Policy。Web 会明确提示该边界，只有启用状态为 ready 且未被 func 管理单独关闭的外部工具才进入主 Agent，审批 Agent 仍保持无 Tool。
+这里的 MCP Tool 分为两个方向。`ops-agent mcp` 通过 stdio、设置中的 MCP Server Mode 通过同一 HTTP 服务上的 `/mcp`，把受控 SSH Service 暴露给 MCP Client，因此完整复用输入校验、审批模式和审计，但不暴露 `ssh_history`；全局执行历史只允许 Web 管理端查看。只读工具通过 MCP annotations 明确标记；`ssh_shell` 使用独立 MCP surface，`ssh_tunnel` 复用已有转发状态。HTTP 传输采用无状态 Streamable HTTP；设置开关按请求即时生效，独立高熵 Bearer Token 仅在生成时返回，SQLite 只保存 SHA-256 摘要。管理员配置的外部 MCP Server 则属于独立信任域：它的工具在远端/子进程自身权限下执行，不自动继承 OpsNerva 的审批控制。Web 会明确提示该边界，只有启用状态为 ready 且未被 func 管理单独关闭的外部工具才进入主 Agent，审批 Agent 仍保持无 Tool。
 
 Web/API 位于单管理员认证边界之后。数据库尚无管理员凭据时，Web 首次初始化页允许用户创建密码，并以仅首次插入的方式保存 Argon2id 哈希；初始化完成后该接口永久拒绝再次写入。后续请求使用服务端 Session、HttpOnly/SameSite Cookie 和 CSRF Token。MCP HTTP 使用独立 Bearer Token，不接受浏览器 Cookie；MCP stdio 与 CLI 仍属于本机进程边界。
 
-`ApprovalAgent` 是一个 `MaxIterations=1`、无 Tool 的独立 Eino `ChatModelAgent`，结构化返回 `allow/reject`、原因、操作机制和风险。Auto 模式同步使用其决定；不可用、超时或格式无效时回退 Manual。Manual 可异步调用它生成审批建议，但建议不代替用户决定。确定性风险始终保留在 Run 中。
+`ApprovalAgent` 是一个 `MaxIterations=1`、无 Tool 的独立 Eino `ChatModelAgent`，结构化返回 `allow/reject`、原因、操作机制和具体注意事项。Auto 模式同步使用其决定；不可用、超时或格式无效时回退 Manual。Manual 可异步调用它生成审批建议，但建议不代替用户决定。
 
 ## Packages
 
 - `internal/sshx`：进程内 SSH 认证、严格 host key、SFTP、SOCKS5/HTTP 代理、ProxyJump、输出上限和连接探测。
 - `internal/service/websearch.go`：Tavily 请求、HTTP/HTTPS/SOCKS5 代理、凭据解密、响应限额与外部内容脱敏。
-- `internal/policy`：Shell AST、内置风险集和 YAML 扩展规则。
 - `internal/service`：审批状态机、摘要绑定、执行并发、任务、审计事务，以及外部 MCP Client Session 与动态工具生命周期。
 - `internal/store`：SQLite hosts、runs、approvals、events、chat、加密模型/MCP 配置与 Eino checkpoints。
 - `internal/agent`：Eino ChatModelAgent、强类型 Tools、消息历史、事件流与并发安全的 Runner 热切换。
@@ -34,7 +32,7 @@ Web/API 位于单管理员认证边界之后。数据库尚无管理员凭据时
 
 ## Dynamic extensions
 
-Skill Registry 位于控制面数据目录，每个 Skill 目录必须包含 `SKILL.md`，启用状态写入独立 `skill.json`。管理员列表包含全部 Skill；主 Eino Agent 的 `ops_skill` 不传 `name` 时列出启用项，传入 `name` 时加载完整内容。OpsPilot 自身的 MCP Server 不暴露 Skill，删除是不可恢复的物理删除。
+Skill Registry 位于控制面数据目录，每个 Skill 目录必须包含 `SKILL.md`，启用状态写入独立 `skill.json`。管理员列表包含全部 Skill；主 Eino Agent 的 `ops_skill` 不传 `name` 时列出启用项，传入 `name` 时加载完整内容。OpsNerva 自身的 MCP Server 不暴露 Skill，删除是不可恢复的物理删除。
 
 主 Agent 的 func 启用状态保存在 `agent_tool_settings`。未写入状态的 func 默认启用；管理员可在 Loaded functions 中逐项关闭或重新启用。每次修改都会写入审计并重建 Eino runner，关闭项仍保留在管理目录中，但不会传给 ChatModel，也不会注册到 ToolNode。
 
@@ -44,23 +42,23 @@ stdio 通过 `exec.Command(command,args...)` 启动，不解析 Shell；Streamab
 
 ## Command execution
 
-`ssh_exec` 接收 program 与 args，服务对每个参数进行 POSIX 单引号编码，并通过 `golang.org/x/crypto/ssh` 在进程内建立连接，不调用本地 SSH 程序或 shell。
+`ssh_exec` 接收 program 与 args，服务对每个参数进行 POSIX 单引号编码，并通过 `golang.org/x/crypto/ssh` 在进程内建立连接，不调用本地 SSH 程序或 shell。同步 Tool 结果默认返回完整 stdout/stderr；调用方可设置 `max_output_bytes` 和 `output_view=head|tail|head_tail` 仅精炼模型视图，返回值同时携带每个流的总字节数、省略字节数和 `output_limited`，因此不存在静默截断。
 
-`ssh_run_script` 将脚本通过 stdin 传给远端 `bash -se`。脚本先由 `mvdan.cc/sh` 完整解析；解析失败、命令替换、动态执行、下载后管道到 shell 等模式会升级为 Critical。
+`ssh_run_script` 将脚本通过 stdin 传给远端 `bash -se`。服务端使用 Bash AST 校验语法并拒绝脚本内直接调用 sudo；提权只能使用结构化的 `elevated` 参数。后台执行返回 task ID；未显式指定 `timeout_seconds` 时，后台命令使用 `max_timeout_seconds`，同步命令使用 `sync_timeout_seconds`。`ssh_task status` 可在 Service 内阻塞等待终态或指定字节偏移后的新输出，单次最长 60 秒，并可只返回 stdout/stderr 增量；等待截止只返回仍在运行的任务和 `wait_deadline_reached=true`，不会终止或改写任务。
 
-`ssh_tunnel` 的 `start` 进入同一套 Run、Policy、审批模式和加密审计状态机；`list` 与 `stop` 直接操作进程内 Tunnel Registry。启动后控制面在 `127.0.0.1` 建立 TCP Listener，使用已解析的 `ConnectionSpec` 创建持久 SSH Client，再以 `direct-tcpip` channel 转发每个本机连接。因此网络代理、ProxyJump 链、认证与严格 Host Key 校验和普通 SSH 操作完全共用一条连接实现。Registry 记录活动连接和双向流量，Service Shutdown 会关闭 Listener、SSH Client 及全部已接受连接并等待 worker 退出；不把隧道恢复为跨重启持久状态。
+`ssh_tunnel` 的 `start` 进入同一套 Run、审批模式和加密审计状态机；`list` 与 `stop` 直接操作进程内 Tunnel Registry。启动后控制面在 `127.0.0.1` 建立 TCP Listener，使用已解析的 `ConnectionSpec` 创建持久 SSH Client，再以 `direct-tcpip` channel 转发每个本机连接。因此网络代理、ProxyJump 链、认证与严格 Host Key 校验和普通 SSH 操作完全共用一条连接实现。Registry 记录活动连接和双向流量，Service Shutdown 会关闭 Listener、SSH Client 及全部已接受连接并等待 worker 退出；不把隧道恢复为跨重启持久状态。
 
 无 PTY 的交互式 Shell、编辑器与 `systemctl edit` 会在 Service 层拒绝；apt/dnf/yum/pacman 的变更操作必须显式提供对应非交互参数。脚本、argv、环境和路径还有独立大小与格式上限，检测到秘密的环境变量不会进入执行请求。
 
 ## Transactional files and Workspace
 
-`ssh_file_read` 在同一次受审计操作中返回有界内容、mode/owner/mtime 与 SHA256，`workspace_file_read` 使用相同的范围语义：`offset_bytes` 非负时是从文件开头计算的零基偏移，负数表示读取文件末尾对应字节数，返回元数据记录解析后的实际非负偏移。两者都以可选 `pattern` 切换到字面量搜索模式，并支持上下文与结果行数参数；搜索和范围参数互斥，独立的 `ssh_file_search`、`workspace_file_search` 不再注册到 Agent 或 MCP。内部仍以不同执行模式保留策略判断和审计语义。现有文件只能通过 `ssh_file_edit` 提交单文件 unified diff，Workspace 提供对应的 `workspace_file_edit`；不提供专用的新建文件 Tool。Service 在审批前规范化 diff 并计算新增、删除行数，`ExecRequest.change` 是审批、审计和 Web 展示的唯一变更来源。远程 Bash 事务脚本在批准后才生成：同目录写入并同步临时文件、对临时文件运行白名单 validator，通过后原子提交。编辑链路不校验旧文件 SHA、不创建持久备份、不写 `file_operations`，也不提供恢复 Tool。
+`ssh_file_read` 在同一次受审计操作中返回有界内容、mode/owner/mtime 与 SHA256，`workspace_file_read` 使用相同的范围语义。普通读取默认限制为 128 KiB；未到文件末尾时通过 `has_more/next_offset` 显式分页，`full_content=true` 才取消默认页限制。`offset_bytes` 非负时是从文件开头计算的零基偏移，负数表示读取文件末尾对应字节数，返回元数据记录解析后的实际非负偏移。两者都以可选 `pattern` 切换到字面量搜索模式，并支持上下文与结果行数参数；搜索和范围参数互斥，独立的 `ssh_file_search`、`workspace_file_search` 不再注册到 Agent 或 MCP。内部仍以不同执行模式保留参数校验和审计语义。现有文件只能通过 `ssh_file_edit` 提交单文件 unified diff，Workspace 提供对应的 `workspace_file_edit`；不提供专用的新建文件 Tool。Service 在审批前规范化 diff 并计算新增、删除行数，`ExecRequest.change` 是审批、审计和 Web 展示的唯一变更来源。Tool 参数 `validator_id` 只能引用启动配置中的 scope 对应 ID，配置项以固定 program/args 执行并拒绝 Tool 提供的 Shell 命令。远程 Bash 事务脚本在批准后才生成：同目录写入并同步临时文件、对临时文件运行白名单 validator，通过后原子提交。编辑链路不校验旧文件 SHA、不创建持久备份、不写 `file_operations`，也不提供恢复 Tool。
 
-`ssh_file_transfer` 由控制端分别建立源、目标两条内部 SSH/SFTP 连接并用 `io.Copy` 中继，不要求远端主机互通，不调用本地或远端 `scp`，也不在控制端落盘。请求以目标主机作为 Run 主机，同时绑定源主机 ID、源路径及 SHA256、目标路径、覆盖条件、两端 `ssh_connection_digest` 和回滚说明。覆盖时目标当前 SHA256 同样必填并在写入前后复核。Transport 拒绝符号链接和非普通文件，先写目标同目录的随机独占临时文件，流式计算源 SHA256，通过后使用 SFTP rename 提交；冲突、取消和超时会清理临时文件。一次传输只占一个全局执行槽，并按稳定顺序同时占用两台主机的并发槽，避免反向传输死锁。
+`ssh_file_transfer` 由控制端分别建立源、目标两条内部 SSH/SFTP 连接并用 `io.Copy` 中继，不要求远端主机互通，不调用本地或远端 `scp`，也不在控制端落盘。请求以目标主机作为 Run 主机，同时绑定源主机 ID、源路径及 SHA256、目标路径和两端 `ssh_connection_digest`。未提供目标 SHA256 时只允许创建新文件；提供后只允许替换该精确版本，并在写入前后复核。Transport 拒绝符号链接和非普通文件，先写目标同目录的随机独占临时文件，流式计算源 SHA256，通过后使用 SFTP rename 提交；进度按字节事件发送，冲突、取消和超时会清理临时文件。一次传输只占一个全局执行槽，并按稳定顺序同时占用两台主机的并发槽，避免反向传输死锁。
 
 Workspace 在 `workspace_dir` 下按 ID 托管；SQLite 的 Workspace 登记只保存 ID、权限和时间戳，`chat_sessions` 另行持久化每个会话的活动 Workspace ID。数据库第一次初始化时创建 `default/read_write`，之后由受 Cookie/CSRF 保护的管理员 API 新增、修改权限和移除登记；目录固定派生为 `<workspace_dir>/<id>`，API、审计和模型上下文均不返回真实根路径。Web 在首条消息前提交选择，后续通过会话 Workspace API 切换；Agent 活动期间拒绝切换。`workspace_list` 不存在，模型侧全部 Workspace Tool schema 都不含 `workspace_id`，执行时只从可信会话上下文解析绑定。没有会话语义的 MCP Server 不注册 Workspace Tool。移除 Workspace 登记会在同一数据库事务中清空相关会话绑定，但保留目录数据；重新添加同一 ID 会复用目录。上传限制为 100 MiB，拒绝敏感路径和覆盖，通过同目录临时文件、`fsync` 与原子 hard-link 提交；Web 支持拖入多文件并顺序上传。当前文件面板通过 SSE 订阅服务端的操作系统目录事件，创建、写入、删除和重命名经过短暂合并后触发静默刷新；监听仅覆盖当前可见目录，不递归占用大型项目的文件监听配额，同时统一覆盖 Web、Agent、Shell 和外部程序的写入。预览限制为 1 MiB 并识别二进制内容；Web 删除直接删除目标，Workspace 根目录不可删除，并保留摘要与审计证据。Workspace 文件到远端只使用 `workspace_file_upload`：审批同时绑定 Workspace ID、相对路径、读取所得 SHA256、目标主机和远端路径，执行前重新解析白名单路径并校验 SHA256，绝对本地路径通过 `json:"-"` 的内部字段传给内置 SFTP transport。每个 Workspace 使用隐藏的受管目标复用 Run/Approval/Audit 状态机。
 
-`workspace_shell` 是唯一开放给模型的本地 Shell。管理员在 SQLite 持久化的 System 设置中明确选择 `sandbox`、`host` 或 `disabled`，默认 `sandbox`。提交时解析出的实际后端写入 `ExecRequest.workspace_shell_backend`，和完整脚本、Workspace ID、相对 cwd、环境与超时一起进入加密审批摘要；执行前再次读取设置，后端不一致即拒绝，从而避免审批后切换权限边界。它复用确定性 Policy、Run、Approval 与 Audit，每个请求最低风险固定为 Change，危险脚本仍升级为 Critical。
+`workspace_shell` 是唯一开放给模型的本地 Shell，支持一次性 `run` 以及 `start/input/status/list/interrupt/close` 交互式 PTY。管理员在 SQLite 持久化的 System 设置中明确选择 `sandbox`、`host` 或 `disabled`，Linux 默认 `sandbox`，Windows 默认 `host`。启动或运行时解析出的实际后端写入 `ExecRequest.workspace_shell_backend`，和 Workspace ID、相对 cwd、环境及脚本一起进入加密审批摘要；执行前再次读取设置，后端不一致即拒绝。交互会话复用 SSH 终端的事件序列、ANSI 输出、尺寸变更、Ctrl+C 与持久化状态，但以 `kind=workspace` 记录 Workspace 和后端；没有 TTL。Bubblewrap 交互模式复用外层专用 PTY 的 session/controlling terminal，不再创建第二个 session，因此 Bash job control 和全屏程序可用；原始 ANSI 事件保留给 Web 终端，Agent 适配器使用跨块状态机移除控制序列。启动和一次性脚本都遵循当前审批模式，不再进行等级分类。
 
 `web_search` 和 `web_extract` 共用管理员保存在 `web_search_settings` 中的 Tavily 配置，但可由 func 管理分别启停。Tavily 设置只保存共享 `proxy_id`，运行时从 `proxies` 解析 HTTP、HTTPS、SOCKS5 或 SOCKS5H 地址及加密凭据；请求禁用环境代理，选中的代理失败时不会回退直连。查询、域名过滤条件和待提取 URL 会离开本机。`web_extract` 一次接受最多五个公开 HTTP/HTTPS URL，拒绝凭据、localhost、私网和链路本地地址，固定使用 basic Markdown 提取。提供方响应限制为 2 MiB；全部外部内容都会执行当前凭据精确脱敏并标记为不可信。审计只保存查询或规范化 URL 列表的 SHA256，不保存正文、凭据或完整 URL。
 
@@ -76,12 +74,12 @@ Host 后端直接以服务账户执行，拥有宿主机文件系统与网络权
 
 双后端到内置单后端的升级是显式破坏性迁移。检测到旧 `transport_backend`、`config_alias`、自由格式 `proxy_jump` 或 `identity_file` 列时，Store 会清理旧主机及依赖的 runs、approvals、tasks，再删除这些列，不保留运行时兼容分支。废弃的 `file_operations` 表会在启动迁移时直接删除。
 
-提权是 `ExecRequest.elevated` 的结构化属性，不是任意命令字符串。Policy 会无条件追加 `managed_sudo` 命中并升级为 Critical；批准后 Transport 才按主机配置包装为 `sudo -n -- bash -c ...` 或 `sudo -S -p '' -- bash -c ...`。sudo 密码只拼接到远端 stdin，不进入请求摘要、审计 JSON 或模型工具参数。
+提权是 `ExecRequest.elevated` 的结构化属性，不是任意命令字符串。通过当前审批模式后 Transport 才按主机配置包装为 `sudo -n -- bash -c ...` 或 `sudo -S -p '' -- bash -c ...`。sudo 密码只拼接到远端 stdin，不进入请求摘要、审计 JSON 或模型工具参数。
 
 ## Approval state machine
 
 ```text
-Policy decision
+Agent / MCP request
    ├── Manual ── approval_required ── approved ── running ── completed / failed
    │                              └── rejected / expired
    ├── Auto ── ApprovalAgent allow ── running ── completed / failed
@@ -90,7 +88,7 @@ Policy decision
    └── Full access ── running ── completed / failed
 ```
 
-Manual 下 Critical 审批要求填写原因。系统不保存会话级授权。审批写入后，服务再次解密原始载荷并重新计算摘要，避免 TOCTOU 或载荷替换。
+人工审批原因可选。系统不保存会话级授权。审批写入后，服务再次解密原始载荷并重新计算摘要，避免 TOCTOU 或载荷替换。
 
 Eino Agent 请求会在 context 中启用 blocking approval。Service 创建审批后先通过 SSE notifier 立即通知 Web，再让原 Tool goroutine 轮询持久化的 approval/run 状态；批准接口负责执行精确载荷，完成后结果回到原 Tool Call，拒绝说明则以 `operator_instruction` 回到模型。CLI、MCP 和直接 HTTP 执行保持非阻塞的 `approval_required` 返回契约。等待期间每 15 秒发送一次 SSE approval heartbeat。
 
@@ -98,11 +96,11 @@ HTTP Chat Handler 使用保留 request logger/value、但移除浏览器取消�
 
 主 Agent 已产生 Tool 结果但终止正文为空时，不允许重跑带 Tool 的 Runner。Runtime 改用独立的 `FinalAnswerAgent`，仅将当前用户请求、本轮已持久化的脱敏 Tool 结果和最新计划作为不可信 JSON 数据交给同一模型。该 Agent 为 `MaxIterations=1`、无 Tool、无 checkpoint，只能补生成最终用户回复；结果成功后按正常 Assistant 消息持久化，失败则保留原轮次和 Tool 结果并返回明确错误。
 
-## Sequential task plans
+## Task plans
 
-复杂任务通过 Eino 专用的 `ops_plan_create` 和 `ops_plan_step_update` 两个强类型 Tool 编排。计划和步骤分别写入 `agent_plans`、`agent_plan_steps`，session ID 只取可信 Go context，模型不能为其他会话读写计划。创建时只允许 2–8 个不重复步骤，第一步自动进入 `in_progress`；Store 在单个 SQLite 事务中只接受当前步骤的 `completed` 或 `blocked` 转移，完成后自动激活下一步，因而数据库层始终最多只有一个进行中步骤。
+复杂任务通过 Eino 专用的 `ops_plan_create`、`ops_plan_step_update` 和 `ops_plan_revise` 三个强类型 Tool 编排。计划和步骤分别写入 `agent_plans`、`agent_plan_steps`，session ID 只取可信 Go context，模型不能为其他会话读写计划。创建时只允许 2–8 个不重复步骤，第一步自动进入 `in_progress`。Store 在单个 SQLite 事务中处理当前步骤的完成、阻塞、跳过和恢复；完成或跳过后自动激活下一步。修订只删除当前及待处理步骤，再按新顺序插入，已完成和已跳过记录保持不变。数据库层始终最多只有一个进行中步骤。
 
-计划创建与每次状态转移均写入审计。Chat state 同时返回消息、后台运行状态和最新计划，Web 使用同一恢复轮询展示总进度、当前步骤与完成证据。每次模型请求前，Runtime 按可信 session ID 读取计划，并在当前用户消息前注入临时 System message；状态字段可信，目标、步骤标题和证据文本按不可信数据处理。Agent Loop 达到迭代上限不会删除计划，下一条 `continue` 会直接收到当前状态。没有计划时不注入任何计划消息。计划是编排状态而非额外权限，所有 SSH Tool 仍独立通过 Policy、审批和加密审计。
+计划创建与每次状态转移均写入审计。Chat state 同时返回消息、后台运行状态和最新计划，Web 使用同一恢复轮询展示总进度、当前步骤与完成证据。每次模型请求前，Runtime 按可信 session ID 读取计划，并在当前用户消息前注入临时 System message；状态字段可信，目标、步骤标题和证据文本按不可信数据处理。Agent Loop 达到迭代上限不会删除计划，下一条 `continue` 会直接收到当前状态。没有计划时不注入任何计划消息。计划是编排状态而非额外权限，所有 SSH Tool 仍独立通过输入校验、审批模式和加密审计。
 
 ## Audit storage
 
@@ -114,7 +112,7 @@ HTTP Chat Handler 使用保留 request logger/value、但移除浏览器取消�
 
 服务端日志与执行审计是两条独立链路：Audit 是 SQLite 中不可替代的安全证据，Server Logs 用于排查控制面运行状态。应用统一调用标准库 `log/slog`，初始化时通过 MultiHandler 分发到终端、JSONL 轮转文件和进程内环形缓冲区。成功的普通 GET、HEAD 和 OPTIONS 不写访问日志；超过 2 秒的只读请求记录为 Warn，写请求记录为 Info，4xx/5xx 分别记录为 Warn/Error。因此 Web 的状态刷新和日志轮询不会挤占环形缓冲区。
 
-HTTP Middleware 始终为请求生成 `request_id` 并通过 context 传递给 Agent、Policy、Approval 与 SSH 层；需要记录访问事件时附带 method、path、status、耗时、响应字节和来源 IP，因此一次请求的跨层事件可以关联检索。模型输入、reasoning token、HTTP body、命令参数、脚本和远端输出均不进入服务日志，只记录长度、计数、ID 与最终状态。统一脱敏 Handler 会处理结构化敏感字段，并清理消息、错误文本和嵌套对象中的 Authorization、Bearer/Basic、密码、Token、API Key、私钥与常见云凭据格式。Debug 日志默认启用，可通过配置或 `OPS_AGENT_LOG_LEVEL=info` 降低详细程度。
+HTTP Middleware 始终为请求生成 `request_id` 并通过 context 传递给 Agent、Approval 与 SSH 层；需要记录访问事件时附带 method、path、status、耗时、响应字节和来源 IP，因此一次请求的跨层事件可以关联检索。模型输入、reasoning token、HTTP body、命令参数、脚本和远端输出均不进入服务日志，只记录长度、计数、ID 与最终状态。统一脱敏 Handler 会处理结构化敏感字段，并清理消息、错误文本和嵌套对象中的 Authorization、Bearer/Basic、密码、Token、API Key、私钥与常见云凭据格式。Debug 日志默认启用，可通过配置或 `OPS_AGENT_LOG_LEVEL=info` 降低详细程度。
 
 Web 导出接口返回诊断 ZIP：`diagnostics.json` 仅包含版本、Go/OS/架构、启动时间、非敏感日志配置、Agent/模型状态及资源数量；其余条目为当前 JSONL 文件和轮转备份，文件日志关闭时回退为内存日志 JSONL。归档阶段会再次解析并脱敏已有结构化日志，避免旧文件中的常见凭据格式直接进入诊断包。诊断包不包含系统 Prompt、主机地址、Workspace 路径、数据库、审计原文或浏览器控制台日志。
 

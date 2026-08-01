@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -15,6 +14,7 @@ import (
 	"eino-ops-agent/internal/observability"
 	"eino-ops-agent/internal/sshx"
 	"eino-ops-agent/internal/store"
+	"eino-ops-agent/internal/terminaltext"
 )
 
 const (
@@ -37,14 +37,13 @@ type sshShellState struct {
 	pending      map[string]string
 	notify       chan struct{}
 	recentOutput string
+	ansiStripper terminaltext.Stripper
 	secretPrompt bool
 }
 
-var sshShellANSISequenceRE = regexp.MustCompile(`\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))`)
-
 func (s *Service) StartSSHShell(ctx context.Context, hostID, cwd string, elevated bool, cols, rows int, reason, actor string) (domain.ExecResult, error) {
 	if SessionIDFromContext(ctx) == "" {
-		return domain.ExecResult{}, fmt.Errorf("interactive SSH shells require an Agent conversation")
+		return domain.ExecResult{}, fmt.Errorf("interactive SSH shells require an Agent or MCP session")
 	}
 	return s.Submit(ctx, domain.ExecRequest{
 		HostID: strings.TrimSpace(hostID), Mode: domain.ExecSSHShellStart,
@@ -138,7 +137,40 @@ func (s *Service) GetSSHShellSnapshot(ctx context.Context, id, expectedSessionID
 	}, nil
 }
 
+// ReadableSSHShellSnapshot removes terminal control sequences for a model-facing
+// snapshot. It replays earlier raw output into the parser so an incremental
+// request remains correct when its first event begins in the middle of an ANSI
+// sequence. Web terminal snapshots continue to use the untouched raw events.
+func (s *Service) ReadableSSHShellSnapshot(ctx context.Context, snapshot domain.SSHShellSnapshot, after uint64) (domain.SSHShellSnapshot, error) {
+	if snapshot.Shell.ID == "" {
+		return snapshot, nil
+	}
+	previous, err := s.store.ListSSHShellEvents(ctx, snapshot.Shell.ID, 0)
+	if err != nil {
+		return snapshot, err
+	}
+	var stripper terminaltext.Stripper
+	for _, event := range previous {
+		if event.Sequence > after {
+			break
+		}
+		if event.Stream == "stdout" || event.Stream == "stderr" {
+			_ = stripper.WriteString(event.Content)
+		}
+	}
+	for index := range snapshot.Events {
+		if snapshot.Events[index].Stream == "stdout" || snapshot.Events[index].Stream == "stderr" {
+			snapshot.Events[index].Content = stripper.WriteString(snapshot.Events[index].Content)
+		}
+	}
+	return snapshot, nil
+}
+
 func (s *Service) WriteSSHShell(ctx context.Context, id, expectedSessionID, input, reason, actor string) (domain.SSHShellSnapshot, error) {
+	return s.WriteSSHShellWithWait(ctx, id, expectedSessionID, input, 350*time.Millisecond, reason, actor)
+}
+
+func (s *Service) WriteSSHShellWithWait(ctx context.Context, id, expectedSessionID, input string, maxWait time.Duration, reason, actor string) (domain.SSHShellSnapshot, error) {
 	_, before, err := s.liveSSHShell(id, expectedSessionID)
 	if err != nil {
 		return domain.SSHShellSnapshot{}, err
@@ -146,7 +178,51 @@ func (s *Service) WriteSSHShell(ctx context.Context, id, expectedSessionID, inpu
 	if err := s.SendSSHShellInput(ctx, id, expectedSessionID, input, reason, actor); err != nil {
 		return domain.SSHShellSnapshot{}, err
 	}
-	return s.GetSSHShellSnapshot(ctx, id, expectedSessionID, before, 350*time.Millisecond, false, "", "")
+	if maxWait <= 0 {
+		maxWait = 350 * time.Millisecond
+	}
+	if maxWait > 10*time.Second {
+		maxWait = 10 * time.Second
+	}
+	deadline := time.Now().Add(maxWait)
+	initial, err := s.GetSSHShellSnapshot(ctx, id, expectedSessionID, before, 0, false, "", "")
+	if err != nil {
+		return domain.SSHShellSnapshot{}, err
+	}
+	cursor := initial.NextSequence
+	hadOutput := shellSnapshotHasOutput(initial)
+	if !hadOutput {
+		first, waitErr := s.GetSSHShellSnapshot(ctx, id, expectedSessionID, cursor, time.Until(deadline), false, "", "")
+		if waitErr != nil {
+			return domain.SSHShellSnapshot{}, waitErr
+		}
+		cursor = first.NextSequence
+		hadOutput = shellSnapshotHasOutput(first)
+	}
+	for hadOutput && time.Now().Before(deadline) {
+		quietWait := 350 * time.Millisecond
+		if remaining := time.Until(deadline); remaining < quietWait {
+			quietWait = remaining
+		}
+		next, waitErr := s.GetSSHShellSnapshot(ctx, id, expectedSessionID, cursor, quietWait, false, "", "")
+		if waitErr != nil {
+			return domain.SSHShellSnapshot{}, waitErr
+		}
+		if !shellSnapshotHasOutput(next) {
+			break
+		}
+		cursor = next.NextSequence
+	}
+	return s.GetSSHShellSnapshot(ctx, id, expectedSessionID, before, 0, false, "", "")
+}
+
+func shellSnapshotHasOutput(snapshot domain.SSHShellSnapshot) bool {
+	for _, event := range snapshot.Events {
+		if (event.Stream == "stdout" || event.Stream == "stderr") && event.Content != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) SendSSHShellInput(ctx context.Context, id, expectedSessionID, input, reason, actor string) error {
@@ -174,14 +250,14 @@ func (s *Service) SendSSHShellInput(ctx context.Context, id, expectedSessionID, 
 		return fmt.Errorf("reason must not exceed %d bytes", maxSSHShellReasonBytes)
 	}
 	source := "operator"
-	if actor == "eino-agent" {
+	if actor == "eino-agent" || actor == "mcp-client" {
 		source = "agent"
 	}
 	s.appendSSHShellInputEvent(state, source, s.redactor.Redact(input), false, len(input))
 	if _, err := state.session.Write([]byte(input)); err != nil {
 		return fmt.Errorf("write SSH shell input: %w", err)
 	}
-	s.audit(context.WithoutCancel(ctx), shell.RunID, "ssh_shell_input", actor, map[string]any{
+	s.audit(context.WithoutCancel(ctx), shell.RunID, interactiveShellComponent(shell.Kind)+"_input", actor, map[string]any{
 		"shell_id": shell.ID, "host_id": shell.HostID, "input": s.redactor.Redact(input),
 		"source": source, "reason": s.redactor.Redact(reason),
 	})
@@ -212,7 +288,7 @@ func (s *Service) WriteSensitiveSSHShellInput(ctx context.Context, id, input, ac
 	if _, err := state.session.Write([]byte(input)); err != nil {
 		return fmt.Errorf("write sensitive SSH shell input: %w", err)
 	}
-	s.audit(context.WithoutCancel(ctx), shell.RunID, "ssh_shell_sensitive_input", actor, map[string]any{
+	s.audit(context.WithoutCancel(ctx), shell.RunID, interactiveShellComponent(shell.Kind)+"_sensitive_input", actor, map[string]any{
 		"shell_id": shell.ID, "host_id": shell.HostID, "bytes": len(input), "source": "operator",
 	})
 	return nil
@@ -233,7 +309,7 @@ func (s *Service) ResizeSSHShell(ctx context.Context, id string, cols, rows int,
 	if err := s.store.UpdateSSHShell(ctx, shell); err != nil {
 		return domain.SSHShell{}, err
 	}
-	s.audit(context.WithoutCancel(ctx), shell.RunID, "ssh_shell_resized", actor, map[string]any{
+	s.audit(context.WithoutCancel(ctx), shell.RunID, interactiveShellComponent(shell.Kind)+"_resized", actor, map[string]any{
 		"shell_id": shell.ID, "cols": cols, "rows": rows,
 	})
 	return shell, nil
@@ -248,7 +324,7 @@ func (s *Service) InterruptSSHShell(ctx context.Context, id, expectedSessionID, 
 		return domain.SSHShell{}, fmt.Errorf("reason must not exceed %d bytes", maxSSHShellReasonBytes)
 	}
 	source := "operator"
-	if actor == "eino-agent" {
+	if actor == "eino-agent" || actor == "mcp-client" {
 		source = "agent"
 	}
 	s.appendSSHShellInputEvent(state, source, "\x03", false, 1)
@@ -258,7 +334,7 @@ func (s *Service) InterruptSSHShell(ctx context.Context, id, expectedSessionID, 
 	state.mu.Lock()
 	shell := state.shell
 	state.mu.Unlock()
-	s.audit(context.WithoutCancel(ctx), shell.RunID, "ssh_shell_interrupted", actor, map[string]any{
+	s.audit(context.WithoutCancel(ctx), shell.RunID, interactiveShellComponent(shell.Kind)+"_interrupted", actor, map[string]any{
 		"shell_id": shell.ID, "input": "Ctrl+C", "reason": s.redactor.Redact(reason),
 	})
 	return shell, nil
@@ -284,7 +360,7 @@ func (s *Service) CloseSSHShell(ctx context.Context, id, expectedSessionID, reas
 	_ = s.store.UpdateSSHShell(context.WithoutCancel(ctx), shell)
 	cancel()
 	_ = state.session.Close()
-	s.audit(context.WithoutCancel(ctx), shell.RunID, "ssh_shell_close_requested", actor, map[string]any{
+	s.audit(context.WithoutCancel(ctx), shell.RunID, interactiveShellComponent(shell.Kind)+"_close_requested", actor, map[string]any{
 		"shell_id": shell.ID, "host_id": shell.HostID, "reason": s.redactor.Redact(reason),
 	})
 	return shell, nil
@@ -298,6 +374,34 @@ func (s *Service) openSSHShell(ctx context.Context, host domain.Host, connection
 	if err := validateSSHShellRequest(req); err != nil {
 		return domain.SSHShell{}, err
 	}
+	secrets := []string(nil)
+	if req.Elevated && connection.Target.SudoPassword != "" {
+		secrets = append(secrets, connection.Target.SudoPassword)
+	}
+	return s.openInteractiveShell(ctx, host, req, run, actor, interactiveShellOptions{
+		kind: domain.SSHShellKindSSH, user: host.User, secrets: secrets,
+	}, func(shellCtx context.Context, output func(string, []byte)) (sshx.ShellSession, error) {
+		return transport.OpenShell(shellCtx, connection, req, req.ShellCols, req.ShellRows, output)
+	})
+}
+
+type interactiveShellOptions struct {
+	kind        string
+	workspaceID string
+	backend     string
+	user        string
+	secrets     []string
+}
+
+func (s *Service) openInteractiveShell(
+	ctx context.Context,
+	host domain.Host,
+	req domain.ExecRequest,
+	run domain.Run,
+	actor string,
+	options interactiveShellOptions,
+	opener func(context.Context, func(string, []byte)) (sshx.ShellSession, error),
+) (domain.SSHShell, error) {
 	s.shellMu.Lock()
 	activeTotal, activeHost := 0, 0
 	for _, current := range s.shells {
@@ -314,13 +418,19 @@ func (s *Service) openSSHShell(ctx context.Context, host domain.Host, connection
 	}
 	if activeTotal >= maxActiveSSHShells || activeHost >= maxActiveSSHShellsPerHost {
 		s.shellMu.Unlock()
-		return domain.SSHShell{}, fmt.Errorf("interactive SSH shell limit reached")
+		return domain.SSHShell{}, fmt.Errorf("interactive shell limit reached")
 	}
 	started := time.Now().UTC()
 	shellCtx, cancel := context.WithCancel(s.executionCtx)
 	surface := req.ShellSurface
 	if surface == "" {
-		if run.SessionID == "" {
+		if options.kind == domain.SSHShellKindWorkspace && run.SessionID == "" {
+			surface = domain.WorkspaceShellSurfaceOperator
+		} else if options.kind == domain.SSHShellKindWorkspace {
+			surface = domain.WorkspaceShellSurfaceAgent
+		} else if run.SessionID == mcpClientSessionID {
+			surface = domain.SSHShellSurfaceMCP
+		} else if run.SessionID == "" {
 			surface = domain.SSHShellSurfaceQuick
 		} else {
 			surface = domain.SSHShellSurfaceAgent
@@ -328,15 +438,19 @@ func (s *Service) openSSHShell(ctx context.Context, host domain.Host, connection
 	}
 	state := &sshShellState{
 		shell: domain.SSHShell{
-			ID: ids.New("shell"), RunID: run.ID, SessionID: run.SessionID, Surface: surface,
+			ID: ids.New("shell"), RunID: run.ID, SessionID: run.SessionID, Kind: options.kind, Surface: surface,
 			HostID: host.ID, HostName: host.Name, User: host.User, Elevated: req.Elevated,
+			WorkspaceID: options.workspaceID, Backend: options.backend,
 			Cwd: req.Cwd, Status: "starting", Cols: req.ShellCols, Rows: req.ShellRows,
 			StartedAt: started,
 		},
 		cancel: cancel, pending: make(map[string]string), notify: make(chan struct{}),
 	}
-	if req.Elevated && connection.Target.SudoPassword != "" {
-		state.secrets = appendUniqueSecret(state.secrets, connection.Target.SudoPassword)
+	if options.user != "" {
+		state.shell.User = options.user
+	}
+	for _, secret := range options.secrets {
+		state.secrets = appendUniqueSecret(state.secrets, secret)
 	}
 	s.shells[state.shell.ID] = state
 	s.shellMu.Unlock()
@@ -364,7 +478,7 @@ func (s *Service) openSSHShell(ctx context.Context, host domain.Host, connection
 		}
 	}()
 
-	interactive, err := transport.OpenShell(shellCtx, connection, req, req.ShellCols, req.ShellRows, func(stream string, data []byte) {
+	interactive, err := opener(shellCtx, func(stream string, data []byte) {
 		s.appendSSHShellOutput(state, stream, data)
 	})
 	if err != nil {
@@ -386,14 +500,22 @@ func (s *Service) openSSHShell(ctx context.Context, host domain.Host, connection
 	s.appendSSHShellEvent(state, "status", "", "running")
 	workerStarted = true
 	go s.runSSHShell(shellCtx, state)
-	s.audit(context.WithoutCancel(ctx), run.ID, "ssh_shell_started", actor, map[string]any{
+	component := interactiveShellComponent(options.kind)
+	s.audit(context.WithoutCancel(ctx), run.ID, component+"_started", actor, map[string]any{
 		"shell_id": shell.ID, "host_id": shell.HostID, "elevated": shell.Elevated,
-		"cwd": shell.Cwd,
+		"workspace_id": shell.WorkspaceID, "cwd": shell.Cwd,
 	})
-	observability.FromContext(ctx).InfoContext(ctx, "interactive SSH shell started",
-		"component", "ssh_shell", "shell_id", shell.ID, "run_id", run.ID,
+	observability.FromContext(ctx).InfoContext(ctx, "interactive shell started",
+		"component", component, "shell_id", shell.ID, "run_id", run.ID,
 		"session_id", run.SessionID, "host_id", host.ID, "elevated", shell.Elevated)
 	return shell, nil
+}
+
+func interactiveShellComponent(kind string) string {
+	if kind == domain.SSHShellKindWorkspace {
+		return "workspace_shell"
+	}
+	return "ssh_shell"
 }
 
 func (s *Service) runSSHShell(ctx context.Context, state *sshShellState) {
@@ -417,6 +539,9 @@ func (s *Service) runSSHShell(ctx context.Context, state *sshShellState) {
 	state.mu.Lock()
 	status := "completed"
 	termination := "remote_exit"
+	if state.shell.Kind == domain.SSHShellKindWorkspace {
+		termination = "process_exit"
+	}
 	exitCode := result.ExitCode
 	if state.closing && state.reason == "requested_close" {
 		status = "closed"
@@ -430,13 +555,22 @@ func (s *Service) runSSHShell(ctx context.Context, state *sshShellState) {
 		status = "failed"
 		if result.Signal != "" {
 			termination = "remote_signal"
+			if state.shell.Kind == domain.SSHShellKindWorkspace {
+				termination = "process_signal"
+			}
 		} else if result.ExitCode == nil {
 			termination = "connection_lost"
+			if state.shell.Kind == domain.SSHShellKindWorkspace {
+				termination = "process_lost"
+			}
 		}
 	} else if result.ExitCode == nil {
 		status = "failed"
 		termination = "connection_lost"
-		result.Err = fmt.Errorf("remote shell ended without an exit status")
+		if state.shell.Kind == domain.SSHShellKindWorkspace {
+			termination = "process_lost"
+		}
+		result.Err = fmt.Errorf("interactive shell ended without an exit status")
 	}
 	state.shell.Status = status
 	state.shell.ExitCode = exitCode
@@ -459,7 +593,7 @@ func (s *Service) runSSHShell(ctx context.Context, state *sshShellState) {
 		delete(s.shells, shell.ID)
 	}
 	s.shellMu.Unlock()
-	s.audit(context.Background(), shell.RunID, "ssh_shell_stopped", "control-plane", map[string]any{
+	s.audit(context.Background(), shell.RunID, interactiveShellComponent(shell.Kind)+"_stopped", "control-plane", map[string]any{
 		"shell_id": shell.ID, "host_id": shell.HostID, "status": status,
 		"termination_reason": termination, "exit_code": exitCode,
 	})
@@ -586,7 +720,7 @@ func (s *Service) liveSSHShell(id, expectedSessionID string) (*sshShellState, ui
 		return nil, 0, store.ErrNotFound
 	}
 	if state.shell.Status != "running" || state.session == nil {
-		return nil, 0, fmt.Errorf("SSH shell %q is %s", id, state.shell.Status)
+		return nil, 0, fmt.Errorf("interactive shell %q is %s", id, state.shell.Status)
 	}
 	return state, state.shell.LastSequence, nil
 }
@@ -611,6 +745,48 @@ func (s *Service) hasActiveSSHShellForSession(sessionID string) bool {
 	for _, state := range s.shells {
 		state.mu.Lock()
 		active := state.shell.SessionID == sessionID && shellStatusActive(state.shell.Status)
+		state.mu.Unlock()
+		if active {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) hasActiveWorkspaceShell(workspaceID string) bool {
+	s.shellMu.RLock()
+	defer s.shellMu.RUnlock()
+	for _, state := range s.shells {
+		state.mu.Lock()
+		active := state.shell.Kind == domain.SSHShellKindWorkspace && state.shell.WorkspaceID == workspaceID && shellStatusActive(state.shell.Status)
+		state.mu.Unlock()
+		if active {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) hasActiveWorkspaceShellForSession(sessionID string) bool {
+	s.shellMu.RLock()
+	defer s.shellMu.RUnlock()
+	for _, state := range s.shells {
+		state.mu.Lock()
+		active := state.shell.Kind == domain.SSHShellKindWorkspace && state.shell.SessionID == sessionID && shellStatusActive(state.shell.Status)
+		state.mu.Unlock()
+		if active {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) hasAnyActiveWorkspaceShell() bool {
+	s.shellMu.RLock()
+	defer s.shellMu.RUnlock()
+	for _, state := range s.shells {
+		state.mu.Lock()
+		active := state.shell.Kind == domain.SSHShellKindWorkspace && shellStatusActive(state.shell.Status)
 		state.mu.Unlock()
 		if active {
 			return true
@@ -651,7 +827,7 @@ func redactKnownSecrets(content string, secrets []string) string {
 
 func updateSSHShellOutputState(state *sshShellState, content string) {
 	state.mu.Lock()
-	recent := appendReadableSSHShellOutput(state.recentOutput, content)
+	recent := appendReadableSSHShellText(state.recentOutput, state.ansiStripper.WriteString(content))
 	state.recentOutput = recent
 	line := recent
 	if index := strings.LastIndexAny(line, "\r\n"); index >= 0 {
@@ -665,7 +841,10 @@ func updateSSHShellOutputState(state *sshShellState, content string) {
 }
 
 func appendReadableSSHShellOutput(previous, content string) string {
-	clean := sshShellANSISequenceRE.ReplaceAllString(content, "")
+	return appendReadableSSHShellText(previous, terminaltext.Strip(content))
+}
+
+func appendReadableSSHShellText(previous, clean string) string {
 	runes := []rune(previous)
 	cleanRunes := []rune(clean)
 	for index := 0; index < len(cleanRunes); index++ {
@@ -728,6 +907,10 @@ func validateSSHShellRequest(req domain.ExecRequest) error {
 	if req.Mode != domain.ExecSSHShellStart {
 		return fmt.Errorf("invalid SSH shell request mode")
 	}
+	return validateInteractiveShellSize(req)
+}
+
+func validateInteractiveShellSize(req domain.ExecRequest) error {
 	if req.ShellCols < 20 || req.ShellCols > 500 || req.ShellRows < 5 || req.ShellRows > 200 {
 		return fmt.Errorf("interactive terminal size is out of range")
 	}
@@ -744,7 +927,7 @@ func marshalSSHShell(shell domain.SSHShell) ([]byte, error) {
 
 func sshShellUsage() *domain.SSHShellUsage {
 	return &domain.SSHShellUsage{
-		Input:  "action=input sends raw bytes; submit=true appends a carriage return when needed",
+		Input:  "action=input sends raw bytes; submit=true appends a carriage return; wait_seconds waits for output to settle",
 		Status: "action=status with after_sequence returns later events; coalesce=true merges adjacent events without dropping output",
 		Close:  "call action=close when finished; the shell remains active until it is closed or disconnected",
 	}

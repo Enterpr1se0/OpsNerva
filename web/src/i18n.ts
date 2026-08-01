@@ -27,7 +27,7 @@ void i18n.use(initReactI18next).init({
 function applyLanguage(language: string) {
   const normalized = language.startsWith('zh') ? 'zh' : 'en'
   document.documentElement.lang = normalized === 'zh' ? 'zh-CN' : 'en'
-  document.title = 'OpsPilot'
+  document.title = 'OpsNerva'
   try { localStorage.setItem(storageKey, normalized) } catch { /* storage may be disabled */ }
 }
 

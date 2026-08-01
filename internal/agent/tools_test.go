@@ -15,7 +15,6 @@ import (
 
 	"eino-ops-agent/internal/config"
 	"eino-ops-agent/internal/domain"
-	"eino-ops-agent/internal/policy"
 	"eino-ops-agent/internal/security"
 	"eino-ops-agent/internal/service"
 	"eino-ops-agent/internal/sshx"
@@ -32,6 +31,17 @@ import (
 type backgroundToolTransport struct {
 	started chan domain.ExecRequest
 	release chan struct{}
+}
+
+func enableFullAccessForTest(t *testing.T, svc *service.Service) {
+	t.Helper()
+	mode := domain.ApprovalModeFullAccess
+	if _, err := svc.SaveSystemSettings(context.Background(), domain.SystemSettingsInput{
+		AgentMaxIterations: domain.DefaultAgentMaxIterations,
+		ApprovalMode:       &mode,
+	}, "test"); err != nil {
+		t.Fatal(err)
+	}
 }
 
 type fileReadToolTransport struct {
@@ -126,15 +136,11 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	engine, err := policy.Load("")
-	if err != nil {
-		t.Fatal(err)
-	}
 	encryptor, err := security.NewEncryptor("", t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := service.New(st, engine, nil, encryptor, security.NewRedactor(), config.Default().Limits)
+	svc := service.New(st, nil, encryptor, security.NewRedactor(), config.Default().Limits)
 	loaded, err := BuildTools(svc)
 	if err != nil {
 		t.Fatal(err)
@@ -146,8 +152,8 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 	if len(descriptors) != len(loaded) || len(descriptors) < 20 {
 		t.Fatalf("catalog=%d loaded=%d", len(descriptors), len(loaded))
 	}
-	if len(descriptors) != 22 {
-		t.Fatalf("built-in catalog size=%d, want 22", len(descriptors))
+	if len(descriptors) != 23 {
+		t.Fatalf("built-in catalog size=%d, want 23", len(descriptors))
 	}
 
 	seen := make(map[string]bool, len(descriptors))
@@ -167,8 +173,9 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 			t.Fatalf("%s still exposes retired verbose fields: %s", descriptor.Name, descriptor.InputSchema)
 		}
 		if descriptor.Name == "ssh_exec" {
-			if descriptor.Guard != "policy_checked" || !strings.Contains(schemaText, `"host_id"`) || !strings.Contains(schemaText, `"program"`) ||
-				!strings.Contains(schemaText, `"args"`) || !strings.Contains(schemaText, `"background"`) || !strings.Contains(schemaText, `"elevated"`) {
+			if descriptor.Guard != "approval_required" || !strings.Contains(schemaText, `"host_id"`) || !strings.Contains(schemaText, `"program"`) ||
+				!strings.Contains(schemaText, `"args"`) || !strings.Contains(schemaText, `"background"`) || !strings.Contains(schemaText, `"elevated"`) ||
+				!strings.Contains(schemaText, `"max_output_bytes"`) || !strings.Contains(schemaText, `"output_view"`) {
 				t.Fatalf("ssh_exec metadata does not reflect its runtime schema: %#v", descriptor)
 			}
 			var schema struct {
@@ -203,17 +210,17 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 		}
 		if descriptor.Name == "ssh_file_edit" {
 			schema := string(descriptor.InputSchema)
-			if !strings.Contains(schema, `"diff"`) || strings.Contains(schema, `"expected_sha256"`) || strings.Contains(schema, `"content"`) {
+			if !strings.Contains(schema, `"diff"`) || !strings.Contains(schema, `"validator_id"`) || strings.Contains(schema, `"validator"`) || strings.Contains(schema, `"expected_sha256"`) || strings.Contains(schema, `"content"`) {
 				t.Fatalf("ssh_file_edit still exposes the retired edit contract: %s", schema)
 			}
 		}
 		if descriptor.Name == "workspace_file_edit" {
 			schema := string(descriptor.InputSchema)
-			if !strings.Contains(schema, `"diff"`) || strings.Contains(schema, `"expected_sha256"`) || strings.Contains(schema, `"content"`) {
+			if !strings.Contains(schema, `"diff"`) || !strings.Contains(schema, `"validator_id"`) || strings.Contains(schema, `"validator"`) || strings.Contains(schema, `"expected_sha256"`) || strings.Contains(schema, `"content"`) {
 				t.Fatalf("workspace_file_edit still exposes the retired edit contract: %s", schema)
 			}
 		}
-		if descriptor.Name == "ssh_task" && (descriptor.Guard != "audited_control" || !strings.Contains(string(descriptor.InputSchema), `"action"`)) {
+		if descriptor.Name == "ssh_task" && (descriptor.Guard != "audited_control" || !strings.Contains(string(descriptor.InputSchema), `"action"`) || !strings.Contains(string(descriptor.InputSchema), `"wait_seconds"`) || !strings.Contains(string(descriptor.InputSchema), `"block_until"`) || !strings.Contains(string(descriptor.InputSchema), `"after_stdout_bytes"`)) {
 			t.Fatalf("ssh_task metadata does not expose its audited action: %#v", descriptor)
 		}
 		if descriptor.Name == "ssh_task" && descriptor.Category != "tasks" {
@@ -241,11 +248,17 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 		if descriptor.Name == "ops_skill" && descriptor.Category != "skills" {
 			t.Fatalf("ops_skill category = %q, want skills", descriptor.Category)
 		}
-		if descriptor.Name == "workspace_shell" && descriptor.Guard != "approval_required" {
-			t.Fatalf("workspace_shell must be approval-gated: %#v", descriptor)
+		if descriptor.Name == "workspace_shell" {
+			schema := string(descriptor.InputSchema)
+			if descriptor.Guard != "approval_required" || !strings.Contains(schema, `"action"`) ||
+				!strings.Contains(schema, `"shell_id"`) || !strings.Contains(schema, `"input"`) ||
+				!strings.Contains(schema, `"submit"`) || !strings.Contains(schema, `"after_sequence"`) ||
+				!strings.Contains(schema, `"coalesce"`) || strings.Contains(schema, `"ttl_seconds"`) {
+				t.Fatalf("workspace_shell metadata does not expose interactive actions: %#v", descriptor)
+			}
 		}
-		if descriptor.Name == "ssh_file_transfer" && (descriptor.Guard != "approval_required" || !strings.Contains(string(descriptor.InputSchema), `"source_host_id"`) || !strings.Contains(string(descriptor.InputSchema), `"destination_host_id"`)) {
-			t.Fatalf("ssh_file_transfer metadata does not reflect its runtime schema: %#v", descriptor)
+		if descriptor.Name == "ssh_file_transfer" && (descriptor.Guard != "approval_required" || !strings.Contains(string(descriptor.InputSchema), `"source_host_id"`) || !strings.Contains(string(descriptor.InputSchema), `"destination_host_id"`) || strings.Contains(string(descriptor.InputSchema), `"overwrite"`)) {
+			t.Fatalf("ssh_file_transfer metadata does not reflect its create-or-versioned-replace schema: %#v", descriptor)
 		}
 		if descriptor.Name == "web_extract" && (descriptor.Guard != "read_only" || descriptor.Category != "web" || !strings.Contains(string(descriptor.InputSchema), `"urls"`)) {
 			t.Fatalf("web_extract metadata does not reflect its runtime schema: %#v", descriptor)
@@ -256,7 +269,7 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 			t.Fatalf("removed %s tool remains in the Agent catalog", retired)
 		}
 	}
-	if !seen["ops_plan_create"] || !seen["ops_plan_step_update"] || !seen["ssh_file_edit"] || !seen["ssh_file_transfer"] || !seen["ssh_tunnel"] || !seen["ssh_shell"] || !seen["workspace_file_edit"] || !seen["workspace_file_upload"] || !seen["workspace_shell"] || !seen["web_search"] || !seen["web_extract"] || !seen["ssh_task"] || !seen["ssh_history"] || !seen["ops_skill"] {
+	if !seen["ops_plan_create"] || !seen["ops_plan_step_update"] || !seen["ops_plan_revise"] || !seen["ssh_file_edit"] || !seen["ssh_file_transfer"] || !seen["ssh_tunnel"] || !seen["ssh_shell"] || !seen["workspace_file_edit"] || !seen["workspace_file_upload"] || !seen["workspace_shell"] || !seen["web_search"] || !seen["web_extract"] || !seen["ssh_task"] || !seen["ssh_history"] || !seen["ops_skill"] {
 		t.Fatalf("representative functions missing: %#v", seen)
 	}
 }
@@ -284,6 +297,21 @@ func TestSSHShellActionValidationReportsExactFields(t *testing.T) {
 	}
 }
 
+func TestWorkspaceShellActionValidationRejectsRunFieldsOnInput(t *testing.T) {
+	input := WorkspaceShellInput{Action: "input", ShellID: "shell-1", Input: "go test ./...", Submit: true, Script: "pwd", TimeoutSeconds: 30}
+	err := validateWorkspaceShellActionFields(input, "input",
+		[]string{"action", "shell_id", "input", "submit", "reason"},
+		map[string]any{"action": "input", "shell_id": "shell_xxx", "input": "go test ./...", "submit": true},
+	)
+	var validation *toolInputValidationError
+	if !errors.As(err, &validation) || validation.validation == nil {
+		t.Fatalf("structured validation error was not returned: %v", err)
+	}
+	if strings.Join(validation.validation.UnexpectedFields, ",") != "script,timeout_seconds" {
+		t.Fatalf("unexpected Workspace shell fields = %#v", validation.validation)
+	}
+}
+
 func TestSSHTunnelListAllowsReasonWithoutHidingRealInputErrors(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir()+"/tunnel-tools.db")
@@ -291,15 +319,11 @@ func TestSSHTunnelListAllowsReasonWithoutHidingRealInputErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	engine, err := policy.Load("")
-	if err != nil {
-		t.Fatal(err)
-	}
 	encryptor, err := security.NewEncryptor("", t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := service.New(st, engine, nil, encryptor, security.NewRedactor(), config.Default().Limits)
+	svc := service.New(st, nil, encryptor, security.NewRedactor(), config.Default().Limits)
 	loaded, err := BuildTools(svc)
 	if err != nil {
 		t.Fatal(err)
@@ -353,14 +377,14 @@ func TestWorkspaceToolUsesConversationBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	engine, _ := policy.Load("")
 	encryptor, err := security.NewEncryptor("", dataDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg := config.Default()
 	cfg.DataDir = dataDir
-	svc := service.New(st, engine, nil, encryptor, security.NewRedactor(), cfg.Limits, cfg)
+	svc := service.New(st, nil, encryptor, security.NewRedactor(), cfg.Limits, cfg)
+	enableFullAccessForTest(t, svc)
 	if err := svc.InitializeWorkspaces(ctx, workspaceRoot); err != nil {
 		t.Fatal(err)
 	}
@@ -397,11 +421,11 @@ func TestWorkspaceToolUsesConversationBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var result domain.ExecResult
+	var result ExecToolResult
 	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
 		t.Fatal(err)
 	}
-	if !result.OK || result.Status != "completed" || !strings.Contains(result.Stdout, "README.md") {
+	if result.Status != "completed" || !strings.Contains(result.Stdout, "README.md") {
 		t.Fatalf("bound Workspace listing = %#v", result)
 	}
 }
@@ -429,17 +453,42 @@ func TestWebExtractToolResultExposesPartialAndProviderFailures(t *testing.T) {
 }
 
 func TestTaskToolResultsExposeRejectionAndStderr(t *testing.T) {
-	partial, err := NormalizeExecToolResult(domain.ExecResult{
+	validationFailure, err := CompactExecToolResult(domain.ExecResult{}, invalidToolInput("block_until requires wait_seconds"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if validationFailure.Code != "validation_failed" || validationFailure.Retryable {
+		t.Fatalf("typed task input failure was exposed as retryable remote failure: %#v", validationFailure)
+	}
+
+	persistenceFailure, err := CompactExecToolResult(domain.ExecResult{}, errors.New("constraint failed: FOREIGN KEY constraint failed (787)"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persistenceFailure.Code != "internal_error" || persistenceFailure.Retryable {
+		t.Fatalf("control-plane constraint failure was exposed as retryable remote failure: %#v", persistenceFailure)
+	}
+
+	partial, err := CompactExecToolResult(domain.ExecResult{
 		RunID: "run_partial", Status: "partial", ExitCode: 2, Stdout: "matched configuration\n",
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !partial.OK || partial.Code != "partial" || partial.Retryable || partial.NextAction == "" {
-		t.Fatalf("partial execution was not exposed as usable without automatic retry: %#v", partial)
+	if partial.Status != "partial" || partial.Code != "" || partial.Retryable || partial.Stdout == "" {
+		t.Fatalf("partial execution was not compactly exposed as usable output: %#v", partial)
+	}
+	encodedPartial, err := json.Marshal(partial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, redundant := range []string{`"ok"`, `"tool_version"`, `"risk"`, `"duration"`, `"completed_at"`, `"message"`, `"next_action"`, `"stderr"`} {
+		if strings.Contains(string(encodedPartial), redundant) {
+			t.Fatalf("compact execution result retained redundant field %s: %s", redundant, encodedPartial)
+		}
 	}
 
-	execResult, err := NormalizeExecToolResult(domain.ExecResult{
+	execResult, err := CompactExecToolResult(domain.ExecResult{
 		RunID:               "run_exec_rejected",
 		Status:              "rejected",
 		OperatorInstruction: "inspect logs instead",
@@ -447,7 +496,7 @@ func TestTaskToolResultsExposeRejectionAndStderr(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if execResult.OK || execResult.Code != "rejected" || execResult.OperatorInstruction == "" || !strings.Contains(execResult.NextAction, "do not resubmit") {
+	if execResult.Status != "rejected" || execResult.Code != "" || execResult.OperatorInstruction == "" {
 		t.Fatalf("rejected execution was not exposed as an operator interruption: %#v", execResult)
 	}
 
@@ -457,11 +506,12 @@ func TestTaskToolResultsExposeRejectionAndStderr(t *testing.T) {
 		Status:              "rejected",
 		OperatorInstruction: "stop the test and only summarize existing evidence",
 	}
-	status, err := TaskToolResult(task, domain.ExecResult{Status: "rejected", OperatorInstruction: task.OperatorInstruction}, "", nil)
+	fullStatus, err := normalizeTaskResult(task, domain.ExecResult{Status: "rejected", OperatorInstruction: task.OperatorInstruction}, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.OK || status.TaskID != task.ID || status.OperatorInstruction != task.OperatorInstruction || !strings.Contains(status.NextAction, "do not resubmit") {
+	status := compactExecToolResult(fullStatus)
+	if status.Status != "rejected" || status.TaskID != task.ID || status.OperatorInstruction != task.OperatorInstruction || status.Code != "" {
 		t.Fatalf("task status lost the operator interruption: %#v", status)
 	}
 	encoded, err := json.Marshal(status)
@@ -472,7 +522,7 @@ func TestTaskToolResultsExposeRejectionAndStderr(t *testing.T) {
 		t.Fatalf("serialized Tool result lost the operator instruction: %s", encoded)
 	}
 
-	failed, err := TaskToolResult(
+	fullFailure, err := normalizeTaskResult(
 		domain.Task{ID: "task_failed", RunID: "run_failed", Status: "failed"},
 		domain.ExecResult{RunID: "run_failed", Status: "failed", ExitCode: 1, Stderr: "sleep: missing operand"},
 		"", nil,
@@ -480,11 +530,12 @@ func TestTaskToolResultsExposeRejectionAndStderr(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	failed := compactExecToolResult(fullFailure)
 	encoded, err = json.Marshal(failed)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if failed.OK || failed.Code != "failed" || !strings.Contains(string(encoded), `"stderr":"sleep: missing operand"`) || !strings.Contains(failed.NextAction, "do not repeat unchanged input") {
+	if failed.Status != "failed" || failed.Code != "" || !strings.Contains(string(encoded), `"stderr":"sleep: missing operand"`) {
 		t.Fatalf("failed task did not expose stderr to the model: output=%#v json=%s", failed, encoded)
 	}
 }
@@ -496,7 +547,6 @@ func TestRunScriptBackgroundReturnsTaskAndUnifiedTaskToolReturnsOutput(t *testin
 		t.Fatal(err)
 	}
 	defer st.Close()
-	engine, _ := policy.Load("")
 	encryptor, err := security.NewEncryptor("", t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -509,7 +559,8 @@ func TestRunScriptBackgroundReturnsTaskAndUnifiedTaskToolReturnsOutput(t *testin
 			close(transport.release)
 		}
 	}()
-	svc := service.New(st, engine, transport, encryptor, security.NewRedactor(), config.Default().Limits)
+	svc := service.New(st, transport, encryptor, security.NewRedactor(), config.Default().Limits)
+	enableFullAccessForTest(t, svc)
 	host, err := svc.AddHost(ctx, domain.Host{Name: "background-host", Address: "127.0.0.1", Port: 22, User: "ops", AgentEnabled: true}, "test")
 	if err != nil {
 		t.Fatal(err)
@@ -535,7 +586,7 @@ func TestRunScriptBackgroundReturnsTaskAndUnifiedTaskToolReturnsOutput(t *testin
 		t.Fatal("merged background tools are missing")
 	}
 	inputJSON, _ := json.Marshal(map[string]any{
-		"host_id": host.ID, "script": "printf 'background complete\\n'", "background": true, "reason": "verify background script execution",
+		"host_id": host.Name, "script": "printf 'background complete\\n'", "background": true, "reason": "verify background script execution",
 	})
 	startedJSON, err := scriptTool.InvokableRun(ctx, string(inputJSON))
 	if err != nil {
@@ -545,12 +596,16 @@ func TestRunScriptBackgroundReturnsTaskAndUnifiedTaskToolReturnsOutput(t *testin
 	if err := json.Unmarshal([]byte(startedJSON), &started); err != nil {
 		t.Fatal(err)
 	}
-	if !started.OK || started.Status != "running" || started.TaskID == "" {
+	if started.Status != "running" || started.TaskID == "" {
 		t.Fatalf("background script did not return a running task: %#v", started)
+	}
+	storedTask, _, _, err := svc.GetTask(started.TaskID)
+	if err != nil || storedTask.HostID != host.ID {
+		t.Fatalf("background script did not persist the canonical host ID: task=%#v err=%v", storedTask, err)
 	}
 	select {
 	case request := <-transport.started:
-		if request.Mode != domain.ExecScript || request.Script == "" {
+		if request.Mode != domain.ExecScript || request.Script == "" || request.TimeoutSeconds != config.Default().Limits.MaxTimeoutSeconds {
 			t.Fatalf("background request lost script mode: %#v", request)
 		}
 	case <-time.After(time.Second):
@@ -565,12 +620,12 @@ func TestRunScriptBackgroundReturnsTaskAndUnifiedTaskToolReturnsOutput(t *testin
 		if getErr != nil {
 			t.Fatal(getErr)
 		}
-		var result domain.ExecResult
+		var result ExecToolResult
 		if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
 			t.Fatal(err)
 		}
 		if result.Status == "completed" {
-			if !result.OK || result.TaskID != started.TaskID || result.Stdout != "background complete\n" {
+			if result.TaskID != started.TaskID || result.Stdout != "background complete\n" {
 				t.Fatalf("unexpected completed task result: %#v", result)
 			}
 			return
@@ -588,14 +643,13 @@ func TestApprovalGatedBackgroundScriptReturnsBeforeDecision(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	engine, _ := policy.Load("")
 	encryptor, err := security.NewEncryptor("", t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	transport := &backgroundToolTransport{started: make(chan domain.ExecRequest, 1), release: make(chan struct{})}
 	defer close(transport.release)
-	svc := service.New(st, engine, transport, encryptor, security.NewRedactor(), config.Default().Limits)
+	svc := service.New(st, transport, encryptor, security.NewRedactor(), config.Default().Limits)
 	host, err := svc.AddHost(ctx, domain.Host{Name: "approval-background", Address: "127.0.0.1", Port: 22, User: "ops", AgentEnabled: true}, "test")
 	if err != nil {
 		t.Fatal(err)
@@ -679,7 +733,6 @@ func TestSSHExecPersistsArgumentsAndBackgroundWithOriginalToolCall(t *testing.T)
 		t.Fatal(err)
 	}
 	defer st.Close()
-	engine, _ := policy.Load("")
 	encryptor, err := security.NewEncryptor("", t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -687,7 +740,8 @@ func TestSSHExecPersistsArgumentsAndBackgroundWithOriginalToolCall(t *testing.T)
 	transport := &backgroundToolTransport{started: make(chan domain.ExecRequest, 1), release: make(chan struct{})}
 	var releaseOnce sync.Once
 	t.Cleanup(func() { releaseOnce.Do(func() { close(transport.release) }) })
-	svc := service.New(st, engine, transport, encryptor, security.NewRedactor(), config.Default().Limits)
+	svc := service.New(st, transport, encryptor, security.NewRedactor(), config.Default().Limits)
+	enableFullAccessForTest(t, svc)
 	host, err := svc.AddHost(ctx, domain.Host{Name: "exec-history", Address: "127.0.0.1", Port: 22, User: "ops", AgentEnabled: true}, "test")
 	if err != nil {
 		t.Fatal(err)
@@ -711,7 +765,7 @@ func TestSSHExecPersistsArgumentsAndBackgroundWithOriginalToolCall(t *testing.T)
 		t.Fatal("ssh_exec was not registered")
 	}
 	inputJSON, err := json.Marshal(map[string]any{
-		"host_id": host.ID, "program": "printf", "args": []string{"%s", "args-ok"}, "background": true,
+		"host_id": host.Name, "program": "printf", "args": []string{"%s", "args-ok"}, "background": true,
 		"elevated": false, "reason": "verify exact ssh_exec argument persistence",
 	})
 	if err != nil {
@@ -726,9 +780,13 @@ func TestSSHExecPersistsArgumentsAndBackgroundWithOriginalToolCall(t *testing.T)
 	if err := json.Unmarshal([]byte(startedJSON), &started); err != nil {
 		t.Fatal(err)
 	}
+	storedTask, _, _, err := svc.GetTask(started.TaskID)
+	if err != nil || storedTask.HostID != host.ID {
+		t.Fatalf("background ssh_exec did not persist the canonical host ID: task=%#v err=%v", storedTask, err)
+	}
 	select {
 	case request := <-transport.started:
-		if request.Program != "printf" || len(request.Args) != 2 || request.Args[0] != "%s" || request.Args[1] != "args-ok" || !request.Background || request.Elevated {
+		if request.Program != "printf" || len(request.Args) != 2 || request.Args[0] != "%s" || request.Args[1] != "args-ok" || !request.Background || request.Elevated || request.TimeoutSeconds != config.Default().Limits.MaxTimeoutSeconds {
 			t.Fatalf("SSH transport received incomplete request: %#v", request)
 		}
 	case <-time.After(time.Second):
@@ -776,14 +834,13 @@ func TestUnifiedTaskToolCancelsWithStandardExecResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	engine, _ := policy.Load("")
 	encryptor, err := security.NewEncryptor("", t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	transport := &backgroundToolTransport{started: make(chan domain.ExecRequest, 1), release: make(chan struct{})}
 	defer close(transport.release)
-	svc := service.New(st, engine, transport, encryptor, security.NewRedactor(), config.Default().Limits)
+	svc := service.New(st, transport, encryptor, security.NewRedactor(), config.Default().Limits)
 	host, err := svc.AddHost(ctx, domain.Host{Name: "cancel-host", Address: "127.0.0.1", Port: 22, User: "ops", AgentEnabled: true}, "test")
 	if err != nil {
 		t.Fatal(err)
@@ -797,12 +854,19 @@ func TestUnifiedTaskToolCancelsWithStandardExecResult(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("background task did not start")
 	}
-	result, err := RunTaskTool(svc, TaskInput{TaskID: task.ID, Action: "cancel"}, "test")
+	result, err := RunTaskTool(context.Background(), svc, TaskInput{TaskID: task.ID, Action: "cancel"}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.OK || result.TaskID != task.ID || result.Status != "cancelled" || result.Code != "cancelled" || result.ToolVersion != "1.1" {
-		t.Fatalf("cancel result is not a standard ExecResult: %#v", result)
+	if result.TaskID != task.ID || result.Status != "cancelled" || result.Code != "" {
+		t.Fatalf("cancel result is not compact and terminal: %#v", result)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "0001-01-01") {
+		t.Fatalf("cancel result contains a zero timestamp: %s", encoded)
 	}
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
@@ -822,18 +886,17 @@ func TestFileReadMetadataOnlyKeepsSHA256WithoutContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	engine, _ := policy.Load("")
 	encryptor, err := security.NewEncryptor("", t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	transport := &fileReadToolTransport{}
-	svc := service.New(st, engine, transport, encryptor, security.NewRedactor(), config.Default().Limits)
+	svc := service.New(st, transport, encryptor, security.NewRedactor(), config.Default().Limits)
 	host, err := svc.AddHost(ctx, domain.Host{Name: "file-host", Address: "127.0.0.1", Port: 22, User: "ops", AgentEnabled: true}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	runRead := func(input FileReadInput) domain.ExecResult {
+	runRead := func(input FileReadInput) ExecToolResult {
 		t.Helper()
 		base, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
@@ -842,13 +905,13 @@ func TestFileReadMetadataOnlyKeepsSHA256WithoutContent(t *testing.T) {
 			notifications <- result
 		})
 		type outcome struct {
-			result domain.ExecResult
+			result ExecToolResult
 			err    error
 		}
 		done := make(chan outcome, 1)
 		beforeCalls := transport.callCount
 		go func() {
-			result, readErr := RunFileReadTool(toolCtx, svc, input, "test")
+			result, readErr := RunFileReadTool(toolCtx, svc, input, "eino-agent")
 			done <- outcome{result: result, err: readErr}
 		}()
 		var pending domain.ExecResult
@@ -857,7 +920,7 @@ func TestFileReadMetadataOnlyKeepsSHA256WithoutContent(t *testing.T) {
 		case <-base.Done():
 			t.Fatal("timed out waiting for file-read approval")
 		}
-		if pending.Status != "approval_required" || pending.Risk != domain.RiskReadOnly || pending.ApprovalID == "" || transport.callCount != beforeCalls {
+		if pending.Status != "approval_required" || pending.ApprovalID == "" || transport.callCount != beforeCalls {
 			t.Fatalf("file read skipped approval: %#v", pending)
 		}
 		_, approveErr := svc.Approve(ctx, pending.ApprovalID, "reviewed file access", "operator")
@@ -875,11 +938,11 @@ func TestFileReadMetadataOnlyKeepsSHA256WithoutContent(t *testing.T) {
 			return completed.result
 		case <-base.Done():
 			t.Fatal("timed out waiting for approved file read")
-			return domain.ExecResult{}
+			return ExecToolResult{}
 		}
 	}
 	result := runRead(FileReadInput{HostID: host.ID, Path: "/etc/example.conf", MetadataOnly: true})
-	if !result.OK || result.Stdout != "" || result.File == nil || result.File.SHA256 != strings.Repeat("a", 64) || result.File.Size != 15 {
+	if result.Status != "completed" || result.Stdout != "" || result.File == nil || result.File.SHA256 != strings.Repeat("a", 64) || result.File.Size != 15 {
 		t.Fatalf("metadata-only result = %#v", result)
 	}
 	if !strings.Contains(transport.request.Script, "head -c 1") || strings.Contains(transport.request.Script, "tail -n") || strings.Contains(transport.request.Script, "tail -c") {
@@ -897,15 +960,19 @@ func TestFileReadMetadataOnlyKeepsSHA256WithoutContent(t *testing.T) {
 		t.Fatalf("metadata read was not persisted structurally: %#v", metadataRequest)
 	}
 	result = runRead(FileReadInput{HostID: host.ID, Path: "/etc/example.conf"})
-	if result.Stdout == "" || !strings.Contains(transport.request.Script, "cat -- '/etc/example.conf'") || strings.Contains(transport.request.Script, "head -c") {
-		t.Fatalf("default file read did not request complete content: result=%#v script=%s", result, transport.request.Script)
+	if result.Stdout == "" || !strings.Contains(transport.request.Script, "head -c 131072 -- '/etc/example.conf'") || result.File == nil || result.File.HasMore {
+		t.Fatalf("default file read did not request a bounded page: result=%#v script=%s", result, transport.request.Script)
+	}
+	result = runRead(FileReadInput{HostID: host.ID, Path: "/etc/example.conf", FullContent: true})
+	if !strings.Contains(transport.request.Script, "cat -- '/etc/example.conf'") || strings.Contains(transport.request.Script, "head -c") {
+		t.Fatalf("explicit full-content read was not honored: result=%#v script=%s", result, transport.request.Script)
 	}
 	result = runRead(FileReadInput{HostID: host.ID, Path: "/etc/example.conf", OffsetBytes: -4})
 	if !strings.Contains(transport.request.Script, "tail -c 4 -- '/etc/example.conf'") || result.File == nil || result.File.OffsetBytes != 11 {
 		t.Fatalf("negative file offset did not read from the end: result=%#v script=%s", result, transport.request.Script)
 	}
 	result = runRead(FileReadInput{HostID: host.ID, Path: "/etc/example.conf", Pattern: "secret|token", MatchMode: domain.FileSearchRegex, ContextLines: 2})
-	if !result.OK || result.Search == nil || !result.Search.Found || !strings.Contains(transport.request.Script, "grep -n -E -C 2 -- 'secret|token' '/etc/example.conf'") || strings.Contains(transport.request.Script, "head -n") {
+	if result.Status != "completed" || result.Search == nil || !result.Search.Found || !strings.Contains(transport.request.Script, "grep -n -E -C 2 -- 'secret|token' '/etc/example.conf'") || strings.Contains(transport.request.Script, "head -n") {
 		t.Fatalf("file read search mode was not dispatched: result=%#v script=%s", result, transport.request.Script)
 	}
 	searchRun, err := st.GetRun(ctx, result.RunID)
@@ -920,15 +987,15 @@ func TestFileReadMetadataOnlyKeepsSHA256WithoutContent(t *testing.T) {
 		t.Fatalf("remote search was not persisted structurally: %#v", searchRequest)
 	}
 	result, err = RunFileReadTool(ctx, svc, FileReadInput{HostID: host.ID, Path: "/etc/example.conf", Pattern: "secret", MatchMode: domain.FileSearchLiteral, MaxBytes: 10}, "test")
-	if err != nil || result.OK || result.Code != "validation_failed" {
+	if err != nil || result.Status != "failed" || result.Code != "validation_failed" {
 		t.Fatalf("ambiguous file read mode was not rejected: result=%#v err=%v", result, err)
 	}
 	result, err = RunFileReadTool(ctx, svc, FileReadInput{HostID: host.ID, Path: "/etc/example.conf", Pattern: "secret"}, "test")
-	if err != nil || result.OK || result.Code != "validation_failed" || !strings.Contains(result.Message, "match_mode") {
+	if err != nil || result.Status != "failed" || result.Code != "validation_failed" || !strings.Contains(result.Message, "match_mode") {
 		t.Fatalf("search without match_mode was not rejected: result=%#v err=%v", result, err)
 	}
 	result, err = RunFileReadTool(ctx, svc, FileReadInput{HostID: host.ID, Path: "/etc/example.conf", MetadataOnly: true, MaxBytes: 10}, "test")
-	if err != nil || result.OK || result.Code != "validation_failed" {
+	if err != nil || result.Status != "failed" || result.Code != "validation_failed" {
 		t.Fatalf("ambiguous metadata read was not rejected: result=%#v err=%v", result, err)
 	}
 }
@@ -949,10 +1016,10 @@ func TestUnifiedHistoryToolSearchesAndReadsExactRun(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	reviewJSON := `{"status":"completed","model":"private-review-model","deterministic_risk":"read_only","explanation":{"summary":"SUBAGENT_SUMMARY_SENTINEL","mechanism":"SUBAGENT_MECHANISM_SENTINEL","risks":["SUBAGENT_RISK_SENTINEL"]},"reviewed_at":"2026-07-29T00:00:00Z"}`
+	reviewJSON := `{"status":"completed","model":"private-review-model","explanation":{"summary":"SUBAGENT_SUMMARY_SENTINEL","mechanism":"SUBAGENT_MECHANISM_SENTINEL","risks":["SUBAGENT_RISK_SENTINEL"]},"reviewed_at":"2026-07-29T00:00:00Z"}`
 	for _, run := range []domain.Run{
-		{ID: "run-nginx", SessionID: "session-a", HostID: "host-a", RequestJSON: `{"program":"nginx"}`, RequestDigest: "digest-a", Risk: domain.RiskReadOnly, Status: "completed", AIReviewJSON: reviewJSON, StartedAt: now.Add(-time.Minute)},
-		{ID: "run-disk", SessionID: "session-b", HostID: "host-b", RequestJSON: `{"program":"df"}`, RequestDigest: "digest-b", Risk: domain.RiskReadOnly, Status: "completed", StartedAt: now},
+		{ID: "run-nginx", SessionID: "session-a", HostID: "host-a", RequestJSON: `{"program":"nginx"}`, RequestDigest: "digest-a", Status: "completed", AIReviewJSON: reviewJSON, StartedAt: now.Add(-time.Minute)},
+		{ID: "run-disk", SessionID: "session-b", HostID: "host-b", RequestJSON: `{"program":"df"}`, RequestDigest: "digest-b", Status: "completed", StartedAt: now},
 	} {
 		if err := st.CreateRun(ctx, run); err != nil {
 			t.Fatal(err)
@@ -965,12 +1032,11 @@ func TestUnifiedHistoryToolSearchesAndReadsExactRun(t *testing.T) {
 	if storedRun.AIReview == nil || storedRun.AIReview.Explanation == nil {
 		t.Fatal("history leak fixture did not persist the command explainer review")
 	}
-	engine, _ := policy.Load("")
 	encryptor, err := security.NewEncryptor("", t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := service.New(st, engine, nil, encryptor, security.NewRedactor(), config.Default().Limits)
+	svc := service.New(st, nil, encryptor, security.NewRedactor(), config.Default().Limits)
 	searched, err := ReadHistoryTool(ctx, svc, HistorySearchInput{Query: "nginx", Limit: 10})
 	if err != nil {
 		t.Fatal(err)
@@ -1048,15 +1114,11 @@ func TestDisabledToolIsExcludedFromRunnerAndRetainedInCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	engine, err := policy.Load("")
-	if err != nil {
-		t.Fatal(err)
-	}
 	encryptor, err := security.NewEncryptor("", t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := service.New(st, engine, nil, encryptor, security.NewRedactor(), config.Default().Limits)
+	svc := service.New(st, nil, encryptor, security.NewRedactor(), config.Default().Limits)
 	if err := svc.SetAgentToolEnabled(ctx, "ssh_exec", false, "test"); err != nil {
 		t.Fatal(err)
 	}
@@ -1115,14 +1177,13 @@ func TestUnifiedSkillToolReadsTheLiveAdministratorRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	engine, _ := policy.Load("")
 	encryptor, err := security.NewEncryptor("", t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg := config.Default()
 	cfg.DataDir = t.TempDir()
-	svc := service.New(st, engine, nil, encryptor, security.NewRedactor(), cfg.Limits, cfg)
+	svc := service.New(st, nil, encryptor, security.NewRedactor(), cfg.Limits, cfg)
 	if _, err := svc.SaveAdminSkill(ctx, "custom-diagnosis", "# Custom Diagnosis\n\nUse the administrator workflow.", "test"); err != nil {
 		t.Fatal(err)
 	}
@@ -1180,12 +1241,11 @@ func TestPlanStepUpdateReturnsCurrentPlanWithoutAbortingToolNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	engine, _ := policy.Load("")
 	encryptor, err := security.NewEncryptor("", t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := service.New(st, engine, nil, encryptor, security.NewRedactor(), config.Default().Limits)
+	svc := service.New(st, nil, encryptor, security.NewRedactor(), config.Default().Limits)
 	if _, err := svc.CreateAgentPlan(ctx, "Repair the service", []string{"Inspect", "Repair"}, "test"); err != nil {
 		t.Fatal(err)
 	}
@@ -1389,12 +1449,11 @@ func TestExecutionToolReturnsStructuredNotFoundWithoutAbortingToolNode(t *testin
 		t.Fatal(err)
 	}
 	defer st.Close()
-	engine, _ := policy.Load("")
 	encryptor, err := security.NewEncryptor("", t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := service.New(st, engine, nil, encryptor, security.NewRedactor(), config.Default().Limits)
+	svc := service.New(st, nil, encryptor, security.NewRedactor(), config.Default().Limits)
 	tools, err := BuildTools(svc)
 	if err != nil {
 		t.Fatal(err)
@@ -1413,11 +1472,21 @@ func TestExecutionToolReturnsStructuredNotFoundWithoutAbortingToolNode(t *testin
 	if err != nil {
 		t.Fatalf("expected not_found Tool result, got fatal error: %v", err)
 	}
-	var result domain.ExecResult
+	var result ExecToolResult
 	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.OK || result.Code != "not_found" || result.Retryable || result.TaskID != "" {
+	if result.Status != "failed" || result.Code != "not_found" || result.Retryable || result.TaskID != "" {
 		t.Fatalf("unexpected structured failure: %#v", result)
+	}
+}
+
+func TestSelectExecResultOutputReportsOmittedBytes(t *testing.T) {
+	selected, err := selectExecResultOutput(domain.ExecResult{Stdout: "0123456789", Stderr: "abcdefghij"}, 0, 0, 6, "head_tail", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.Stdout != "012789" || selected.Stderr != "abchij" || !selected.OutputLimited || selected.StdoutOmittedBytes != 4 || selected.StderrOmittedBytes != 4 || selected.StdoutTotalBytes != 10 || selected.OutputView != "head_tail" {
+		t.Fatalf("unexpected selected output: %#v", selected)
 	}
 }

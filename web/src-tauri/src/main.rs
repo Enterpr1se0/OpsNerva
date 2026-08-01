@@ -1,5 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    opspilot_desktop_lib::run();
+    opsnerva_desktop_lib::run();
 }
