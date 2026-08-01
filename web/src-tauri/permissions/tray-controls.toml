@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "tray-controls"
+description = "Allows the desktop frontend to synchronize and hide the main window."
+commands.allow = ["set_tray_mode", "hide_to_tray"]
