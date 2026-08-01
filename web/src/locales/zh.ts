@@ -7,7 +7,7 @@ const zh = {
     notConfigured: '未配置', unavailable: '不可用', dismiss: '关闭', new: '新建', image: '图片',
     status: '状态', time: '时间', host: '主机', model: '模型', agent: 'Agent', functions: '函数工具', arguments: '参数',
     files: '文件', size: '大小', updated: '更新时间', workspace: 'Workspace', operation: '操作', next: '下一步', operator: '操作员', error: '错误',
-    showPassword: '显示密码', hidePassword: '隐藏密码', copy: '复制', proxy: '代理', direct: '直连',
+    showPassword: '显示密码', hidePassword: '隐藏密码', copy: '复制', copied: '已复制', proxy: '代理', direct: '直连',
   },
   errors: {
     apiUnavailable: '无法连接 OpsNerva API。请确认服务正在 8080 端口运行后重试。',
@@ -18,6 +18,7 @@ const zh = {
     securing: '加载中...',
     pageTitles: { chat: '会话', ssh: 'SSH', config: '配置', extensions: '扩展', audit: '审计', logs: '日志' },
     nav: { agent: 'Agent', ssh: 'SSH', configuration: '配置', extensions: '扩展', audit: '审计', logs: '日志' },
+    collapseSidebar: '收起侧栏', expandSidebar: '展开侧栏',
     signOut: '退出登录',
     online: '服务正常', disconnected: '连接已断开', refresh: '刷新',
   },
@@ -149,7 +150,7 @@ const zh = {
     started: 'MCP Server 已启动。', stopped: 'MCP Server 已停止。', endpointCopied: 'Endpoint 已复制。', tokenCopied: '令牌已复制。',
   },
   chat: {
-    session: 'OpsNerva 会话', newSession: '新会话', conversations: '会话记录', openConversations: '打开会话记录', closeConversations: '关闭会话记录',
+    session: 'OpsNerva 会话', newSession: '新会话', conversations: '会话记录', openConversations: '打开会话记录', closeConversations: '关闭会话记录', collapseConversations: '收起会话记录', expandConversations: '展开会话记录',
     newConversation: '新建会话', noSaved: '没有会话', saved: '已保存', hosts: '主机',
     emptyTitle: '需要排查什么？',
     waitingModel: '等待模型响应', retryWaiting: '模型请求失败 · 第 {{attempt}}/{{max}} 次重试 · {{delay}} 秒后重试', retryingModel: '模型重试中 · 第 {{attempt}}/{{max}} 次', backgroundRunning: '后台运行中，刷新页面不会中断。',
@@ -165,7 +166,7 @@ const zh = {
     reasoning: '思考过程', reasoningActive: '思考中', reasoningFallback: '正在思考...',
   },
   workspace: {
-    noConfigured: '未配置 Workspace', localFiles: '本地文件', terminal: '终端', newTerminal: '新建终端', switchTerminal: '切换终端', agent: 'Agent', operator: '用户', inputBy: '输入 · {{source}}', parent: '上级目录', uploadFile: '上传文件', refreshFiles: '刷新文件', switchWorkspace: '切换 Workspace', switching: '正在切换…', boundToConversation: '已绑定当前会话',
+    noConfigured: '未配置 Workspace', localFiles: '本地文件', terminal: '终端', newTerminal: '新建终端', switchTerminal: '切换终端', agent: 'Agent', operator: '用户', inputBy: '输入 · {{source}}', parent: '上级目录', uploadFile: '上传文件', refreshFiles: '刷新文件', switchWorkspace: '切换 Workspace', switching: '正在切换…', boundToConversation: '已绑定当前会话', collapsePanel: '收起 Workspace', expandPanel: '展开 Workspace',
     registeredCount: '{{count}} 个', add: '新增 Workspace', id: '名称', permission: '权限', readOnly: '只读', readWrite: '读写', remove: '移除',
     settingsCreated: 'Workspace {{id}} 已新增。', settingsUpdated: 'Workspace {{id}} 已更新。', settingsRemoved: 'Workspace {{id}} 已移除。', removeDialogLabel: '永久删除 Workspace', removeTitle: '删除 Workspace“{{id}}”？', removeText: '该 Workspace 目录及其中的所有文件将被永久删除，无法恢复。',
     relativePath: '相对上传路径', cancelUpload: '取消上传', previewFile: '预览文件', openDirectory: '打开目录', revealDirectory: '在文件管理器中打开', deleteEntry: '删除{{type}}',
@@ -193,8 +194,8 @@ const zh = {
   approval: {
     actionScript: '脚本', actionCommand: '命令', sudoFileTitle: '是否允许 sudo 修改系统文件', sudoTitle: '是否允许 sudo 以 root 权限执行{{kind}}',
     readTitle: '是否允许读取这个文件', searchTitle: '是否允许搜索这个文件', sudoReadTitle: '是否允许以 root 权限读取这个文件', sudoSearchTitle: '是否允许以 root 权限搜索这个文件',
-    uploadTitle: '是否允许上传文件', transferTitle: '是否允许在 SSH 主机间传输文件', tunnelTitle: '是否允许建立本机 SSH 端口转发', sshShellTitle: '是否允许 Agent 控制交互式 SSH Shell', hostShellTitle: '是否允许在宿主机执行脚本', fileTitle: '是否允许修改文件', executeTitle: '是否允许执行{{kind}}',
-    uploadLabel: '将要上传的文件', transferLabel: '文件传输', tunnelLabel: '端口转发链路', sshShellLabel: '交互控制范围', rootFileLabel: '将以 root 权限修改的文件', rootCommandLabel: '将以 root 权限执行的完整{{kind}}', fileLabel: '将要修改的文件', commandLabel: '将要执行的完整{{kind}}',
+    uploadTitle: '是否允许上传文件', downloadTitle: '是否允许下载文件', transferTitle: '是否允许在 SSH 主机间传输文件', tunnelTitle: '是否允许建立本机 SSH 端口转发', sshShellTitle: '是否允许 Agent 控制交互式 SSH Shell', hostShellTitle: '是否允许在宿主机执行脚本', fileTitle: '是否允许修改文件', executeTitle: '是否允许执行{{kind}}',
+    uploadLabel: '将要上传的文件', downloadLabel: '将要下载的文件', transferLabel: '文件传输', tunnelLabel: '端口转发链路', sshShellLabel: '交互控制范围', rootFileLabel: '将以 root 权限修改的文件', rootCommandLabel: '将以 root 权限执行的完整{{kind}}', fileLabel: '将要修改的文件', commandLabel: '将要执行的完整{{kind}}',
     readLabel: '将要读取的文件', searchLabel: '将要搜索的文件', rootReadLabel: '将以 root 权限读取的文件', rootSearchLabel: '将以 root 权限搜索的文件',
     pendingOperation: '待审批操作', rootViaSudo: 'root（通过 sudo）', serviceUser: '当前服务用户', approved: '审批已通过 · {{status}} · {{run}}',
     replacementRequired: '请先填写拒绝原因或后续要求。', rejected: '已拒绝，Agent 将按你的说明继续。',
@@ -256,14 +257,14 @@ const zh = {
     columns: { time: '时间', level: '级别', component: '组件', event: '事件 / 字段' }, general: '通用', emptyTitle: '没有匹配的服务日志',
   },
   statusLabels: { pending: '待处理', completed: '已完成', skipped: '已跳过', partial: '部分成功', closed: '已关闭', expired: '已到期', failed: '失败', active: '进行中', running: '运行中', stopping: '停止中', stopped: '已停止', blocked: '已阻塞', in_progress: '执行中', ready: '就绪', error: '错误', connecting: '连接中', interrupted: '已中断', rejected: '已拒绝', approval_required: '待审批' },
-  toolCategories: { planning: '任务计划', execution: '命令执行', hosts: 'SSH 主机', tasks: '长任务', remote_files: '远程文件', workspace: 'Workspace', web: '网络搜索', history: '审计历史', approvals: '审批', skills: '运维 Skills', mcp: '外部 MCP' },
+  toolCategories: { planning: '任务计划', execution: '命令执行', hosts: 'SSH 主机', tasks: '长任务', remote_files: '远程文件', workspace: 'Workspace', web: '网络搜索', history: '审计历史', approvals: '审批', skills: 'Skills', mcp: '外部 MCP' },
   toolGuards: { read_only: '只读', approval_required: '审批控制', agent_state: 'Agent 状态', audited_control: '审计控制', external_mcp: '外部 MCP' },
   toolNames: {
     ssh_exec: '执行远程命令', ssh_run_script: '执行 Bash 脚本', ssh_file_read: '读取远程文件', ssh_file_search_mode: '搜索远程文件', ssh_file_list: '列出远程目录',
     ssh_file_edit: '编辑远程文件', ssh_file_transfer: '在主机间传输文件',
     ssh_task: '管理后台任务', ssh_tunnel: '管理 SSH 端口转发', ssh_shell: 'Shell', ssh_host_list: '列出主机', ssh_host_inspect: '检查主机',
-    workspace_file_list: '列出 Workspace 目录', workspace_file_read: '读取 Workspace 文件', workspace_file_search_mode: '搜索 Workspace 文件', workspace_file_edit: '编辑 Workspace 文件',
-    workspace_file_upload: '上传 Workspace 文件', workspace_shell: 'Workspace 终端', ssh_history: '读取执行历史', ops_skill: '读取 Skill',
+    workspace_file_list: '列出 Workspace 目录', workspace_file_read: '读取 Workspace 文件', workspace_file_search_mode: '搜索 Workspace 文件', workspace_file_edit: '编辑 Workspace 文件', workspace_file_delete: '删除 Workspace 条目',
+    workspace_file_upload: '上传 Workspace 文件', workspace_file_download: '下载到 Workspace', workspace_shell: 'Workspace 终端', ssh_history: '读取执行历史', skill: '读取 Skill',
     ops_plan_create: '创建任务计划', ops_plan_step_update: '更新任务步骤', ops_plan_revise: '修订任务计划', web_search: '搜索网络', web_extract: '提取网页',
   },
 }

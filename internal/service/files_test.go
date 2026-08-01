@@ -209,6 +209,11 @@ func TestFileEditHeredocMarkerCannotTerminateFromDiff(t *testing.T) {
 	if !strings.Contains(script, change.Diff) {
 		t.Fatal("edit lost the normalized diff")
 	}
+	for _, required := range []string{"head -c 3", "efbbbf", "sed $'s/\\r$//'"} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("remote edit script does not normalize Windows text with %q", required)
+		}
+	}
 }
 
 func TestRemoteFileEditRejectsSecretsAndMalformedDiffs(t *testing.T) {
@@ -229,11 +234,11 @@ func TestRemoteFileEditRejectsSecretsAndMalformedDiffs(t *testing.T) {
 }
 
 func TestBuildEditChangeNormalizesHeadersAndCountsLines(t *testing.T) {
-	change, err := buildEditChange("app.conf", "--- old\n+++ new\n@@ -1,2 +1,3 @@\n a\n-b\n+c\n+d\n")
+	change, err := buildEditChange("app.conf", "\ufeff--- old\r\n+++ new\r\n@@ -1,2 +1,3 @@\r\n a\r\n-b\r\n+c\r\n+d\r\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if change.Additions != 2 || change.Deletions != 1 || !strings.HasPrefix(change.Diff, "--- app.conf\n+++ app.conf\n") {
+	if change.Additions != 2 || change.Deletions != 1 || !strings.HasPrefix(change.Diff, "--- app.conf\n+++ app.conf\n") || strings.ContainsAny(change.Diff, "\ufeff\r") {
 		t.Fatalf("unexpected normalized change: %#v", change)
 	}
 }

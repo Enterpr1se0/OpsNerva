@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,6 +78,31 @@ func TestSearchRunsMatchesCommandTextLiterally(t *testing.T) {
 	// A literal underscore query must not wildcard-match "readapercent".
 	if runs, err := st.SearchRuns(ctx, `readapercent`, "", "", 0); err != nil || len(runs) != 0 {
 		t.Fatalf("sanity: unexpected match for readapercent: %d (err=%v)", len(runs), err)
+	}
+}
+
+func TestSearchRunsRegexMatchesHumanReadableRequestAndRedactedOutput(t *testing.T) {
+	st, ctx := newSearchStore(t)
+	now := time.Now().UTC()
+	insertRunForRequest(t, st, ctx, "run-regex-nginx", "host-a", domain.ExecRequest{
+		HostID: "host-a", Mode: "program", Program: "systemctl", Args: []string{"status", "nginx-api"}, Reason: "inspect service",
+	}, now.Add(-time.Minute))
+	insertRunForRequest(t, st, ctx, "run-regex-redis", "host-b", domain.ExecRequest{
+		HostID: "host-b", Mode: "program", Program: "systemctl", Args: []string{"status", "redis"}, Reason: "inspect cache",
+	}, now)
+	if err := st.UpdateRun(ctx, domain.Run{ID: "run-regex-redis", HostID: "host-b", Status: "failed", StderrRedacted: "redis connection timeout after [REDACTED]", CompletedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	runs, err := st.SearchRunsRegex(ctx, `nginx-(api|web)|connection[[:space:]]+timeout`, "", "", 0)
+	if err != nil || len(runs) != 2 || runs[0].ID != "run-regex-redis" || runs[1].ID != "run-regex-nginx" {
+		t.Fatalf("regex history search = %#v, err=%v", runs, err)
+	}
+	runs, err = st.SearchRunsRegex(ctx, `nginx-.*`, "host-a", "", 1)
+	if err != nil || len(runs) != 1 || runs[0].ID != "run-regex-nginx" {
+		t.Fatalf("filtered regex history search = %#v, err=%v", runs, err)
+	}
+	if _, err := st.SearchRunsRegex(ctx, `[`, "", "", 0); err == nil || !strings.Contains(err.Error(), "POSIX") {
+		t.Fatalf("invalid history regex was accepted: %v", err)
 	}
 }
 

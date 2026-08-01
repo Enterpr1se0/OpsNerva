@@ -131,6 +131,10 @@ export function workspaceFileEventsURL(workspaceId:string,path:string){
 	return `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/events?path=${encodeURIComponent(path)}`
 }
 
+export function workspaceDownloadURL(workspaceId:string,path:string){
+	return `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/download?path=${encodeURIComponent(path)}`
+}
+
 export function sshShellEventsURL(shellId:string,after=0){
 	return `/api/v1/ssh-shells/${encodeURIComponent(shellId)}/events?after=${after}`
 }

@@ -152,8 +152,8 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 	if len(descriptors) != len(loaded) || len(descriptors) < 20 {
 		t.Fatalf("catalog=%d loaded=%d", len(descriptors), len(loaded))
 	}
-	if len(descriptors) != 23 {
-		t.Fatalf("built-in catalog size=%d, want 23", len(descriptors))
+	if len(descriptors) != 25 {
+		t.Fatalf("built-in catalog size=%d, want 25", len(descriptors))
 	}
 
 	seen := make(map[string]bool, len(descriptors))
@@ -201,7 +201,7 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 		}
 		if descriptor.Name == "workspace_file_read" {
 			schema := string(descriptor.InputSchema)
-			if descriptor.Guard != "approval_required" || strings.Contains(schema, `"workspace_id"`) || !strings.Contains(schema, `"pattern"`) || !strings.Contains(schema, `"match_mode"`) || !strings.Contains(schema, `"literal"`) || !strings.Contains(schema, `"regex"`) || !strings.Contains(schema, `"context_lines"`) || strings.Contains(schema, `"max_matches"`) {
+			if descriptor.Guard != "approval_required" || strings.Contains(schema, `"workspace_id"`) || !strings.Contains(schema, `"tail_lines"`) || !strings.Contains(schema, `"pattern"`) || !strings.Contains(schema, `"match_mode"`) || !strings.Contains(schema, `"literal"`) || !strings.Contains(schema, `"regex"`) || !strings.Contains(schema, `"context_lines"`) || strings.Contains(schema, `"max_matches"`) {
 				t.Fatalf("workspace_file_read merged modes are incomplete: %#v", descriptor)
 			}
 		}
@@ -218,6 +218,15 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 			schema := string(descriptor.InputSchema)
 			if !strings.Contains(schema, `"diff"`) || !strings.Contains(schema, `"validator_id"`) || strings.Contains(schema, `"validator"`) || strings.Contains(schema, `"expected_sha256"`) || strings.Contains(schema, `"content"`) {
 				t.Fatalf("workspace_file_edit still exposes the retired edit contract: %s", schema)
+			}
+		}
+		if descriptor.Name == "workspace_file_delete" && (descriptor.Guard != "approval_required" || !strings.Contains(string(descriptor.InputSchema), `"recursive"`) || !strings.Contains(string(descriptor.InputSchema), `"reason"`)) {
+			t.Fatalf("workspace_file_delete metadata is incomplete: %#v", descriptor)
+		}
+		if descriptor.Name == "workspace_file_download" {
+			schema := string(descriptor.InputSchema)
+			if descriptor.Guard != "approval_required" || !strings.Contains(schema, `"host_id"`) || !strings.Contains(schema, `"remote_path"`) || !strings.Contains(schema, `"expected_sha256"`) || !strings.Contains(schema, `"path"`) {
+				t.Fatalf("workspace_file_download metadata is incomplete: %#v", descriptor)
 			}
 		}
 		if descriptor.Name == "ssh_task" && (descriptor.Guard != "audited_control" || !strings.Contains(string(descriptor.InputSchema), `"action"`) || !strings.Contains(string(descriptor.InputSchema), `"wait_seconds"`) || !strings.Contains(string(descriptor.InputSchema), `"block_until"`) || !strings.Contains(string(descriptor.InputSchema), `"after_stdout_bytes"`)) {
@@ -242,11 +251,14 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 				t.Fatalf("ssh_shell metadata does not reflect its runtime schema: %#v", descriptor)
 			}
 		}
-		if descriptor.Name == "ssh_history" && descriptor.Category != "history" {
-			t.Fatalf("ssh_history category = %q, want history", descriptor.Category)
+		if descriptor.Name == "ssh_history" {
+			schema := string(descriptor.InputSchema)
+			if descriptor.Category != "history" || !strings.Contains(schema, `"match_mode"`) || !strings.Contains(schema, `"literal"`) || !strings.Contains(schema, `"regex"`) {
+				t.Fatalf("ssh_history metadata is incomplete: %#v", descriptor)
+			}
 		}
-		if descriptor.Name == "ops_skill" && descriptor.Category != "skills" {
-			t.Fatalf("ops_skill category = %q, want skills", descriptor.Category)
+		if descriptor.Name == "skill" && descriptor.Category != "skills" {
+			t.Fatalf("skill category = %q, want skills", descriptor.Category)
 		}
 		if descriptor.Name == "workspace_shell" {
 			schema := string(descriptor.InputSchema)
@@ -264,12 +276,12 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 			t.Fatalf("web_extract metadata does not reflect its runtime schema: %#v", descriptor)
 		}
 	}
-	for _, retired := range []string{"ssh_approval_status", "ssh_task_start", "ssh_task_status", "ssh_task_tail", "ssh_task_list", "ssh_task_get", "ssh_task_cancel", "ssh_file_write", "ssh_file_apply_patch", "ssh_file_restore", "ssh_file_create", "ssh_file_stat", "ssh_config_apply", "ssh_config_restore", "workspace_list", "workspace_file_apply_patch", "workspace_file_create", "ssh_file_search", "workspace_file_search", "ssh_history_search", "ssh_history_get", "ops_skill_list", "ops_skill_get", "ops_plan_get"} {
+	for _, retired := range []string{"ssh_approval_status", "ssh_task_start", "ssh_task_status", "ssh_task_tail", "ssh_task_list", "ssh_task_get", "ssh_task_cancel", "ssh_file_write", "ssh_file_apply_patch", "ssh_file_restore", "ssh_file_create", "ssh_file_stat", "ssh_config_apply", "ssh_config_restore", "workspace_list", "workspace_file_apply_patch", "workspace_file_create", "ssh_file_search", "workspace_file_search", "ssh_history_search", "ssh_history_get", "ops_skill", "ops_skill_list", "ops_skill_get", "ops_plan_get"} {
 		if seen[retired] {
 			t.Fatalf("removed %s tool remains in the Agent catalog", retired)
 		}
 	}
-	if !seen["ops_plan_create"] || !seen["ops_plan_step_update"] || !seen["ops_plan_revise"] || !seen["ssh_file_edit"] || !seen["ssh_file_transfer"] || !seen["ssh_tunnel"] || !seen["ssh_shell"] || !seen["workspace_file_edit"] || !seen["workspace_file_upload"] || !seen["workspace_shell"] || !seen["web_search"] || !seen["web_extract"] || !seen["ssh_task"] || !seen["ssh_history"] || !seen["ops_skill"] {
+	if !seen["ops_plan_create"] || !seen["ops_plan_step_update"] || !seen["ops_plan_revise"] || !seen["ssh_file_edit"] || !seen["ssh_file_transfer"] || !seen["ssh_tunnel"] || !seen["ssh_shell"] || !seen["workspace_file_edit"] || !seen["workspace_file_delete"] || !seen["workspace_file_upload"] || !seen["workspace_file_download"] || !seen["workspace_shell"] || !seen["web_search"] || !seen["web_extract"] || !seen["ssh_task"] || !seen["ssh_history"] || !seen["skill"] {
 		t.Fatalf("representative functions missing: %#v", seen)
 	}
 }
@@ -1044,6 +1056,13 @@ func TestUnifiedHistoryToolSearchesAndReadsExactRun(t *testing.T) {
 	if len(searched.Runs) != 1 || searched.Runs[0].ID != "run-nginx" {
 		t.Fatalf("history search result = %#v", searched)
 	}
+	regexMatched, err := ReadHistoryTool(ctx, svc, HistorySearchInput{Query: `nginx|"df"`, MatchMode: domain.FileSearchRegex, Limit: 10})
+	if err != nil || len(regexMatched.Runs) != 2 {
+		t.Fatalf("history regex search result = %#v, err=%v", regexMatched, err)
+	}
+	if _, err := ReadHistoryTool(ctx, svc, HistorySearchInput{Query: `[`, MatchMode: domain.FileSearchRegex}); err == nil || !strings.Contains(err.Error(), "POSIX") {
+		t.Fatalf("invalid history regex was accepted: %v", err)
+	}
 	encodedHistory, err := json.Marshal(searched)
 	if err != nil {
 		t.Fatal(err)
@@ -1197,12 +1216,12 @@ func TestUnifiedSkillToolReadsTheLiveAdministratorRegistry(t *testing.T) {
 		if infoErr != nil {
 			t.Fatal(infoErr)
 		}
-		if info.Name == "ops_skill" {
+		if info.Name == "skill" {
 			skillTool = candidate.(tool.InvokableTool)
 		}
 	}
 	if skillTool == nil {
-		t.Fatal("ops_skill was not registered")
+		t.Fatal("skill was not registered")
 	}
 	result, err := skillTool.InvokableRun(service.WithSessionID(ctx, "session_skill"), `{"name":"custom-diagnosis"}`)
 	if err != nil {

@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +18,7 @@ import (
 	"eino-ops-agent/internal/config"
 	"eino-ops-agent/internal/domain"
 	"eino-ops-agent/internal/security"
+	"eino-ops-agent/internal/sshx"
 	"eino-ops-agent/internal/store"
 )
 
@@ -53,6 +56,42 @@ func newWorkspaceService(t *testing.T, access string) (*Service, string) {
 		t.Fatal(err)
 	}
 	return svc, filepath.Join(workspaceRoot, "project")
+}
+
+type workspaceDownloadTransport struct {
+	*fakeTransport
+	content    []byte
+	remotePath string
+}
+
+func (transport *workspaceDownloadTransport) OpenSFTPFile(_ context.Context, _ sshx.ConnectionSpec, remotePath string) (sshx.SFTPDownload, error) {
+	if remotePath != transport.remotePath {
+		return sshx.SFTPDownload{}, fmt.Errorf("unexpected remote path %q", remotePath)
+	}
+	return sshx.SFTPDownload{
+		Entry:  sshx.SFTPFileEntry{Name: filepath.Base(remotePath), Path: remotePath, Type: "file", Size: int64(len(transport.content)), Mode: "-rw-r--r--"},
+		Reader: io.NopCloser(bytes.NewReader(transport.content)),
+	}, nil
+}
+
+func (*workspaceDownloadTransport) ListSFTPFiles(context.Context, sshx.ConnectionSpec, string) (sshx.SFTPFileList, error) {
+	return sshx.SFTPFileList{}, errors.New("not implemented")
+}
+
+func (*workspaceDownloadTransport) UploadSFTPFile(context.Context, sshx.ConnectionSpec, string, io.Reader, bool) (sshx.SFTPFileEntry, error) {
+	return sshx.SFTPFileEntry{}, errors.New("not implemented")
+}
+
+func (*workspaceDownloadTransport) CreateSFTPDirectory(context.Context, sshx.ConnectionSpec, string) (sshx.SFTPFileEntry, error) {
+	return sshx.SFTPFileEntry{}, errors.New("not implemented")
+}
+
+func (*workspaceDownloadTransport) RenameSFTPEntry(context.Context, sshx.ConnectionSpec, string, string) (sshx.SFTPFileEntry, error) {
+	return sshx.SFTPFileEntry{}, errors.New("not implemented")
+}
+
+func (*workspaceDownloadTransport) RemoveSFTPEntry(context.Context, sshx.ConnectionSpec, string, bool) (sshx.SFTPFileEntry, error) {
+	return sshx.SFTPFileEntry{}, errors.New("not implemented")
 }
 
 func TestConversationWorkspaceBindingIsAuthoritative(t *testing.T) {
@@ -296,6 +335,23 @@ func TestWorkspaceReadNegativeOffsetReadsFromFileEnd(t *testing.T) {
 	}
 }
 
+func TestWorkspaceReadTailLinesMatchesRemoteSemantics(t *testing.T) {
+	svc, root := newWorkspaceService(t, "read_only")
+	content := "one\r\ntwo\r\nthree\r\n"
+	if err := os.WriteFile(filepath.Join(root, "tail-lines.log"), []byte(content), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	result := runApprovedWorkspaceAccess(t, svc, func(ctx context.Context) (domain.ExecResult, error) {
+		return svc.ReadWorkspaceFileAdvanced(ctx, "project", "tail-lines.log", 0, 0, 2, "eino-agent")
+	})
+	if result.Stdout != "two\r\nthree\r\n" || result.File == nil || result.File.OffsetBytes != 5 || result.File.ReturnedBytes != len("two\r\nthree\r\n") {
+		t.Fatalf("Workspace tail_lines returned %#v", result)
+	}
+	if _, err := svc.ReadWorkspaceFileAdvanced(context.Background(), "project", "tail-lines.log", 0, 1, 2, "test"); err == nil || !strings.Contains(err.Error(), "tail_lines") {
+		t.Fatalf("Workspace tail_lines accepted offset_bytes: %v", err)
+	}
+}
+
 func TestWorkspaceSearchReturnsLiteralMatchesWithContext(t *testing.T) {
 	svc, root := newWorkspaceService(t, "read_only")
 	content := "before\nneedle one\nmiddle\nneedle two\nafter\nport|socks\n"
@@ -397,6 +453,27 @@ func TestWorkspaceFileEditPreservesMode(t *testing.T) {
 	info, err := os.Stat(existingPath)
 	if err != nil || info.Mode().Perm() != 0o640 {
 		t.Fatalf("replacement mode=%v err=%v", info, err)
+	}
+}
+
+func TestWorkspaceFileEditNormalizesUTF8BOMAndCRLF(t *testing.T) {
+	svc, root := newWorkspaceService(t, "read_write")
+	path := filepath.Join(root, "windows.conf")
+	original := append([]byte{0xef, 0xbb, 0xbf}, []byte("enabled=false\r\nname=demo\r\n")...)
+	if err := os.WriteFile(path, original, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	patch := "\ufeff--- windows.conf\r\n+++ windows.conf\r\n@@ -1,2 +1,2 @@\r\n-enabled=false\r\n+enabled=true\r\n name=demo\r\n"
+	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "windows.conf", patch, "", "normalize Windows text", "eino-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed", "operator"); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil || string(content) != "enabled=true\nname=demo\n" {
+		t.Fatalf("normalized edit result=%q err=%v", content, err)
 	}
 }
 
@@ -694,6 +771,78 @@ func TestWorkspaceAdminDeletePermanentlyRemovesDirectory(t *testing.T) {
 	}
 }
 
+func TestAgentWorkspaceDeleteRequiresApprovalAndRecursiveIntent(t *testing.T) {
+	svc, root := newWorkspaceService(t, "read_write")
+	directory := filepath.Join(root, "generated")
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "artifact.txt"), []byte("temporary\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.DeleteWorkspaceEntry(context.Background(), "project", "generated", false, "remove generated output", "eino-agent"); err == nil || !strings.Contains(err.Error(), "recursive=true") {
+		t.Fatalf("non-empty directory deletion did not require recursive intent: %v", err)
+	}
+	pending, err := svc.DeleteWorkspaceEntry(context.Background(), "project", "generated", true, "remove generated output", "eino-agent")
+	if err != nil || pending.Status != "approval_required" {
+		t.Fatalf("Workspace delete did not require approval: result=%#v err=%v", pending, err)
+	}
+	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed permanent deletion", "operator")
+	if err != nil || approved.Status != "completed" || !strings.Contains(approved.Stdout, `"path":"generated"`) {
+		t.Fatalf("approved Workspace delete failed: result=%#v err=%v", approved, err)
+	}
+	if _, err := os.Stat(directory); !os.IsNotExist(err) {
+		t.Fatalf("deleted Workspace directory still exists: %v", err)
+	}
+	if _, err := svc.DeleteWorkspaceEntry(context.Background(), "project", ".", true, "remove root", "eino-agent"); err == nil || !strings.Contains(err.Error(), "root cannot be deleted") {
+		t.Fatalf("Workspace root deletion was accepted: %v", err)
+	}
+}
+
+func TestWorkspaceDownloadUsesVersionBoundAtomicDestination(t *testing.T) {
+	svc, root := newWorkspaceService(t, "read_write")
+	content := []byte("downloaded over SFTP\n")
+	remotePath := "/tmp/report.txt"
+	transport := &workspaceDownloadTransport{fakeTransport: &fakeTransport{}, content: content, remotePath: remotePath}
+	svc.transport = transport
+	host, err := svc.SaveHost(context.Background(), domain.HostInput{
+		Name: "source", Address: "192.0.2.50", Port: 22, User: "ops", AuthType: "agent", SudoMode: "none",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := fmt.Sprintf("%x", sha256.Sum256(content))
+	pending, err := svc.DownloadHostFileToWorkspace(context.Background(), host.ID, remotePath, digest, "project", "downloads/report.txt", 30, "download the reviewed report", "eino-agent")
+	if err == nil || !strings.Contains(err.Error(), "parent directory") {
+		t.Fatalf("download accepted a missing Workspace parent: result=%#v err=%v", pending, err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "downloads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = svc.DownloadHostFileToWorkspace(context.Background(), host.ID, remotePath, digest, "project", "downloads/report.txt", 30, "download the reviewed report", "eino-agent")
+	if err != nil || pending.Status != "approval_required" {
+		t.Fatalf("Workspace download did not require approval: result=%#v err=%v", pending, err)
+	}
+	approval, err := svc.Store().GetApproval(context.Background(), pending.ApprovalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(approval.RequestJSON, root) || !strings.Contains(approval.RequestJSON, digest) || !strings.Contains(approval.RequestJSON, `"mode":"workspace_download"`) {
+		t.Fatalf("download approval did not bind safe paths and SHA256: %s", approval.RequestJSON)
+	}
+	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed source and destination", "operator")
+	if err != nil || approved.Status != "completed" || approved.File == nil || approved.File.SHA256 != digest {
+		t.Fatalf("approved Workspace download failed: result=%#v err=%v", approved, err)
+	}
+	stored, err := os.ReadFile(filepath.Join(root, "downloads", "report.txt"))
+	if err != nil || !bytes.Equal(stored, content) {
+		t.Fatalf("downloaded content=%q err=%v", stored, err)
+	}
+	if _, err := svc.DownloadHostFileToWorkspace(context.Background(), host.ID, remotePath, digest, "project", "downloads/report.txt", 30, "avoid overwrite", "eino-agent"); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("Workspace download overwrote an existing file: %v", err)
+	}
+}
+
 func TestWorkspaceUploadRejectsReadOnlyWorkspace(t *testing.T) {
 	svc, _ := newWorkspaceService(t, "read_only")
 	if _, err := svc.UploadWorkspaceFile(context.Background(), "project", "file.txt", "file.txt", bytes.NewBufferString("x"), "admin-web"); err == nil || !strings.Contains(err.Error(), "read_only") {
@@ -837,12 +986,16 @@ func TestHostWorkspaceShellRequiresFreshOneTimeApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := WithSessionID(context.Background(), "host-shell-session")
-	pending, err := svc.RunWorkspaceShell(ctx, "project", "pwd\nprintf 'ok\\n' > host-created.txt", ".", nil, 10, "exercise host shell", "eino-agent")
+	pending, err := svc.RunWorkspaceShell(ctx, "project", "pwd\nprintf 'ok\\n' > host-created.txt", "", nil, 10, "exercise host shell", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if pending.Status != "approval_required" {
 		t.Fatalf("host shell did not request explicit approval: %#v", pending)
+	}
+	approval, err := svc.Store().GetApproval(context.Background(), pending.ApprovalID)
+	if err != nil || !strings.Contains(approval.RequestJSON, `"cwd":"."`) {
+		t.Fatalf("Workspace shell did not bind the root cwd by default: approval=%#v err=%v", approval, err)
 	}
 	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed once", "operator")
 	if err != nil || approved.Status != "completed" {
@@ -854,7 +1007,7 @@ func TestHostWorkspaceShellRequiresFreshOneTimeApproval(t *testing.T) {
 	if content, err := os.ReadFile(filepath.Join(root, "host-created.txt")); err != nil || string(content) != "ok\n" {
 		t.Fatalf("host shell did not write the workspace fixture: content=%q err=%v", content, err)
 	}
-	repeated, err := svc.RunWorkspaceShell(ctx, "project", "pwd\nprintf 'ok\\n' > host-created.txt", ".", nil, 10, "exercise host shell", "eino-agent")
+	repeated, err := svc.RunWorkspaceShell(ctx, "project", "pwd\nprintf 'ok\\n' > host-created.txt", "", nil, 10, "exercise host shell", "eino-agent")
 	if err != nil || repeated.Status != "approval_required" {
 		t.Fatalf("repeated host shell reused approval: %#v err=%v", repeated, err)
 	}
@@ -983,6 +1136,8 @@ func TestWorkspacePowerShellScriptUsesUTF8AndCleansTemporaryDirectory(t *testing
 		"[System.Console]::InputEncoding = $__opsPilotUtf8Encoding",
 		"[System.Console]::OutputEncoding = $__opsPilotUtf8Encoding",
 		"$OutputEncoding = $__opsPilotUtf8Encoding",
+		"$env:LANG = 'C.UTF-8'",
+		"$env:PYTHONUTF8 = '1'",
 		script,
 	} {
 		if !bytes.Contains(content, []byte(required)) {
@@ -1008,6 +1163,12 @@ func TestWorkspacePowerShellScriptUsesUTF8AndCleansTemporaryDirectory(t *testing
 	}
 	if _, err := os.Stat(directory); !os.IsNotExist(err) {
 		t.Fatalf("temporary PowerShell directory was not removed: %v", err)
+	}
+	environment := strings.Join(workspaceHostEnvironment("workspace-root", nil), "\n")
+	for _, required := range []string{"LANG=C.UTF-8", "LC_ALL=C.UTF-8", "PYTHONUTF8=1", "PYTHONIOENCODING=utf-8"} {
+		if !strings.Contains(environment, required) {
+			t.Fatalf("Workspace host environment is missing %q: %s", required, environment)
+		}
 	}
 }
 

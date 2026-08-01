@@ -32,7 +32,7 @@ Web/API 位于单管理员认证边界之后。数据库尚无管理员凭据时
 
 ## Dynamic extensions
 
-Skill Registry 位于控制面数据目录，每个 Skill 目录必须包含 `SKILL.md`，启用状态写入独立 `skill.json`。管理员列表包含全部 Skill；主 Eino Agent 的 `ops_skill` 不传 `name` 时列出启用项，传入 `name` 时加载完整内容。OpsNerva 自身的 MCP Server 不暴露 Skill，删除是不可恢复的物理删除。
+Skill Registry 位于控制面数据目录，每个 Skill 目录必须包含 `SKILL.md`，启用状态写入独立 `skill.json`。管理员列表包含全部 Skill；主 Eino Agent 的通用 `skill` 可用于任意任务领域，不传 `name` 时列出启用项，传入精确 `name` 时加载完整内容。Skill 只提供指导，不扩大权限或覆盖系统规则。OpsNerva 自身的 MCP Server 不暴露 Skill，删除是不可恢复的物理删除。
 
 主 Agent 的 func 启用状态保存在 `agent_tool_settings`。未写入状态的 func 默认启用；管理员可在 Loaded functions 中逐项关闭或重新启用。每次修改都会写入审计并重建 Eino runner，关闭项仍保留在管理目录中，但不会传给 ChatModel，也不会注册到 ToolNode。
 
@@ -52,11 +52,13 @@ stdio 通过 `exec.Command(command,args...)` 启动，不解析 Shell；Streamab
 
 ## Transactional files and Workspace
 
+Workspace 与 SSH 文件读取共享 `tail_lines` 语义。Agent 侧 Workspace 生命周期包括审批控制的 `workspace_file_delete`、Workspace→SSH 的 `workspace_file_upload` 和 SSH→Workspace 的 `workspace_file_download`；下载绑定远端 SHA256，拒绝符号链接、超过 100 MiB 的源和已存在的本地目标，并在同目录临时文件校验后原子提交。文件编辑在应用 diff 前统一移除 UTF-8 BOM、把 CRLF 转换为 LF，UTF-16 则明确拒绝。`workspace_shell` 省略 cwd 时在请求中固定绑定 `.`，执行环境统一声明 UTF-8，Windows PowerShell 脚本继续通过系统临时目录中的 BOM 文件启动，但进程工作目录始终是 Workspace 根。
+
 `ssh_file_read` 在同一次受审计操作中返回有界内容、mode/owner/mtime 与 SHA256，`workspace_file_read` 使用相同的范围语义。普通读取默认限制为 128 KiB；未到文件末尾时通过 `has_more/next_offset` 显式分页，`full_content=true` 才取消默认页限制。`offset_bytes` 非负时是从文件开头计算的零基偏移，负数表示读取文件末尾对应字节数，返回元数据记录解析后的实际非负偏移。两者都以可选 `pattern` 切换到字面量搜索模式，并支持上下文与结果行数参数；搜索和范围参数互斥，独立的 `ssh_file_search`、`workspace_file_search` 不再注册到 Agent 或 MCP。内部仍以不同执行模式保留参数校验和审计语义。现有文件只能通过 `ssh_file_edit` 提交单文件 unified diff，Workspace 提供对应的 `workspace_file_edit`；不提供专用的新建文件 Tool。Service 在审批前规范化 diff 并计算新增、删除行数，`ExecRequest.change` 是审批、审计和 Web 展示的唯一变更来源。Tool 参数 `validator_id` 只能引用启动配置中的 scope 对应 ID，配置项以固定 program/args 执行并拒绝 Tool 提供的 Shell 命令。远程 Bash 事务脚本在批准后才生成：同目录写入并同步临时文件、对临时文件运行白名单 validator，通过后原子提交。编辑链路不校验旧文件 SHA、不创建持久备份、不写 `file_operations`，也不提供恢复 Tool。
 
 `ssh_file_transfer` 由控制端分别建立源、目标两条内部 SSH/SFTP 连接并用 `io.Copy` 中继，不要求远端主机互通，不调用本地或远端 `scp`，也不在控制端落盘。请求以目标主机作为 Run 主机，同时绑定源主机 ID、源路径及 SHA256、目标路径和两端 `ssh_connection_digest`。未提供目标 SHA256 时只允许创建新文件；提供后只允许替换该精确版本，并在写入前后复核。Transport 拒绝符号链接和非普通文件，先写目标同目录的随机独占临时文件，流式计算源 SHA256，通过后使用 SFTP rename 提交；进度按字节事件发送，冲突、取消和超时会清理临时文件。一次传输只占一个全局执行槽，并按稳定顺序同时占用两台主机的并发槽，避免反向传输死锁。
 
-Workspace 在 `workspace_dir` 下按 ID 托管；SQLite 的 Workspace 登记只保存 ID、权限和时间戳，`chat_sessions` 另行持久化每个会话的活动 Workspace ID。数据库第一次初始化时创建 `default/read_write`，之后由受 Cookie/CSRF 保护的管理员 API 新增、修改权限和移除登记；目录固定派生为 `<workspace_dir>/<id>`，API、审计和模型上下文均不返回真实根路径。Web 在首条消息前提交选择，后续通过会话 Workspace API 切换；Agent 活动期间拒绝切换。`workspace_list` 不存在，模型侧全部 Workspace Tool schema 都不含 `workspace_id`，执行时只从可信会话上下文解析绑定。没有会话语义的 MCP Server 不注册 Workspace Tool。移除 Workspace 登记会在同一数据库事务中清空相关会话绑定，但保留目录数据；重新添加同一 ID 会复用目录。上传限制为 100 MiB，拒绝敏感路径和覆盖，通过同目录临时文件、`fsync` 与原子 hard-link 提交；Web 支持拖入多文件并顺序上传。当前文件面板通过 SSE 订阅服务端的操作系统目录事件，创建、写入、删除和重命名经过短暂合并后触发静默刷新；监听仅覆盖当前可见目录，不递归占用大型项目的文件监听配额，同时统一覆盖 Web、Agent、Shell 和外部程序的写入。预览限制为 1 MiB 并识别二进制内容；Web 删除直接删除目标，Workspace 根目录不可删除，并保留摘要与审计证据。Workspace 文件到远端只使用 `workspace_file_upload`：审批同时绑定 Workspace ID、相对路径、读取所得 SHA256、目标主机和远端路径，执行前重新解析白名单路径并校验 SHA256，绝对本地路径通过 `json:"-"` 的内部字段传给内置 SFTP transport。每个 Workspace 使用隐藏的受管目标复用 Run/Approval/Audit 状态机。
+Workspace 在 `workspace_dir` 下按 ID 托管；SQLite 只登记 ID、权限和时间戳，`chat_sessions` 持久化当前绑定。目录固定派生为 `<workspace_dir>/<id>`，API、审计和模型上下文均不返回真实根路径。`workspace_list` 不存在，模型侧 Workspace Tool schema 不含 `workspace_id`，只从可信会话上下文解析绑定；没有会话语义的 MCP Server 不注册这些 Tool。上传与下载限制为 100 MiB，拒绝敏感路径、符号链接和覆盖，通过同目录临时文件、`fsync`、SHA256 校验与原子 hard-link 提交。`workspace_file_upload` 绑定本地源版本后发送到 SSH，`workspace_file_download` 绑定远端源版本后写入 Workspace；绝对本地路径不会序列化。`workspace_file_delete` 拒绝根目录，非空目录要求 `recursive=true`。Web 文件面板通过独立附件接口流式下载普通文件，响应使用原文件名、`no-store` 与 `nosniff`；文件列表和预览窗口共享该入口。Web 文件面板与 Agent、Shell、外部程序共享 SSE 文件事件刷新链路。每个 Workspace 使用隐藏的受管目标复用 Run/Approval/Audit 状态机。
 
 `workspace_shell` 是唯一开放给模型的本地 Shell，支持一次性 `run` 以及 `start/input/status/list/interrupt/close` 交互式 PTY。管理员在 SQLite 持久化的 System 设置中明确选择 `sandbox`、`host` 或 `disabled`，Linux 默认 `sandbox`，Windows 默认 `host`。启动或运行时解析出的实际后端写入 `ExecRequest.workspace_shell_backend`，和 Workspace ID、相对 cwd、环境及脚本一起进入加密审批摘要；执行前再次读取设置，后端不一致即拒绝。交互会话复用 SSH 终端的事件序列、ANSI 输出、尺寸变更、Ctrl+C 与持久化状态，但以 `kind=workspace` 记录 Workspace 和后端；没有 TTL。Bubblewrap 交互模式复用外层专用 PTY 的 session/controlling terminal，不再创建第二个 session，因此 Bash job control 和全屏程序可用；原始 ANSI 事件保留给 Web 终端，Agent 适配器使用跨块状态机移除控制序列。启动和一次性脚本都遵循当前审批模式，不再进行等级分类。
 
@@ -98,11 +100,15 @@ HTTP Chat Handler 使用保留 request logger/value、但移除浏览器取消�
 
 ## Task plans
 
+`ops_plan_step_update` 在状态转移前读取当前步骤开始后的最近审计 run，将 run ID、Tool、状态、退出码和脱敏输出摘要自动附加到 evidence；仅在没有可用 run 时要求调用方手写证据。
+
 复杂任务通过 Eino 专用的 `ops_plan_create`、`ops_plan_step_update` 和 `ops_plan_revise` 三个强类型 Tool 编排。计划和步骤分别写入 `agent_plans`、`agent_plan_steps`，session ID 只取可信 Go context，模型不能为其他会话读写计划。创建时只允许 2–8 个不重复步骤，第一步自动进入 `in_progress`。Store 在单个 SQLite 事务中处理当前步骤的完成、阻塞、跳过和恢复；完成或跳过后自动激活下一步。修订只删除当前及待处理步骤，再按新顺序插入，已完成和已跳过记录保持不变。数据库层始终最多只有一个进行中步骤。
 
 计划创建与每次状态转移均写入审计。Chat state 同时返回消息、后台运行状态和最新计划，Web 使用同一恢复轮询展示总进度、当前步骤与完成证据。每次模型请求前，Runtime 按可信 session ID 读取计划，并在当前用户消息前注入临时 System message；状态字段可信，目标、步骤标题和证据文本按不可信数据处理。Agent Loop 达到迭代上限不会删除计划，下一条 `continue` 会直接收到当前状态。没有计划时不注入任何计划消息。计划是编排状态而非额外权限，所有 SSH Tool 仍独立通过输入校验、审批模式和加密审计。
 
 ## Audit storage
+
+`ssh_history` 默认按字面量检索，也支持经过 POSIX 编译校验的 `regex` 模式；正则仅匹配当前会话允许读取的请求文本、Tool 参数和脱敏输出。
 
 `runs.request_json`、stdout 和 stderr 的可检索字段均为脱敏视图；对应原文采用 AES-256-GCM 写入 cipher 字段。MCP/Eino 历史工具永远不会返回 cipher 或解密内容。只有本地审批和显式 `audit show --raw` 会解密。
 
@@ -138,4 +144,4 @@ SQLite 使用部分唯一索引保证最多只有一个 active provider。切换
 
 ## Runtime settings
 
-Web 配置中心把模型提供商、SSH 主机、代理和系统设置收敛到同一入口。`proxies` 保存可复用的名称、规范化 URL、用户名和加密密码；模型、Tavily 和主机只保存 `proxy_id`。被引用的代理禁止删除，HTTPS 代理禁止分配给 SSH 主机。旧的三套内嵌代理字段会在一次性迁移中复制到独立代理记录后直接删除，不保留双轨运行逻辑。`system_settings` 单行表保存完整 System Prompt、Agent 最大模型迭代数、命令解释开关、独立 provider、请求超时、聊天图片格式和 Workspace Shell 模式；每次修改都会写入 `system_settings_updated` 审计事件。未显式保存 Prompt 时读取内置模板，显式空字符串则保持为空。保存后的 Prompt 直接作为 ChatModelAgent Instruction，不拼接内置内容。Runtime 构建新的 ChatModelAgent/Runner 并原子替换指针，因此所有会话的新请求立即使用新的 Prompt、循环预算和解释模型路由，已经取得旧 Runner 的执行不会被中断。
+Web 配置中心把模型提供商、SSH 主机、代理和系统设置收敛到同一入口。`proxies` 保存可复用的名称、规范化 URL、用户名和加密密码；模型、Tavily 和主机只保存 `proxy_id`。被引用的代理禁止删除，HTTPS 代理禁止分配给 SSH 主机。旧的三套内嵌代理字段会在一次性迁移中复制到独立代理记录后直接删除，不保留双轨运行逻辑。`system_settings` 单行表保存完整 System Prompt、Agent 最大模型迭代数、命令解释开关、独立 provider、请求超时、聊天图片格式和 Workspace Shell 模式；每次修改都会写入 `system_settings_updated` 审计事件。未显式保存 Prompt 时读取内置模板，显式空字符串则保持为空。保存后的 Prompt 不拼接内置内容；Runtime 仅附加不可编辑的服务宿主机 `GOOS/GOARCH` 上下文，并明确该平台不代表 SSH 目标机。Runtime 构建新的 ChatModelAgent/Runner 并原子替换指针，因此所有会话的新请求立即使用新的 Prompt、循环预算和解释模型路由，已经取得旧 Runner 的执行不会被中断。

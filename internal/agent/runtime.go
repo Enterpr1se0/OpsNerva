@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -272,7 +273,7 @@ func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st
 	}
 	agentInstance, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name: "ops-pilot", Description: "Diagnoses and operates registered Linux servers through audited SSH tools.",
-		Instruction: systemPrompt, Model: chatModel, MaxIterations: maxIterations,
+		Instruction: hostPlatformSystemPrompt(systemPrompt, goruntime.GOOS, goruntime.GOARCH), Model: chatModel, MaxIterations: maxIterations,
 		ModelRetryConfig: modelRequestRetryConfig(),
 		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
 			Tools: tools, ExecuteSequentially: true, UnknownToolsHandler: unknownToolResult,
@@ -283,6 +284,16 @@ func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st
 		return nil, nil, fmt.Errorf("create Eino agent: %w", err)
 	}
 	return adk.NewRunner(ctx, adk.RunnerConfig{Agent: agentInstance, EnableStreaming: true, CheckPointStore: st}), descriptors, nil
+}
+
+func hostPlatformSystemPrompt(systemPrompt, goos, goarch string) string {
+	hostContext := fmt.Sprintf(`Runtime host context:
+OpsNerva service host platform: %s/%s.
+This platform applies only to the OpsNerva service and local Workspace tools, not to registered SSH hosts. Inspect a remote host before relying on its OS.`, goos, goarch)
+	if systemPrompt == "" {
+		return hostContext
+	}
+	return systemPrompt + "\n\n" + hostContext
 }
 
 func (r *Runtime) Reload(ctx context.Context) error {

@@ -421,10 +421,12 @@ const (
 	ExecWorkspaceDirectoryList ExecMode = "workspace_directory_list"
 	ExecWorkspaceSearch        ExecMode = "workspace_search"
 	ExecWorkspaceEdit          ExecMode = "workspace_edit"
+	ExecWorkspaceDelete        ExecMode = "workspace_delete"
 	ExecRemoteRead             ExecMode = "remote_read"
 	ExecRemoteSearch           ExecMode = "remote_search"
 	ExecRemoteEdit             ExecMode = "remote_edit"
 	ExecWorkspaceUpload        ExecMode = "workspace_upload"
+	ExecWorkspaceDownload      ExecMode = "workspace_download"
 	ExecWorkspaceShell         ExecMode = "workspace_shell"
 	ExecWorkspaceShellStart    ExecMode = "workspace_shell_start"
 	ExecSSHFileTransfer        ExecMode = "ssh_file_transfer"
@@ -462,6 +464,7 @@ type ExecRequest struct {
 	SourceConnectionDigest    string              `json:"source_connection_digest,omitempty" jsonschema:"control-plane-selected source SSH connection revision bound into approval"`
 	RelativePath              string              `json:"relative_path,omitempty" jsonschema:"path relative to the workspace root"`
 	ExpectedSHA256            string              `json:"expected_sha256,omitempty" jsonschema:"workspace file version observed before mutation"`
+	Recursive                 bool                `json:"recursive,omitempty" jsonschema:"allow recursive Workspace directory deletion"`
 	Validator                 string              `json:"validator,omitempty" jsonschema:"allowlisted validator identifier"`
 	SearchPattern             string              `json:"search_pattern,omitempty" jsonschema:"file search pattern"`
 	SearchMatchMode           FileSearchMatchMode `json:"search_match_mode,omitempty" jsonschema:"file search matching mode: literal or regex"`

@@ -78,7 +78,7 @@ func toolCategory(name string) string {
 	switch {
 	case strings.HasPrefix(name, "ops_plan_"):
 		return "planning"
-	case name == "ops_skill" || strings.HasPrefix(name, "ops_skill_"):
+	case name == "skill":
 		return "skills"
 	case strings.HasPrefix(name, "mcp__"):
 		return "mcp"
@@ -105,7 +105,7 @@ func toolGuard(name string) string {
 		return "agent_state"
 	case "ssh_exec", "ssh_run_script":
 		return "approval_required"
-	case "ssh_tunnel", "ssh_shell", "ssh_file_read", "workspace_file_read", "ssh_file_edit", "ssh_file_transfer", "workspace_file_edit", "workspace_file_upload", "workspace_shell":
+	case "ssh_tunnel", "ssh_shell", "ssh_file_read", "workspace_file_read", "ssh_file_edit", "ssh_file_transfer", "workspace_file_edit", "workspace_file_delete", "workspace_file_upload", "workspace_file_download", "workspace_shell":
 		return "approval_required"
 	case "ssh_task":
 		return "audited_control"
@@ -286,9 +286,10 @@ type WorkspacePathInput struct {
 
 type WorkspaceReadInput struct {
 	Path         string                     `json:"path" jsonschema:"clean path relative to the workspace root"`
-	FullContent  bool                       `json:"full_content,omitempty" jsonschema:"return the complete file; cannot be combined with ranges or search"`
-	MaxBytes     int                        `json:"max_bytes,omitempty" jsonschema:"maximum bytes in this page; omitted defaults to 131072 unless full_content or search is used"`
-	OffsetBytes  int64                      `json:"offset_bytes,omitempty" jsonschema:"zero-based byte offset from the start; a negative value reads that many final bytes from the end"`
+	FullContent  bool                       `json:"full_content,omitempty" jsonschema:"return the complete file; cannot be combined with ranges, tail_lines, or search"`
+	MaxBytes     int                        `json:"max_bytes,omitempty" jsonschema:"maximum bytes in this page; omitted defaults to 131072 unless full_content, tail_lines, or search is used"`
+	OffsetBytes  int64                      `json:"offset_bytes,omitempty" jsonschema:"zero-based byte offset from the start; a negative value reads that many final bytes from the end; cannot be combined with tail_lines"`
+	TailLines    int                        `json:"tail_lines,omitempty" jsonschema:"return the requested number of final lines; cannot be combined with offset_bytes"`
 	Pattern      string                     `json:"pattern,omitempty" jsonschema:"optional search pattern; when set, match_mode is required and file range parameters are forbidden"`
 	MatchMode    domain.FileSearchMatchMode `json:"match_mode,omitempty" jsonschema:"Search mode only and required with pattern. Use literal for exact text or regex for a POSIX regular expression such as port|socks|proxy."`
 	ContextLines int                        `json:"context_lines,omitempty" jsonschema:"search mode only; lines around each match"`
@@ -299,6 +300,12 @@ type WorkspaceFileEditInput struct {
 	Diff        string `json:"diff" jsonschema:"complete unified diff containing one or more hunks for this file"`
 	ValidatorID string `json:"validator_id,omitempty" jsonschema:"optional allowlisted validator ID from the current Workspace context; never provide a command line and omit this field when no ID is listed"`
 	Reason      string `json:"reason" jsonschema:"concise one-sentence purpose of this operation"`
+}
+
+type WorkspaceFileDeleteInput struct {
+	Path      string `json:"path" jsonschema:"existing clean file or directory path relative to the conversation-bound Workspace root; the Workspace root cannot be deleted"`
+	Recursive bool   `json:"recursive,omitempty" jsonschema:"required to delete a non-empty directory; omit for files and empty directories"`
+	Reason    string `json:"reason" jsonschema:"concise one-sentence purpose of this permanent deletion"`
 }
 
 func fileSearchSchemaOption() toolutils.Option {
@@ -317,13 +324,22 @@ type WorkspaceUploadInput struct {
 	Reason         string `json:"reason" jsonschema:"concise one-sentence purpose of this operation"`
 }
 
+type WorkspaceDownloadInput struct {
+	HostID         string `json:"host_id" jsonschema:"registered source host identifier"`
+	RemotePath     string `json:"remote_path" jsonschema:"absolute source path on the remote host; symbolic links are rejected"`
+	ExpectedSHA256 string `json:"expected_sha256" jsonschema:"sha256 returned by ssh_file_read with metadata_only=true; download is rejected if the source changed"`
+	Path           string `json:"path" jsonschema:"new clean destination file path relative to the conversation-bound Workspace root; existing files are never overwritten"`
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty" jsonschema:"download timeout from 1 to 600 seconds"`
+	Reason         string `json:"reason" jsonschema:"concise one-sentence purpose of this operation"`
+}
+
 type WorkspaceShellInput struct {
 	Action         string            `json:"action" jsonschema:"Workspace shell operation: run, start, input, status, list, interrupt, or close"`
 	Script         string            `json:"script,omitempty" jsonschema:"run only: complete non-interactive Bash or PowerShell script"`
 	ShellID        string            `json:"shell_id,omitempty" jsonschema:"input, status, interrupt, and close only: Workspace shell identifier"`
 	Input          string            `json:"input,omitempty" jsonschema:"input only: exact non-secret bytes to send"`
 	Submit         bool              `json:"submit,omitempty" jsonschema:"input only: append a carriage return when input has no newline"`
-	Cwd            string            `json:"cwd,omitempty" jsonschema:"run and start only: clean directory relative to the Workspace root"`
+	Cwd            string            `json:"cwd,omitempty" jsonschema:"run and start only: clean directory relative to the Workspace root; omitted always means the Workspace root"`
 	Env            map[string]string `json:"env,omitempty" jsonschema:"run and start only: non-secret environment variables"`
 	TimeoutSeconds int               `json:"timeout_seconds,omitempty" jsonschema:"run only: timeout from 1 to 600 seconds"`
 	AfterSequence  uint64            `json:"after_sequence,omitempty" jsonschema:"status only: return every event after this sequence"`
@@ -398,10 +414,11 @@ func invalidWorkspaceShellValue(input WorkspaceShellInput, action, message strin
 }
 
 type HistorySearchInput struct {
-	RunID  string `json:"run_id,omitempty" jsonschema:"exact audit run identifier; mutually exclusive with search filters"`
-	Query  string `json:"query,omitempty" jsonschema:"literal substring matched against the command text and redacted output; prefer one short distinctive keyword because secrets appear as [REDACTED] and long exact phrases often miss"`
-	HostID string `json:"host_id,omitempty" jsonschema:"optional registered host identifier"`
-	Limit  int    `json:"limit,omitempty" jsonschema:"optional maximum results; omitted returns every matching audited run"`
+	RunID     string                     `json:"run_id,omitempty" jsonschema:"exact audit run identifier; mutually exclusive with search filters"`
+	Query     string                     `json:"query,omitempty" jsonschema:"substring or POSIX regular expression matched against command text and redacted output; secrets appear as [REDACTED]"`
+	MatchMode domain.FileSearchMatchMode `json:"match_mode,omitempty" jsonschema:"query mode: literal (default) or regex using POSIX regular expressions"`
+	HostID    string                     `json:"host_id,omitempty" jsonschema:"optional registered host identifier"`
+	Limit     int                        `json:"limit,omitempty" jsonschema:"optional maximum results; omitted returns every matching audited run"`
 }
 
 type WebSearchInput struct {
@@ -767,8 +784,8 @@ func RunWorkspaceFileReadTool(ctx context.Context, svc *service.Service, input W
 		return CompactExecToolResult(domain.ExecResult{}, err)
 	}
 	searching := input.Pattern != ""
-	if searching && (input.FullContent || input.MaxBytes != 0 || input.OffsetBytes != 0) {
-		return CompactExecToolResult(domain.ExecResult{}, fmt.Errorf("invalid Workspace file read input: pattern cannot be combined with full_content, max_bytes, or offset_bytes"))
+	if searching && (input.FullContent || input.MaxBytes != 0 || input.OffsetBytes != 0 || input.TailLines != 0) {
+		return CompactExecToolResult(domain.ExecResult{}, fmt.Errorf("invalid Workspace file read input: pattern cannot be combined with full_content, max_bytes, offset_bytes, or tail_lines"))
 	}
 	if searching && input.MatchMode == "" {
 		return CompactExecToolResult(domain.ExecResult{}, fmt.Errorf("invalid Workspace file read input: match_mode is required with pattern"))
@@ -780,19 +797,22 @@ func RunWorkspaceFileReadTool(ctx context.Context, svc *service.Service, input W
 		result, err := svc.SearchWorkspace(ctx, workspace.ID, input.Path, input.Pattern, input.MatchMode, input.ContextLines, actor)
 		return CompactExecToolResult(result, err)
 	}
-	if input.FullContent && (input.MaxBytes != 0 || input.OffsetBytes != 0) {
-		return CompactExecToolResult(domain.ExecResult{}, fmt.Errorf("invalid Workspace file read input: full_content cannot be combined with max_bytes or offset_bytes"))
+	if input.FullContent && (input.MaxBytes != 0 || input.OffsetBytes != 0 || input.TailLines != 0) {
+		return CompactExecToolResult(domain.ExecResult{}, fmt.Errorf("invalid Workspace file read input: full_content cannot be combined with max_bytes, offset_bytes, or tail_lines"))
 	}
-	if !input.FullContent && input.MaxBytes == 0 {
+	if input.MaxBytes < 0 || input.TailLines < 0 || (input.OffsetBytes != 0 && input.TailLines != 0) {
+		return CompactExecToolResult(domain.ExecResult{}, fmt.Errorf("invalid Workspace file read range: max_bytes and tail_lines must be non-negative; tail_lines cannot be combined with offset_bytes"))
+	}
+	if !input.FullContent && input.MaxBytes == 0 && input.TailLines == 0 {
 		input.MaxBytes = defaultFileReadBytes
 	}
-	result, err := svc.ReadWorkspaceFile(ctx, workspace.ID, input.Path, input.MaxBytes, input.OffsetBytes, actor)
+	result, err := svc.ReadWorkspaceFileAdvanced(ctx, workspace.ID, input.Path, input.MaxBytes, input.OffsetBytes, input.TailLines, actor)
 	return CompactExecToolResult(result, err)
 }
 
 func ReadHistoryTool(ctx context.Context, svc *service.Service, input HistorySearchInput) (HistoryOutput, error) {
 	if input.RunID != "" {
-		if input.Query != "" || input.HostID != "" || input.Limit != 0 {
+		if input.Query != "" || input.MatchMode != "" || input.HostID != "" || input.Limit != 0 {
 			return HistoryOutput{}, fmt.Errorf("invalid history input: run_id is mutually exclusive with search filters")
 		}
 		result, err := svc.GetRun(ctx, input.RunID, false)
@@ -801,7 +821,14 @@ func ReadHistoryTool(ctx context.Context, svc *service.Service, input HistorySea
 		}
 		return HistoryOutput{Runs: []HistoryRun{historyRun(result.Run)}}, nil
 	}
-	runs, err := svc.SearchRuns(ctx, input.Query, input.HostID, input.Limit)
+	matchMode := input.MatchMode
+	if matchMode == "" {
+		matchMode = domain.FileSearchLiteral
+	}
+	if matchMode == domain.FileSearchRegex && strings.TrimSpace(input.Query) == "" {
+		return HistoryOutput{}, fmt.Errorf("invalid history input: query is required with match_mode=regex")
+	}
+	runs, err := svc.SearchRunsMatching(ctx, input.Query, matchMode, input.HostID, input.Limit)
 	return HistoryOutput{Runs: historyRuns(runs)}, err
 }
 
@@ -1204,7 +1231,7 @@ func NormalizeWebExtractToolResult(result domain.WebExtractResponse, err error) 
 }
 
 type SkillInput struct {
-	Name string `json:"name,omitempty" jsonschema:"enabled skill name; omit to list available skills"`
+	Name string `json:"name,omitempty" jsonschema:"exact enabled Skill name; omit to list available Skills"`
 }
 
 type SkillOutput struct {
@@ -1219,7 +1246,7 @@ type PlanCreateInput struct {
 type PlanStepUpdateInput struct {
 	StepNumber int    `json:"step_number" jsonschema:"the current in-progress or blocked step number"`
 	Status     string `json:"status" jsonschema:"completed after verification; blocked when unable to continue; skipped when no longer needed; in_progress to resume a blocked step"`
-	Evidence   string `json:"evidence" jsonschema:"concise observed result, blocker, skip reason, or resume reason"`
+	Evidence   string `json:"evidence,omitempty" jsonschema:"optional concise observed result, blocker, skip reason, or resume reason; recent audited runs from this step are appended automatically"`
 }
 
 type PlanReviseInput struct {
@@ -1250,7 +1277,7 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ops_plan_step_update", "Update the current step. completed and skipped advance to the next step; blocked pauses the plan; in_progress resumes the blocked step. Finished steps cannot be changed and out-of-order updates are rejected.", func(ctx context.Context, input PlanStepUpdateInput) (any, error) {
+	if err := appendTool(toolutils.InferTool("ops_plan_step_update", "Update the current step. Recent audited run summaries from this step are appended to evidence automatically, so manual evidence is optional when runs already prove the result. completed and skipped advance to the next step; blocked pauses the plan; in_progress resumes the blocked step. Finished steps cannot be changed and out-of-order updates are rejected.", func(ctx context.Context, input PlanStepUpdateInput) (any, error) {
 		plan, err := svc.UpdateAgentPlanStep(ctx, input.StepNumber, input.Status, input.Evidence, "eino-agent")
 		return normalizePlanToolResult(ctx, svc, "ops_plan_step_update", plan, err)
 	})); err != nil {
@@ -1335,7 +1362,7 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("workspace_file_read", "Read one file from the Workspace bound to this conversation under the configured approval mode. Content reads default to a 131072-byte page; follow file.next_offset while file.has_more, or set full_content=true only for a reasonably sized file. Byte ranges are optional and negative offset_bytes reads from the file end. To search, set pattern and the required match_mode: literal searches exact text, while regex uses POSIX regular expressions (for example port|socks|proxy). context_lines is optional and search results are never truncated. No matches is a successful result with search.found=false. Read-range and search parameters are mutually exclusive. SHA256 metadata is returned for content reads and sensitive paths are denied unless Full access is enabled.", func(ctx context.Context, input WorkspaceReadInput) (ExecToolResult, error) {
+	if err := appendTool(toolutils.InferTool("workspace_file_read", "Read one file from the Workspace bound to this conversation under the configured approval mode. Content reads default to a 131072-byte page; follow file.next_offset while file.has_more, or set full_content=true only for a reasonably sized file. Byte ranges and tail_lines are optional, and negative offset_bytes reads from the file end. To search, set pattern and the required match_mode: literal searches exact text, while regex uses POSIX regular expressions (for example port|socks|proxy). context_lines is optional and search results are never truncated. No matches is a successful result with search.found=false. Read-range and search parameters are mutually exclusive. SHA256 metadata is returned for content reads and sensitive paths are denied unless Full access is enabled.", func(ctx context.Context, input WorkspaceReadInput) (ExecToolResult, error) {
 		return RunWorkspaceFileReadTool(ctx, svc, input, "eino-agent")
 	}, fileSearchSchemaOption())); err != nil {
 		return nil, err
@@ -1350,6 +1377,16 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
+	if err := appendTool(toolutils.InferTool("workspace_file_delete", "Permanently delete one existing file or directory inside the conversation-bound read_write Workspace under the configured approval mode. The Workspace root and sensitive paths are denied. Set recursive=true only for a non-empty directory.", func(ctx context.Context, input WorkspaceFileDeleteInput) (ExecToolResult, error) {
+		workspace, err := svc.SessionWorkspace(ctx)
+		if err != nil {
+			return CompactExecToolResult(domain.ExecResult{}, err)
+		}
+		result, err := svc.DeleteWorkspaceEntry(ctx, workspace.ID, input.Path, input.Recursive, input.Reason, "eino-agent")
+		return CompactExecToolResult(result, err)
+	})); err != nil {
+		return nil, err
+	}
 	if err := appendTool(toolutils.InferTool("workspace_file_upload", "Upload one file from the conversation-bound Workspace to a registered SSH host through one approved SFTP operation. Always bind expected_sha256 from workspace_file_read. This is the only supported local-to-remote file transfer path.", func(ctx context.Context, input WorkspaceUploadInput) (ExecToolResult, error) {
 		workspace, err := svc.SessionWorkspace(ctx)
 		if err != nil {
@@ -1360,7 +1397,17 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("workspace_shell", "Run a script or manage an interactive PTY in the Workspace bound to this conversation. Use run when complete output can be returned once; use start, input, status, list, interrupt, and close for interactive programs. input may wait for output to settle with wait_seconds. The configured Sandbox or Host backend and approval mode always apply.", func(ctx context.Context, input WorkspaceShellInput) (any, error) {
+	if err := appendTool(toolutils.InferTool("workspace_file_download", "Download one version-bound regular file from a registered SSH host into the conversation-bound read_write Workspace through one approved SFTP operation. Bind expected_sha256 from ssh_file_read metadata. The Workspace destination must not already exist.", func(ctx context.Context, input WorkspaceDownloadInput) (ExecToolResult, error) {
+		workspace, err := svc.SessionWorkspace(ctx)
+		if err != nil {
+			return CompactExecToolResult(domain.ExecResult{}, err)
+		}
+		result, err := svc.DownloadHostFileToWorkspace(ctx, input.HostID, input.RemotePath, input.ExpectedSHA256, workspace.ID, input.Path, input.TimeoutSeconds, input.Reason, "eino-agent")
+		return CompactExecToolResult(result, err)
+	})); err != nil {
+		return nil, err
+	}
+	if err := appendTool(toolutils.InferTool("workspace_shell", "Run a script or manage an interactive PTY in the Workspace bound to this conversation. Omitted cwd always means the Workspace root. Bash and PowerShell execution use an explicit UTF-8 environment. Use run when complete output can be returned once; use start, input, status, list, interrupt, and close for interactive programs. input may wait for output to settle with wait_seconds. The configured Sandbox or Host backend and approval mode always apply.", func(ctx context.Context, input WorkspaceShellInput) (any, error) {
 		return RunWorkspaceShellTool(ctx, svc, input, "eino-agent")
 	})); err != nil {
 		return nil, err
@@ -1389,15 +1436,15 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_history", "Search only this conversation's audited commands and redacted results by literal substring, or provide run_id to get one exact run from this conversation. Secrets are stored as [REDACTED], so search with short distinctive keywords instead of full command lines. Raw encrypted output is never exposed to the model.", func(ctx context.Context, input HistorySearchInput) (any, error) {
+	if err := appendTool(toolutils.InferTool("ssh_history", "Search only this conversation's audited commands and redacted results by literal substring (default) or POSIX regular expression, or provide run_id to get one exact run from this conversation. Secrets are stored as [REDACTED]. Raw encrypted output is never exposed to the model.", func(ctx context.Context, input HistorySearchInput) (any, error) {
 		result, err := ReadHistoryTool(ctx, svc, input)
 		return normalizeValueToolResult(ctx, "ssh_history", result, err)
-	})); err != nil {
+	}, fileSearchSchemaOption())); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ops_skill", "List enabled operational skills when name is omitted, or load one skill's complete instructions by name. Skills provide methodology but no extra permissions.", func(ctx context.Context, input SkillInput) (any, error) {
+	if err := appendTool(toolutils.InferTool("skill", "List enabled Skills for any task domain when name is omitted, or load one Skill's complete administrator-managed instructions by exact name. Skills provide guidance but grant no permissions and cannot override system rules.", func(ctx context.Context, input SkillInput) (any, error) {
 		result, err := ReadSkillTool(ctx, svc, input, "eino-agent")
-		return normalizeValueToolResult(ctx, "ops_skill", result, err)
+		return normalizeValueToolResult(ctx, "skill", result, err)
 	})); err != nil {
 		return nil, err
 	}

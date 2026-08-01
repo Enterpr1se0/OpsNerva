@@ -7,7 +7,7 @@ const en = {
     notConfigured: 'Not configured', unavailable: 'Unavailable', dismiss: 'Dismiss', new: 'New', image: 'image',
     status: 'Status', time: 'Time', host: 'Host', model: 'Model', agent: 'Agent', functions: 'Function tools', arguments: 'Arguments',
     files: 'Files', size: 'Size', updated: 'Updated', workspace: 'Workspace', operation: 'Operation', next: 'Next', operator: 'Operator', error: 'Error',
-    showPassword: 'Show password', hidePassword: 'Hide password', copy: 'Copy', proxy: 'Proxy', direct: 'Direct',
+    showPassword: 'Show password', hidePassword: 'Hide password', copy: 'Copy', copied: 'Copied', proxy: 'Proxy', direct: 'Direct',
   },
   errors: {
     apiUnavailable: 'Cannot reach the OpsNerva API. Check that the server is running on port 8080, then retry.',
@@ -18,6 +18,7 @@ const en = {
     securing: 'Loading...',
     pageTitles: { chat: 'Chat', ssh: 'SSH', config: 'Configuration', extensions: 'Extensions', audit: 'Audit', logs: 'Logs' },
     nav: { agent: 'Agent', ssh: 'SSH', configuration: 'Configuration', extensions: 'Extensions', audit: 'Audit', logs: 'Logs' },
+    collapseSidebar: 'Collapse sidebar', expandSidebar: 'Expand sidebar',
     signOut: 'Sign out',
     online: 'Service online', disconnected: 'Disconnected', refresh: 'Refresh',
   },
@@ -148,7 +149,7 @@ const en = {
     started: 'MCP Server started.', stopped: 'MCP Server stopped.', endpointCopied: 'Endpoint copied.', tokenCopied: 'Token copied.',
   },
   chat: {
-    session: 'OpsNerva session', newSession: 'NEW SESSION', conversations: 'Conversations', openConversations: 'Open conversations', closeConversations: 'Close conversations',
+    session: 'OpsNerva session', newSession: 'NEW SESSION', conversations: 'Conversations', openConversations: 'Open conversations', closeConversations: 'Close conversations', collapseConversations: 'Collapse conversations', expandConversations: 'Expand conversations',
     newConversation: 'New conversation', noSaved: 'No conversations', saved: 'Saved', hosts: 'Hosts',
     emptyTitle: 'What should we investigate?',
     waitingModel: 'Waiting for model response', retryWaiting: 'Model request failed · retry {{attempt}}/{{max}} in {{delay}}s', retryingModel: 'Retrying model · attempt {{attempt}}/{{max}}', backgroundRunning: 'Running in the background. Reloading will not interrupt it.',
@@ -164,7 +165,7 @@ const en = {
     reasoning: 'Reasoning', reasoningActive: 'Reasoning...', reasoningFallback: 'Thinking...',
   },
   workspace: {
-    noConfigured: 'No Workspace configured', localFiles: 'Local files', terminal: 'Terminal', newTerminal: 'New terminal', switchTerminal: 'Switch terminal', agent: 'Agent', operator: 'User', inputBy: 'Input · {{source}}', parent: 'Parent directory', uploadFile: 'Upload file', refreshFiles: 'Refresh files', switchWorkspace: 'Switch Workspace', switching: 'Switching…', boundToConversation: 'Bound to this conversation',
+    noConfigured: 'No Workspace configured', localFiles: 'Local files', terminal: 'Terminal', newTerminal: 'New terminal', switchTerminal: 'Switch terminal', agent: 'Agent', operator: 'User', inputBy: 'Input · {{source}}', parent: 'Parent directory', uploadFile: 'Upload file', refreshFiles: 'Refresh files', switchWorkspace: 'Switch Workspace', switching: 'Switching…', boundToConversation: 'Bound to this conversation', collapsePanel: 'Collapse Workspace', expandPanel: 'Expand Workspace',
     registeredCount: '{{count}} registered', add: 'Add Workspace', id: 'Name', permission: 'Permission', readOnly: 'Read only', readWrite: 'Read and write', remove: 'Remove',
     settingsCreated: 'Workspace {{id}} added.', settingsUpdated: 'Workspace {{id}} updated.', settingsRemoved: 'Workspace {{id}} removed.', removeDialogLabel: 'PERMANENT WORKSPACE DELETION', removeTitle: 'Delete Workspace “{{id}}”?', removeText: 'The Workspace directory and all files inside it will be permanently deleted and cannot be recovered.',
     relativePath: 'Relative upload path', cancelUpload: 'Cancel upload', previewFile: 'Preview file', openDirectory: 'Open directory', revealDirectory: 'Show in file manager', deleteEntry: 'Delete {{type}}',
@@ -192,8 +193,8 @@ const en = {
   approval: {
     actionScript: 'script', actionCommand: 'command', sudoFileTitle: 'Allow sudo to modify this system file?', sudoTitle: 'Allow sudo to run this {{kind}} as root?',
     readTitle: 'Allow this file to be read?', searchTitle: 'Allow this file to be searched?', sudoReadTitle: 'Allow this file to be read as root?', sudoSearchTitle: 'Allow this file to be searched as root?',
-    uploadTitle: 'Allow this file upload?', transferTitle: 'Allow this host-to-host file transfer?', tunnelTitle: 'Allow this local SSH port forward?', sshShellTitle: 'Allow the Agent to control an interactive SSH shell?', hostShellTitle: 'Allow this script to run on the host?', fileTitle: 'Allow this file change?', executeTitle: 'Allow this {{kind}} to run?',
-    uploadLabel: 'File to upload', transferLabel: 'File transfer', tunnelLabel: 'Port forwarding route', sshShellLabel: 'Interactive control scope', rootFileLabel: 'File to modify as root', rootCommandLabel: 'Full {{kind}} to execute as root', fileLabel: 'File to modify', commandLabel: 'Full {{kind}} to execute',
+    uploadTitle: 'Allow this file upload?', downloadTitle: 'Allow this file download?', transferTitle: 'Allow this host-to-host file transfer?', tunnelTitle: 'Allow this local SSH port forward?', sshShellTitle: 'Allow the Agent to control an interactive SSH shell?', hostShellTitle: 'Allow this script to run on the host?', fileTitle: 'Allow this file change?', executeTitle: 'Allow this {{kind}} to run?',
+    uploadLabel: 'File to upload', downloadLabel: 'File to download', transferLabel: 'File transfer', tunnelLabel: 'Port forwarding route', sshShellLabel: 'Interactive control scope', rootFileLabel: 'File to modify as root', rootCommandLabel: 'Full {{kind}} to execute as root', fileLabel: 'File to modify', commandLabel: 'Full {{kind}} to execute',
     readLabel: 'File to read', searchLabel: 'File to search', rootReadLabel: 'File to read as root', rootSearchLabel: 'File to search as root',
     pendingOperation: 'Pending operation', rootViaSudo: 'root (via sudo)', serviceUser: 'Current service user', approved: 'Approved · {{status}} · {{run}}',
     replacementRequired: 'Add a rejection reason or next step.', rejected: 'Rejected. The Agent will follow your instruction.',
@@ -255,14 +256,14 @@ const en = {
     columns: { time: 'Time', level: 'Level', component: 'Component', event: 'Event / fields' }, general: 'general', emptyTitle: 'No matching server logs',
   },
   statusLabels: { pending: 'pending', completed: 'completed', skipped: 'skipped', partial: 'partial', closed: 'closed', expired: 'expired', failed: 'failed', active: 'active', running: 'running', stopping: 'stopping', stopped: 'stopped', blocked: 'blocked', in_progress: 'in progress', ready: 'ready', error: 'error', connecting: 'connecting', interrupted: 'interrupted', rejected: 'rejected', approval_required: 'approval required' },
-  toolCategories: { planning: 'Task planning', execution: 'Command execution', hosts: 'SSH hosts', tasks: 'Long tasks', remote_files: 'Remote files', workspace: 'Workspace', web: 'Web search', history: 'Audit history', approvals: 'Approvals', skills: 'Ops skills', mcp: 'External MCP' },
+  toolCategories: { planning: 'Task planning', execution: 'Command execution', hosts: 'SSH hosts', tasks: 'Long tasks', remote_files: 'Remote files', workspace: 'Workspace', web: 'Web search', history: 'Audit history', approvals: 'Approvals', skills: 'Skills', mcp: 'External MCP' },
   toolGuards: { read_only: 'Read only', approval_required: 'Approval control', agent_state: 'Agent state', audited_control: 'Audited control', external_mcp: 'External MCP' },
   toolNames: {
     ssh_exec: 'Run remote command', ssh_run_script: 'Run Bash script', ssh_file_read: 'Read remote file', ssh_file_search_mode: 'Search remote file', ssh_file_list: 'List remote directory',
     ssh_file_edit: 'Edit remote file', ssh_file_transfer: 'Transfer file between hosts',
     ssh_task: 'Manage background task', ssh_tunnel: 'Manage SSH port forwarding', ssh_shell: 'Shell', ssh_host_list: 'List hosts', ssh_host_inspect: 'Inspect host',
-    workspace_file_list: 'List Workspace directory', workspace_file_read: 'Read Workspace file', workspace_file_search_mode: 'Search Workspace file', workspace_file_edit: 'Edit Workspace file',
-    workspace_file_upload: 'Upload Workspace file', workspace_shell: 'Workspace Shell', ssh_history: 'Read execution history', ops_skill: 'Read Skill',
+    workspace_file_list: 'List Workspace directory', workspace_file_read: 'Read Workspace file', workspace_file_search_mode: 'Search Workspace file', workspace_file_edit: 'Edit Workspace file', workspace_file_delete: 'Delete Workspace entry',
+    workspace_file_upload: 'Upload Workspace file', workspace_file_download: 'Download to Workspace', workspace_shell: 'Workspace Shell', ssh_history: 'Read execution history', skill: 'Read Skill',
     ops_plan_create: 'Create task plan', ops_plan_step_update: 'Update task step', ops_plan_revise: 'Revise task plan', web_search: 'Search the Web', web_extract: 'Extract Web pages',
   },
 }

@@ -81,6 +81,14 @@ type WorkspaceFilePreview struct {
 	Binary      bool   `json:"binary,omitempty"`
 }
 
+type WorkspaceFileDownload struct {
+	WorkspaceID string
+	Path        string
+	Name        string
+	Size        int64
+	Reader      io.ReadCloser
+}
+
 type WorkspaceDeleteResult struct {
 	WorkspaceID string `json:"workspace_id"`
 	Path        string `json:"path"`
@@ -559,6 +567,38 @@ func (s *Service) PreviewAdminWorkspaceFile(workspaceID, relativePath string) (W
 	return result, nil
 }
 
+func (s *Service) OpenAdminWorkspaceFile(workspaceID, relativePath string) (WorkspaceFileDownload, error) {
+	workspace, ok := s.workspaceByID(workspaceID)
+	if !ok {
+		return WorkspaceFileDownload{}, fmt.Errorf("workspace %q not found", workspaceID)
+	}
+	relativePath = strings.TrimSpace(relativePath)
+	path, err := s.resolveWorkspacePath(workspace, relativePath, false)
+	if err != nil {
+		return WorkspaceFileDownload{}, err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return WorkspaceFileDownload{}, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return WorkspaceFileDownload{}, err
+	}
+	if !info.Mode().IsRegular() {
+		file.Close()
+		return WorkspaceFileDownload{}, fmt.Errorf("workspace download target is not a regular file")
+	}
+	return WorkspaceFileDownload{
+		WorkspaceID: workspace.ID,
+		Path:        filepath.ToSlash(filepath.Clean(relativePath)),
+		Name:        info.Name(),
+		Size:        info.Size(),
+		Reader:      file,
+	}, nil
+}
+
 func (s *Service) SaveAdminWorkspaceTextFile(ctx context.Context, workspaceID, relativePath, content string) (WorkspaceUploadResult, error) {
 	workspace, ok := s.workspaceByID(workspaceID)
 	if !ok {
@@ -621,18 +661,65 @@ func (s *Service) DeleteAdminWorkspaceEntry(ctx context.Context, workspaceID, re
 	if !ok {
 		return WorkspaceDeleteResult{}, fmt.Errorf("workspace %q not found", workspaceID)
 	}
+	return s.deleteWorkspaceEntry(ctx, workspace, relativePath, true, actor)
+}
+
+func (s *Service) DeleteWorkspaceEntry(ctx context.Context, workspaceID, relativePath string, recursive bool, reason, actor string) (domain.ExecResult, error) {
+	workspace, ok := s.workspaceByID(workspaceID)
+	if !ok {
+		return domain.ExecResult{}, fmt.Errorf("workspace %q not found", workspaceID)
+	}
+	relativePath = strings.TrimSpace(relativePath)
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return domain.ExecResult{}, fmt.Errorf("reason is required")
+	}
+	if _, _, err := s.validateWorkspaceDeleteTarget(workspace, relativePath, recursive); err != nil {
+		return domain.ExecResult{}, err
+	}
+	host, err := s.workspaceHost(ctx, workspaceID)
+	if err != nil {
+		return domain.ExecResult{}, err
+	}
+	return s.Submit(ctx, domain.ExecRequest{
+		HostID: host.ID, Mode: domain.ExecWorkspaceDelete, WorkspaceID: workspaceID,
+		RelativePath: relativePath, Recursive: recursive, Reason: reason,
+	}, actor)
+}
+
+func (s *Service) validateWorkspaceDeleteTarget(workspace config.Workspace, relativePath string, recursive bool) (string, os.FileInfo, error) {
 	if workspace.Access != "read_write" {
-		return WorkspaceDeleteResult{}, fmt.Errorf("workspace %q is read_only", workspace.ID)
+		return "", nil, fmt.Errorf("workspace %q is read_only", workspace.ID)
 	}
 	relativePath = strings.TrimSpace(relativePath)
 	if relativePath == "" || relativePath == "." {
-		return WorkspaceDeleteResult{}, fmt.Errorf("Workspace root cannot be deleted")
+		return "", nil, fmt.Errorf("Workspace root cannot be deleted")
 	}
 	path, err := s.resolveWorkspacePath(workspace, relativePath, false)
 	if err != nil {
-		return WorkspaceDeleteResult{}, err
+		return "", nil, err
 	}
 	info, err := os.Lstat(path)
+	if err != nil {
+		return "", nil, err
+	}
+	if !info.Mode().IsRegular() && !info.IsDir() {
+		return "", nil, fmt.Errorf("only regular Workspace files and directories can be deleted")
+	}
+	if info.IsDir() && !recursive {
+		entries, readErr := os.ReadDir(path)
+		if readErr != nil {
+			return "", nil, readErr
+		}
+		if len(entries) != 0 {
+			return "", nil, fmt.Errorf("workspace directory is not empty; set recursive=true to delete it")
+		}
+	}
+	return path, info, nil
+}
+
+func (s *Service) deleteWorkspaceEntry(ctx context.Context, workspace config.Workspace, relativePath string, recursive bool, actor string) (WorkspaceDeleteResult, error) {
+	path, info, err := s.validateWorkspaceDeleteTarget(workspace, relativePath, recursive)
 	if err != nil {
 		return WorkspaceDeleteResult{}, err
 	}
@@ -656,12 +743,14 @@ func (s *Service) DeleteAdminWorkspaceEntry(ctx context.Context, workspaceID, re
 			return WorkspaceDeleteResult{}, closeErr
 		}
 		sha256Sum = hex.EncodeToString(digest.Sum(nil))
-	} else if !info.IsDir() {
-		return WorkspaceDeleteResult{}, fmt.Errorf("only regular Workspace files and directories can be deleted from Web")
 	}
 	normalizedPath := filepath.ToSlash(filepath.Clean(relativePath))
 	if info.IsDir() {
-		err = os.RemoveAll(path)
+		if recursive {
+			err = os.RemoveAll(path)
+		} else {
+			err = os.Remove(path)
+		}
 	} else {
 		err = os.Remove(path)
 	}
@@ -689,30 +778,46 @@ func (s *Service) UploadWorkspaceFile(ctx context.Context, workspaceID, targetPa
 	if !ok {
 		return WorkspaceUploadResult{}, fmt.Errorf("workspace %q not found", workspaceID)
 	}
+	return s.storeWorkspaceFile(ctx, workspace, targetPath, originalFilename, source, "", "workspace_file_uploaded", actor)
+}
+
+func (s *Service) validateWorkspaceFileDestination(workspace config.Workspace, targetPath, originalFilename string) (string, string, error) {
 	if workspace.Access != "read_write" {
-		return WorkspaceUploadResult{}, fmt.Errorf("workspace %q is read_only", workspace.ID)
+		return "", "", fmt.Errorf("workspace %q is read_only", workspace.ID)
 	}
 	targetPath = strings.TrimSpace(targetPath)
 	if targetPath == "" {
 		targetPath = filepath.Base(strings.ReplaceAll(originalFilename, "\\", "/"))
 	}
 	if targetPath == "" || targetPath == "." || len(targetPath) > 1024 {
-		return WorkspaceUploadResult{}, fmt.Errorf("invalid workspace upload path")
+		return "", "", fmt.Errorf("invalid workspace destination path")
 	}
 	target, err := s.resolveWorkspacePath(workspace, targetPath, true)
 	if err != nil {
-		return WorkspaceUploadResult{}, err
+		if errors.Is(err, os.ErrNotExist) {
+			return "", "", fmt.Errorf("workspace destination parent directory does not exist")
+		}
+		return "", "", err
 	}
 	if _, err := os.Lstat(target); err == nil {
-		return WorkspaceUploadResult{}, fmt.Errorf("workspace file already exists; choose a new path instead of overwriting it")
+		return "", "", fmt.Errorf("workspace file already exists; choose a new path instead of overwriting it")
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return WorkspaceUploadResult{}, err
+		return "", "", err
 	}
 	parent := filepath.Dir(target)
 	parentInfo, err := os.Stat(parent)
 	if err != nil || !parentInfo.IsDir() {
-		return WorkspaceUploadResult{}, fmt.Errorf("workspace upload parent directory does not exist")
+		return "", "", fmt.Errorf("workspace destination parent directory does not exist")
 	}
+	return targetPath, target, nil
+}
+
+func (s *Service) storeWorkspaceFile(ctx context.Context, workspace config.Workspace, targetPath, originalFilename string, source io.Reader, expectedSHA256, eventType, actor string) (WorkspaceUploadResult, error) {
+	targetPath, target, err := s.validateWorkspaceFileDestination(workspace, targetPath, originalFilename)
+	if err != nil {
+		return WorkspaceUploadResult{}, err
+	}
+	parent := filepath.Dir(target)
 	temporary, err := os.CreateTemp(parent, ".opspilot-upload-*")
 	if err != nil {
 		return WorkspaceUploadResult{}, err
@@ -728,6 +833,11 @@ func (s *Service) UploadWorkspaceFile(ctx context.Context, workspaceID, targetPa
 	if written > maxWorkspaceUploadBytes {
 		temporary.Close()
 		return WorkspaceUploadResult{}, fmt.Errorf("workspace upload exceeds 100 MiB")
+	}
+	actualSHA256 := hex.EncodeToString(digest.Sum(nil))
+	if expectedSHA256 != "" && actualSHA256 != expectedSHA256 {
+		temporary.Close()
+		return WorkspaceUploadResult{}, fmt.Errorf("remote download source version conflict: expected SHA256 %s, got %s", expectedSHA256, actualSHA256)
 	}
 	if err := temporary.Chmod(0o644); err != nil {
 		temporary.Close()
@@ -750,14 +860,21 @@ func (s *Service) UploadWorkspaceFile(ctx context.Context, workspaceID, targetPa
 		_ = os.Remove(target)
 		return WorkspaceUploadResult{}, err
 	}
-	result := WorkspaceUploadResult{WorkspaceID: workspace.ID, Path: targetPath, Size: written, SHA256: hex.EncodeToString(digest.Sum(nil))}
-	s.audit(ctx, "", "workspace_file_uploaded", actor, map[string]any{
+	result := WorkspaceUploadResult{WorkspaceID: workspace.ID, Path: targetPath, Size: written, SHA256: actualSHA256}
+	s.audit(ctx, "", eventType, actor, map[string]any{
 		"workspace_id": workspace.ID, "path": targetPath, "size": written, "sha256": result.SHA256,
 	})
 	return result, nil
 }
 
 func (s *Service) ReadWorkspaceFile(ctx context.Context, workspaceID, relativePath string, maxBytes int, offset int64, actor string) (domain.ExecResult, error) {
+	return s.ReadWorkspaceFileAdvanced(ctx, workspaceID, relativePath, maxBytes, offset, 0, actor)
+}
+
+func (s *Service) ReadWorkspaceFileAdvanced(ctx context.Context, workspaceID, relativePath string, maxBytes int, offset int64, tailLines int, actor string) (domain.ExecResult, error) {
+	if maxBytes < 0 || tailLines < 0 || (offset != 0 && tailLines != 0) {
+		return domain.ExecResult{}, fmt.Errorf("invalid Workspace file read range: max_bytes and tail_lines must be non-negative; tail_lines cannot be combined with offset_bytes")
+	}
 	workspace, ok := s.workspaceByID(workspaceID)
 	if !ok {
 		return domain.ExecResult{}, fmt.Errorf("workspace %q not found", workspaceID)
@@ -771,13 +888,15 @@ func (s *Service) ReadWorkspaceFile(ctx context.Context, workspaceID, relativePa
 	}
 	result, err := s.Submit(ctx, domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecWorkspaceRead, WorkspaceID: workspaceID, RelativePath: relativePath,
-		MaxBytes: maxBytes, OffsetBytes: offset, Reason: "read a bounded file from an allowlisted workspace",
+		MaxBytes: maxBytes, OffsetBytes: offset, TailLines: tailLines, Reason: "read a bounded file from an allowlisted workspace",
 	}, actor)
 	if result.Stdout != "" {
 		metadata, content := parseFileReadOutput(relativePath, result.Stdout)
-		metadata.OffsetBytes = resolvedFileOffset(metadata.Size, offset)
+		if tailLines == 0 {
+			metadata.OffsetBytes = resolvedFileOffset(metadata.Size, offset)
+		}
 		metadata.ReturnedBytes = len(content)
-		decorateFileReadPage(&metadata, maxBytes, 0)
+		decorateFileReadPage(&metadata, maxBytes, tailLines)
 		metadata.Sensitive = strings.Contains(content, "[REDACTED]")
 		result.File, result.Stdout = &metadata, content
 	}
@@ -834,7 +953,8 @@ func (s *Service) EditWorkspaceFile(ctx context.Context, workspaceID, relativePa
 	if len(diff) > 1<<20 || strings.Contains(diff, "[REDACTED]") || s.redactor.Redact(diff) != diff {
 		return domain.ExecResult{}, fmt.Errorf("workspace edit is too large or contains sensitive content")
 	}
-	if strings.TrimSpace(reason) == "" {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
 		return domain.ExecResult{}, fmt.Errorf("reason is required")
 	}
 	if _, err := s.workspaceValidator(validatorID, workspace, relativePath); err != nil {
@@ -871,6 +991,80 @@ func (s *Service) UploadWorkspaceFileToHost(ctx context.Context, hostID, workspa
 		HostID: hostID, Mode: domain.ExecWorkspaceUpload, WorkspaceID: workspaceID, RelativePath: relativePath,
 		ExpectedSHA256: strings.ToLower(strings.TrimSpace(expectedSHA256)), RemotePath: remotePath, Reason: reason,
 	}, actor)
+}
+
+// DownloadHostFileToWorkspace copies one SHA256-bound remote file into a new
+// path in the conversation-bound Workspace. The destination is resolved both
+// before approval and immediately before the atomic local commit.
+func (s *Service) DownloadHostFileToWorkspace(ctx context.Context, hostID, remotePath, expectedSHA256, workspaceID, relativePath string, timeoutSeconds int, reason, actor string) (domain.ExecResult, error) {
+	workspace, ok := s.workspaceByID(workspaceID)
+	if !ok {
+		return domain.ExecResult{}, fmt.Errorf("workspace %q not found", workspaceID)
+	}
+	if err := validateRemoteFilePath(remotePath); err != nil {
+		return domain.ExecResult{}, err
+	}
+	expectedSHA256 = strings.ToLower(strings.TrimSpace(expectedSHA256))
+	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(expectedSHA256) {
+		return domain.ExecResult{}, fmt.Errorf("workspace download requires expected_sha256 from ssh_file_read")
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return domain.ExecResult{}, fmt.Errorf("reason is required")
+	}
+	if timeoutSeconds < 0 || timeoutSeconds > 600 {
+		return domain.ExecResult{}, fmt.Errorf("workspace download timeout_seconds must be between 1 and 600 when provided")
+	}
+	relativePath, _, err := s.validateWorkspaceFileDestination(workspace, relativePath, filepath.Base(remotePath))
+	if err != nil {
+		return domain.ExecResult{}, err
+	}
+	return s.Submit(ctx, domain.ExecRequest{
+		HostID: hostID, Mode: domain.ExecWorkspaceDownload, WorkspaceID: workspaceID,
+		RemotePath: remotePath, RelativePath: relativePath, ExpectedSHA256: expectedSHA256,
+		TimeoutSeconds: timeoutSeconds, Reason: reason,
+	}, actor)
+}
+
+func (s *Service) executeWorkspaceDownload(ctx context.Context, connection sshx.ConnectionSpec, req domain.ExecRequest, actor string) (sshx.RawResult, error) {
+	started := time.Now()
+	transport, ok := s.transport.(sshx.SFTPTransport)
+	if !ok {
+		return sshx.RawResult{ExitCode: -1, Duration: time.Since(started)}, fmt.Errorf("configured SSH transport does not support SFTP")
+	}
+	workspace, ok := s.workspaceByID(req.WorkspaceID)
+	if !ok {
+		return sshx.RawResult{ExitCode: -1, Duration: time.Since(started)}, fmt.Errorf("workspace %q not found", req.WorkspaceID)
+	}
+	if _, _, err := s.validateWorkspaceFileDestination(workspace, req.RelativePath, filepath.Base(req.RemotePath)); err != nil {
+		return sshx.RawResult{ExitCode: -1, Duration: time.Since(started)}, err
+	}
+	timeout := req.TimeoutSeconds
+	if timeout <= 0 {
+		timeout = s.limits.SyncTimeoutSeconds
+	}
+	if timeout <= 0 {
+		timeout = 60
+	}
+	downloadCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+	defer cancel()
+	download, err := transport.OpenSFTPFile(downloadCtx, connection, req.RemotePath)
+	if err != nil {
+		return sshx.RawResult{ExitCode: -1, Duration: time.Since(started)}, err
+	}
+	defer download.Reader.Close()
+	if download.Entry.Type != "file" {
+		return sshx.RawResult{ExitCode: -1, Duration: time.Since(started)}, fmt.Errorf("remote download source is not a regular file")
+	}
+	if download.Entry.Size > maxWorkspaceUploadBytes {
+		return sshx.RawResult{ExitCode: -1, Duration: time.Since(started)}, fmt.Errorf("remote download source exceeds 100 MiB")
+	}
+	stored, err := s.storeWorkspaceFile(downloadCtx, workspace, req.RelativePath, filepath.Base(req.RemotePath), download.Reader, req.ExpectedSHA256, "workspace_file_downloaded", actor)
+	if err != nil {
+		return sshx.RawResult{ExitCode: -1, Duration: time.Since(started)}, err
+	}
+	output, err := json.Marshal(stored)
+	return sshx.RawResult{ExitCode: 0, Stdout: output, Duration: time.Since(started)}, err
 }
 
 // RunWorkspaceShell resolves the administrator-selected backend before
@@ -1152,14 +1346,14 @@ func (s *Service) prepareWorkspaceUpload(req domain.ExecRequest) (domain.ExecReq
 
 func isWorkspaceMode(mode domain.ExecMode) bool {
 	switch mode {
-	case domain.ExecWorkspaceRead, domain.ExecWorkspaceDirectoryList, domain.ExecWorkspaceSearch, domain.ExecWorkspaceEdit, domain.ExecWorkspaceShell, domain.ExecWorkspaceShellStart:
+	case domain.ExecWorkspaceRead, domain.ExecWorkspaceDirectoryList, domain.ExecWorkspaceSearch, domain.ExecWorkspaceEdit, domain.ExecWorkspaceDelete, domain.ExecWorkspaceShell, domain.ExecWorkspaceShellStart:
 		return true
 	default:
 		return false
 	}
 }
 
-func (s *Service) executeWorkspace(ctx context.Context, req domain.ExecRequest) (sshx.RawResult, error) {
+func (s *Service) executeWorkspace(ctx context.Context, req domain.ExecRequest, actor string) (sshx.RawResult, error) {
 	started := time.Now()
 	workspace, ok := s.workspaceByID(req.WorkspaceID)
 	if !ok {
@@ -1177,7 +1371,7 @@ func (s *Service) executeWorkspace(ctx context.Context, req domain.ExecRequest) 
 	}
 	switch req.Mode {
 	case domain.ExecWorkspaceRead:
-		result.Stdout, err = readWorkspaceFile(path, req.RelativePath, req.MaxBytes, req.OffsetBytes)
+		result.Stdout, err = readWorkspaceFile(path, req.RelativePath, req.MaxBytes, req.OffsetBytes, req.TailLines)
 	case domain.ExecWorkspaceDirectoryList:
 		result.Stdout, err = listWorkspaceDirectory(path)
 	case domain.ExecWorkspaceSearch:
@@ -1188,6 +1382,13 @@ func (s *Service) executeWorkspace(ctx context.Context, req domain.ExecRequest) 
 			break
 		}
 		result, err = s.editWorkspaceFile(ctx, workspace, path, req)
+	case domain.ExecWorkspaceDelete:
+		deleted, deleteErr := s.deleteWorkspaceEntry(ctx, workspace, req.RelativePath, req.Recursive, actor)
+		if deleteErr != nil {
+			err = deleteErr
+			break
+		}
+		result.Stdout, err = json.Marshal(deleted)
 	default:
 		err = fmt.Errorf("unsupported workspace operation %q", req.Mode)
 	}
@@ -1466,6 +1667,8 @@ func (s *Service) workspaceSandboxCommand(workspace config.Workspace, req domain
 		"--setenv", "COLORTERM", "truecolor",
 		"--setenv", "LANG", "C.UTF-8",
 		"--setenv", "LC_ALL", "C.UTF-8",
+		"--setenv", "PYTHONUTF8", "1",
+		"--setenv", "PYTHONIOENCODING", "utf-8",
 	)
 	keys := make([]string, 0, len(req.Env))
 	for key := range req.Env {
@@ -1481,7 +1684,7 @@ func (s *Service) workspaceSandboxCommand(workspace config.Workspace, req domain
 	}
 	args = append(args, "--", "/usr/bin/bash")
 	args = append(args, bashArgs...)
-	environment := []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"}
+	environment := []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C.UTF-8", "LC_ALL=C.UTF-8", "PYTHONUTF8=1", "PYTHONIOENCODING=utf-8"}
 	return sandbox, args, environment, nil
 }
 
@@ -1547,6 +1750,10 @@ const workspacePowerShellUTF8Preamble = `$__opsPilotUtf8Encoding = [System.Text.
 [System.Console]::InputEncoding = $__opsPilotUtf8Encoding
 [System.Console]::OutputEncoding = $__opsPilotUtf8Encoding
 $OutputEncoding = $__opsPilotUtf8Encoding
+$env:LANG = 'C.UTF-8'
+$env:LC_ALL = 'C.UTF-8'
+$env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'
 `
 
 func workspacePowerShellScript(script string) []byte {
@@ -1575,10 +1782,14 @@ func createWorkspacePowerShellScript(script string) (string, func() error, error
 
 func workspaceHostEnvironment(workspaceRoot string, input map[string]string) []string {
 	values := map[string]string{
-		"HOME":      workspaceRoot,
-		"PATH":      os.Getenv("PATH"),
-		"TERM":      "xterm-256color",
-		"COLORTERM": "truecolor",
+		"HOME":             workspaceRoot,
+		"PATH":             os.Getenv("PATH"),
+		"TERM":             "xterm-256color",
+		"COLORTERM":        "truecolor",
+		"LANG":             "C.UTF-8",
+		"LC_ALL":           "C.UTF-8",
+		"PYTHONUTF8":       "1",
+		"PYTHONIOENCODING": "utf-8",
 	}
 	if runtime.GOOS == "windows" {
 		values["USERPROFILE"] = workspaceRoot
@@ -1588,8 +1799,6 @@ func workspaceHostEnvironment(workspaceRoot string, input map[string]string) []s
 			}
 		}
 	} else {
-		values["LANG"] = "C.UTF-8"
-		values["LC_ALL"] = "C.UTF-8"
 		values["TMPDIR"] = os.TempDir()
 	}
 	for key, value := range input {
@@ -1710,7 +1919,7 @@ func normalizedWorkspaceRelativePath(relative string) string {
 	return relative
 }
 
-func readWorkspaceFile(path, displayPath string, maxBytes int, offset int64) ([]byte, error) {
+func readWorkspaceFile(path, displayPath string, maxBytes int, offset int64, tailLines int) ([]byte, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -1721,6 +1930,12 @@ func readWorkspaceFile(path, displayPath string, maxBytes int, offset int64) ([]
 		return nil, fmt.Errorf("workspace target is not a regular file")
 	}
 	resolvedOffset := resolvedFileOffset(info.Size(), offset)
+	if tailLines > 0 {
+		resolvedOffset, err = workspaceTailOffset(file, info.Size(), tailLines)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if _, err := file.Seek(resolvedOffset, io.SeekStart); err != nil {
 		return nil, err
 	}
@@ -1740,8 +1955,46 @@ func readWorkspaceFile(path, displayPath string, maxBytes int, offset int64) ([]
 	if _, err := io.Copy(digest, file); err != nil {
 		return nil, err
 	}
-	metadata := fmt.Sprintf("%s\n%d\t%o\t%s\t%s\t%d\n%x  %s\n%s\n", fileMetaMarker, info.Size(), info.Mode().Perm(), "local", "local", info.ModTime().Unix(), digest.Sum(nil), displayPath, fileContentMarker)
+	metadata := fmt.Sprintf("%s\n%d\t%o\t%s\t%s\t%d\t%d\n%x  %s\n%s\n", fileMetaMarker, info.Size(), info.Mode().Perm(), "local", "local", info.ModTime().Unix(), resolvedOffset, digest.Sum(nil), displayPath, fileContentMarker)
 	return append([]byte(metadata), content...), nil
+}
+
+func workspaceTailOffset(file *os.File, size int64, lines int) (int64, error) {
+	if lines <= 0 || size <= 0 {
+		return 0, nil
+	}
+	const blockSize int64 = 32 << 10
+	remaining := lines
+	position := size
+	ignoreTrailingNewline := true
+	buffer := make([]byte, blockSize)
+	for position > 0 {
+		start := position - blockSize
+		if start < 0 {
+			start = 0
+		}
+		length := position - start
+		read, err := file.ReadAt(buffer[:length], start)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return 0, err
+		}
+		for index := read - 1; index >= 0; index-- {
+			if buffer[index] != '\n' {
+				ignoreTrailingNewline = false
+				continue
+			}
+			if ignoreTrailingNewline {
+				ignoreTrailingNewline = false
+				continue
+			}
+			remaining--
+			if remaining == 0 {
+				return start + int64(index) + 1, nil
+			}
+		}
+		position = start
+	}
+	return 0, nil
 }
 
 func listWorkspaceDirectory(path string) ([]byte, error) {
@@ -1863,7 +2116,11 @@ func (s *Service) editWorkspaceFile(ctx context.Context, workspace config.Worksp
 	if err != nil {
 		return sshx.RawResult{}, err
 	}
-	updated, err := applyUnifiedPatch(string(original), change.Diff)
+	normalizedOriginal, err := normalizeEditableText(original)
+	if err != nil {
+		return sshx.RawResult{ExitCode: 1, Stderr: []byte(err.Error()), Duration: time.Since(started)}, err
+	}
+	updated, err := applyUnifiedPatch(normalizedOriginal, change.Diff)
 	if err != nil {
 		return sshx.RawResult{ExitCode: 1, Stderr: []byte(err.Error()), Duration: time.Since(started)}, err
 	}
@@ -1894,6 +2151,14 @@ func (s *Service) editWorkspaceFile(ctx context.Context, workspace config.Worksp
 	stdout += fmt.Sprintf("%s\n%x  %s\n", fileAfterMarker, afterDigest, req.RelativePath)
 	stdout += string(validationOutput)
 	return sshx.RawResult{ExitCode: 0, Stdout: []byte(stdout), Duration: time.Since(started)}, nil
+}
+
+func normalizeEditableText(content []byte) (string, error) {
+	if bytes.HasPrefix(content, []byte{0xff, 0xfe}) || bytes.HasPrefix(content, []byte{0xfe, 0xff}) {
+		return "", fmt.Errorf("UTF-16 file editing is unsupported; convert the file to UTF-8 first")
+	}
+	text := strings.TrimPrefix(string(content), "\ufeff")
+	return strings.ReplaceAll(text, "\r\n", "\n"), nil
 }
 
 func (s *Service) workspaceValidator(id string, workspace config.Workspace, relative string) (config.Validator, error) {

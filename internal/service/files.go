@@ -251,13 +251,23 @@ func (s *Service) prepareRemoteFileChange(req domain.ExecRequest) (domain.ExecRe
 
 func buildRemoteFileChangeScript(path, tempPath string, change domain.FileChange, validatorCommand string) string {
 	pathQ, tempQ := shellQuote(path), shellQuote(tempPath)
+	normalizedPath := tempPath + ".normalized"
+	normalizedQ := shellQuote(normalizedPath)
 	marker := fileEditHeredocMarker(change.Diff)
 	lines := []string{
 		"set -eu",
 		"test ! -e " + tempQ,
-		"trap " + shellQuote("test ! -e "+tempQ+" || unlink -- "+tempQ) + " EXIT",
+		"test ! -e " + normalizedQ,
+		"trap " + shellQuote("test ! -e "+tempQ+" || unlink -- "+tempQ+"; test ! -e "+normalizedQ+" || unlink -- "+normalizedQ) + " EXIT",
 		"test -f " + pathQ,
 		"cp -p -- " + pathQ + " " + tempQ,
+		"if [ \"$(head -c 3 -- " + tempQ + " | od -An -tx1 | tr -d ' \\n')\" = efbbbf ]; then",
+		"  tail -c +4 -- " + tempQ + " > " + normalizedQ,
+		"else",
+		"  cat -- " + tempQ + " > " + normalizedQ,
+		"fi",
+		"sed $'s/\\r$//' -- " + normalizedQ + " > " + tempQ,
+		"unlink -- " + normalizedQ,
 		"patch --batch --forward --no-backup-if-mismatch " + tempQ + " <<'" + marker + "'",
 		change.Diff,
 		marker,
@@ -272,6 +282,7 @@ func buildRemoteFileChangeScript(path, tempPath string, change domain.FileChange
 }
 
 func buildEditChange(path, diff string) (domain.FileChange, error) {
+	diff = strings.TrimPrefix(diff, "\ufeff")
 	diff = strings.ReplaceAll(diff, "\r\n", "\n")
 	if strings.ContainsAny(diff, "\x00\r") {
 		return domain.FileChange{}, fmt.Errorf("unified diff contains unsupported control characters")
@@ -419,6 +430,9 @@ func parseFileReadOutput(path, output string) (domain.FileMetadata, string) {
 			metadata.Size, _ = strconv.ParseInt(fields[0], 10, 64)
 			metadata.Mode, metadata.Owner, metadata.Group = fields[1], fields[2], fields[3]
 			metadata.ModifiedUnix, _ = strconv.ParseInt(fields[4], 10, 64)
+			if len(fields) >= 6 {
+				metadata.OffsetBytes, _ = strconv.ParseInt(fields[5], 10, 64)
+			}
 		}
 	}
 	if len(metaLines) > 1 {

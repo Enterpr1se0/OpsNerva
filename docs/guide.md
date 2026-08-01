@@ -175,7 +175,7 @@ make dev-web
 
 ## System Prompt
 
-系统设置会展示当前完整 System Prompt，可直接编辑、保存为空或恢复内置模板。用户保存的文本会完整覆盖内置 Prompt，不进行自动拼接、去空白或空值回退。保存后 Runtime 原子替换 Agent Runner；已经开始的请求继续执行，所有会话之后发起的请求统一使用新 Prompt。
+系统设置会展示当前可编辑的 System Prompt，可直接编辑、保存为空或恢复内置模板。用户保存的文本会完整覆盖内置 Prompt，不进行去空白或空值回退；Runtime 会另行附加当前服务宿主机的 `OS/架构`，并明确它只适用于本地服务与 Workspace，不代表 SSH 目标机。保存后 Runtime 原子替换 Agent Runner；已经开始的请求继续执行，所有会话之后发起的请求统一使用新 Prompt。
 
 ## Tavily Web
 
@@ -189,19 +189,19 @@ Agent 页面右侧的 Conversations 会列出最近会话，标题取首条用�
 
 ## Workspace
 
-服务在 `workspace_dir`（默认启动目录下的 `workspace/`）中托管全部 Workspace。首次初始化会创建 `default/read_write`，之后可在系统设置中按名称新增、修改权限或移除；每个 Workspace 固定使用 `<workspace_dir>/<名称>/`，无需填写或查看宿主机绝对路径。在系统设置中删除 Workspace 会先解除登记（Agent 立即失去访问权），再永久删除对应目录及其中全部文件，无法恢复；审计事件会记录目录路径与删除结果。每个 Agent 会话持久化绑定一个 Workspace；对话左侧的选择器负责首次绑定和后续切换，运行中的 Agent 禁止切换。模型没有 Workspace 列表工具，所有 `workspace_*` Tool 都由服务端读取当前会话绑定，Tool schema 不接受 `workspace_id`。文件面板仍可进入子目录、点击上传或拖入多个不超过 100 MiB 的文件，并预览文本。服务端通过操作系统文件事件监听当前打开的目录，再以 SSE 通知 Web 静默刷新，因此 Web 上传、Agent Tool、Workspace Shell 和外部编辑器产生的变化使用同一条刷新链路；监听不会递归扫描整个项目。Web 删除会直接永久删除宿主机文件或目录，确认后无法恢复。这些操作不会自动改写提示词或触发 LLM。文本预览上限为 1 MiB，二进制文件只显示元数据和 SHA256。Web 上传使用 CSRF、防路径穿越、敏感文件名拒绝、禁止覆盖、同目录临时文件、`fsync` 和原子落盘。
+服务在 `workspace_dir`（默认启动目录下的 `workspace/`）中托管全部 Workspace。首次初始化会创建 `default/read_write`，之后可在系统设置中按名称新增、修改权限或移除；每个 Workspace 固定使用 `<workspace_dir>/<名称>/`，无需填写或查看宿主机绝对路径。在系统设置中删除 Workspace 会先解除登记（Agent 立即失去访问权），再永久删除对应目录及其中全部文件，无法恢复；审计事件会记录目录路径与删除结果。每个 Agent 会话持久化绑定一个 Workspace；对话左侧的选择器负责首次绑定和后续切换，运行中的 Agent 禁止切换。模型没有 Workspace 列表工具，所有 `workspace_*` Tool 都由服务端读取当前会话绑定，Tool schema 不接受 `workspace_id`。文件面板可进入子目录、点击上传或拖入多个不超过 100 MiB 的文件、预览文本，并从文件列表或预览窗口把原文件下载到浏览器。服务端通过操作系统文件事件监听当前打开的目录，再以 SSE 通知 Web 静默刷新，因此 Web 上传、Agent Tool、Workspace Shell 和外部编辑器产生的变化使用同一条刷新链路；监听不会递归扫描整个项目。Web 删除会直接永久删除宿主机文件或目录，确认后无法恢复。这些操作不会自动改写提示词或触发 LLM。文本预览上限为 1 MiB，二进制文件只显示元数据和 SHA256，但仍可直接下载。Web 上传使用 CSRF、防路径穿越、敏感文件名拒绝、禁止覆盖、同目录临时文件、`fsync` 和原子落盘。
 
 `workspace_shell` 用于解压、构建、测试、打包和交互式调试。`action=run` 执行一次性脚本并一次返回完整输出；`start/input/status/list/interrupt/close` 管理持续 PTY，`input.wait_seconds` 可等待本次输入的输出稳定后再返回。Agent 创建的 Workspace Shell 会进入右上角统一 Shell 列表并可直接打开观察；Workspace 文件栏中用户手动新建的终端只保留在当前 Workspace，不重复展示。交互 Sandbox 保留专用 PTY 的控制终端，因此 Bash 作业控制及 `vim`、`top` 等全屏程序可用。Web 终端接收原始 ANSI 事件，Agent Tool 结果使用跨输出块清理后的可读文本。系统设置提供 `Sandbox`、`Host Shell`、`Disabled` 三种模式；Linux 默认 Sandbox，Windows 默认 Host Shell，设置变化不会让已审批请求切换执行边界。Sandbox 仅支持 Linux，通过 `workspace_sandbox_path`（默认 `bwrap`，也可用 `OPS_AGENT_WORKSPACE_SANDBOX`）启动隔离的 user/mount/PID/network namespace，只挂载只读系统运行目录、独立 `/tmp` 和目标 Workspace，并禁用网络与嵌套 user namespace；缺少 Bubblewrap 或 namespace 权限时直接失败，不会降级执行。Workspace 的 `read_only/read_write` 决定沙箱挂载权限，`.env*`、`.ssh` 和系统隐藏文件等敏感路径会被遮蔽。交互会话持续到主动关闭、进程退出或服务停止，不设置 TTL。
 
-Host Shell 直接拥有当前服务账户可用的宿主机文件系统与网络权限：Unix 使用 Bash，Windows 优先使用 PowerShell 7 (`pwsh.exe`) 并回退 Windows PowerShell。它仅允许 `read_write` Workspace，并遵循当前审批模式。实际后端、Workspace、脚本、相对工作目录、环境与超时全部进入加密请求摘要；模式或请求内容变化不会修改已经开始的执行。`Disabled` 会在审批前拒绝调用。
+Host Shell 直接拥有当前服务账户可用的宿主机文件系统与网络权限：Unix 使用 Bash，Windows 优先使用 PowerShell 7 (`pwsh.exe`) 并回退 Windows PowerShell。它仅允许 `read_write` Workspace，并遵循当前审批模式。省略 `cwd` 时固定使用 Workspace 根目录；Bash、PowerShell、Python 等子进程统一声明 UTF-8 环境。实际后端、Workspace、脚本、相对工作目录、环境与超时全部进入加密请求摘要；模式或请求内容变化不会修改已经开始的执行。`Disabled` 会在审批前拒绝调用。
 
-Agent 向远端发送 Workspace 文件只使用 `workspace_file_upload`：源相对路径、读取所得 SHA256、目标主机和远端路径进入同一个审批摘要，批准执行前会再次校验源版本。托管根目录仅在服务内部使用，不写入数据库、API、审计或模型上下文。可通过 `workspace_dir` 或 `OPS_AGENT_WORKSPACE_DIR` 修改统一根目录。
+Agent 向远端发送 Workspace 文件使用 `workspace_file_upload`；从远端取回 Workspace 使用 `workspace_file_download`。两个方向都绑定读取所得 SHA256、主机和两端路径，并在批准执行时再次校验版本；下载只创建新文件，不覆盖现有 Workspace 文件。`workspace_file_delete` 可删除文件或目录，非空目录必须显式设置 `recursive=true`，Workspace 根目录不可删除。托管根目录仅在服务内部使用，不写入数据库、API、审计或模型上下文。可通过 `workspace_dir` 或 `OPS_AGENT_WORKSPACE_DIR` 修改统一根目录。
 
-`workspace_file_read` 和 `ssh_file_read` 默认读取 128 KiB；内容未读完时返回 `file.has_more=true` 与下一页 `file.next_offset`。只有文件大小合理且确实需要完整内容时才设置 `full_content=true`。显式设置 `offset_bytes` 时，非负值表示从文件开头计算的零基偏移，负值表示读取末尾对应字节数，例如 `-12000` 读取最后 12,000 字节。设置 `pattern` 会切换为搜索模式，并且必须同时设置 `match_mode`：`literal` 匹配完整字面量，`regex` 使用 POSIX 正则表达式；可选的 `context_lines` 返回上下文，搜索结果不会截断。未找到匹配项是成功结果并返回 `search.found=false`；搜索参数与内容范围参数互斥，不再提供独立的 file search Tool。
+`workspace_file_read` 和 `ssh_file_read` 默认读取 128 KiB；内容未读完时返回 `file.has_more=true` 与下一页 `file.next_offset`。只有文件大小合理且确实需要完整内容时才设置 `full_content=true`。两者都支持 `tail_lines`。显式设置 `offset_bytes` 时，非负值表示从文件开头计算的零基偏移，负值表示读取末尾对应字节数，例如 `-12000` 读取最后 12,000 字节。设置 `pattern` 会切换为搜索模式，并且必须同时设置 `match_mode`：`literal` 匹配完整字面量，`regex` 使用 POSIX 正则表达式；可选的 `context_lines` 返回上下文，搜索结果不会截断。未找到匹配项是成功结果并返回 `search.found=false`；搜索参数与内容范围参数互斥，不再提供独立的 file search Tool。
 
 SSH 主机间迁移单个普通文件使用 `ssh_file_transfer`。OpsNerva 分别连接源主机和目标主机，通过内置 SFTP 在内存中中继数据，因此两台主机无需彼此可达，也不会调用远端 `scp`。调用前先用 `ssh_file_read(metadata_only=true)` 获取源文件 SHA256。目标不存在时省略 `expected_destination_sha256` 即可创建；目标存在时提供其当前 SHA256，服务只替换该精确版本。两端连接配置、路径、版本和超时进入同一个受控请求。目标端先写同目录临时文件，源 SHA256 匹配后再原子改名；版本冲突、取消或超时不会留下半文件。传输中的字节进度会实时显示在 Tool 卡片。
 
-文件编辑 Tool 把变更作为一等数据展示：审批和执行结果都显示完整 unified diff、行号以及新增/删除统计。`ssh_file_edit` 与 `workspace_file_edit` 只修改现有文件，不提供专用的新建文件 Tool。远程事务脚本只在批准后由执行层生成，不进入审批内容。编辑不再绑定 SHA256、不保存备份，也不提供自动恢复 Tool。可选的 `validator_id` 只能填写 `validators` 配置中对应 scope 的 ID，不能填写 `grep -q ...` 等命令行；Agent Tool 描述和当前 Workspace 上下文会列出可用 ID，没有可用 ID 时必须省略。validator 仅对临时文件执行，失败时目标文件不会被修改。执行类 Tool 结果只返回状态、有效输出和必要标识；错误额外返回 `code/message/retryable` 与可用的结构化校验信息，不再重复审计、耗时、风险和通用下一步字段。不存在资源、参数错误、超时和远端失败不会用普通运行错误中断 Eino ToolNode。
+文件编辑 Tool 把变更作为一等数据展示：审批和执行结果都显示完整 unified diff、行号以及新增/删除统计。写入前会移除 UTF-8 BOM 并把 CRLF 归一化为 LF，避免 Windows 文本导致 diff 上下文意外失配；UTF-16 文件需先转换为 UTF-8。`ssh_file_edit` 与 `workspace_file_edit` 只修改现有文件，不提供专用的新建文件 Tool。远程事务脚本只在批准后由执行层生成，不进入审批内容。编辑不再绑定 SHA256、不保存备份，也不提供自动恢复 Tool。可选的 `validator_id` 只能填写 `validators` 配置中对应 scope 的 ID，不能填写 `grep -q ...` 等命令行；Agent Tool 描述和当前 Workspace 上下文会列出可用 ID，没有可用 ID 时必须省略。validator 仅对临时文件执行，失败时目标文件不会被修改。执行类 Tool 结果只返回状态、有效输出和必要标识；错误额外返回 `code/message/retryable` 与可用的结构化校验信息，不再重复审计、耗时、风险和通用下一步字段。不存在资源、参数错误、超时和远端失败不会用普通运行错误中断 Eino ToolNode。
 
 ## 日志
 
@@ -251,7 +251,7 @@ Eino Agent 的 `ssh_tunnel` 支持 `start`、`list` 和 `stop`。`start` 把目�
 
 如果主 Agent 已产生 Tool 结果却以空正文结束，Runtime 不会重跑原 Agent Loop。它会把本轮已持久化的脱敏 Tool 结果和最新计划交给一个 `MaxIterations=1`、无 Tool、无 checkpoint 的独立总结 Agent，仅补生成最终回复；该路径不能再次执行操作。总结仍失败时会返回明确错误，并保留原 Tool 结果供下一轮继续。
 
-部署、修复、迁移和多组件诊断等复杂任务会先调用 `ops_plan_create` 创建 2–8 个可验证步骤。`ops_plan_step_update` 可完成、阻塞、跳过当前步骤或恢复已阻塞步骤；完成和跳过都会自动启动下一步，越级更新仍会被拒绝。顺序或范围变化时，`ops_plan_revise` 可替换全部未完成步骤，已完成和已跳过的历史保持不变。计划存储在 SQLite 并由会话 state 返回，Web 持续显示当前状态；刷新、断网或达到 Agent 迭代上限后可从原步骤继续。
+部署、修复、迁移和多组件诊断等复杂任务会先调用 `ops_plan_create` 创建 2–8 个可验证步骤。`ops_plan_step_update` 会自动把当前步骤开始后的最近审计 run 摘要附加到 evidence；没有可用 run 时仍需填写原因。它可完成、阻塞、跳过当前步骤或恢复已阻塞步骤；完成和跳过都会自动启动下一步，越级更新仍会被拒绝。顺序或范围变化时，`ops_plan_revise` 可替换全部未完成步骤，已完成和已跳过的历史保持不变。计划存储在 SQLite 并由会话 state 返回，Web 持续显示当前状态；刷新、断网或达到 Agent 迭代上限后可从原步骤继续。
 
 CLI 审批示例：
 
@@ -312,8 +312,8 @@ Web 的 **Extensions / MCP Servers** 还支持反向角色：让 OpsNerva 作为
 - `ssh_task`（`action=status|cancel`；status 可用 `wait_seconds`、`block_until=terminal|output` 阻塞等待，并用输出字节偏移只取增量；单次等待截止返回 `wait_deadline_reached=true`，不会改变任务状态。后台命令未填写 `timeout_seconds` 时使用 `max_timeout_seconds`）
 - `ssh_file_read`（可选 `metadata_only=true` 或 `pattern` 搜索模式）/ `ssh_file_list`
 - `ssh_file_edit` / `ssh_file_transfer`
-- `workspace_file_list` / `workspace_file_read`（可选 `pattern` 搜索模式）/ `workspace_file_edit` / `workspace_file_upload` / `workspace_shell`。这些工具只在 Eino Agent 中提供，Workspace 由 Web 会话绑定，模型不能列出或自行选择其他 Workspace；无会话语义的 MCP Server 不暴露这组工具。
-- `ssh_history` 和 `ops_skill` 仅提供给 OpsNerva 主 Agent，不通过自身 MCP Server 暴露。完整执行历史只在 Web 管理端查看。
+- `workspace_file_list` / `workspace_file_read`（可选 `tail_lines` 或 `pattern` 搜索模式）/ `workspace_file_edit` / `workspace_file_delete` / `workspace_file_upload` / `workspace_file_download` / `workspace_shell`。这些工具只在 Eino Agent 中提供，Workspace 由 Web 会话绑定，模型不能列出或自行选择其他 Workspace；无会话语义的 MCP Server 不暴露这组工具。
+- `ssh_history`（支持 `literal` / POSIX `regex`）和通用 `skill` 仅提供给 OpsNerva 主 Agent，不通过自身 MCP Server 暴露。完整执行历史只在 Web 管理端查看。
 
 ## 数据安全
 

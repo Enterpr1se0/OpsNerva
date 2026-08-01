@@ -335,9 +335,30 @@ func (s *Service) UpdateAgentPlanStep(ctx context.Context, stepNumber int, statu
 	if status != "completed" && status != "blocked" && status != "skipped" && status != "in_progress" {
 		return domain.AgentPlan{}, fmt.Errorf("invalid plan step status: use completed, blocked, skipped, or in_progress")
 	}
+	planBefore, err := s.store.GetAgentPlan(ctx, sessionID)
+	if err != nil {
+		return domain.AgentPlan{}, err
+	}
+	var stepUpdatedAt time.Time
+	for _, step := range planBefore.Steps {
+		if step.Number == stepNumber {
+			stepUpdatedAt = step.UpdatedAt
+			break
+		}
+	}
 	evidence = strings.TrimSpace(evidence)
-	if evidence == "" || len(evidence) > 2000 {
-		return domain.AgentPlan{}, fmt.Errorf("invalid step evidence: use 1-2000 characters")
+	recentEvidence, err := s.recentAgentRunEvidence(ctx, sessionID, stepUpdatedAt, 3)
+	if err != nil {
+		return domain.AgentPlan{}, err
+	}
+	if recentEvidence != "" {
+		if evidence != "" {
+			evidence += "\n"
+		}
+		evidence += recentEvidence
+	}
+	if evidence == "" || len(evidence) > 4000 {
+		return domain.AgentPlan{}, fmt.Errorf("invalid step evidence: provide a concise reason or run an auditable operation first; combined evidence must not exceed 4000 bytes")
 	}
 	plan, err := s.store.TransitionAgentPlanStep(ctx, sessionID, stepNumber, status, evidence)
 	if err != nil {
@@ -348,6 +369,65 @@ func (s *Service) UpdateAgentPlanStep(ctx context.Context, stepNumber int, statu
 	})
 	observability.FromContext(ctx).InfoContext(ctx, "agent plan step updated", "component", "agent", "session_id", sessionID, "step_number", stepNumber, "status", status, "plan_status", plan.Status)
 	return plan, nil
+}
+
+func (s *Service) recentAgentRunEvidence(ctx context.Context, sessionID string, since time.Time, limit int) (string, error) {
+	runs, err := s.store.SearchRuns(ctx, "", "", sessionID, 12)
+	if err != nil {
+		return "", err
+	}
+	summaries := make([]string, 0, limit)
+	for _, run := range runs {
+		if !since.IsZero() && run.StartedAt.Before(since) {
+			continue
+		}
+		toolName := strings.TrimSpace(run.ToolName)
+		if toolName == "" {
+			var request domain.ExecRequest
+			if json.Unmarshal([]byte(run.RequestJSON), &request) == nil {
+				toolName = string(request.Mode)
+				if toolName == "" {
+					toolName = request.Program
+				}
+			}
+		}
+		if toolName == "" {
+			toolName = "operation"
+		}
+		statusSummary := run.Status
+		if run.CompletedAt.IsZero() {
+			statusSummary += ", unfinished"
+		} else {
+			statusSummary += fmt.Sprintf(", exit=%d", run.ExitCode)
+		}
+		output := strings.TrimSpace(run.StdoutRedacted)
+		if output == "" {
+			output = strings.TrimSpace(run.StderrRedacted)
+		}
+		if output == "" {
+			output = strings.TrimSpace(run.Error)
+		}
+		output = s.redactor.Redact(output)
+		output = strings.Join(strings.Fields(output), " ")
+		if len(output) > 240 {
+			output = string([]rune(output)[:min(200, len([]rune(output)))]) + "…"
+		}
+		summary := fmt.Sprintf("- %s %s: %s", run.ID, toolName, statusSummary)
+		if output != "" {
+			summary += " — " + output
+		}
+		summaries = append(summaries, summary)
+		if len(summaries) >= limit {
+			break
+		}
+	}
+	if len(summaries) == 0 {
+		return "", nil
+	}
+	for left, right := 0, len(summaries)-1; left < right; left, right = left+1, right-1 {
+		summaries[left], summaries[right] = summaries[right], summaries[left]
+	}
+	return "Recent runs:\n" + strings.Join(summaries, "\n"), nil
 }
 
 func (s *Service) ReviseAgentPlan(ctx context.Context, titles []string, actor string) (domain.AgentPlan, error) {
@@ -1852,8 +1932,10 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 		}
 	} else if req.Mode == domain.ExecSSHFileTransfer {
 		raw, execErr = s.executeSSHFileTransfer(ctx, run, req)
+	} else if req.Mode == domain.ExecWorkspaceDownload {
+		raw, execErr = s.executeWorkspaceDownload(ctx, connection, req, actor)
 	} else if isWorkspaceMode(req.Mode) {
-		raw, execErr = s.executeWorkspace(ctx, req)
+		raw, execErr = s.executeWorkspace(ctx, req, actor)
 	} else if streaming, ok := s.transport.(sshx.StreamingTransport); ok && outputSink != nil {
 		raw, execErr = streaming.ExecStream(ctx, connection, transportReq, outputSink.Write)
 	} else {
@@ -1921,6 +2003,13 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 		metadata := parseFileEditOutput(path, approvedReq.Validator, result.Stdout)
 		result.File = &metadata
 	}
+	if approvedReq.Mode == domain.ExecWorkspaceDownload && run.Status == "completed" {
+		var downloaded WorkspaceUploadResult
+		if json.Unmarshal(raw.Stdout, &downloaded) == nil {
+			result.File = &domain.FileMetadata{Path: downloaded.Path, Size: downloaded.Size, SHA256: downloaded.SHA256}
+			result.Stdout = ""
+		}
+	}
 	return result, execErr
 }
 
@@ -1975,6 +2064,9 @@ func validateExecutionRequest(host domain.Host, req domain.ExecRequest) error {
 				return fmt.Errorf("invalid Workspace file search: %w", err)
 			}
 		}
+		if req.Mode == domain.ExecWorkspaceRead && (req.MaxBytes < 0 || req.TailLines < 0 || (req.OffsetBytes != 0 && req.TailLines != 0)) {
+			return fmt.Errorf("invalid Workspace file read range")
+		}
 		return nil
 	}
 	switch req.Mode {
@@ -1995,6 +2087,16 @@ func validateExecutionRequest(host domain.Host, req domain.ExecRequest) error {
 		if err := validateFileSearchInput(req.SearchPattern, req.SearchMatchMode, req.ContextLines); err != nil {
 			return fmt.Errorf("invalid remote file search: %w", err)
 		}
+	case domain.ExecWorkspaceDownload:
+		if req.WorkspaceID == "" || req.RelativePath == "" {
+			return fmt.Errorf("workspace download requires a workspace destination path")
+		}
+		if err := validateRemoteFilePath(req.RemotePath); err != nil {
+			return err
+		}
+		if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(strings.ToLower(strings.TrimSpace(req.ExpectedSHA256))) {
+			return fmt.Errorf("workspace download requires expected_sha256 from ssh_file_read")
+		}
 	case domain.ExecSSHTunnelStart:
 		if err := validateSSHTunnelRequest(req); err != nil {
 			return err
@@ -2014,7 +2116,7 @@ func validateExecutionRequest(host domain.Host, req domain.ExecRequest) error {
 	if !req.Elevated {
 		return nil
 	}
-	if req.Mode == domain.ExecWorkspaceUpload || req.Mode == domain.ExecSSHFileTransfer {
+	if req.Mode == domain.ExecWorkspaceUpload || req.Mode == domain.ExecWorkspaceDownload || req.Mode == domain.ExecSSHFileTransfer {
 		return fmt.Errorf("elevated mode is not supported for SFTP transfers")
 	}
 	if host.SudoMode == "none" || host.SudoMode == "" {
@@ -2448,6 +2550,17 @@ func (s *Service) GetRun(ctx context.Context, id string, includeRaw bool) (Histo
 
 func (s *Service) SearchRuns(ctx context.Context, query, hostID string, limit int) ([]domain.Run, error) {
 	return s.store.SearchRuns(ctx, query, hostID, SessionIDFromContext(ctx), limit)
+}
+
+func (s *Service) SearchRunsMatching(ctx context.Context, query string, matchMode domain.FileSearchMatchMode, hostID string, limit int) ([]domain.Run, error) {
+	switch matchMode {
+	case "", domain.FileSearchLiteral:
+		return s.store.SearchRuns(ctx, query, hostID, SessionIDFromContext(ctx), limit)
+	case domain.FileSearchRegex:
+		return s.store.SearchRunsRegex(ctx, query, hostID, SessionIDFromContext(ctx), limit)
+	default:
+		return nil, fmt.Errorf("invalid history match_mode: use literal or regex")
+	}
 }
 
 // RetryApprovalExplanation reruns the tool-free command explainer for an

@@ -96,24 +96,22 @@ func (t *NativeSSHTransport) OpenSFTPFile(ctx context.Context, connection Connec
 	if err != nil {
 		return SFTPDownload{}, err
 	}
+	info, err := sftpClient.Lstat(remotePath)
+	if err != nil {
+		_ = sftpClient.Close()
+		_ = client.Close()
+		return SFTPDownload{}, fmt.Errorf("inspect remote file: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		_ = sftpClient.Close()
+		_ = client.Close()
+		return SFTPDownload{}, fmt.Errorf("remote path is not a regular non-symbolic file")
+	}
 	file, err := sftpClient.Open(remotePath)
 	if err != nil {
 		_ = sftpClient.Close()
 		_ = client.Close()
 		return SFTPDownload{}, fmt.Errorf("open remote file: %w", err)
-	}
-	info, err := file.Stat()
-	if err != nil {
-		_ = file.Close()
-		_ = sftpClient.Close()
-		_ = client.Close()
-		return SFTPDownload{}, fmt.Errorf("inspect remote file: %w", err)
-	}
-	if !info.Mode().IsRegular() {
-		_ = file.Close()
-		_ = sftpClient.Close()
-		_ = client.Close()
-		return SFTPDownload{}, fmt.Errorf("remote path is not a regular file")
 	}
 	reader := &sftpDownloadReader{file: file, sftp: sftpClient, client: client}
 	reader.stop = context.AfterFunc(ctx, func() { _ = reader.Close() })

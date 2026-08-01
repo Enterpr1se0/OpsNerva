@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -1679,6 +1680,33 @@ FROM runs WHERE (?='' OR session_id=?) AND (?='' OR host_id=?) AND (?='' OR sear
 		result = append(result, run)
 	}
 	return result, rows.Err()
+}
+
+func (s *Store) SearchRunsRegex(ctx context.Context, pattern, hostID, sessionID string, limit int) ([]domain.Run, error) {
+	expression, err := regexp.CompilePOSIX(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("invalid POSIX history regex: %w", err)
+	}
+	runs, err := s.SearchRuns(ctx, "", hostID, sessionID, 0)
+	if err != nil {
+		return nil, err
+	}
+	matched := make([]domain.Run, 0)
+	for _, run := range runs {
+		parts := []string{run.RequestJSON, run.ToolArgumentsJSON, run.StdoutRedacted, run.StderrRedacted}
+		var request domain.ExecRequest
+		if json.Unmarshal([]byte(run.RequestJSON), &request) == nil {
+			parts = append(parts, request.SearchText())
+		}
+		if !expression.MatchString(strings.Join(parts, "\n")) {
+			continue
+		}
+		matched = append(matched, run)
+		if limit > 0 && len(matched) >= limit {
+			break
+		}
+	}
+	return matched, nil
 }
 
 func scanRun(row scanner) (domain.Run, error) {

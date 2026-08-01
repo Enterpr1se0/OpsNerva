@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -330,8 +331,9 @@ func TestRuntimeReloadAppliesCompleteSystemPromptToExistingConversation(t *testi
 	if _, err := runtime.Query(ctx, "same_session", "first turn", nil); err != nil {
 		t.Fatal(err)
 	}
-	assertSystemPrompt := func(want string) {
+	assertSystemPrompt := func(configured string) {
 		t.Helper()
+		want := hostPlatformSystemPrompt(configured, goruntime.GOOS, goruntime.GOARCH)
 		select {
 		case messages := <-requests:
 			for _, message := range messages {
@@ -375,15 +377,20 @@ func TestRuntimeReloadAppliesCompleteSystemPromptToExistingConversation(t *testi
 	if _, err := runtime.Query(ctx, "same_session", "third turn", nil); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case messages := <-requests:
-		for _, message := range messages {
-			if message.Role == "system" && message.Content != "" {
-				t.Fatalf("empty prompt fell back to non-empty system prompt: %q", message.Content)
-			}
+	assertSystemPrompt(emptyPrompt)
+}
+
+func TestHostPlatformSystemPromptDistinguishesLocalAndRemoteHosts(t *testing.T) {
+	got := hostPlatformSystemPrompt("custom instructions", "windows", "amd64")
+	for _, want := range []string{"custom instructions", "service host platform: windows/amd64", "local Workspace tools", "not to registered SSH hosts"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("host platform prompt is missing %q: %s", want, got)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for model request using empty prompt")
+	}
+
+	empty := hostPlatformSystemPrompt("", "linux", "arm64")
+	if strings.Contains(empty, domain.DefaultSystemPrompt) || !strings.Contains(empty, "service host platform: linux/arm64") {
+		t.Fatalf("empty configured prompt did not produce only runtime host context: %q", empty)
 	}
 }
 

@@ -1453,6 +1453,45 @@ func TestAgentPlanTransitionsPreserveFinishedHistory(t *testing.T) {
 	}
 }
 
+func TestAgentPlanStepUpdateAutomaticallyAppendsRecentRunEvidence(t *testing.T) {
+	svc, _, host := newTestService(t)
+	ctx := WithSessionID(context.Background(), "session_plan_run_evidence")
+	if _, err := svc.CreateAgentPlan(ctx, "Verify the service", []string{"Run the health check", "Report the result"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	request := domain.ExecRequest{HostID: host.ID, Mode: domain.ExecProgram, Program: "curl", Args: []string{"--fail", "http://127.0.0.1/health"}, Reason: "verify health"}
+	requestJSON, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now().UTC()
+	run := domain.Run{
+		ID: "run_plan_evidence", SessionID: "session_plan_run_evidence", HostID: host.ID, ToolName: "ssh_exec",
+		RequestJSON: string(requestJSON), SearchText: request.SearchText(), RequestDigest: "digest-plan-evidence",
+		Status: "running", StartedAt: started,
+	}
+	if err := svc.Store().CreateRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	run.Status = "completed"
+	run.ExitCode = 0
+	run.StdoutRedacted = "HTTP 200 healthy\n"
+	run.CompletedAt = started.Add(time.Second)
+	if err := svc.Store().UpdateRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := svc.UpdateAgentPlanStep(ctx, 1, "completed", "", "eino-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := plan.Steps[0].Evidence
+	for _, required := range []string{"Recent runs:", "run_plan_evidence", "ssh_exec", "completed, exit=0", "HTTP 200 healthy"} {
+		if !strings.Contains(evidence, required) {
+			t.Fatalf("automatic plan evidence is missing %q: %s", required, evidence)
+		}
+	}
+}
+
 func TestReadOnlyExecutesAndAuditIsRedacted(t *testing.T) {
 	svc, transport, host := newTestService(t)
 	result, err := svc.Submit(context.Background(), domain.ExecRequest{HostID: host.ID, Mode: domain.ExecProgram, Program: "uname", Args: []string{"-a"}, Reason: "test read"}, "test")

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Download, Edit3, FileText, LoaderCircle, Save, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { CopyButton } from './CopyButton'
 
 type TextFileEditorProps = {
 	path: string
@@ -35,6 +36,7 @@ export function TextFileEditor({path,meta,content,binary=false,editable=false,on
 			<header>
 				<div><FileText size={18}/><span><b>{path}</b><small>{meta}</small></span></div>
 				<section className="text-file-actions">
+					{!binary&&!editing&&<CopyButton value={content}/>}
 					{onDownload&&<button type="button" disabled={saving} onClick={onDownload} title={t('common.download')}><Download size={15}/></button>}
 					{editable&&!binary&&!editing&&<button type="button" onClick={()=>{setDraft(content);setError('');setEditing(true)}} title={t('common.edit')}><Edit3 size={15}/></button>}
 					<button type="button" disabled={saving} onClick={close} title={t('common.close')}><X size={16}/></button>

@@ -135,6 +135,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/v1/workspaces/{id}/files", s.saveWorkspaceTextFile)
 	s.mux.HandleFunc("DELETE /api/v1/workspaces/{id}/files", s.deleteWorkspaceEntry)
 	s.mux.HandleFunc("GET /api/v1/workspaces/{id}/preview", s.previewWorkspaceFile)
+	s.mux.HandleFunc("GET /api/v1/workspaces/{id}/download", s.downloadWorkspaceFile)
 	s.mux.HandleFunc("GET /api/v1/workspaces/{id}/events", s.workspaceFileEvents)
 	s.mux.HandleFunc("PUT /api/v1/settings", s.saveSystemSettings)
 	s.mux.HandleFunc("GET /api/v1/hosts", s.listHosts)
@@ -491,6 +492,27 @@ func (s *Server) listWorkspaceFiles(w http.ResponseWriter, r *http.Request) {
 func (s *Server) previewWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 	result, err := s.service.PreviewAdminWorkspaceFile(r.PathValue("id"), r.URL.Query().Get("path"))
 	respond(w, result, err)
+}
+
+func (s *Server) downloadWorkspaceFile(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.OpenAdminWorkspaceFile(r.PathValue("id"), r.URL.Query().Get("path"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	defer result.Reader.Close()
+	contentType := mime.TypeByExtension(filepath.Ext(result.Name))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": result.Name}))
+	w.Header().Set("Content-Length", strconv.FormatInt(result.Size, 10))
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if _, err := io.Copy(w, result.Reader); err != nil {
+		observability.FromContext(r.Context()).ErrorContext(r.Context(), "Workspace download failed", "component", "server", "workspace_id", result.WorkspaceID, "path", result.Path, "error", err)
+	}
 }
 
 func (s *Server) saveWorkspaceTextFile(w http.ResponseWriter, r *http.Request) {
