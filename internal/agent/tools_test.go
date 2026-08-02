@@ -245,11 +245,11 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 			schema := string(descriptor.InputSchema)
 			if descriptor.Guard != "approval_required" || !strings.Contains(schema, `"action"`) ||
 				!strings.Contains(schema, `"shell_id"`) || !strings.Contains(schema, `"input"`) ||
-				!strings.Contains(schema, `"submit"`) || !strings.Contains(schema, `"wait_seconds"`) ||
+				!strings.Contains(schema, `"submit"`) || strings.Contains(schema, `"wait_seconds"`) ||
 				!strings.Contains(schema, `"reason"`) || strings.Contains(schema, `"after_sequence"`) ||
 				strings.Contains(schema, `"coalesce"`) ||
 				strings.Contains(schema, `"ttl_seconds"`) || strings.Contains(schema, `"extend_seconds"`) ||
-				!strings.Contains(descriptor.Description, "output waits") || strings.Contains(descriptor.Description, "status refreshes") {
+				!strings.Contains(descriptor.Description, "automatically waits") || strings.Contains(descriptor.Description, "status refreshes") {
 				t.Fatalf("ssh_shell metadata does not reflect its runtime schema: %#v", descriptor)
 			}
 		}
@@ -266,9 +266,9 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 			schema := string(descriptor.InputSchema)
 			if descriptor.Guard != "approval_required" || !strings.Contains(schema, `"action"`) ||
 				!strings.Contains(schema, `"shell_id"`) || !strings.Contains(schema, `"input"`) ||
-				!strings.Contains(schema, `"submit"`) || !strings.Contains(schema, `"wait_seconds"`) ||
+				!strings.Contains(schema, `"submit"`) || strings.Contains(schema, `"wait_seconds"`) ||
 				strings.Contains(schema, `"after_sequence"`) || strings.Contains(schema, `"coalesce"`) ||
-				strings.Contains(schema, `"ttl_seconds"`) || !strings.Contains(descriptor.Description, "output waits") ||
+				strings.Contains(schema, `"ttl_seconds"`) || !strings.Contains(descriptor.Description, "automatically waits") ||
 				strings.Contains(descriptor.Description, "status refreshes") {
 				t.Fatalf("workspace_shell metadata does not expose interactive actions: %#v", descriptor)
 			}
@@ -304,9 +304,9 @@ func TestSSHShellActionValidationReportsExactFields(t *testing.T) {
 		t.Fatalf("unexpected field details = %#v", validation.validation)
 	}
 
-	valid := SSHShellInput{Action: "output", ShellID: "shell-1", WaitSeconds: 2, Reason: "read new output"}
+	valid := SSHShellInput{Action: "output", ShellID: "shell-1", Reason: "read new output"}
 	if err := validateSSHShellActionFields(valid, "output",
-		[]string{"action", "shell_id", "wait_seconds", "reason"},
+		[]string{"action", "shell_id", "reason"},
 		nil,
 	); err != nil {
 		t.Fatalf("valid output fields were rejected: %v", err)
@@ -327,6 +327,46 @@ func TestModelShellOutputReturnsLatestAgentInputResponse(t *testing.T) {
 	}
 }
 
+func TestModelShellOutputRemovesPTYInputEcho(t *testing.T) {
+	testCases := []struct {
+		name   string
+		input  string
+		output string
+		want   string
+	}{
+		{
+			name:   "Unix PTY echo with bracketed-paste carriage return",
+			input:  "echo ready && pwd\r",
+			output: "echo ready && pwd\r\n\rready\r\n/workspace\r\nbash-5.3$ ",
+			want:   "ready\n/workspace\nbash-5.3$ ",
+		},
+		{
+			name:   "Windows ConPTY echo prefixed by PowerShell prompt",
+			input:  "Get-Location\r",
+			output: "PS C:\\workspace> Get-Location\r\n\r\nPath\r\n----\r\nC:\\workspace\r\nPS C:\\workspace> ",
+			want:   "Path\n----\nC:\\workspace\nPS C:\\workspace> ",
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			events := []domain.SSHShellEvent{
+				{Sequence: 1, Stream: "input", Source: "agent", Content: testCase.input},
+				{Sequence: 2, Stream: "stdout", Content: testCase.output},
+			}
+			if got := modelShellOutput(events); got != testCase.want {
+				t.Fatalf("model shell output = %q, want %q", got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestModelShellOutputWithoutInputKeepsIncrementalOutput(t *testing.T) {
+	events := []domain.SSHShellEvent{{Sequence: 4, Stream: "stdout", Content: "late-result\r\n"}}
+	if got := modelShellOutput(events); got != "late-result\n" {
+		t.Fatalf("incremental shell output = %q", got)
+	}
+}
+
 func TestModelShellResultDoesNotExposeEventCursor(t *testing.T) {
 	encoded, err := json.Marshal(shellToolResult{ShellID: "shell-1", Status: "running", Output: "done\n"})
 	if err != nil {
@@ -344,7 +384,7 @@ func TestSSHShellUsageNamesOutputAction(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := string(encoded)
-	if !strings.Contains(result, `"output":"output"`) || strings.Contains(result, `"status"`) {
+	if !strings.Contains(result, `"output"`) || strings.Contains(result, `"status"`) || strings.Contains(result, "wait_seconds") {
 		t.Fatalf("shell usage does not expose the output action cleanly: %s", result)
 	}
 }

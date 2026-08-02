@@ -85,7 +85,7 @@ func TestWriteSSHShellWaitsForDelayedOutput(t *testing.T) {
 	session.outputDelay = 40 * time.Millisecond
 	session.mu.Unlock()
 
-	snapshot, err := svc.WriteSSHShellWithWait(context.Background(), shellID, "session-delayed-shell", "echo delayed\r", time.Second, "", "test")
+	snapshot, err := svc.WriteSSHShell(context.Background(), shellID, "session-delayed-shell", "echo delayed\r", "", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,6 +97,139 @@ func TestWriteSSHShellWaitsForDelayedOutput(t *testing.T) {
 	}
 	if output.String() != "echo delayed\r" {
 		t.Fatalf("delayed shell output was not returned with input: %q", output.String())
+	}
+}
+
+func TestAgentShellOutputStreamsBeforeTheToolResult(t *testing.T) {
+	svc, _, host := newTestService(t)
+	const sessionID = "session-live-shell"
+	ctx := WithSessionID(context.Background(), sessionID)
+	if _, err := svc.PrepareChatSession(ctx, sessionID, "", "test"); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := svc.StartSSHShell(ctx, host.ID, "", false, 80, 24, "test live shell output", "eino-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "approved", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	events, unsubscribe := svc.SubscribeExecutionEvents(sessionID)
+	defer unsubscribe()
+	toolCtx := WithExecutionOwner(context.Background(), "call-shell-input", "ssh_shell", `{"action":"input"}`)
+	if _, err := svc.WriteSSHShell(toolCtx, approved.Shell.ID, sessionID, "echo live\r", "", "eino-agent"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case event := <-events:
+		if event.ToolCallID != "call-shell-input" || event.ToolName != "ssh_shell" || event.RunID != approved.Shell.ID || event.Stream != "stdout" || event.Content != "echo live\r" {
+			t.Fatalf("live shell event is not bound to the input tool: %#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("live shell output was not published")
+	}
+}
+
+func TestSSHShellUsageUsesAutomaticResponseCollection(t *testing.T) {
+	usage := sshShellUsage()
+	if usage == nil || !strings.Contains(usage.Input, "automatically collected") || !strings.Contains(usage.Output, "automatically waits") || strings.Contains(usage.Input+usage.Output, "wait_seconds") {
+		t.Fatalf("shell usage still exposes manual response timing: %#v", usage)
+	}
+}
+
+func TestContinuousShellOutputReturnsABatchWithoutStoppingThePTY(t *testing.T) {
+	svc, _, host := newTestService(t)
+	const sessionID = "session-continuous-shell"
+	ctx := WithSessionID(context.Background(), sessionID)
+	if _, err := svc.PrepareChatSession(ctx, sessionID, "", "test"); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := svc.StartSSHShell(ctx, host.ID, "", false, 80, 24, "test continuous shell output", "eino-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "approved", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, before, err := svc.liveSSHShell(approved.Shell.ID, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.SendSSHShellInput(context.Background(), approved.Shell.ID, sessionID, "top\r", "", "eino-agent"); err != nil {
+		t.Fatal(err)
+	}
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				state.session.(*fakeShellSession).callback("stdout", []byte("top-frame\n"))
+			}
+		}
+	}()
+	started := time.Now()
+	snapshot, err := svc.collectSSHShellResponseWithPolicy(context.Background(), approved.Shell.ID, sessionID, before, 120*time.Millisecond, 30*time.Millisecond, "", "")
+	close(stop)
+	<-done
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed < 90*time.Millisecond || elapsed > 500*time.Millisecond {
+		t.Fatalf("continuous output collection duration = %s", elapsed)
+	}
+	if snapshot.Shell.Status != "running" || !shellSnapshotHasOutput(snapshot) {
+		t.Fatalf("continuous program did not return a live output batch: %#v", snapshot)
+	}
+}
+
+func TestShellOutputIncludesDataProducedBetweenToolCalls(t *testing.T) {
+	svc, _, host := newTestService(t)
+	const sessionID = "session-shell-gap"
+	ctx := WithSessionID(context.Background(), sessionID)
+	if _, err := svc.PrepareChatSession(ctx, sessionID, "", "test"); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := svc.StartSSHShell(ctx, host.ID, "", false, 80, 24, "test shell output gap", "eino-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "approved", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputCtx := WithExecutionOwner(context.Background(), "call-shell-input", "ssh_shell", `{"action":"input"}`)
+	inputSnapshot, err := svc.WriteSSHShell(inputCtx, approved.Shell.ID, sessionID, "long-command\r", "", "eino-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.shellMu.RLock()
+	state := svc.shells[approved.Shell.ID]
+	svc.shellMu.RUnlock()
+	state.session.(*fakeShellSession).callback("stdout", []byte("late-result\n"))
+
+	outputCtx := WithExecutionOwner(context.Background(), "call-shell-output", "ssh_shell", `{"action":"output"}`)
+	outputSnapshot, err := svc.WaitSSHShellOutput(outputCtx, approved.Shell.ID, sessionID, "", "eino-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output strings.Builder
+	for _, event := range outputSnapshot.Events {
+		if event.Stream == "stdout" {
+			output.WriteString(event.Content)
+		}
+	}
+	if output.String() != "late-result\n" || outputSnapshot.NextSequence <= inputSnapshot.NextSequence {
+		t.Fatalf("output between tool calls was skipped or repeated: input=%d output=%#v", inputSnapshot.NextSequence, outputSnapshot)
 	}
 }
 

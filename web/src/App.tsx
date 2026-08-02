@@ -278,7 +278,6 @@ function App() {
 	}
 	const observeAgentWorkspaceShell=(shell:SSHShell)=>{
 		rememberSSHShell(shell)
-		setSelectedShell(current=>current||shell)
 	}
 	const toggleSidebar=()=>setSidebarCollapsed(current=>{const next=!current;rememberSidebarCollapsed(next);return next})
 
@@ -1923,7 +1922,7 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
 	const shellOutput=textValue(payload.output)||textValue(resultPayload?.output)||textValue(payload.recent_output)||textValue(resultPayload?.recent_output)||shellEvents
 		.filter(event=>['stdout','stderr'].includes(textValue(event.stream)))
 		.map(event=>textValue(event.content))
-		.join('')
+		.join('')||entry.liveStdout||''
 	const shellInput=textValue(toolArguments?.input)
 	const shellInputDisplay=`${shellInput}${toolArguments?.submit===true&&!/[\r\n]$/.test(shellInput)?' ↵':''}`
 	const shellActionName=shellAction?t(`sshShell.toolActions.${shellAction}`,{defaultValue:t('sshShell.short')}):t('sshShell.short')

@@ -23,22 +23,26 @@ const (
 	maxSSHShellInputBytes     = 64 << 10
 	maxSSHShellReasonBytes    = 500
 	maxSSHShellRecentBytes    = 16 << 10
+	shellResponseQuietPeriod  = 400 * time.Millisecond
+	shellResponseMaxWait      = 5 * time.Second
 )
 
 type sshShellState struct {
-	mu           sync.Mutex
-	eventMu      sync.Mutex
-	shell        domain.SSHShell
-	session      sshx.ShellSession
-	cancel       context.CancelFunc
-	closing      bool
-	reason       string
-	secrets      []string
-	pending      map[string]string
-	notify       chan struct{}
-	recentOutput string
-	ansiStripper terminaltext.Stripper
-	secretPrompt bool
+	mu             sync.Mutex
+	eventMu        sync.Mutex
+	shell          domain.SSHShell
+	session        sshx.ShellSession
+	cancel         context.CancelFunc
+	closing        bool
+	reason         string
+	secrets        []string
+	pending        map[string]string
+	notify         chan struct{}
+	recentOutput   string
+	ansiStripper   terminaltext.Stripper
+	secretPrompt   bool
+	outputOwner    executionOwner
+	responseCursor uint64
 }
 
 func (s *Service) StartSSHShell(ctx context.Context, hostID, cwd string, elevated bool, cols, rows int, reason, actor string) (domain.ExecResult, error) {
@@ -132,8 +136,12 @@ func (s *Service) GetSSHShellSnapshot(ctx context.Context, id, expectedSessionID
 			"shell_id": shell.ID, "after_sequence": after, "coalesce": coalesce, "reason": s.redactor.Redact(reason),
 		})
 	}
+	nextSequence := shell.LastSequence
+	if len(events) > 0 && events[len(events)-1].Sequence > nextSequence {
+		nextSequence = events[len(events)-1].Sequence
+	}
 	return domain.SSHShellSnapshot{
-		Shell: shell, Events: events, RecentOutput: recent, NextSequence: shell.LastSequence,
+		Shell: shell, Events: events, RecentOutput: recent, NextSequence: nextSequence,
 	}, nil
 }
 
@@ -167,10 +175,6 @@ func (s *Service) ReadableSSHShellSnapshot(ctx context.Context, snapshot domain.
 }
 
 func (s *Service) WriteSSHShell(ctx context.Context, id, expectedSessionID, input, reason, actor string) (domain.SSHShellSnapshot, error) {
-	return s.WriteSSHShellWithWait(ctx, id, expectedSessionID, input, 350*time.Millisecond, reason, actor)
-}
-
-func (s *Service) WriteSSHShellWithWait(ctx context.Context, id, expectedSessionID, input string, maxWait time.Duration, reason, actor string) (domain.SSHShellSnapshot, error) {
 	_, before, err := s.liveSSHShell(id, expectedSessionID)
 	if err != nil {
 		return domain.SSHShellSnapshot{}, err
@@ -178,42 +182,126 @@ func (s *Service) WriteSSHShellWithWait(ctx context.Context, id, expectedSession
 	if err := s.SendSSHShellInput(ctx, id, expectedSessionID, input, reason, actor); err != nil {
 		return domain.SSHShellSnapshot{}, err
 	}
-	if maxWait <= 0 {
-		maxWait = 350 * time.Millisecond
+	snapshot, err := s.collectSSHShellResponse(ctx, id, expectedSessionID, before, "", "")
+	if err == nil && (actor == "eino-agent" || actor == "mcp-client") {
+		s.markSSHShellResponseRead(id, expectedSessionID, snapshot.NextSequence)
 	}
-	if maxWait > 10*time.Second {
-		maxWait = 10 * time.Second
-	}
-	deadline := time.Now().Add(maxWait)
-	initial, err := s.GetSSHShellSnapshot(ctx, id, expectedSessionID, before, 0, false, "", "")
+	return snapshot, err
+}
+
+// WaitSSHShellOutput waits for the next response batch using the same server-side
+// policy as input. A quiet terminal returns quickly; continuously refreshing
+// programs return after the hard deadline and keep running in the PTY.
+func (s *Service) WaitSSHShellOutput(ctx context.Context, id, expectedSessionID, reason, actor string) (domain.SSHShellSnapshot, error) {
+	after, err := s.sshShellResponseCursor(ctx, id, expectedSessionID)
 	if err != nil {
 		return domain.SSHShellSnapshot{}, err
 	}
-	cursor := initial.NextSequence
-	hadOutput := shellSnapshotHasOutput(initial)
-	if !hadOutput {
-		first, waitErr := s.GetSSHShellSnapshot(ctx, id, expectedSessionID, cursor, time.Until(deadline), false, "", "")
-		if waitErr != nil {
-			return domain.SSHShellSnapshot{}, waitErr
-		}
-		cursor = first.NextSequence
-		hadOutput = shellSnapshotHasOutput(first)
+	s.setSSHShellOutputOwner(ctx, id, expectedSessionID, actor)
+	snapshot, err := s.collectSSHShellResponse(ctx, id, expectedSessionID, after, reason, actor)
+	if err == nil && (actor == "eino-agent" || actor == "mcp-client") {
+		s.markSSHShellResponseRead(id, expectedSessionID, snapshot.NextSequence)
 	}
-	for hadOutput && time.Now().Before(deadline) {
-		quietWait := 350 * time.Millisecond
-		if remaining := time.Until(deadline); remaining < quietWait {
-			quietWait = remaining
+	return snapshot, err
+}
+
+func (s *Service) sshShellResponseCursor(ctx context.Context, id, expectedSessionID string) (uint64, error) {
+	shell, err := s.store.GetSSHShell(ctx, strings.TrimSpace(id))
+	if err != nil {
+		return 0, err
+	}
+	if expectedSessionID != "" && shell.SessionID != expectedSessionID {
+		return 0, store.ErrNotFound
+	}
+	cursor := uint64(0)
+	events, err := s.store.ListSSHShellEvents(ctx, shell.ID, 0)
+	if err != nil {
+		return 0, err
+	}
+	for _, event := range events {
+		if event.Stream == "input" && event.Source == "agent" {
+			cursor = event.Sequence
 		}
-		next, waitErr := s.GetSSHShellSnapshot(ctx, id, expectedSessionID, cursor, quietWait, false, "", "")
-		if waitErr != nil {
-			return domain.SSHShellSnapshot{}, waitErr
+	}
+	s.shellMu.RLock()
+	state := s.shells[shell.ID]
+	s.shellMu.RUnlock()
+	if state != nil {
+		state.mu.Lock()
+		if state.responseCursor > cursor {
+			cursor = state.responseCursor
 		}
-		if !shellSnapshotHasOutput(next) {
+		state.mu.Unlock()
+	}
+	return cursor, nil
+}
+
+func (s *Service) markSSHShellResponseRead(id, expectedSessionID string, sequence uint64) {
+	s.shellMu.RLock()
+	state := s.shells[strings.TrimSpace(id)]
+	s.shellMu.RUnlock()
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	if (expectedSessionID == "" || state.shell.SessionID == expectedSessionID) && sequence > state.responseCursor {
+		state.responseCursor = sequence
+	}
+	state.mu.Unlock()
+}
+
+func (s *Service) setSSHShellOutputOwner(ctx context.Context, id, expectedSessionID, actor string) {
+	s.shellMu.RLock()
+	state := s.shells[strings.TrimSpace(id)]
+	s.shellMu.RUnlock()
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if expectedSessionID != "" && state.shell.SessionID != expectedSessionID {
+		return
+	}
+	if owner, ok := executionOwnerFromContext(ctx); ok && (actor == "eino-agent" || actor == "mcp-client") {
+		state.outputOwner = owner
+	} else if actor != "eino-agent" && actor != "mcp-client" {
+		state.outputOwner = executionOwner{}
+	}
+}
+
+func (s *Service) collectSSHShellResponse(ctx context.Context, id, expectedSessionID string, after uint64, reason, actor string) (domain.SSHShellSnapshot, error) {
+	return s.collectSSHShellResponseWithPolicy(ctx, id, expectedSessionID, after, shellResponseMaxWait, shellResponseQuietPeriod, reason, actor)
+}
+
+func (s *Service) collectSSHShellResponseWithPolicy(ctx context.Context, id, expectedSessionID string, after uint64, maxWait, quietPeriod time.Duration, reason, actor string) (domain.SSHShellSnapshot, error) {
+	deadline := time.Now().Add(maxWait)
+	cursor := after
+	hadOutput := false
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		wait := remaining
+		if hadOutput && wait > quietPeriod {
+			wait = quietPeriod
+		}
+		next, err := s.GetSSHShellSnapshot(ctx, id, expectedSessionID, cursor, wait, false, "", "")
+		if err != nil {
+			return domain.SSHShellSnapshot{}, err
+		}
+		if len(next.Events) == 0 {
 			break
 		}
 		cursor = next.NextSequence
+		if shellSnapshotHasOutput(next) {
+			hadOutput = true
+		}
+		if !shellStatusActive(next.Shell.Status) {
+			break
+		}
 	}
-	return s.GetSSHShellSnapshot(ctx, id, expectedSessionID, before, 0, false, "", "")
+	return s.GetSSHShellSnapshot(ctx, id, expectedSessionID, after, 0, false, reason, actor)
 }
 
 func shellSnapshotHasOutput(snapshot domain.SSHShellSnapshot) bool {
@@ -239,6 +327,7 @@ func (s *Service) SendSSHShellInput(ctx context.Context, id, expectedSessionID, 
 	if err != nil {
 		return err
 	}
+	s.setSSHShellOutputOwner(ctx, id, expectedSessionID, actor)
 	state.mu.Lock()
 	secretPrompt := state.secretPrompt
 	shell := state.shell
@@ -446,6 +535,9 @@ func (s *Service) openInteractiveShell(
 		},
 		cancel: cancel, pending: make(map[string]string), notify: make(chan struct{}),
 	}
+	if owner, ok := executionOwnerFromContext(ctx); ok {
+		state.outputOwner = owner
+	}
 	if options.user != "" {
 		state.shell.User = options.user
 	}
@@ -627,7 +719,6 @@ func (s *Service) appendSSHShellOutput(state *sshShellState, stream string, data
 		stream = "stdout"
 	}
 	state.eventMu.Lock()
-	defer state.eventMu.Unlock()
 	combined := state.pending[stream] + string(data)
 	safeEnd := len(combined)
 	for _, secret := range state.secrets {
@@ -644,10 +735,27 @@ func (s *Service) appendSSHShellOutput(state *sshShellState, stream string, data
 	}
 	state.pending[stream] = combined[safeEnd:]
 	content := redactKnownSecrets(s.redactor.Redact(combined[:safeEnd]), state.secrets)
+	readable := ""
 	if content != "" {
-		updateSSHShellOutputState(state, content)
+		readable = updateSSHShellOutputState(state, content)
 		s.appendSSHShellEventLocked(state, stream, content, "running")
 	}
+	state.eventMu.Unlock()
+	if readable == "" {
+		return
+	}
+	state.mu.Lock()
+	shell := state.shell
+	owner := state.outputOwner
+	state.mu.Unlock()
+	if owner.ToolCallID == "" && owner.ToolName == "" {
+		return
+	}
+	s.publishExecutionEvent(ExecutionEvent{
+		SessionID: shell.SessionID, RunID: shell.ID,
+		ToolCallID: owner.ToolCallID, ToolName: owner.ToolName,
+		Stream: stream, Content: readable, Status: "running",
+	})
 }
 
 func (s *Service) appendSSHShellInputEvent(state *sshShellState, source, content string, sensitive bool, inputBytes int) {
@@ -825,9 +933,10 @@ func redactKnownSecrets(content string, secrets []string) string {
 	return content
 }
 
-func updateSSHShellOutputState(state *sshShellState, content string) {
+func updateSSHShellOutputState(state *sshShellState, content string) string {
 	state.mu.Lock()
-	recent := appendReadableSSHShellText(state.recentOutput, state.ansiStripper.WriteString(content))
+	readable := state.ansiStripper.WriteString(content)
+	recent := appendReadableSSHShellText(state.recentOutput, readable)
 	state.recentOutput = recent
 	line := recent
 	if index := strings.LastIndexAny(line, "\r\n"); index >= 0 {
@@ -838,6 +947,7 @@ func updateSSHShellOutputState(state *sshShellState, content string) {
 		(strings.Contains(line, "password") || strings.Contains(line, "passphrase") ||
 			strings.Contains(line, "token") || strings.Contains(line, "secret"))
 	state.mu.Unlock()
+	return readable
 }
 
 func appendReadableSSHShellOutput(previous, content string) string {
@@ -927,8 +1037,8 @@ func marshalSSHShell(shell domain.SSHShell) ([]byte, error) {
 
 func sshShellUsage() *domain.SSHShellUsage {
 	return &domain.SSHShellUsage{
-		Input:  "action=input sends raw bytes and returns the response; submit=true appends a carriage return; wait_seconds waits for output",
-		Output: "action=output waits for and reads more of the latest input response",
+		Input:  "action=input sends raw bytes and returns the automatically collected response; submit=true appends a carriage return",
+		Output: "action=output automatically waits for and reads the next response batch",
 		Close:  "call action=close when finished; the shell remains active until it is closed or disconnected",
 	}
 }

@@ -1236,14 +1236,17 @@ func (s *Service) ListWorkspaceShells(ctx context.Context, sessionID, workspaceI
 }
 
 func (s *Service) WriteWorkspaceShell(ctx context.Context, shellID, sessionID, workspaceID, input, reason, actor string) (domain.SSHShellSnapshot, error) {
-	return s.WriteWorkspaceShellWithWait(ctx, shellID, sessionID, workspaceID, input, 350*time.Millisecond, reason, actor)
-}
-
-func (s *Service) WriteWorkspaceShellWithWait(ctx context.Context, shellID, sessionID, workspaceID, input string, maxWait time.Duration, reason, actor string) (domain.SSHShellSnapshot, error) {
 	if _, err := s.workspaceShellTarget(ctx, shellID, sessionID, workspaceID); err != nil {
 		return domain.SSHShellSnapshot{}, err
 	}
-	return s.WriteSSHShellWithWait(ctx, shellID, sessionID, input, maxWait, reason, actor)
+	return s.WriteSSHShell(ctx, shellID, sessionID, input, reason, actor)
+}
+
+func (s *Service) WaitWorkspaceShellOutput(ctx context.Context, shellID, sessionID, workspaceID, reason, actor string) (domain.SSHShellSnapshot, error) {
+	if _, err := s.workspaceShellTarget(ctx, shellID, sessionID, workspaceID); err != nil {
+		return domain.SSHShellSnapshot{}, err
+	}
+	return s.WaitSSHShellOutput(ctx, shellID, sessionID, reason, actor)
 }
 
 func (s *Service) GetWorkspaceShellSnapshot(ctx context.Context, shellID, sessionID, workspaceID string, after uint64, wait time.Duration, coalesce bool, reason, actor string) (domain.SSHShellSnapshot, error) {
