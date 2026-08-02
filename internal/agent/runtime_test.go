@@ -590,7 +590,7 @@ func TestQueryInjectsPersistedPlanBeforeCurrentUser(t *testing.T) {
 		Goal:      "Repair the API",
 		Status:    "active",
 		Steps: []domain.AgentPlanStep{
-			{Number: 1, Title: "Inspect logs", Status: "completed", Evidence: "timeout observed"},
+			{Number: 1, Title: "Inspect logs", Status: "completed"},
 			{Number: 2, Title: "Fix timeout", Status: "in_progress"},
 		},
 	})
@@ -709,7 +709,7 @@ func TestQueryUsesNoToolFinalizerAfterToolActivityWithoutFinalAnswer(t *testing.
 		Goal:      "Deploy the service",
 		Status:    "completed",
 		Steps: []domain.AgentPlanStep{
-			{Number: 1, Title: "Deploy", Status: "completed", Evidence: "service is active"},
+			{Number: 1, Title: "Deploy", Status: "completed"},
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -768,14 +768,14 @@ func TestQueryUsesNoToolFinalizerAfterToolActivityWithoutFinalAnswer(t *testing.
 	}
 }
 
-func TestQueryBlocksPersistedToolEvidenceLeakAndUsesFinalizer(t *testing.T) {
+func TestQueryBlocksPersistedToolResultLeakAndUsesFinalizer(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	leaked := "temporary preamble\n" + persistedToolEvidenceHeader + "\n\nTool: ssh_shell\nResult:\n{\"status\":\"completed\",\"stdout\":\"private-shell-output\"}\n\n" + persistedToolEvidenceTrailer
+	leaked := "temporary preamble\n" + persistedToolResultsHeader + "\n\nTool: ssh_shell\nResult:\n{\"status\":\"completed\",\"stdout\":\"private-shell-output\"}\n\n" + persistedToolResultsTrailer
 	split := len("temporary preamble\n") + 30
 	leakedStream := schema.StreamReaderFromArray([]*schema.Message{
 		{Role: schema.Assistant, Content: leaked[:split]},
@@ -1014,8 +1014,11 @@ func TestQueryStreamingPersistsOnlyTerminalAssistantOutput(t *testing.T) {
 		adk.EventFromMessage(nil, terminalStream, schema.Assistant, ""),
 	}}}
 	runtime := &Runtime{runner: runner, store: st}
+	var emitted []Event
 
-	answer, err := runtime.Query(ctx, "session_stream_terminal", "inspect host", nil)
+	answer, err := runtime.Query(ctx, "session_stream_terminal", "inspect host", func(event Event) {
+		emitted = append(emitted, event)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1029,9 +1032,54 @@ func TestQueryStreamingPersistsOnlyTerminalAssistantOutput(t *testing.T) {
 	if len(messages) != 4 || messages[0].Status != "completed" || messages[1].Role != "tool" || messages[2].Role != "reasoning" || messages[3].Role != "assistant" || messages[3].Content != answer {
 		t.Fatalf("stored messages = %#v", messages)
 	}
+	var assistantEvents []Event
+	for _, event := range emitted {
+		if event.Type == "message" && event.Role == string(schema.Assistant) {
+			assistantEvents = append(assistantEvents, event)
+		}
+	}
+	if len(assistantEvents) != 1 || assistantEvents[0].Content != answer {
+		t.Fatalf("assistant message events = %#v", assistantEvents)
+	}
 }
 
-func TestNextQueryReceivesToolEvidenceFromFailedTurn(t *testing.T) {
+func TestQueryDoesNotEmitNonStreamingToolCallPreamble(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	toolCall := schema.ToolCall{
+		ID: "call-1", Type: "function",
+		Function: schema.FunctionCall{Name: "ssh_exec", Arguments: `{}`},
+	}
+	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{{
+		adk.EventFromMessage(schema.AssistantMessage("I will inspect.", []schema.ToolCall{toolCall}), nil, schema.Assistant, ""),
+		adk.EventFromMessage(schema.ToolMessage("tool completed", "call-1", schema.WithToolName("ssh_exec")), nil, schema.Tool, "ssh_exec"),
+		adk.EventFromMessage(schema.AssistantMessage("Host memory is stable.", nil), nil, schema.Assistant, ""),
+	}}}
+	runtime := &Runtime{runner: runner, store: st}
+	var emitted []Event
+
+	answer, err := runtime.Query(ctx, "session_nonstream_terminal", "inspect host", func(event Event) {
+		emitted = append(emitted, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var assistantEvents []Event
+	for _, event := range emitted {
+		if event.Type == "message" && event.Role == string(schema.Assistant) {
+			assistantEvents = append(assistantEvents, event)
+		}
+	}
+	if answer != "Host memory is stable." || len(assistantEvents) != 1 || assistantEvents[0].Content != answer {
+		t.Fatalf("answer = %q, assistant message events = %#v", answer, assistantEvents)
+	}
+}
+
+func TestNextQueryReceivesToolResultsFromFailedTurn(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
 	if err != nil {
@@ -1060,7 +1108,7 @@ func TestNextQueryReceivesToolEvidenceFromFailedTurn(t *testing.T) {
 	if inputs[1][0].Role != schema.User || inputs[1][0].Content != "inspect disk" {
 		t.Fatalf("failed turn user context = %#v", inputs[1][0])
 	}
-	if inputs[1][1].Role != schema.Assistant || !strings.Contains(inputs[1][1].Content, "Persisted operational tool evidence") || !strings.Contains(inputs[1][1].Content, "disk is healthy") {
+	if inputs[1][1].Role != schema.Assistant || !strings.Contains(inputs[1][1].Content, "Persisted operational tool results") || !strings.Contains(inputs[1][1].Content, "disk is healthy") {
 		t.Fatalf("failed turn tool context = %#v", inputs[1][1])
 	}
 	if inputs[1][2].Role != schema.User || inputs[1][2].Content != "continue" {
@@ -1087,7 +1135,7 @@ func TestBuildModelContextPreservesTurnBoundaries(t *testing.T) {
 		}
 	}
 	if !strings.Contains(messages[1].Content, "docker installed") || !strings.Contains(messages[3].Content, "mihomo updated") {
-		t.Fatalf("tool evidence was not retained: %#v", messages)
+		t.Fatalf("tool results were not retained: %#v", messages)
 	}
 	if messages[5].Content != incompleteTurnContext {
 		t.Fatalf("incomplete turn marker = %q", messages[5].Content)
@@ -1097,7 +1145,7 @@ func TestBuildModelContextPreservesTurnBoundaries(t *testing.T) {
 	}
 }
 
-func TestBuildModelContextPreservesCompleteToolEvidence(t *testing.T) {
+func TestBuildModelContextPreservesCompleteToolResults(t *testing.T) {
 	first := "first-start\n" + strings.Repeat("甲", 50_000) + "\nfirst-end"
 	second := "second-start\n" + strings.Repeat("乙", 50_000) + "\nsecond-end"
 	history := []domain.ChatMessage{
@@ -1109,10 +1157,10 @@ func TestBuildModelContextPreservesCompleteToolEvidence(t *testing.T) {
 	if len(messages) != 3 {
 		t.Fatalf("model messages = %#v", messages)
 	}
-	evidence := messages[1].Content
+	results := messages[1].Content
 	for _, expected := range []string{first, second} {
-		if !strings.Contains(evidence, expected) {
-			t.Fatalf("complete tool evidence was not preserved: evidence_bytes=%d expected_bytes=%d", len(evidence), len(expected))
+		if !strings.Contains(results, expected) {
+			t.Fatalf("complete tool results were not preserved: result_bytes=%d expected_bytes=%d", len(results), len(expected))
 		}
 	}
 	if stats.ToolResults != 2 || stats.IncludedTurns != 1 {
@@ -1158,15 +1206,15 @@ func TestBuildModelContextExcludesCommandExplainerDataFromStoredSSHHistory(t *te
 	if len(messages) != 3 {
 		t.Fatalf("model messages = %#v", messages)
 	}
-	evidence := messages[1].Content
+	results := messages[1].Content
 	for _, leaked := range []string{"ai_review", "PRIVATE_REVIEW_MODEL", "PRIVATE_REVIEW_SUMMARY", "PRIVATE_REVIEW_MECHANISM", "PRIVATE_REVIEW_RISK", "_display"} {
-		if strings.Contains(evidence, leaked) {
-			t.Fatalf("stored SSH history leaked private metadata %q: %s", leaked, evidence)
+		if strings.Contains(results, leaked) {
+			t.Fatalf("stored SSH history leaked private metadata %q: %s", leaked, results)
 		}
 	}
 	for _, retained := range []string{"run-demo", `\"program\":\"uname\"`, "Linux"} {
-		if !strings.Contains(evidence, retained) {
-			t.Fatalf("stored SSH history lost operational field %q: %s", retained, evidence)
+		if !strings.Contains(results, retained) {
+			t.Fatalf("stored SSH history lost operational field %q: %s", retained, results)
 		}
 	}
 }

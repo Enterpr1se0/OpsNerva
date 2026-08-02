@@ -7,19 +7,25 @@ use std::sync::{
 };
 use std::time::Duration;
 use tauri::{
-    Manager, RunEvent, WindowEvent,
+    Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent,
     menu::MenuBuilder,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 use tauri_plugin_shell::{ShellExt, process::CommandEvent};
 
-const READY_PREFIX: &str = "OPSPILOT_DESKTOP_READY=";
+const READY_PREFIX: &str = "OPSNERVA_DESKTOP_READY=";
 
 #[derive(Default)]
 struct SidecarState(Mutex<Option<tauri_plugin_shell::process::CommandChild>>);
 
 #[derive(Default)]
 struct DesktopWorkspaceState(Mutex<Option<PathBuf>>);
+
+#[derive(Default)]
+struct DesktopWindowState {
+    url: Mutex<Option<tauri::Url>>,
+    opening: AtomicBool,
+}
 
 #[derive(Default)]
 struct TrayState {
@@ -40,18 +46,16 @@ struct DesktopReady {
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            show_main_window(app);
         }))
         .plugin(tauri_plugin_shell::init())
         .manage(SidecarState::default())
         .manage(DesktopWorkspaceState::default())
+        .manage(DesktopWindowState::default())
         .manage(TrayState::default())
         .invoke_handler(tauri::generate_handler![
             set_tray_mode,
-            hide_to_tray,
+            enter_lightweight_mode,
             open_workspace_directory
         ])
         .on_window_event(|window, event| {
@@ -70,12 +74,22 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("failed to build OpsNerva desktop application");
 
-    app.run(|handle, event| {
-        if let RunEvent::Exit = event {
+    app.run(|handle, event| match event {
+        RunEvent::ExitRequested { code, api, .. } => {
+            let tray = handle.state::<TrayState>();
+            if code.is_none()
+                && tray.enabled.load(Ordering::Acquire)
+                && !tray.exiting.load(Ordering::Acquire)
+            {
+                api.prevent_exit();
+            }
+        }
+        RunEvent::Exit => {
             if let Some(child) = handle.state::<SidecarState>().0.lock().unwrap().take() {
                 let _ = child.kill();
             }
         }
+        _ => {}
     });
 }
 
@@ -85,11 +99,18 @@ fn set_tray_mode(enabled: bool, state: tauri::State<'_, TrayState>) {
 }
 
 #[tauri::command]
-fn hide_to_tray(app: tauri::AppHandle) -> Result<(), String> {
+fn enter_lightweight_mode(app: tauri::AppHandle) -> Result<(), String> {
+    if !app
+        .state::<TrayState>()
+        .enabled
+        .load(Ordering::Acquire)
+    {
+        return Err("MCP Server Mode is disabled".into());
+    }
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "main window is unavailable".to_string())?;
-    window.hide().map_err(|error| error.to_string())
+    window.destroy().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -195,7 +216,59 @@ fn show_main_window(app: &tauri::AppHandle) {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+        return;
     }
+    let state = app.state::<DesktopWindowState>();
+    if state
+        .opening
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        if let Err(error) = recreate_main_window(&handle) {
+            eprintln!("failed to recreate OpsNerva window: {error}");
+        }
+        handle
+            .state::<DesktopWindowState>()
+            .opening
+            .store(false, Ordering::Release);
+    });
+}
+
+fn recreate_main_window(app: &tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        window.show().map_err(|error| error.to_string())?;
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+        return Ok(());
+    }
+    let url = app
+        .state::<DesktopWindowState>()
+        .url
+        .lock()
+        .map_err(|_| "desktop window state is unavailable".to_string())?
+        .clone()
+        .ok_or_else(|| "backend URL is unavailable".to_string())?;
+    let mut config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|config| config.label == "main")
+        .cloned()
+        .ok_or_else(|| "main window configuration is unavailable".to_string())?;
+    config.url = WebviewUrl::External(url);
+    config.visible = true;
+    let window = WebviewWindowBuilder::from_config(app, &config)
+        .map_err(|error| error.to_string())?
+        .build()
+        .map_err(|error| error.to_string())?;
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+    Ok(())
 }
 
 fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
@@ -204,7 +277,7 @@ fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .separator()
         .text("quit", "退出")
         .build()?;
-    let mut tray = TrayIconBuilder::with_id("opspilot")
+    let mut tray = TrayIconBuilder::with_id("opsnerva")
         .menu(&menu)
         .tooltip("OpsNerva")
         .show_menu_on_left_click(false)
@@ -238,16 +311,21 @@ fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn start_sidecar(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    let data_dir = app.path().app_data_dir()?;
-    std::fs::create_dir_all(&data_dir)?;
+    let executable = std::env::current_exe()?;
+    let install_dir = executable.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "desktop executable has no installation directory",
+        )
+    })?;
 
     let command = app
         .shell()
         .sidecar("ops-agent")?
-        .env("OPS_AGENT_HOME", &data_dir)
+        .env("OPS_AGENT_HOME", install_dir)
         .env("OPS_AGENT_DESKTOP", "true")
         .env("OPS_AGENT_LISTEN", "127.0.0.1:0")
-        .current_dir(&data_dir);
+        .current_dir(install_dir);
     let (mut events, child) = command.spawn()?;
     app.state::<SidecarState>().0.lock().unwrap().replace(child);
 
@@ -326,6 +404,11 @@ fn open_application(app: &tauri::AppHandle, ready: DesktopReady) {
             .unwrap()
             .replace(PathBuf::from(&ready.workspace_root));
     }
+    app.state::<DesktopWindowState>()
+        .url
+        .lock()
+        .unwrap()
+        .replace(destination.clone());
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.navigate(destination);
     }
@@ -371,7 +454,7 @@ mod tests {
     fn parses_desktop_ready_event() {
         assert_eq!(parse_ready("ordinary log line").unwrap(), None);
         let ready = parse_ready(
-            r#"OPSPILOT_DESKTOP_READY={"url":"http://127.0.0.1:49152","workspace_root":"/tmp/opspilot/workspace"}"#,
+            r#"OPSNERVA_DESKTOP_READY={"url":"http://127.0.0.1:49152","workspace_root":"/tmp/opsnerva/workspace"}"#,
         )
         .unwrap()
         .unwrap();
@@ -380,7 +463,7 @@ mod tests {
             DesktopReady {
                 url: "http://127.0.0.1:49152".into(),
                 mcp_http_enabled: false,
-                workspace_root: "/tmp/opspilot/workspace".into(),
+                workspace_root: "/tmp/opsnerva/workspace".into(),
             }
         );
     }

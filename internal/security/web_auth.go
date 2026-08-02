@@ -18,7 +18,7 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-const SessionCookieName = "opspilot_session"
+const SessionCookieName = "opsnerva_session"
 
 var ErrAlreadyInitialized = errors.New("administrator password is already initialized")
 

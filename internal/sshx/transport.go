@@ -196,7 +196,7 @@ func applyElevation(host domain.Host, req domain.ExecRequest, command string, st
 		if err != nil {
 			return "", nil, err
 		}
-		const inputVariable = "OPSPILOT_SUDO_INPUT"
+		const inputVariable = "OPSNERVA_SUDO_INPUT"
 		gate := "set +x; while IFS= read -r " + inputVariable + "; do " +
 			"if [ \"$" + inputVariable + "\" = " + shellQuote(marker) + " ]; then " +
 			"unset " + inputVariable + "; exec " + wrapped + "; fi; done; exit 1"
@@ -213,7 +213,7 @@ func newSudoInputMarker(password string) (string, error) {
 		if _, err := rand.Read(entropy[:]); err != nil {
 			return "", fmt.Errorf("generate managed sudo input marker: %w", err)
 		}
-		marker := "__OPSPILOT_SUDO_INPUT_" + hex.EncodeToString(entropy[:]) + "__"
+		marker := "__OPSNERVA_SUDO_INPUT_" + hex.EncodeToString(entropy[:]) + "__"
 		if marker != password {
 			return marker, nil
 		}

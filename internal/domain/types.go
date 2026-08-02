@@ -192,38 +192,40 @@ func DefaultWorkspaceShellMode(goos string) string {
 }
 
 type SystemSettings struct {
-	AgentMaxIterations          int       `json:"agent_max_iterations"`
-	SystemPrompt                string    `json:"system_prompt"`
-	DefaultSystemPrompt         string    `json:"default_system_prompt"`
-	ApprovalMode                string    `json:"approval_mode"`
-	ApprovalExplanationsEnabled bool      `json:"approval_explanations_enabled"`
-	SubagentModelProviderID     string    `json:"subagent_model_provider_id"`
-	SubagentTimeoutSeconds      int       `json:"subagent_timeout_seconds"`
-	ChatImageAllowedTypes       []string  `json:"chat_image_allowed_types"`
-	WorkspaceShellMode          string    `json:"workspace_shell_mode"`
-	WorkspaceShellPlatform      string    `json:"workspace_shell_platform,omitempty"`
-	WorkspaceShellBackend       string    `json:"workspace_shell_backend,omitempty"`
-	WorkspaceShellName          string    `json:"workspace_shell_name,omitempty"`
-	WorkspaceSandboxAvailable   bool      `json:"workspace_sandbox_available"`
-	WorkspaceHostShellAvailable bool      `json:"workspace_host_shell_available"`
-	MCPHTTPEnabled              bool      `json:"mcp_http_enabled"`
-	MCPHTTPTokenHash            string    `json:"-"`
-	MCPHTTPTokenConfigured      bool      `json:"mcp_http_token_configured"`
-	MCPHTTPToken                string    `json:"mcp_http_token,omitempty"`
-	UpdatedAt                   time.Time `json:"updated_at"`
+	AgentMaxIterations               int       `json:"agent_max_iterations"`
+	SystemPrompt                     string    `json:"system_prompt"`
+	DefaultSystemPrompt              string    `json:"default_system_prompt"`
+	ApprovalMode                     string    `json:"approval_mode"`
+	ApprovalExplanationsEnabled      bool      `json:"approval_explanations_enabled"`
+	SubagentModelProviderID          string    `json:"subagent_model_provider_id"`
+	AutomaticApprovalModelProviderID string    `json:"automatic_approval_model_provider_id"`
+	SubagentTimeoutSeconds           int       `json:"subagent_timeout_seconds"`
+	ChatImageAllowedTypes            []string  `json:"chat_image_allowed_types"`
+	WorkspaceShellMode               string    `json:"workspace_shell_mode"`
+	WorkspaceShellPlatform           string    `json:"workspace_shell_platform,omitempty"`
+	WorkspaceShellBackend            string    `json:"workspace_shell_backend,omitempty"`
+	WorkspaceShellName               string    `json:"workspace_shell_name,omitempty"`
+	WorkspaceSandboxAvailable        bool      `json:"workspace_sandbox_available"`
+	WorkspaceHostShellAvailable      bool      `json:"workspace_host_shell_available"`
+	MCPHTTPEnabled                   bool      `json:"mcp_http_enabled"`
+	MCPHTTPTokenHash                 string    `json:"-"`
+	MCPHTTPTokenConfigured           bool      `json:"mcp_http_token_configured"`
+	MCPHTTPToken                     string    `json:"mcp_http_token,omitempty"`
+	UpdatedAt                        time.Time `json:"updated_at"`
 }
 
 type SystemSettingsInput struct {
-	AgentMaxIterations          int      `json:"agent_max_iterations"`
-	SystemPrompt                *string  `json:"system_prompt,omitempty"`
-	ApprovalMode                *string  `json:"approval_mode,omitempty"`
-	ApprovalExplanationsEnabled *bool    `json:"approval_explanations_enabled,omitempty"`
-	SubagentModelProviderID     *string  `json:"subagent_model_provider_id,omitempty"`
-	SubagentTimeoutSeconds      *int     `json:"subagent_timeout_seconds,omitempty"`
-	ChatImageAllowedTypes       []string `json:"chat_image_allowed_types,omitempty"`
-	WorkspaceShellMode          *string  `json:"workspace_shell_mode,omitempty"`
-	MCPHTTPEnabled              *bool    `json:"mcp_http_enabled,omitempty"`
-	RotateMCPHTTPToken          bool     `json:"rotate_mcp_http_token,omitempty"`
+	AgentMaxIterations               int      `json:"agent_max_iterations"`
+	SystemPrompt                     *string  `json:"system_prompt,omitempty"`
+	ApprovalMode                     *string  `json:"approval_mode,omitempty"`
+	ApprovalExplanationsEnabled      *bool    `json:"approval_explanations_enabled,omitempty"`
+	SubagentModelProviderID          *string  `json:"subagent_model_provider_id,omitempty"`
+	AutomaticApprovalModelProviderID *string  `json:"automatic_approval_model_provider_id,omitempty"`
+	SubagentTimeoutSeconds           *int     `json:"subagent_timeout_seconds,omitempty"`
+	ChatImageAllowedTypes            []string `json:"chat_image_allowed_types,omitempty"`
+	WorkspaceShellMode               *string  `json:"workspace_shell_mode,omitempty"`
+	MCPHTTPEnabled                   *bool    `json:"mcp_http_enabled,omitempty"`
+	RotateMCPHTTPToken               bool     `json:"rotate_mcp_http_token,omitempty"`
 }
 
 const (
@@ -408,7 +410,6 @@ type AgentPlanStep struct {
 	Number    int       `json:"number"`
 	Title     string    `json:"title"`
 	Status    string    `json:"status"`
-	Evidence  string    `json:"evidence,omitempty"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
@@ -538,6 +539,7 @@ type ExecResult struct {
 	RunID               string            `json:"run_id"`
 	TaskID              string            `json:"task_id,omitempty"`
 	Status              string            `json:"status"`
+	AutoApproved        bool              `json:"auto_approved,omitempty"`
 	ApprovalID          string            `json:"approval_id,omitempty"`
 	OperatorInstruction string            `json:"operator_instruction,omitempty"`
 	ExitCode            int               `json:"exit_code,omitempty"`
@@ -637,7 +639,7 @@ type SSHShellList struct {
 
 type SSHShellUsage struct {
 	Input  string `json:"input"`
-	Status string `json:"status"`
+	Output string `json:"output"`
 	Close  string `json:"close"`
 }
 
@@ -689,6 +691,15 @@ type CommandReviewInput struct {
 	RequestDigest string         `json:"request_digest"`
 }
 
+type AutomaticApprovalInput struct {
+	Request       ExecRequest    `json:"request"`
+	Host          HostCapability `json:"host"`
+	UserRequest   string         `json:"user_request"`
+	PlanGoal      string         `json:"plan_goal,omitempty"`
+	PlanStep      string         `json:"plan_step,omitempty"`
+	RequestDigest string         `json:"request_digest"`
+}
+
 type CommandExplanation struct {
 	Summary   string   `json:"summary"`
 	Mechanism string   `json:"mechanism"`
@@ -698,10 +709,14 @@ type CommandExplanation struct {
 const (
 	ApprovalAgentAllow  = "allow"
 	ApprovalAgentReject = "reject"
+	ApprovalAgentManual = "manual"
+
+	CommandReviewKindAutomaticApproval = "automatic_approval"
 )
 
 type CommandReview struct {
 	Status      string              `json:"status"`
+	Kind        string              `json:"kind,omitempty"`
 	Model       string              `json:"model,omitempty"`
 	Decision    string              `json:"decision,omitempty"`
 	Reason      string              `json:"reason,omitempty"`
@@ -745,7 +760,6 @@ type Approval struct {
 	Reason        string         `json:"reason,omitempty"`
 	AIReview      *CommandReview `json:"ai_review,omitempty"`
 	CreatedAt     time.Time      `json:"created_at"`
-	ExpiresAt     time.Time      `json:"expires_at"`
 	DecidedAt     time.Time      `json:"decided_at,omitempty,omitzero"`
 }
 

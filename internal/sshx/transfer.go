@@ -267,7 +267,7 @@ func createTransferTemp(client *sftp.Client, destinationPath string) (string, *s
 		if _, err := rand.Read(random); err != nil {
 			return "", nil, err
 		}
-		tempPath := path.Join(path.Dir(destinationPath), ".opspilot-transfer-"+hex.EncodeToString(random)+".tmp")
+		tempPath := path.Join(path.Dir(destinationPath), ".opsnerva-transfer-"+hex.EncodeToString(random)+".tmp")
 		file, err := client.OpenFile(tempPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
 		if err == nil {
 			return tempPath, file, nil

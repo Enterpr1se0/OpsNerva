@@ -50,7 +50,7 @@ func TestManagedSudoPasswordUsesStdin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, part := range []string{"sudo -S -p '' -- bash -c", "IFS= read -r OPSPILOT_SUDO_INPUT", "exec bash -c"} {
+	for _, part := range []string{"sudo -S -p '' -- bash -c", "IFS= read -r OPSNERVA_SUDO_INPUT", "exec bash -c"} {
 		if !strings.Contains(command, part) {
 			t.Fatalf("managed sudo command %q does not contain %q", command, part)
 		}
@@ -60,7 +60,7 @@ func TestManagedSudoPasswordUsesStdin(t *testing.T) {
 	}
 	data, _ := io.ReadAll(stdin)
 	lines := strings.SplitN(string(data), "\n", 3)
-	if len(lines) != 3 || lines[0] != "sudo-secret" || !strings.HasPrefix(lines[1], "__OPSPILOT_SUDO_INPUT_") || lines[2] != "echo ok\n" {
+	if len(lines) != 3 || lines[0] != "sudo-secret" || !strings.HasPrefix(lines[1], "__OPSNERVA_SUDO_INPUT_") || lines[2] != "echo ok\n" {
 		t.Fatalf("unexpected managed sudo stdin %q", data)
 	}
 	if !strings.Contains(command, lines[1]) {
@@ -141,7 +141,7 @@ func TestBuildRemoteScriptUsesStdin(t *testing.T) {
 
 func TestProbeScriptFallsBackWhenCommonUtilitiesAreMissing(t *testing.T) {
 	cmd := exec.Command("/bin/bash", "-se")
-	cmd.Env = []string{"PATH=/opspilot-no-such-path"}
+	cmd.Env = []string{"PATH=/opsnerva-no-such-path"}
 	cmd.Stdin = strings.NewReader(probeScript)
 	output, err := cmd.Output()
 	if err != nil {

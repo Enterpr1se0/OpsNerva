@@ -11,4 +11,10 @@
 
 - Keep frontend text concise and limited to labels, values, statuses, actionable errors, and instructions required to complete an operation.
 - Do not add explanatory, promotional, repetitive, or self-evident helper text.
+- Confirmation dialogs contain only a title, required fields, action buttons, and actionable errors. Do not add eyebrow labels, explanatory body copy, repeated consequences, or self-evident warnings.
 - When removing UI text, also delete its unused locale keys, markup, and styles.
+
+## Desktop builds
+
+- Never compile, test, or build Rust/Tauri locally.
+- Validate desktop changes through source review and GitHub Actions. Local verification is limited to Go tests and the Web build.

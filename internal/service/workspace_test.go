@@ -22,6 +22,13 @@ import (
 	"eino-ops-agent/internal/store"
 )
 
+type zeroReader struct{}
+
+func (zeroReader) Read(buffer []byte) (int, error) {
+	clear(buffer)
+	return len(buffer), nil
+}
+
 func newWorkspaceService(t *testing.T, access string) (*Service, string) {
 	t.Helper()
 	ctx := context.Background()
@@ -642,8 +649,28 @@ func TestWorkspaceAdminUploadIsAtomicAndNeverOverwrites(t *testing.T) {
 	if err != nil || len(listing.Entries) != 0 {
 		t.Fatalf("deleted file remains in listing: %#v err=%v", listing, err)
 	}
-	if _, err := os.Stat(filepath.Join(root, ".opspilot-trash")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(root, ".opsnerva-trash")); !os.IsNotExist(err) {
 		t.Fatalf("delete created a recovery directory: %v", err)
+	}
+}
+
+func TestWorkspaceAdminUploadAcceptsFilesLargerThanLegacyLimit(t *testing.T) {
+	svc, root := newWorkspaceService(t, "read_write")
+	const size = int64(100<<20) + 1
+
+	result, err := svc.UploadWorkspaceFile(context.Background(), "project", "large.bin", "large.bin", io.LimitReader(zeroReader{}, size), "admin-web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Size != size {
+		t.Fatalf("uploaded size = %d, want %d", result.Size, size)
+	}
+	info, err := os.Stat(filepath.Join(root, "large.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != size {
+		t.Fatalf("stored size = %d, want %d", info.Size(), size)
 	}
 }
 
@@ -685,7 +712,7 @@ func TestWorkspaceAdminTextEditorPreservesModeAndRejectsBinaryFiles(t *testing.T
 		t.Fatal(err)
 	}
 	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), ".opspilot-") {
+		if strings.HasPrefix(entry.Name(), ".opsnerva-") {
 			t.Fatalf("text editor left temporary file %q", entry.Name())
 		}
 	}
@@ -1133,9 +1160,9 @@ func TestWorkspacePowerShellScriptUsesUTF8AndCleansTemporaryDirectory(t *testing
 		t.Fatalf("PowerShell script is missing its UTF-8 BOM: %x", content[:3])
 	}
 	for _, required := range []string{
-		"[System.Console]::InputEncoding = $__opsPilotUtf8Encoding",
-		"[System.Console]::OutputEncoding = $__opsPilotUtf8Encoding",
-		"$OutputEncoding = $__opsPilotUtf8Encoding",
+		"[System.Console]::InputEncoding = $__opsNervaUtf8Encoding",
+		"[System.Console]::OutputEncoding = $__opsNervaUtf8Encoding",
+		"$OutputEncoding = $__opsNervaUtf8Encoding",
 		"$env:LANG = 'C.UTF-8'",
 		"$env:PYTHONUTF8 = '1'",
 		script,

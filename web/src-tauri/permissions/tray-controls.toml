@@ -1,4 +1,4 @@
 [[permission]]
 identifier = "tray-controls"
 description = "Allows desktop window controls and opening validated Workspace directories."
-commands.allow = ["set_tray_mode", "hide_to_tray", "open_workspace_directory"]
+commands.allow = ["set_tray_mode", "enter_lightweight_mode", "open_workspace_directory"]

@@ -1,10 +1,22 @@
 package agent
 
 import (
+	"strings"
 	"testing"
 
 	"eino-ops-agent/internal/domain"
 )
+
+func TestApprovalAgentsUseIndependentInstructions(t *testing.T) {
+	if strings.Contains(explainerInstruction, "user_request") || strings.Contains(explainerInstruction, `"manual"`) {
+		t.Fatal("the existing explanation Agent instruction was changed into an Auto decision instruction")
+	}
+	for _, required := range []string{"AutoApprovalAgent", "user_request", `"allow"`, `"reject"`, `"manual"`} {
+		if !strings.Contains(automaticApprovalInstruction, required) {
+			t.Fatalf("Auto approval Agent instruction is missing %q", required)
+		}
+	}
+}
 
 func TestDecodeApprovalReviewJSONAndRejectUnexpectedFields(t *testing.T) {
 	var review struct {
@@ -34,6 +46,17 @@ func TestReviewInputMasksEnvironmentValues(t *testing.T) {
 	}
 	if input.Request.Env["TOKEN"] != "secret" {
 		t.Fatal("masking mutated the execution request")
+	}
+}
+
+func TestAutomaticApprovalInputMasksEnvironmentValues(t *testing.T) {
+	input := domain.AutomaticApprovalInput{Request: domain.ExecRequest{Env: map[string]string{"TOKEN": "secret"}}, UserRequest: "deploy demo"}
+	masked := maskAutomaticApprovalInput(input)
+	if masked.Request.Env["TOKEN"] != "[configured]" || masked.UserRequest != input.UserRequest {
+		t.Fatalf("automatic approval input was not masked correctly: %#v", masked)
+	}
+	if input.Request.Env["TOKEN"] != "secret" {
+		t.Fatal("automatic approval masking mutated the execution request")
 	}
 }
 

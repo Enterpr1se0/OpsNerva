@@ -98,8 +98,8 @@ type WorkspaceDeleteResult struct {
 }
 
 const (
-	maxWorkspaceUploadBytes = 100 << 20
-	workspaceWatchDebounce  = 120 * time.Millisecond
+	maxWorkspaceTextFileBytes = 100 << 20
+	workspaceWatchDebounce    = 120 * time.Millisecond
 )
 
 var workspaceIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
@@ -607,7 +607,7 @@ func (s *Service) SaveAdminWorkspaceTextFile(ctx context.Context, workspaceID, r
 	if workspace.Access != "read_write" {
 		return WorkspaceUploadResult{}, fmt.Errorf("workspace %q is read_only", workspace.ID)
 	}
-	if len(content) > maxWorkspaceUploadBytes {
+	if len(content) > maxWorkspaceTextFileBytes {
 		return WorkspaceUploadResult{}, fmt.Errorf("workspace text file exceeds 100 MiB")
 	}
 	if err := ctx.Err(); err != nil {
@@ -625,7 +625,7 @@ func (s *Service) SaveAdminWorkspaceTextFile(ctx context.Context, workspaceID, r
 	if !info.Mode().IsRegular() {
 		return WorkspaceUploadResult{}, fmt.Errorf("workspace edit target is not a regular file")
 	}
-	if info.Size() > maxWorkspaceUploadBytes {
+	if info.Size() > maxWorkspaceTextFileBytes {
 		return WorkspaceUploadResult{}, fmt.Errorf("workspace text file exceeds 100 MiB")
 	}
 	current, err := os.ReadFile(path)
@@ -636,7 +636,7 @@ func (s *Service) SaveAdminWorkspaceTextFile(ctx context.Context, workspaceID, r
 		return WorkspaceUploadResult{}, fmt.Errorf("workspace edit target is binary")
 	}
 	suffix := time.Now().UTC().Format("20060102T150405Z") + "-" + ids.New("file")
-	temporary := filepath.Join(filepath.Dir(path), ".opspilot-"+filepath.Base(path)+"-"+suffix+".tmp")
+	temporary := filepath.Join(filepath.Dir(path), ".opsnerva-"+filepath.Base(path)+"-"+suffix+".tmp")
 	if err := writeSyncedFile(temporary, []byte(content), info.Mode().Perm()); err != nil {
 		return WorkspaceUploadResult{}, err
 	}
@@ -818,21 +818,17 @@ func (s *Service) storeWorkspaceFile(ctx context.Context, workspace config.Works
 		return WorkspaceUploadResult{}, err
 	}
 	parent := filepath.Dir(target)
-	temporary, err := os.CreateTemp(parent, ".opspilot-upload-*")
+	temporary, err := os.CreateTemp(parent, ".opsnerva-upload-*")
 	if err != nil {
 		return WorkspaceUploadResult{}, err
 	}
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
 	digest := sha256.New()
-	written, copyErr := io.Copy(io.MultiWriter(temporary, digest), io.LimitReader(source, maxWorkspaceUploadBytes+1))
+	written, copyErr := io.Copy(io.MultiWriter(temporary, digest), source)
 	if copyErr != nil {
 		temporary.Close()
 		return WorkspaceUploadResult{}, copyErr
-	}
-	if written > maxWorkspaceUploadBytes {
-		temporary.Close()
-		return WorkspaceUploadResult{}, fmt.Errorf("workspace upload exceeds 100 MiB")
 	}
 	actualSHA256 := hex.EncodeToString(digest.Sum(nil))
 	if expectedSHA256 != "" && actualSHA256 != expectedSHA256 {
@@ -1055,9 +1051,6 @@ func (s *Service) executeWorkspaceDownload(ctx context.Context, connection sshx.
 	defer download.Reader.Close()
 	if download.Entry.Type != "file" {
 		return sshx.RawResult{ExitCode: -1, Duration: time.Since(started)}, fmt.Errorf("remote download source is not a regular file")
-	}
-	if download.Entry.Size > maxWorkspaceUploadBytes {
-		return sshx.RawResult{ExitCode: -1, Duration: time.Since(started)}, fmt.Errorf("remote download source exceeds 100 MiB")
 	}
 	stored, err := s.storeWorkspaceFile(downloadCtx, workspace, req.RelativePath, filepath.Base(req.RemotePath), download.Reader, req.ExpectedSHA256, "workspace_file_downloaded", actor)
 	if err != nil {
@@ -1324,16 +1317,13 @@ func (s *Service) prepareWorkspaceUpload(req domain.ExecRequest) (domain.ExecReq
 		return req, fmt.Errorf("workspace upload source is not a regular file")
 	}
 	digest := sha256.New()
-	written, copyErr := io.Copy(digest, io.LimitReader(file, maxWorkspaceUploadBytes+1))
+	_, copyErr := io.Copy(digest, file)
 	closeErr := file.Close()
 	if copyErr != nil {
 		return req, copyErr
 	}
 	if closeErr != nil {
 		return req, closeErr
-	}
-	if written > maxWorkspaceUploadBytes {
-		return req, fmt.Errorf("workspace upload source exceeds 100 MiB")
 	}
 	actual := hex.EncodeToString(digest.Sum(nil))
 	if actual != expected {
@@ -1746,10 +1736,10 @@ func (s *Service) executeWorkspaceHostShell(ctx context.Context, workspace confi
 	return result, runErr
 }
 
-const workspacePowerShellUTF8Preamble = `$__opsPilotUtf8Encoding = [System.Text.UTF8Encoding]::new($false)
-[System.Console]::InputEncoding = $__opsPilotUtf8Encoding
-[System.Console]::OutputEncoding = $__opsPilotUtf8Encoding
-$OutputEncoding = $__opsPilotUtf8Encoding
+const workspacePowerShellUTF8Preamble = `$__opsNervaUtf8Encoding = [System.Text.UTF8Encoding]::new($false)
+[System.Console]::InputEncoding = $__opsNervaUtf8Encoding
+[System.Console]::OutputEncoding = $__opsNervaUtf8Encoding
+$OutputEncoding = $__opsNervaUtf8Encoding
 $env:LANG = 'C.UTF-8'
 $env:LC_ALL = 'C.UTF-8'
 $env:PYTHONUTF8 = '1'
@@ -1762,7 +1752,7 @@ func workspacePowerShellScript(script string) []byte {
 }
 
 func createWorkspacePowerShellScript(script string) (string, func() error, error) {
-	directory, err := os.MkdirTemp("", "opspilot-workspace-shell-*")
+	directory, err := os.MkdirTemp("", "opsnerva-workspace-shell-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("create temporary PowerShell directory: %w", err)
 	}
@@ -1870,7 +1860,7 @@ func (s *Service) workspaceHost(ctx context.Context, workspaceID string) (domain
 		return host, nil
 	}
 	now := time.Now().UTC()
-	return s.store.UpsertHost(ctx, domain.Host{ID: id, Name: "Workspace / " + workspaceID, Address: "local-workspace", Port: 1, User: "opspilot", AuthType: "workspace", SudoMode: "none", CreatedAt: now})
+	return s.store.UpsertHost(ctx, domain.Host{ID: id, Name: "Workspace / " + workspaceID, Address: "local-workspace", Port: 1, User: "opsnerva", AuthType: "workspace", SudoMode: "none", CreatedAt: now})
 }
 
 func (s *Service) resolveWorkspacePath(workspace config.Workspace, relative string, allowMissing bool) (string, error) {
@@ -2027,7 +2017,7 @@ func listWorkspaceDirectory(path string) ([]byte, error) {
 
 func isSensitiveWorkspaceComponent(name string) bool {
 	lower := strings.ToLower(name)
-	return strings.HasPrefix(lower, ".env") || strings.HasPrefix(lower, ".opspilot-") || lower == ".ssh" || lower == ".data" || lower == "master.key" || strings.Contains(lower, "credential")
+	return strings.HasPrefix(lower, ".env") || strings.HasPrefix(lower, ".opsnerva-") || lower == ".ssh" || lower == "data" || lower == "master.key" || strings.Contains(lower, "credential")
 }
 
 func searchWorkspaceFile(path, pattern string, matchMode domain.FileSearchMatchMode, contextLines int) ([]byte, error) {
@@ -2125,7 +2115,7 @@ func (s *Service) editWorkspaceFile(ctx context.Context, workspace config.Worksp
 		return sshx.RawResult{ExitCode: 1, Stderr: []byte(err.Error()), Duration: time.Since(started)}, err
 	}
 	suffix := time.Now().UTC().Format("20060102T150405Z") + "-" + ids.New("file")
-	temporary := filepath.Join(filepath.Dir(path), ".opspilot-"+filepath.Base(path)+"-"+suffix+".tmp")
+	temporary := filepath.Join(filepath.Dir(path), ".opsnerva-"+filepath.Base(path)+"-"+suffix+".tmp")
 	if err := writeSyncedFile(temporary, []byte(updated), mode); err != nil {
 		return sshx.RawResult{}, err
 	}

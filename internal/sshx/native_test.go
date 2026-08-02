@@ -529,7 +529,7 @@ func TestNativeSFTPTransferConflictLeavesDestinationUntouched(t *testing.T) {
 	if !bytes.Equal(current, original) {
 		t.Fatalf("destination changed after source conflict: %q", current)
 	}
-	matches, err := filepath.Glob(filepath.Join(destinationServer.root, ".opspilot-transfer-*.tmp"))
+	matches, err := filepath.Glob(filepath.Join(destinationServer.root, ".opsnerva-transfer-*.tmp"))
 	if err != nil || len(matches) != 0 {
 		t.Fatalf("temporary files were not cleaned up: matches=%v err=%v", matches, err)
 	}

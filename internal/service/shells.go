@@ -128,7 +128,7 @@ func (s *Service) GetSSHShellSnapshot(ctx context.Context, id, expectedSessionID
 		if len(reason) > maxSSHShellReasonBytes {
 			return domain.SSHShellSnapshot{}, fmt.Errorf("reason must not exceed %d bytes", maxSSHShellReasonBytes)
 		}
-		s.audit(context.WithoutCancel(ctx), shell.RunID, "ssh_shell_status", actor, map[string]any{
+		s.audit(context.WithoutCancel(ctx), shell.RunID, interactiveShellComponent(shell.Kind)+"_output", actor, map[string]any{
 			"shell_id": shell.ID, "after_sequence": after, "coalesce": coalesce, "reason": s.redactor.Redact(reason),
 		})
 	}
@@ -927,8 +927,8 @@ func marshalSSHShell(shell domain.SSHShell) ([]byte, error) {
 
 func sshShellUsage() *domain.SSHShellUsage {
 	return &domain.SSHShellUsage{
-		Input:  "action=input sends raw bytes; submit=true appends a carriage return; wait_seconds waits for output to settle",
-		Status: "action=status with after_sequence returns later events; coalesce=true merges adjacent events without dropping output",
+		Input:  "action=input sends raw bytes and returns the response; submit=true appends a carriage return; wait_seconds waits for output",
+		Output: "action=output waits for and reads more of the latest input response",
 		Close:  "call action=close when finished; the shell remains active until it is closed or disconnected",
 	}
 }

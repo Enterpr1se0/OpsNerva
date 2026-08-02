@@ -55,12 +55,12 @@ export interface Approval {
   reason?: string
   ai_review?: CommandReview
   created_at: string
-  expires_at: string
 }
 
 export interface ApprovalExecutionResult {
   run_id: string
   status: string
+	auto_approved?: boolean
   operator_instruction?: string
   exit_code?: number
   stdout?: string
@@ -175,7 +175,7 @@ export interface SSHShellStartInput {
 
 export interface SSHShellUsage {
   input: string
-  status: string
+  output: string
   close: string
 }
 
@@ -207,8 +207,9 @@ export interface CommandExplanation {
 
 export interface CommandReview {
   status: 'pending' | 'completed' | 'degraded' | 'unavailable'
+	kind?: 'automatic_approval'
   model?: string
-  decision?: 'allow' | 'reject'
+  decision?: 'allow' | 'reject' | 'manual'
   reason?: string
   explanation?: CommandExplanation
   errors?: string[]
@@ -281,7 +282,6 @@ export interface AgentPlanStep {
   number: number
   title: string
   status: 'pending' | 'in_progress' | 'completed' | 'blocked' | 'skipped'
-  evidence?: string
   updated_at: string
 }
 
@@ -376,11 +376,16 @@ export interface ModelCatalog {
 export interface ModelStatus {
   available: boolean
   approval_agent_available: boolean
+  automatic_approval_agent_available: boolean
   approval_provider_id?: string
   approval_provider_name?: string
   approval_model?: string
+  automatic_approval_provider_id?: string
+  automatic_approval_provider_name?: string
+  automatic_approval_model?: string
   approval_timeout_seconds?: number
   approval_error?: string
+  automatic_approval_error?: string
   source: 'database' | 'environment' | 'none'
   provider_id?: string
   name?: string
@@ -410,6 +415,7 @@ export interface SystemSettings {
   approval_mode: ApprovalMode
   approval_explanations_enabled: boolean
   subagent_model_provider_id: string
+  automatic_approval_model_provider_id: string
   subagent_timeout_seconds: number
 	chat_image_allowed_types: string[]
   workspace_shell_mode: WorkspaceShellMode
@@ -433,6 +439,7 @@ export interface SystemSettingsInput {
   approval_mode?: ApprovalMode
   approval_explanations_enabled?: boolean
   subagent_model_provider_id?: string
+  automatic_approval_model_provider_id?: string
   subagent_timeout_seconds?: number
 	chat_image_allowed_types?: string[]
   workspace_shell_mode?: WorkspaceShellMode

@@ -16,8 +16,8 @@ RUN CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags="-s -w" -o /out/op
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates bubblewrap && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY --from=backend /out/ops-agent /usr/local/bin/ops-agent
+COPY --from=backend /out/ops-agent /app/ops-agent
 COPY configs ./configs
-VOLUME ["/app/.data"]
+VOLUME ["/app/data"]
 EXPOSE 8080
-CMD ["ops-agent", "serve"]
+CMD ["./ops-agent", "serve"]

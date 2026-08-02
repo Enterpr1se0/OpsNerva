@@ -1,13 +1,13 @@
 listen_address: 0.0.0.0:8080
-data_dir: .data
-database_path: .data/ops-agent.db
+data_dir: data
+database_path: data/ops-agent.db
 
 web_auth:
   # Enable secure cookies when the Web UI is served over HTTPS.
   secure_cookies: false
 
 # OpsNerva creates one directory per Workspace below this managed root.
-# Relative paths use the startup working directory. Override with
+# Relative paths use the configuration file directory. Override with
 # OPS_AGENT_WORKSPACE_DIR.
 workspace_dir: workspace
 
@@ -29,14 +29,14 @@ validators:
 logging:
   level: debug # use info in production when detailed lifecycle logs are not needed
   format: text # terminal format: text or json; the rotating file is always JSONL
-  file: .data/ops-agent.log # set to "-" to disable file output
+  file: data/ops-agent.log # set to "-" to disable file output
   add_source: false
   max_size_mb: 20
   max_backups: 3
   recent_limit: 2000 # in-memory entries available to the Web Logs page
 
 ssh:
-  default_known_hosts: .data/known_hosts
+  default_known_hosts: data/known_hosts
 
 model:
   base_url: ""

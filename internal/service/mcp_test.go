@@ -130,7 +130,7 @@ func TestMCPToolErrorReturnsStructuredEnvelope(t *testing.T) {
 		t.Fatalf("unexpected MCP failure envelope: %#v", envelope)
 	}
 	if envelope.Message == "" || envelope.NextAction == "" || !envelope.Result.IsError || len(envelope.Result.Content) != 1 {
-		t.Fatalf("MCP failure evidence was not preserved: %#v", envelope)
+		t.Fatalf("MCP failure details were not preserved: %#v", envelope)
 	}
 }
 

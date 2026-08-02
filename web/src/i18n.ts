@@ -6,7 +6,7 @@ import zh from './locales/zh'
 export const supportedLanguages = ['zh', 'en'] as const
 export type SupportedLanguage = typeof supportedLanguages[number]
 
-const storageKey = 'opspilot.language'
+const storageKey = 'opsnerva.language'
 
 function initialLanguage(): SupportedLanguage {
   try {

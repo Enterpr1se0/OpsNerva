@@ -33,7 +33,7 @@ import (
 	"eino-ops-agent/internal/store"
 )
 
-const version = "0.1.7"
+const version = "0.1.8"
 
 type application struct {
 	config    config.Config
@@ -293,7 +293,7 @@ func desktopReadyLine(options serveOptions, url string) string {
 		MCPHTTPEnabled:    options.MCPHTTPEnabled,
 		WorkspaceRoot:     options.WorkspaceRoot,
 	})
-	return "OPSPILOT_DESKTOP_READY=" + string(payload)
+	return "OPSNERVA_DESKTOP_READY=" + string(payload)
 }
 
 func envBool(name string) bool {

@@ -105,8 +105,8 @@ func (guard *assistantOutputGuard) Finish() string {
 }
 
 func internalContextMarkerIndex(content string) int {
-	index := strings.Index(content, persistedToolEvidenceHeader)
-	trailerIndex := strings.Index(content, persistedToolEvidenceTrailer)
+	index := strings.Index(content, persistedToolResultsHeader)
+	trailerIndex := strings.Index(content, persistedToolResultsTrailer)
 	if index < 0 || trailerIndex >= 0 && trailerIndex < index {
 		return trailerIndex
 	}
@@ -114,8 +114,8 @@ func internalContextMarkerIndex(content string) int {
 }
 
 func internalContextMarkerPrefixSuffix(content string) int {
-	maximum := len(persistedToolEvidenceHeader) - 1
-	if trailerMaximum := len(persistedToolEvidenceTrailer) - 1; trailerMaximum > maximum {
+	maximum := len(persistedToolResultsHeader) - 1
+	if trailerMaximum := len(persistedToolResultsTrailer) - 1; trailerMaximum > maximum {
 		maximum = trailerMaximum
 	}
 	if len(content) < maximum {
@@ -123,7 +123,7 @@ func internalContextMarkerPrefixSuffix(content string) int {
 	}
 	for size := maximum; size > 0; size-- {
 		suffix := content[len(content)-size:]
-		if strings.HasPrefix(persistedToolEvidenceHeader, suffix) || strings.HasPrefix(persistedToolEvidenceTrailer, suffix) {
+		if strings.HasPrefix(persistedToolResultsHeader, suffix) || strings.HasPrefix(persistedToolResultsTrailer, suffix) {
 			return size
 		}
 	}
@@ -228,18 +228,23 @@ type Runtime struct {
 }
 
 type Status struct {
-	Available              bool   `json:"available"`
-	ApprovalAgentAvailable bool   `json:"approval_agent_available"`
-	ApprovalProviderID     string `json:"approval_provider_id,omitempty"`
-	ApprovalProviderName   string `json:"approval_provider_name,omitempty"`
-	ApprovalModel          string `json:"approval_model,omitempty"`
-	ApprovalTimeoutSeconds int    `json:"approval_timeout_seconds,omitempty"`
-	ApprovalError          string `json:"approval_error,omitempty"`
-	Source                 string `json:"source"`
-	ProviderID             string `json:"provider_id,omitempty"`
-	Name                   string `json:"name,omitempty"`
-	Model                  string `json:"model,omitempty"`
-	Error                  string `json:"error,omitempty"`
+	Available                       bool   `json:"available"`
+	ApprovalAgentAvailable          bool   `json:"approval_agent_available"`
+	AutomaticApprovalAgentAvailable bool   `json:"automatic_approval_agent_available"`
+	ApprovalProviderID              string `json:"approval_provider_id,omitempty"`
+	ApprovalProviderName            string `json:"approval_provider_name,omitempty"`
+	ApprovalModel                   string `json:"approval_model,omitempty"`
+	AutomaticApprovalProviderID     string `json:"automatic_approval_provider_id,omitempty"`
+	AutomaticApprovalProviderName   string `json:"automatic_approval_provider_name,omitempty"`
+	AutomaticApprovalModel          string `json:"automatic_approval_model,omitempty"`
+	ApprovalTimeoutSeconds          int    `json:"approval_timeout_seconds,omitempty"`
+	ApprovalError                   string `json:"approval_error,omitempty"`
+	AutomaticApprovalError          string `json:"automatic_approval_error,omitempty"`
+	Source                          string `json:"source"`
+	ProviderID                      string `json:"provider_id,omitempty"`
+	Name                            string `json:"name,omitempty"`
+	Model                           string `json:"model,omitempty"`
+	Error                           string `json:"error,omitempty"`
 }
 
 type TestResult struct {
@@ -272,7 +277,7 @@ func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st
 		middlewares = append([]compose.ToolMiddleware{{Invokable: normalizeEmptyToolArguments}}, middlewares...)
 	}
 	agentInstance, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
-		Name: "ops-pilot", Description: "Diagnoses and operates registered Linux servers through audited SSH tools.",
+		Name: "ops-nerva", Description: "Diagnoses and operates registered Linux servers through managed SSH tools.",
 		Instruction: hostPlatformSystemPrompt(systemPrompt, goruntime.GOOS, goruntime.GOARCH), Model: chatModel, MaxIterations: maxIterations,
 		ModelRetryConfig: modelRequestRetryConfig(),
 		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
@@ -317,6 +322,7 @@ func (r *Runtime) Reload(ctx context.Context) error {
 			r.toolsAt = ""
 			r.mu.Unlock()
 			r.service.SetApprovalReviewer(nil)
+			r.service.SetAutomaticApprovalReviewer(nil)
 			observability.FromContext(ctx).WarnContext(ctx, "model runtime unavailable", "component", "agent", "reason", "no active model provider")
 			return nil
 		}
@@ -347,6 +353,7 @@ func (r *Runtime) Reload(ctx context.Context) error {
 		r.toolsAt = ""
 		r.mu.Unlock()
 		r.service.SetApprovalReviewer(nil)
+		r.service.SetAutomaticApprovalReviewer(nil)
 		observability.FromContext(ctx).ErrorContext(ctx, "model runtime reload failed", "component", "agent", "provider_id", status.ProviderID, "model", cfg.Name, "error", err)
 		return err
 	}
@@ -366,15 +373,21 @@ func (r *Runtime) Reload(ctx context.Context) error {
 		r.toolsAt = ""
 		r.mu.Unlock()
 		r.service.SetApprovalReviewer(nil)
+		r.service.SetAutomaticApprovalReviewer(nil)
 		observability.FromContext(ctx).ErrorContext(ctx, "final answer Agent unavailable", "component", "agent", "provider_id", status.ProviderID, "model", cfg.Name, "error", err)
 		return fmt.Errorf("build final answer Agent: %w", err)
 	}
 	explanationCfg := cfg
+	automaticApprovalCfg := cfg
 	status.ApprovalProviderID = status.ProviderID
 	status.ApprovalProviderName = status.Name
 	status.ApprovalModel = cfg.Name
+	status.AutomaticApprovalProviderID = status.ProviderID
+	status.AutomaticApprovalProviderName = status.Name
+	status.AutomaticApprovalModel = cfg.Name
 	status.ApprovalTimeoutSeconds = settings.SubagentTimeoutSeconds
 	var explanationConfigErr error
+	var automaticApprovalConfigErr error
 	if settings.SubagentModelProviderID != "" {
 		status.ApprovalProviderID = settings.SubagentModelProviderID
 		status.ApprovalProviderName = ""
@@ -387,8 +400,22 @@ func (r *Runtime) Reload(ctx context.Context) error {
 			status.ApprovalModel = explanationProvider.Model
 		}
 	}
+	if settings.AutomaticApprovalModelProviderID != "" {
+		status.AutomaticApprovalProviderID = settings.AutomaticApprovalModelProviderID
+		status.AutomaticApprovalProviderName = ""
+		status.AutomaticApprovalModel = ""
+		var automaticApprovalProvider domain.ModelProvider
+		automaticApprovalCfg, automaticApprovalProvider, automaticApprovalConfigErr = r.service.ModelProviderConfig(ctx, settings.AutomaticApprovalModelProviderID)
+		if automaticApprovalConfigErr == nil {
+			status.AutomaticApprovalProviderID = automaticApprovalProvider.ID
+			status.AutomaticApprovalProviderName = automaticApprovalProvider.Name
+			status.AutomaticApprovalModel = automaticApprovalProvider.Model
+		}
+	}
 	var approvalCoordinator *ApprovalCoordinator
+	var automaticApprovalCoordinator *AutomaticApprovalCoordinator
 	var explanationErr error
+	var automaticApprovalErr error
 	if explanationConfigErr != nil {
 		explanationErr = fmt.Errorf("load configured subagent model provider: %w", explanationConfigErr)
 	} else {
@@ -396,11 +423,24 @@ func (r *Runtime) Reload(ctx context.Context) error {
 			r.baseCtx, explanationCfg, time.Duration(settings.SubagentTimeoutSeconds)*time.Second,
 		)
 	}
+	if automaticApprovalConfigErr != nil {
+		automaticApprovalErr = fmt.Errorf("load configured Auto approval model provider: %w", automaticApprovalConfigErr)
+	} else {
+		automaticApprovalCoordinator, automaticApprovalErr = buildAutomaticApprovalCoordinator(
+			r.baseCtx, automaticApprovalCfg, time.Duration(settings.SubagentTimeoutSeconds)*time.Second,
+		)
+	}
 	if explanationErr != nil {
 		status.ApprovalError = explanationErr.Error()
 		observability.FromContext(ctx).WarnContext(ctx, "approval Agent unavailable", "component", "agent", "provider_id", status.ApprovalProviderID, "model", status.ApprovalModel, "error", explanationErr)
 	} else {
 		status.ApprovalAgentAvailable = true
+	}
+	if automaticApprovalErr != nil {
+		status.AutomaticApprovalError = automaticApprovalErr.Error()
+		observability.FromContext(ctx).WarnContext(ctx, "Auto approval Agent unavailable", "component", "agent", "provider_id", status.AutomaticApprovalProviderID, "model", status.AutomaticApprovalModel, "error", automaticApprovalErr)
+	} else {
+		status.AutomaticApprovalAgentAvailable = true
 	}
 	status.Available = true
 	r.mu.Lock()
@@ -412,7 +452,8 @@ func (r *Runtime) Reload(ctx context.Context) error {
 	r.toolsAt = time.Now().UTC().Format(time.RFC3339Nano)
 	r.mu.Unlock()
 	r.service.SetApprovalReviewer(approvalCoordinator)
-	observability.FromContext(ctx).InfoContext(ctx, "model runtime ready", "component", "agent", "source", status.Source, "provider_id", status.ProviderID, "model", status.Model, "max_iterations", settings.AgentMaxIterations, "approval_agent", status.ApprovalAgentAvailable, "approval_provider_id", status.ApprovalProviderID, "approval_model", status.ApprovalModel, "approval_timeout_seconds", status.ApprovalTimeoutSeconds)
+	r.service.SetAutomaticApprovalReviewer(automaticApprovalCoordinator)
+	observability.FromContext(ctx).InfoContext(ctx, "model runtime ready", "component", "agent", "source", status.Source, "provider_id", status.ProviderID, "model", status.Model, "max_iterations", settings.AgentMaxIterations, "approval_agent", status.ApprovalAgentAvailable, "automatic_approval_agent", status.AutomaticApprovalAgentAvailable, "approval_provider_id", status.ApprovalProviderID, "approval_model", status.ApprovalModel, "automatic_approval_provider_id", status.AutomaticApprovalProviderID, "automatic_approval_model", status.AutomaticApprovalModel, "approval_timeout_seconds", status.ApprovalTimeoutSeconds)
 	return nil
 }
 
@@ -435,7 +476,7 @@ func (r *Runtime) Status() Status {
 }
 
 func (r *Runtime) ToolCatalog() ToolCatalog {
-	catalog := ToolCatalog{Agent: "ops-pilot", Framework: "Eino InferTool", ExecutionMode: "sequential", Tools: []ToolDescriptor{}}
+	catalog := ToolCatalog{Agent: "ops-nerva", Framework: "Eino InferTool", ExecutionMode: "sequential", Tools: []ToolDescriptor{}}
 	if r == nil {
 		return catalog
 	}
@@ -770,6 +811,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 		}
 		toolCalls := newToolCallTracker(workspaceState.ID, inlineContext)
 		runCtx := service.WithSessionID(ctx, sessionID)
+		runCtx = service.WithApprovalUserRequest(runCtx, query)
 		runCtx = service.WithBlockingApprovals(runCtx)
 		runCtx = withModelRequestRetryNotifier(runCtx, func(notice modelRequestRetryNotice) {
 			total := modelRetries.Add(1)
@@ -856,6 +898,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 			if variant.IsStreaming && variant.MessageStream != nil {
 				stream := variant.MessageStream
 				var assistantContent strings.Builder
+				var assistantDisplay strings.Builder
 				var assistantGuard assistantOutputGuard
 				assistantHasToolCalls := false
 				var toolResult strings.Builder
@@ -919,7 +962,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 					if variant.Role == schema.Assistant {
 						assistantContent.WriteString(message.Content)
 						if content := assistantGuard.Write(message.Content); content != "" {
-							emit(Event{Type: "message", Role: role, ToolName: variant.ToolName, Content: content, SessionID: sessionID})
+							assistantDisplay.WriteString(content)
 						}
 						continue
 					}
@@ -931,18 +974,22 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 				}
 				if variant.Role == schema.Assistant {
 					if content := assistantGuard.Finish(); content != "" {
-						emit(Event{Type: "message", Role: role, ToolName: variant.ToolName, Content: content, SessionID: sessionID})
+						assistantDisplay.WriteString(content)
 					}
 					if len(assistantChunks) > 0 {
 						merged, mergeErr := schema.ConcatMessages(assistantChunks)
 						if mergeErr == nil {
 							toolCalls.add(merged.ToolCalls)
+							assistantHasToolCalls = assistantHasToolCalls || len(merged.ToolCalls) > 0
 						}
 					}
 					if assistantHasToolCalls {
 						assistantToolCallOutputs++
 					} else if assistantContent.Len() > 0 {
 						answerCandidate = assistantContent.String()
+						if !assistantGuard.blocked && assistantDisplay.Len() > 0 {
+							emit(Event{Type: "message", Role: role, ToolName: variant.ToolName, Content: assistantDisplay.String(), SessionID: sessionID})
+						}
 					} else {
 						assistantEmptyOutputs++
 					}
@@ -1020,7 +1067,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 					emit(Event{Type: "tool", ToolName: toolName, ToolCallID: toolCallID, Content: displayContent, SessionID: sessionID})
 					continue
 				}
-				if variant.Role != schema.Assistant || !containsInternalContextMarker(displayContent) {
+				if variant.Role != schema.Assistant || !assistantHasToolCalls && !containsInternalContextMarker(displayContent) {
 					emit(Event{Type: "message", Role: role, ToolName: toolName, Content: displayContent, SessionID: sessionID})
 				}
 			}

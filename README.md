@@ -41,7 +41,7 @@ flowchart LR
 ```bash
 docker build -t opsnerva .
 docker run --rm -p 8080:8080 \
-  -v opsnerva-data:/app/.data \
+  -v opsnerva-data:/app/data \
   -v opsnerva-workspace:/app/workspace \
   opsnerva
 ```
@@ -57,7 +57,7 @@ make build
 ./bin/ops-agent
 ```
 
-无参数启动会在可执行文件同目录生成 `config.yaml`、`.data/` 和 `workspace/`，已有配置不会被覆盖。Windows 的构建命令见[使用手册](docs/guide.md#windows-powershell)。
+无参数启动会在可执行文件同目录生成 `config.yaml`、`data/` 和 `workspace/`，已有配置不会被覆盖。Windows 的构建命令见[使用手册](docs/guide.md#windows-powershell)。
 
 ### 首次使用
 
@@ -71,7 +71,7 @@ make build
 ## 审批模式
 
 - `Manual`：主 Agent 和 MCP Client 的执行请求全部等待用户允许或拒绝。
-- `Auto`：全部请求交给无 Tool 的独立审批 Agent；模型不可用、超时或响应无效时回退人工审批。
+- `Auto`：独立的 Auto Approval Agent 对照当前用户请求返回允许、拒绝或人工判断；缺少用户请求、模型不可用、超时或响应无效时回退人工审批。
 - `Full access`：主 Agent 和 MCP Client 直接执行。
 
 三种模式都保留参数校验、主机与 Workspace 边界、SSH Host Key、连接摘要、凭据脱敏和审计。人工审批摘要绑定主机、命令、参数、环境和文件内容的 SHA-256。

@@ -54,7 +54,43 @@ func TestEnsureDefaultFileCreatesLoadableConfigWithoutOverwriting(t *testing.T) 
 	}
 }
 
-func TestLoadResolvesWorkspaceDirectoryRelativeToStartupDirectory(t *testing.T) {
+func TestLoadResolvesRuntimePathsRelativeToConfigurationDirectory(t *testing.T) {
+	configRoot := t.TempDir()
+	startupRoot := t.TempDir()
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(startupRoot); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previous) })
+
+	cfg, err := Load(filepath.Join(configRoot, "missing.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DataDir != filepath.Join(configRoot, "data") {
+		t.Fatalf("data directory = %q", cfg.DataDir)
+	}
+	if cfg.DatabasePath != filepath.Join(configRoot, "data", "ops-agent.db") {
+		t.Fatalf("database path = %q", cfg.DatabasePath)
+	}
+	if cfg.Logging.File != filepath.Join(configRoot, "data", "ops-agent.log") {
+		t.Fatalf("log path = %q", cfg.Logging.File)
+	}
+	if cfg.SSH.DefaultKnownHosts != filepath.Join(configRoot, "data", "known_hosts") {
+		t.Fatalf("known hosts path = %q", cfg.SSH.DefaultKnownHosts)
+	}
+	if cfg.WorkspaceDir != filepath.Join(configRoot, "workspace") {
+		t.Fatalf("workspace directory = %q", cfg.WorkspaceDir)
+	}
+	if cfg.WorkspaceSandboxPath != "bwrap" {
+		t.Fatalf("default workspace sandbox = %q", cfg.WorkspaceSandboxPath)
+	}
+}
+
+func TestLoadWithoutConfigurationUsesStartupDirectory(t *testing.T) {
 	root := t.TempDir()
 	previous, err := os.Getwd()
 	if err != nil {
@@ -65,15 +101,12 @@ func TestLoadResolvesWorkspaceDirectoryRelativeToStartupDirectory(t *testing.T) 
 	}
 	t.Cleanup(func() { _ = os.Chdir(previous) })
 
-	cfg, err := Load(filepath.Join(root, "missing.yaml"))
+	cfg, err := Load("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.WorkspaceDir != filepath.Join(root, "workspace") {
-		t.Fatalf("workspace directory = %q", cfg.WorkspaceDir)
-	}
-	if cfg.WorkspaceSandboxPath != "bwrap" {
-		t.Fatalf("default workspace sandbox = %q", cfg.WorkspaceSandboxPath)
+	if cfg.DataDir != filepath.Join(root, "data") || cfg.WorkspaceDir != filepath.Join(root, "workspace") {
+		t.Fatalf("runtime roots = data %q workspace %q", cfg.DataDir, cfg.WorkspaceDir)
 	}
 }
 

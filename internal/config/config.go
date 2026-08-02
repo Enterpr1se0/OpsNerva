@@ -84,14 +84,14 @@ type Limits struct {
 func Default() Config {
 	return Config{
 		ListenAddress: "0.0.0.0:8080",
-		DataDir:       ".data",
-		DatabasePath:  ".data/ops-agent.db",
+		DataDir:       "data",
+		DatabasePath:  "data/ops-agent.db",
 		Logging: Logging{
-			Level: "debug", Format: "text", File: ".data/ops-agent.log",
+			Level: "debug", Format: "text", File: "data/ops-agent.log",
 			MaxSizeMB: 20, MaxBackups: 3, RecentLimit: 2000,
 		},
 		SSH: SSH{
-			DefaultKnownHosts: ".data/known_hosts",
+			DefaultKnownHosts: "data/known_hosts",
 		},
 		Model: Model{Name: "gpt-4o-mini"},
 		Limits: Limits{
@@ -109,6 +109,10 @@ func Default() Config {
 
 func Load(path string) (Config, error) {
 	cfg := Default()
+	baseDir, err := configurationBaseDir(path)
+	if err != nil {
+		return Config{}, err
+	}
 	defaultDataDir := cfg.DataDir
 	defaultDatabasePath := cfg.DatabasePath
 	defaultKnownHosts := cfg.SSH.DefaultKnownHosts
@@ -134,22 +138,46 @@ func Load(path string) (Config, error) {
 	if cfg.Logging.File == "" || (cfg.DataDir != defaultDataDir && cfg.Logging.File == defaultLogFile && os.Getenv("OPS_AGENT_LOG_FILE") == "") {
 		cfg.Logging.File = filepath.Join(cfg.DataDir, "ops-agent.log")
 	}
+	cfg.DataDir = resolvePath(baseDir, cfg.DataDir)
+	if cfg.DatabasePath != ":memory:" && !strings.HasPrefix(cfg.DatabasePath, "file:") {
+		cfg.DatabasePath = resolvePath(baseDir, cfg.DatabasePath)
+	}
+	if cfg.Logging.File != "-" {
+		cfg.Logging.File = resolvePath(baseDir, cfg.Logging.File)
+	}
+	cfg.SSH.DefaultKnownHosts = resolvePath(baseDir, cfg.SSH.DefaultKnownHosts)
 	workspaceDir := filepath.Clean(strings.TrimSpace(cfg.WorkspaceDir))
 	if workspaceDir == "." && strings.TrimSpace(cfg.WorkspaceDir) == "" {
 		return Config{}, fmt.Errorf("workspace_dir is required")
 	}
-	if !filepath.IsAbs(workspaceDir) {
-		absolute, err := filepath.Abs(workspaceDir)
-		if err != nil {
-			return Config{}, fmt.Errorf("resolve workspace_dir: %w", err)
-		}
-		workspaceDir = absolute
-	}
-	cfg.WorkspaceDir = workspaceDir
+	cfg.WorkspaceDir = resolvePath(baseDir, workspaceDir)
 	if err := validateOperationsConfig(&cfg); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func configurationBaseDir(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		current, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("resolve startup directory: %w", err)
+		}
+		return filepath.Abs(current)
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve configuration path: %w", err)
+	}
+	return filepath.Dir(absolute), nil
+}
+
+func resolvePath(baseDir, path string) string {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(baseDir, path)
 }
 
 func validateOperationsConfig(cfg *Config) error {

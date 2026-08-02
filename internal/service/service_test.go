@@ -99,6 +99,26 @@ type fakeCommandExplainer struct {
 	inputs []domain.CommandReviewInput
 }
 
+type fakeAutomaticApprovalReviewer struct {
+	mu     sync.Mutex
+	review domain.CommandReview
+	err    error
+	inputs []domain.AutomaticApprovalInput
+}
+
+func (f *fakeAutomaticApprovalReviewer) Review(_ context.Context, input domain.AutomaticApprovalInput) (domain.CommandReview, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.inputs = append(f.inputs, input)
+	return f.review, f.err
+}
+
+func (f *fakeAutomaticApprovalReviewer) Inputs() []domain.AutomaticApprovalInput {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]domain.AutomaticApprovalInput(nil), f.inputs...)
+}
+
 func (f *fakeCommandExplainer) Review(_ context.Context, input domain.CommandReviewInput) (domain.CommandReview, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -772,7 +792,7 @@ func TestSystemSettingsValidatePersistAndReturnDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settings.AgentMaxIterations != domain.DefaultAgentMaxIterations || settings.ApprovalMode != domain.ApprovalModeManual || !settings.ApprovalExplanationsEnabled || settings.SubagentModelProviderID != "" || settings.SubagentTimeoutSeconds != domain.DefaultSubagentTimeoutSeconds || settings.WorkspaceShellMode != domain.DefaultWorkspaceShellMode(runtime.GOOS) {
+	if settings.AgentMaxIterations != domain.DefaultAgentMaxIterations || settings.ApprovalMode != domain.ApprovalModeManual || !settings.ApprovalExplanationsEnabled || settings.SubagentModelProviderID != "" || settings.AutomaticApprovalModelProviderID != "" || settings.SubagentTimeoutSeconds != domain.DefaultSubagentTimeoutSeconds || settings.WorkspaceShellMode != domain.DefaultWorkspaceShellMode(runtime.GOOS) {
 		t.Fatalf("unexpected default max iterations: %#v", settings)
 	}
 	if strings.Join(settings.ChatImageAllowedTypes, ",") != strings.Join(domain.DefaultChatImageAllowedTypes, ",") {
@@ -795,8 +815,17 @@ func TestSystemSettingsValidatePersistAndReturnDefault(t *testing.T) {
 	if _, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{AgentMaxIterations: 20, SubagentModelProviderID: &missingProvider}, "test"); err == nil {
 		t.Fatal("expected missing subagent provider validation error")
 	}
+	if _, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{AgentMaxIterations: 20, AutomaticApprovalModelProviderID: &missingProvider}, "test"); err == nil {
+		t.Fatal("expected missing Auto approval provider validation error")
+	}
 	provider, err := svc.SaveModelProvider(ctx, domain.ModelProviderInput{
 		Name: "subagent", Kind: "ollama", BaseURL: "http://127.0.0.1:11434/v1", Model: "small-model",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	automaticProvider, err := svc.SaveModelProvider(ctx, domain.ModelProviderInput{
+		Name: "auto-approval", Kind: "ollama", BaseURL: "http://127.0.0.1:11434/v1", Model: "approval-model",
 	}, "test")
 	if err != nil {
 		t.Fatal(err)
@@ -810,24 +839,27 @@ func TestSystemSettingsValidatePersistAndReturnDefault(t *testing.T) {
 	saved, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{
 		AgentMaxIterations: 30, ApprovalExplanationsEnabled: &explanationsEnabled,
 		ApprovalMode: &approvalMode,
-		SystemPrompt: &systemPrompt, SubagentModelProviderID: &provider.ID, SubagentTimeoutSeconds: &timeoutSeconds,
+		SystemPrompt: &systemPrompt, SubagentModelProviderID: &provider.ID, AutomaticApprovalModelProviderID: &automaticProvider.ID, SubagentTimeoutSeconds: &timeoutSeconds,
 		ChatImageAllowedTypes: imageTypes, WorkspaceShellMode: &hostShell,
 	}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if saved.AgentMaxIterations != 30 || saved.SystemPrompt != systemPrompt || saved.ApprovalMode != domain.ApprovalModeAuto || saved.ApprovalExplanationsEnabled || saved.SubagentModelProviderID != provider.ID || saved.SubagentTimeoutSeconds != timeoutSeconds || strings.Join(saved.ChatImageAllowedTypes, ",") != strings.Join(imageTypes, ",") || saved.WorkspaceShellMode != domain.WorkspaceShellModeHost || saved.UpdatedAt.IsZero() {
+	if saved.AgentMaxIterations != 30 || saved.SystemPrompt != systemPrompt || saved.ApprovalMode != domain.ApprovalModeAuto || saved.ApprovalExplanationsEnabled || saved.SubagentModelProviderID != provider.ID || saved.AutomaticApprovalModelProviderID != automaticProvider.ID || saved.SubagentTimeoutSeconds != timeoutSeconds || strings.Join(saved.ChatImageAllowedTypes, ",") != strings.Join(imageTypes, ",") || saved.WorkspaceShellMode != domain.WorkspaceShellModeHost || saved.UpdatedAt.IsZero() {
 		t.Fatalf("unexpected saved settings: %#v", saved)
 	}
 	reloaded, err := svc.SystemSettings(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reloaded.AgentMaxIterations != 30 || reloaded.SystemPrompt != systemPrompt || reloaded.ApprovalMode != domain.ApprovalModeAuto || reloaded.ApprovalExplanationsEnabled || reloaded.SubagentModelProviderID != provider.ID || reloaded.SubagentTimeoutSeconds != timeoutSeconds || strings.Join(reloaded.ChatImageAllowedTypes, ",") != strings.Join(imageTypes, ",") || reloaded.WorkspaceShellMode != domain.WorkspaceShellModeHost {
+	if reloaded.AgentMaxIterations != 30 || reloaded.SystemPrompt != systemPrompt || reloaded.ApprovalMode != domain.ApprovalModeAuto || reloaded.ApprovalExplanationsEnabled || reloaded.SubagentModelProviderID != provider.ID || reloaded.AutomaticApprovalModelProviderID != automaticProvider.ID || reloaded.SubagentTimeoutSeconds != timeoutSeconds || strings.Join(reloaded.ChatImageAllowedTypes, ",") != strings.Join(imageTypes, ",") || reloaded.WorkspaceShellMode != domain.WorkspaceShellModeHost {
 		t.Fatalf("system settings were not persisted: %#v", reloaded)
 	}
 	if _, err := svc.DeleteModelProvider(ctx, provider.ID, "test"); !errors.Is(err, ErrModelProviderInUse) || !strings.Contains(err.Error(), "selected for the approval Agent") {
 		t.Fatalf("selected subagent provider deletion was not blocked: %v", err)
+	}
+	if _, err := svc.DeleteModelProvider(ctx, automaticProvider.ID, "test"); !errors.Is(err, ErrModelProviderInUse) || !strings.Contains(err.Error(), "selected for the Auto approval Agent") {
+		t.Fatalf("selected Auto approval provider deletion was not blocked: %v", err)
 	}
 	invalidMode := "automatic"
 	if _, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{AgentMaxIterations: 30, ApprovalMode: &invalidMode}, "test"); err == nil {
@@ -902,6 +934,11 @@ func TestMCPHTTPSettingsGenerateRotateAndAuthorizeToken(t *testing.T) {
 
 func TestManualApprovalModeKeepsHumanApproval(t *testing.T) {
 	svc, transport, host := newTestService(t)
+	automatic := &fakeAutomaticApprovalReviewer{review: domain.CommandReview{
+		Status: "completed", Decision: domain.ApprovalAgentAllow, Reason: "范围明确",
+		Explanation: &domain.CommandExplanation{Summary: "重启 demo", Mechanism: "systemd 重启单元"}, ReviewedAt: time.Now().UTC(),
+	}}
+	svc.SetAutomaticApprovalReviewer(automatic)
 	svc.SetApprovalReviewer(&fakeCommandExplainer{review: domain.CommandReview{
 		Status: "completed", Decision: domain.ApprovalAgentAllow, Reason: "范围明确", ReviewedAt: time.Now().UTC(),
 	}})
@@ -911,7 +948,7 @@ func TestManualApprovalModeKeepsHumanApproval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "approval_required" || result.ApprovalID == "" || len(transport.calls) != 0 {
+	if result.Status != "approval_required" || result.AutoApproved || result.ApprovalID == "" || len(transport.calls) != 0 || len(automatic.Inputs()) != 0 {
 		t.Fatalf("manual mode bypassed human approval: result=%#v calls=%d", result, len(transport.calls))
 	}
 }
@@ -919,35 +956,42 @@ func TestManualApprovalModeKeepsHumanApproval(t *testing.T) {
 func TestAutoApprovalModeExecutesAllowedOperation(t *testing.T) {
 	svc, transport, host := newTestService(t)
 	saveApprovalMode(t, svc, domain.ApprovalModeAuto)
-	svc.SetApprovalReviewer(&fakeCommandExplainer{review: domain.CommandReview{
+	reviewer := &fakeAutomaticApprovalReviewer{review: domain.CommandReview{
 		Status: "completed", Decision: domain.ApprovalAgentAllow, Reason: "目标与范围明确",
 		Explanation: &domain.CommandExplanation{Summary: "重启 demo", Mechanism: "systemd 重启单元"}, ReviewedAt: time.Now().UTC(),
-	}})
-	result, err := svc.Submit(context.Background(), domain.ExecRequest{
+	}}
+	svc.SetAutomaticApprovalReviewer(reviewer)
+	ctx := WithApprovalUserRequest(context.Background(), "重启 demo 服务以恢复运行")
+	result, err := svc.Submit(ctx, domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"}, Reason: "recover demo",
 	}, "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "completed" || len(transport.calls) != 1 {
+	if result.Status != "completed" || !result.AutoApproved || len(transport.calls) != 1 {
 		t.Fatalf("approval Agent did not allow execution: result=%#v calls=%d", result, len(transport.calls))
 	}
 	run, err := svc.store.GetRun(context.Background(), result.RunID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run.AIReview == nil || run.AIReview.Decision != domain.ApprovalAgentAllow {
+	if run.AIReview == nil || run.AIReview.Kind != domain.CommandReviewKindAutomaticApproval || run.AIReview.Decision != domain.ApprovalAgentAllow {
 		t.Fatalf("approval Agent decision was not persisted: %#v", run.AIReview)
+	}
+	inputs := reviewer.Inputs()
+	if len(inputs) != 1 || inputs[0].UserRequest != "重启 demo 服务以恢复运行" {
+		t.Fatalf("approval Agent did not receive the current user request: %#v", inputs)
 	}
 }
 
 func TestAutoApprovalModeRejectsOperation(t *testing.T) {
 	svc, transport, host := newTestService(t)
 	saveApprovalMode(t, svc, domain.ApprovalModeAuto)
-	svc.SetApprovalReviewer(&fakeCommandExplainer{review: domain.CommandReview{
-		Status: "completed", Decision: domain.ApprovalAgentReject, Reason: "请求范围过大", ReviewedAt: time.Now().UTC(),
+	svc.SetAutomaticApprovalReviewer(&fakeAutomaticApprovalReviewer{review: domain.CommandReview{
+		Status: "completed", Decision: domain.ApprovalAgentReject, Reason: "请求范围过大",
+		Explanation: &domain.CommandExplanation{Summary: "重启 demo", Mechanism: "systemd 重启单元"}, ReviewedAt: time.Now().UTC(),
 	}})
-	result, err := svc.Submit(context.Background(), domain.ExecRequest{
+	result, err := svc.Submit(WithApprovalUserRequest(context.Background(), "只查看 demo 状态"), domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"}, Reason: "recover demo",
 	}, "eino-agent")
 	if err != nil {
@@ -965,7 +1009,7 @@ func TestAutoApprovalModeRejectsOperation(t *testing.T) {
 func TestAutoApprovalModeFallsBackToHuman(t *testing.T) {
 	svc, transport, host := newTestService(t)
 	saveApprovalMode(t, svc, domain.ApprovalModeAuto)
-	result, err := svc.Submit(context.Background(), domain.ExecRequest{
+	result, err := svc.Submit(WithApprovalUserRequest(context.Background(), "重启 demo 服务"), domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"}, Reason: "recover demo",
 	}, "eino-agent")
 	if err != nil {
@@ -982,13 +1026,31 @@ func TestAutoApprovalModeFallsBackToHuman(t *testing.T) {
 	}
 }
 
+func TestAutoApprovalModeDoesNotReuseExplanationAgent(t *testing.T) {
+	svc, transport, host := newTestService(t)
+	saveApprovalMode(t, svc, domain.ApprovalModeAuto)
+	explainer := &fakeCommandExplainer{review: domain.CommandReview{
+		Status: "completed", Decision: domain.ApprovalAgentAllow, Reason: "范围明确", ReviewedAt: time.Now().UTC(),
+	}}
+	svc.SetApprovalReviewer(explainer)
+	result, err := svc.Submit(WithApprovalUserRequest(context.Background(), "重启 demo 服务"), domain.ExecRequest{
+		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"}, Reason: "recover demo",
+	}, "eino-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "approval_required" || result.ApprovalID == "" || len(transport.calls) != 0 || len(explainer.Inputs()) != 0 {
+		t.Fatalf("Auto mode reused the explanation Agent: result=%#v calls=%d explanation_reviews=%d", result, len(transport.calls), len(explainer.Inputs()))
+	}
+}
+
 func TestAutoApprovalModeFallsBackOnInvalidReview(t *testing.T) {
 	svc, transport, host := newTestService(t)
 	saveApprovalMode(t, svc, domain.ApprovalModeAuto)
-	svc.SetApprovalReviewer(&fakeCommandExplainer{review: domain.CommandReview{
+	svc.SetAutomaticApprovalReviewer(&fakeAutomaticApprovalReviewer{review: domain.CommandReview{
 		Status: "completed", Decision: domain.ApprovalAgentAllow, ReviewedAt: time.Now().UTC(),
 	}})
-	result, err := svc.Submit(context.Background(), domain.ExecRequest{
+	result, err := svc.Submit(WithApprovalUserRequest(context.Background(), "重启 demo 服务"), domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"}, Reason: "recover demo",
 	}, "eino-agent")
 	if err != nil {
@@ -996,6 +1058,50 @@ func TestAutoApprovalModeFallsBackOnInvalidReview(t *testing.T) {
 	}
 	if result.Status != "approval_required" || len(transport.calls) != 0 {
 		t.Fatalf("invalid approval Agent response bypassed the human fallback: result=%#v calls=%d", result, len(transport.calls))
+	}
+}
+
+func TestAutoApprovalModeUsesManualDecisionWithoutExecuting(t *testing.T) {
+	svc, transport, host := newTestService(t)
+	saveApprovalMode(t, svc, domain.ApprovalModeAuto)
+	svc.SetAutomaticApprovalReviewer(&fakeAutomaticApprovalReviewer{review: domain.CommandReview{
+		Status: "completed", Decision: domain.ApprovalAgentManual, Reason: "目标范围需要用户确认",
+		Explanation: &domain.CommandExplanation{Summary: "重启 demo", Mechanism: "systemd 重启单元"}, ReviewedAt: time.Now().UTC(),
+	}})
+	result, err := svc.Submit(WithApprovalUserRequest(context.Background(), "检查并修复 demo"), domain.ExecRequest{
+		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"}, Reason: "recover demo",
+	}, "eino-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "approval_required" || result.ApprovalID == "" || len(transport.calls) != 0 {
+		t.Fatalf("manual approval Agent decision did not fall back to the operator: result=%#v calls=%d", result, len(transport.calls))
+	}
+	run, err := svc.store.GetRun(context.Background(), result.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.AIReview == nil || run.AIReview.Decision != domain.ApprovalAgentManual {
+		t.Fatalf("manual approval Agent decision was not persisted: %#v", run.AIReview)
+	}
+}
+
+func TestAutoApprovalModeRequiresCurrentUserRequest(t *testing.T) {
+	svc, transport, host := newTestService(t)
+	saveApprovalMode(t, svc, domain.ApprovalModeAuto)
+	reviewer := &fakeAutomaticApprovalReviewer{review: domain.CommandReview{
+		Status: "completed", Decision: domain.ApprovalAgentAllow, Reason: "范围明确",
+		Explanation: &domain.CommandExplanation{Summary: "重启 demo", Mechanism: "systemd 重启单元"}, ReviewedAt: time.Now().UTC(),
+	}}
+	svc.SetAutomaticApprovalReviewer(reviewer)
+	result, err := svc.Submit(context.Background(), domain.ExecRequest{
+		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"}, Reason: "recover demo",
+	}, "eino-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "approval_required" || result.ApprovalID == "" || len(transport.calls) != 0 || len(reviewer.Inputs()) != 0 {
+		t.Fatalf("missing user request did not fail closed to manual approval: result=%#v calls=%d reviews=%d", result, len(transport.calls), len(reviewer.Inputs()))
 	}
 }
 
@@ -1009,21 +1115,21 @@ func TestFullAccessModeBypassesPolicyOnlyForAgent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "completed" || len(transport.calls) != 1 {
+	if result.Status != "completed" || result.AutoApproved || len(transport.calls) != 1 {
 		t.Fatalf("full access did not execute the Agent request directly: result=%#v calls=%d", result, len(transport.calls))
 	}
 	mcpResult, err := svc.Submit(context.Background(), request, "mcp-client")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mcpResult.Status != "completed" || len(transport.calls) != 2 {
+	if mcpResult.Status != "completed" || mcpResult.AutoApproved || len(transport.calls) != 2 {
 		t.Fatalf("full access did not apply to the LLM-facing MCP server: result=%#v calls=%d", mcpResult, len(transport.calls))
 	}
 	operatorResult, err := svc.Submit(context.Background(), request, "admin-web")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if operatorResult.Status != "completed" || len(transport.calls) != 3 {
+	if operatorResult.Status != "completed" || operatorResult.AutoApproved || len(transport.calls) != 3 {
 		t.Fatalf("authenticated operator request did not execute directly: result=%#v calls=%d", operatorResult, len(transport.calls))
 	}
 }
@@ -1399,7 +1505,7 @@ func TestAgentPlanTransitionsPreserveFinishedHistory(t *testing.T) {
 	if plan.Status != "active" || len(plan.Steps) != 3 || plan.Steps[0].Status != "in_progress" || plan.Steps[1].Status != "pending" {
 		t.Fatalf("unexpected initial plan: %#v", plan)
 	}
-	if _, err := svc.UpdateAgentPlanStep(ctx, 2, "completed", "not actually current", "test"); err == nil {
+	if _, err := svc.UpdateAgentPlanStep(ctx, 2, "completed", "test"); err == nil {
 		t.Fatal("expected out-of-order step completion to fail")
 	} else {
 		var transition *store.PlanTransitionError
@@ -1407,25 +1513,25 @@ func TestAgentPlanTransitionsPreserveFinishedHistory(t *testing.T) {
 			t.Fatalf("out-of-order update did not return a typed transition error: %v", err)
 		}
 	}
-	plan, err = svc.UpdateAgentPlanStep(ctx, 1, "completed", "Inspected README and host facts", "test")
+	plan, err = svc.UpdateAgentPlanStep(ctx, 1, "completed", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if plan.Steps[0].Status != "completed" || plan.Steps[1].Status != "in_progress" || plan.Steps[2].Status != "pending" {
 		t.Fatalf("plan did not advance exactly one step: %#v", plan)
 	}
-	plan, err = svc.UpdateAgentPlanStep(ctx, 2, "blocked", "Package mirror is unavailable", "test")
+	plan, err = svc.UpdateAgentPlanStep(ctx, 2, "blocked", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if plan.Status != "blocked" || plan.Steps[1].Status != "blocked" || plan.Steps[2].Status != "pending" {
 		t.Fatalf("blocked plan state is inconsistent: %#v", plan)
 	}
-	plan, err = svc.UpdateAgentPlanStep(ctx, 2, "in_progress", "Package mirror recovered", "test")
+	plan, err = svc.UpdateAgentPlanStep(ctx, 2, "in_progress", "test")
 	if err != nil || plan.Status != "active" || plan.Steps[1].Status != "in_progress" {
 		t.Fatalf("blocked step did not resume: plan=%#v err=%v", plan, err)
 	}
-	plan, err = svc.UpdateAgentPlanStep(ctx, 2, "skipped", "Deployment is already current", "test")
+	plan, err = svc.UpdateAgentPlanStep(ctx, 2, "skipped", "test")
 	if err != nil || plan.Steps[1].Status != "skipped" || plan.Steps[2].Status != "in_progress" {
 		t.Fatalf("skipped step did not advance: plan=%#v err=%v", plan, err)
 	}
@@ -1433,14 +1539,14 @@ func TestAgentPlanTransitionsPreserveFinishedHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plan.Steps) != 4 || plan.Steps[0].Status != "completed" || plan.Steps[0].Evidence == "" || plan.Steps[1].Status != "skipped" || plan.Steps[1].Evidence == "" || plan.Steps[2].Title != "Verify the endpoint" || plan.Steps[2].Status != "in_progress" || plan.Steps[3].Status != "pending" {
+	if len(plan.Steps) != 4 || plan.Steps[0].Status != "completed" || plan.Steps[1].Status != "skipped" || plan.Steps[2].Title != "Verify the endpoint" || plan.Steps[2].Status != "in_progress" || plan.Steps[3].Status != "pending" {
 		t.Fatalf("revision did not preserve finished history and replace remaining steps: %#v", plan)
 	}
-	plan, err = svc.UpdateAgentPlanStep(ctx, 3, "completed", "Endpoint returned healthy", "test")
+	plan, err = svc.UpdateAgentPlanStep(ctx, 3, "completed", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err = svc.UpdateAgentPlanStep(ctx, 4, "completed", "Outcome recorded", "test")
+	plan, err = svc.UpdateAgentPlanStep(ctx, 4, "completed", "test")
 	if err != nil || plan.Status != "completed" {
 		t.Fatalf("revised plan did not complete: plan=%#v err=%v", plan, err)
 	}
@@ -1450,45 +1556,6 @@ func TestAgentPlanTransitionsPreserveFinishedHistory(t *testing.T) {
 	loaded, err := svc.GetAgentPlan(context.Background(), "session_plan_test")
 	if err != nil || loaded.Status != "completed" || len(loaded.Steps) != 4 {
 		t.Fatalf("plan was not persisted: plan=%#v err=%v", loaded, err)
-	}
-}
-
-func TestAgentPlanStepUpdateAutomaticallyAppendsRecentRunEvidence(t *testing.T) {
-	svc, _, host := newTestService(t)
-	ctx := WithSessionID(context.Background(), "session_plan_run_evidence")
-	if _, err := svc.CreateAgentPlan(ctx, "Verify the service", []string{"Run the health check", "Report the result"}, "test"); err != nil {
-		t.Fatal(err)
-	}
-	request := domain.ExecRequest{HostID: host.ID, Mode: domain.ExecProgram, Program: "curl", Args: []string{"--fail", "http://127.0.0.1/health"}, Reason: "verify health"}
-	requestJSON, err := json.Marshal(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	started := time.Now().UTC()
-	run := domain.Run{
-		ID: "run_plan_evidence", SessionID: "session_plan_run_evidence", HostID: host.ID, ToolName: "ssh_exec",
-		RequestJSON: string(requestJSON), SearchText: request.SearchText(), RequestDigest: "digest-plan-evidence",
-		Status: "running", StartedAt: started,
-	}
-	if err := svc.Store().CreateRun(ctx, run); err != nil {
-		t.Fatal(err)
-	}
-	run.Status = "completed"
-	run.ExitCode = 0
-	run.StdoutRedacted = "HTTP 200 healthy\n"
-	run.CompletedAt = started.Add(time.Second)
-	if err := svc.Store().UpdateRun(ctx, run); err != nil {
-		t.Fatal(err)
-	}
-	plan, err := svc.UpdateAgentPlanStep(ctx, 1, "completed", "", "eino-agent")
-	if err != nil {
-		t.Fatal(err)
-	}
-	evidence := plan.Steps[0].Evidence
-	for _, required := range []string{"Recent runs:", "run_plan_evidence", "ssh_exec", "completed, exit=0", "HTTP 200 healthy"} {
-		if !strings.Contains(evidence, required) {
-			t.Fatalf("automatic plan evidence is missing %q: %s", required, evidence)
-		}
 	}
 }
 
@@ -2428,7 +2495,7 @@ func TestNormalizeProviderBaseURL(t *testing.T) {
 }
 
 func TestChatSessionsCanBeListedLoadedAndDeleted(t *testing.T) {
-	svc, _, _ := newTestService(t)
+	svc, _, host := newTestService(t)
 	ctx := context.Background()
 	if err := svc.store.AppendChatMessage(ctx, "session-one", "user", "Investigate disk usage"); err != nil {
 		t.Fatal(err)
@@ -2443,6 +2510,34 @@ func TestChatSessionsCanBeListedLoadedAndDeleted(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := svc.store.AppendChatMessage(ctx, "session-two", "user", "Deploy the API"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	run := domain.Run{
+		ID: "run-session-one", SessionID: "session-one", HostID: host.ID, ToolName: "ssh_exec",
+		RequestJSON: `{}`, RequestDigest: "digest-session-one", Status: "completed", StartedAt: now, CompletedAt: now,
+	}
+	if err := svc.store.CreateRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	approval := domain.Approval{
+		ID: "approval-session-one", RunID: run.ID, HostID: host.ID, RequestJSON: `{}`, RequestDigest: run.RequestDigest,
+		Status: "rejected", CreatedAt: now,
+	}
+	if err := svc.store.CreateApproval(ctx, approval); err != nil {
+		t.Fatal(err)
+	}
+	task := domain.Task{ID: "task-session-one", RunID: run.ID, HostID: host.ID, Status: "completed", StartedAt: now, EndedAt: now}
+	if err := svc.store.UpsertTask(ctx, task, domain.ExecResult{RunID: run.ID, Status: "completed"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.store.AppendAudit(ctx, domain.AuditEvent{RunID: run.ID, Type: "command_completed", Actor: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.store.AppendAudit(ctx, domain.AuditEvent{Type: "agent_plan_created", Actor: "test", Data: map[string]any{"session_id": "session-one"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.store.AppendAudit(ctx, domain.AuditEvent{Type: "agent_plan_created", Actor: "test", Data: map[string]any{"session_id": "session-two"}}); err != nil {
 		t.Fatal(err)
 	}
 	sessions, err := svc.ListChatSessions(ctx, 10)
@@ -2460,14 +2555,39 @@ func TestChatSessionsCanBeListedLoadedAndDeleted(t *testing.T) {
 	if err != nil || len(modelMessages) != 2 || modelMessages[0].Role != "user" || modelMessages[1].Role != "assistant" {
 		t.Fatalf("reasoning and tool history leaked into model messages: %#v err=%v", modelMessages, err)
 	}
-	if err := svc.DeleteChatSession(ctx, "session-one", "test"); err != nil {
+	if err := svc.DeleteChatSession(ctx, "session-one"); err != nil {
 		t.Fatal(err)
 	}
 	messages, err = svc.ListChatMessages(ctx, "session-one", 10)
 	if err != nil || len(messages) != 0 {
 		t.Fatalf("deleted messages still exist: %#v err=%v", messages, err)
 	}
-	if err := svc.DeleteChatSession(ctx, "session-one", "test"); !errors.Is(err, store.ErrNotFound) {
+	if _, err := svc.store.GetRun(ctx, run.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("conversation run survived deletion: %v", err)
+	}
+	if _, err := svc.store.GetApproval(ctx, approval.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("conversation approval survived deletion: %v", err)
+	}
+	if _, _, _, err := svc.store.GetTask(ctx, task.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("conversation task survived deletion: %v", err)
+	}
+	audit, err := svc.store.ListAudit(ctx, "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keptOtherSession := false
+	for _, event := range audit {
+		if event.RunID == run.ID || event.Data["session_id"] == "session-one" {
+			t.Fatalf("conversation audit survived deletion: %#v", event)
+		}
+		if event.Data["session_id"] == "session-two" {
+			keptOtherSession = true
+		}
+	}
+	if !keptOtherSession {
+		t.Fatalf("another conversation's audit was deleted: %#v", audit)
+	}
+	if err := svc.DeleteChatSession(ctx, "session-one"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("expected not found on second delete, got %v", err)
 	}
 }

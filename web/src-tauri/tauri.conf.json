@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "OpsNerva",
-  "version": "0.1.7",
-  "identifier": "io.opspilot.desktop",
+  "version": "0.1.8",
+  "identifier": "io.opsnerva.desktop",
   "build": {
     "beforeDevCommand": "npm run build && npm run desktop:prepare && npm run dev",
     "devUrl": "http://localhost:5173/desktop.html",

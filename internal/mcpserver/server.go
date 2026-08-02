@@ -73,7 +73,7 @@ func New(svc *service.Service, version string) *Server {
 			output, err := agent.RunSSHTunnelTool(ctx, svc, input, "mcp-client")
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_shell", Description: "Start, input, inspect, list, interrupt, or close an approved interactive SSH PTY. Never send credentials through input.", Annotations: changeAnnotations("Manage SSH shell", true)},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_shell", Description: "Start, input, read output, list, interrupt, or close an approved interactive SSH PTY. input returns the response; output waits for and reads more of the latest response. Never send credentials through input.", Annotations: changeAnnotations("Manage SSH shell", true)},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.SSHShellInput) (*mcp.CallToolResult, any, error) {
 			ctx = service.WithMCPClientSession(ctx)
 			output, err := agent.RunSSHShellTool(ctx, svc, input, "mcp-client")

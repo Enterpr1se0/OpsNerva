@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"path/filepath"
 	"strings"
@@ -137,12 +136,12 @@ func TestSearchRunsFiltersAndFallbacks(t *testing.T) {
 		t.Fatalf("stdout search: expected run-a, got %d result(s) (err=%v)", len(runs), err)
 	}
 
-	// Rows without search_text (legacy or hand-inserted) still match via request_json.
-	legacy := domain.Run{
-		ID: "run-legacy", HostID: "host-a", RequestJSON: `{"program":"nginx"}`,
-		RequestDigest: "digest-legacy", Status: "completed", StartedAt: now,
+	// Rows without search_text still match via request_json.
+	fallback := domain.Run{
+		ID: "run-fallback", HostID: "host-a", RequestJSON: `{"program":"nginx"}`,
+		RequestDigest: "digest-fallback", Status: "completed", StartedAt: now,
 	}
-	if err := st.CreateRun(ctx, legacy); err != nil {
+	if err := st.CreateRun(ctx, fallback); err != nil {
 		t.Fatal(err)
 	}
 	runs, err = st.SearchRuns(ctx, "nginx", "", "", 0)
@@ -151,10 +150,10 @@ func TestSearchRunsFiltersAndFallbacks(t *testing.T) {
 	}
 	found := false
 	for _, item := range runs {
-		found = found || item.ID == "run-legacy"
+		found = found || item.ID == "run-fallback"
 	}
 	if !found {
-		t.Fatalf("request_json fallback: run-legacy missing from %d result(s)", len(runs))
+		t.Fatalf("request_json fallback: run-fallback missing from %d result(s)", len(runs))
 	}
 }
 
@@ -191,63 +190,5 @@ func TestSearchRunsFiltersBySession(t *testing.T) {
 	}
 	if len(allRuns) != 2 {
 		t.Fatalf("global audit search lost runs: %#v", allRuns)
-	}
-}
-
-func TestMigrationBackfillsRunSearchText(t *testing.T) {
-	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "legacy.db")
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	statements := []string{
-		`CREATE TABLE hosts (
-  id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, address TEXT NOT NULL, port INTEGER NOT NULL DEFAULT 22,
-  user TEXT NOT NULL, known_hosts_file TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
-		`CREATE TABLE runs (
-  id TEXT PRIMARY KEY, session_id TEXT NOT NULL DEFAULT '', host_id TEXT NOT NULL, request_json TEXT NOT NULL,
-  request_digest TEXT NOT NULL, risk TEXT NOT NULL, status TEXT NOT NULL, exit_code INTEGER NOT NULL DEFAULT 0,
-  stdout_redacted TEXT NOT NULL DEFAULT '', stderr_redacted TEXT NOT NULL DEFAULT '',
-  stdout_cipher TEXT NOT NULL DEFAULT '', stderr_cipher TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
-  started_at TEXT NOT NULL, completed_at TEXT, FOREIGN KEY(host_id) REFERENCES hosts(id))`,
-		`INSERT INTO hosts(id,name,address,port,user,created_at,updated_at)
-  VALUES('host-a','host-a','127.0.0.1',22,'ops','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
-	}
-	for _, statement := range statements {
-		if _, err := db.ExecContext(ctx, statement); err != nil {
-			t.Fatal(err)
-		}
-	}
-	encoded, err := json.Marshal(domain.ExecRequest{
-		HostID: "host-a", Mode: "script", Script: `tail -n 50 "/var/log/nginx/error.log" > /tmp/tail.out`, Reason: "collect errors",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO runs(id,host_id,request_json,request_digest,risk,status,started_at)
-  VALUES('run-old','host-a',?,'digest-old','read_only','completed','2026-01-02T00:00:00Z')`, string(encoded)); err != nil {
-		t.Fatal(err)
-	}
-	// A row whose redacted request is no longer valid JSON must not abort migration.
-	if _, err := db.ExecContext(ctx, `INSERT INTO runs(id,host_id,request_json,request_digest,risk,status,started_at)
-  VALUES('run-broken','host-a','{"script":[REDACTED]}','digest-broken','read_only','completed','2026-01-02T00:00:00Z')`); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	st, err := Open(ctx, path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	runs, err := st.SearchRuns(ctx, `> /tmp/tail.out`, "", "", 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(runs) != 1 || runs[0].ID != "run-old" {
-		t.Fatalf("backfill: expected run-old for redirect query, got %d result(s)", len(runs))
 	}
 }

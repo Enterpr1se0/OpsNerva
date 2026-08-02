@@ -59,7 +59,7 @@ export const api = {
 	workspaceFiles: (workspaceId:string,path='.') => request<WorkspaceFileList>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files?path=${encodeURIComponent(path)}`),
 	previewWorkspaceFile: (workspaceId:string,path:string) => request<WorkspaceFilePreview>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/preview?path=${encodeURIComponent(path)}`),
 	saveWorkspaceTextFile: (workspaceId:string,path:string,content:string) => request<WorkspaceUploadResult>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files`,{method:'PUT',body:JSON.stringify({path,content})}),
-	uploadWorkspaceFile: (workspaceId:string,file:File,path:string) => {const body=new FormData();body.set('file',file);body.set('path',path);return request<WorkspaceUploadResult>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files`,{method:'POST',body})},
+	uploadWorkspaceFile: (workspaceId:string,file:File,path:string) => {const query=new URLSearchParams({path,filename:file.name});return request<WorkspaceUploadResult>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files?${query}`,{method:'POST',body:file,headers:{'Content-Type':file.type||'application/octet-stream'}})},
 	deleteWorkspaceEntry: (workspaceId:string,path:string) => request<WorkspaceDeleteResult>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files?path=${encodeURIComponent(path)}`,{method:'DELETE'}),
   saveSystemSettings: (settings: SystemSettingsInput) => request<SystemSettings>('/api/v1/settings', { method: 'PUT', body: JSON.stringify(settings) }),
   webSearchSettings: () => request<WebSearchSettings>('/api/v1/web-search/settings'),

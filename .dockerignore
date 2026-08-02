@@ -1,6 +1,6 @@
 .git
 .idea
-.data
+data
 bin
 web/node_modules
 web/dist

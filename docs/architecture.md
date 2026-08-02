@@ -6,7 +6,7 @@ LLM、Prompt、Skill、远程输出和 MCP Client 都不属于可信计算基。
 
 1. 从 SQLite 按 `host_id` 解析目标与认证方式，忽略模型提供的任何连接凭据。
 2. 规范化并校验请求，绑定原始载荷与连接配置的 SHA-256。
-3. 应用审批模式：Manual 交给用户，Auto 交给审批 Agent，Full access 直接执行；审批 Agent 不可用时回退用户审批。
+3. 应用审批模式：Manual 交给用户，Auto 将当前用户请求和精确操作交给审批 Agent，Full access 直接执行；审批 Agent 要求人工判断、不可用或返回无效结果时回退用户审批。
 4. 仅在实际执行前解密所需 SSH/sudo 密码，获取并发令牌，通过绑定的内置 SSH Transport 执行。
 5. 加密原始请求和输出，生成脱敏视图并追加审计事件。
 
@@ -16,7 +16,7 @@ Eino Tool、MCP Tool、HTTP 和 CLI 都是这个 Service 的适配器。模型�
 
 Web/API 位于单管理员认证边界之后。数据库尚无管理员凭据时，Web 首次初始化页允许用户创建密码，并以仅首次插入的方式保存 Argon2id 哈希；初始化完成后该接口永久拒绝再次写入。后续请求使用服务端 Session、HttpOnly/SameSite Cookie 和 CSRF Token。MCP HTTP 使用独立 Bearer Token，不接受浏览器 Cookie；MCP stdio 与 CLI 仍属于本机进程边界。
 
-`ApprovalAgent` 是一个 `MaxIterations=1`、无 Tool 的独立 Eino `ChatModelAgent`，结构化返回 `allow/reject`、原因、操作机制和具体注意事项。Auto 模式同步使用其决定；不可用、超时或格式无效时回退 Manual。Manual 可异步调用它生成审批建议，但建议不代替用户决定。
+人工审批说明使用原有 `ApprovalAgent`；Auto 决策使用新增的 `AutoApprovalAgent`。两者都是 `MaxIterations=1`、无 Tool 的独立 Eino `ChatModelAgent`，各自拥有 Runner、Prompt、Service 接口、并发槽和可用状态，互不复用。`ApprovalAgent` 仅异步生成人工审批页的操作与风险说明，不参与自动决定。`AutoApprovalAgent` 接收由 Go context 绑定的当前用户请求、精确操作、目标能力、当前计划目标/步骤和请求摘要；Tool reason 与计划不能扩大用户授权。它结构化返回 `allow/reject/manual`。Auto 仅在完整 `allow` 时执行，明确 `reject` 时终止，`manual`、缺少当前用户请求、不可用、超时或格式无效时回退用户审批。
 
 ## Packages
 
@@ -60,11 +60,11 @@ Workspace 与 SSH 文件读取共享 `tail_lines` 语义。Agent 侧 Workspace �
 
 Workspace 在 `workspace_dir` 下按 ID 托管；SQLite 只登记 ID、权限和时间戳，`chat_sessions` 持久化当前绑定。目录固定派生为 `<workspace_dir>/<id>`，API、审计和模型上下文均不返回真实根路径。`workspace_list` 不存在，模型侧 Workspace Tool schema 不含 `workspace_id`，只从可信会话上下文解析绑定；没有会话语义的 MCP Server 不注册这些 Tool。上传与下载限制为 100 MiB，拒绝敏感路径、符号链接和覆盖，通过同目录临时文件、`fsync`、SHA256 校验与原子 hard-link 提交。`workspace_file_upload` 绑定本地源版本后发送到 SSH，`workspace_file_download` 绑定远端源版本后写入 Workspace；绝对本地路径不会序列化。`workspace_file_delete` 拒绝根目录，非空目录要求 `recursive=true`。Web 文件面板通过独立附件接口流式下载普通文件，响应使用原文件名、`no-store` 与 `nosniff`；文件列表和预览窗口共享该入口。Web 文件面板与 Agent、Shell、外部程序共享 SSE 文件事件刷新链路。每个 Workspace 使用隐藏的受管目标复用 Run/Approval/Audit 状态机。
 
-`workspace_shell` 是唯一开放给模型的本地 Shell，支持一次性 `run` 以及 `start/input/status/list/interrupt/close` 交互式 PTY。管理员在 SQLite 持久化的 System 设置中明确选择 `sandbox`、`host` 或 `disabled`，Linux 默认 `sandbox`，Windows 默认 `host`。启动或运行时解析出的实际后端写入 `ExecRequest.workspace_shell_backend`，和 Workspace ID、相对 cwd、环境及脚本一起进入加密审批摘要；执行前再次读取设置，后端不一致即拒绝。交互会话复用 SSH 终端的事件序列、ANSI 输出、尺寸变更、Ctrl+C 与持久化状态，但以 `kind=workspace` 记录 Workspace 和后端；没有 TTL。Bubblewrap 交互模式复用外层专用 PTY 的 session/controlling terminal，不再创建第二个 session，因此 Bash job control 和全屏程序可用；原始 ANSI 事件保留给 Web 终端，Agent 适配器使用跨块状态机移除控制序列。启动和一次性脚本都遵循当前审批模式，不再进行等级分类。
+`workspace_shell` 是唯一开放给模型的本地 Shell，支持一次性 `run` 以及 `start/input/output/list/interrupt/close` 交互式 PTY。管理员在 SQLite 持久化的 System 设置中明确选择 `sandbox`、`host` 或 `disabled`，Linux 默认 `sandbox`，Windows 默认 `host`。启动或运行时解析出的实际后端写入 `ExecRequest.workspace_shell_backend`，和 Workspace ID、相对 cwd、环境及脚本一起进入加密审批摘要；执行前再次读取设置，后端不一致即拒绝。交互会话复用 SSH 终端的事件序列、ANSI 输出、尺寸变更、Ctrl+C 与持久化状态，但以 `kind=workspace` 记录 Workspace 和后端；没有 TTL。Bubblewrap 交互模式复用外层专用 PTY 的 session/controlling terminal，不再创建第二个 session，因此 Bash job control 和全屏程序可用；原始 ANSI 事件保留给 Web 终端，Agent 适配器使用跨块状态机移除控制序列。启动和一次性脚本都遵循当前审批模式，不再进行等级分类。
 
 `web_search` 和 `web_extract` 共用管理员保存在 `web_search_settings` 中的 Tavily 配置，但可由 func 管理分别启停。Tavily 设置只保存共享 `proxy_id`，运行时从 `proxies` 解析 HTTP、HTTPS、SOCKS5 或 SOCKS5H 地址及加密凭据；请求禁用环境代理，选中的代理失败时不会回退直连。查询、域名过滤条件和待提取 URL 会离开本机。`web_extract` 一次接受最多五个公开 HTTP/HTTPS URL，拒绝凭据、localhost、私网和链路本地地址，固定使用 basic Markdown 提取。提供方响应限制为 2 MiB；全部外部内容都会执行当前凭据精确脱敏并标记为不可信。审计只保存查询或规范化 URL 列表的 SHA256，不保存正文、凭据或完整 URL。
 
-Sandbox 后端仅在 Linux 使用配置的 Bubblewrap；不存在或 namespace 创建失败时关闭失败，绝不回退到 Host Shell。沙箱新建 user/mount/PID/network namespace、丢弃 capabilities、禁用嵌套 user namespace 和网络，只读挂载 `/usr` 与动态链接库目录，创建独立 `/proc`、`/dev`、`/tmp`，并按 Workspace access 只读或读写挂载到 `/workspace`。预存的 `.env*`、`.ssh`、`.opspilot-*`、`.data`、`master.key` 与 credential 命名路径，以及 socket、FIFO 和 device 等特殊文件，在 mount namespace 内被遮蔽。
+Sandbox 后端仅在 Linux 使用配置的 Bubblewrap；不存在或 namespace 创建失败时关闭失败，绝不回退到 Host Shell。沙箱新建 user/mount/PID/network namespace、丢弃 capabilities、禁用嵌套 user namespace 和网络，只读挂载 `/usr` 与动态链接库目录，创建独立 `/proc`、`/dev`、`/tmp`，并按 Workspace access 只读或读写挂载到 `/workspace`。预存的 `.env*`、`.ssh`、`.opsnerva-*`、`data`、`master.key` 与 credential 命名路径，以及 socket、FIFO 和 device 等特殊文件，在 mount namespace 内被遮蔽。
 
 Host 后端直接以服务账户执行，拥有宿主机文件系统与网络权限；Unix 选择 Bash，Windows 依次查找 `pwsh.exe` 与 `powershell.exe`。Host 仅允许 `read_write` Workspace，并遵循当前审批模式。两种后端都使用清理后的环境、有界输出、统一脱敏并隐藏 Workspace 宿主根路径。配置中固定的 Workspace validator 仍使用 argv 和固定环境单独执行，不经过 Shell。
 
@@ -84,9 +84,9 @@ Host 后端直接以服务账户执行，拥有宿主机文件系统与网络权
 Agent / MCP request
    ├── Manual ── approval_required ── approved ── running ── completed / failed
    │                              └── rejected / expired
-   ├── Auto ── ApprovalAgent allow ── running ── completed / failed
+   ├── Auto ── AutoApprovalAgent allow ── running ── completed / failed
    │          ├── reject ── rejected
-   │          └── unavailable/invalid ── approval_required
+   │          └── manual/unavailable/invalid ── approval_required
    └── Full access ── running ── completed / failed
 ```
 
@@ -100,7 +100,7 @@ HTTP Chat Handler 使用保留 request logger/value、但移除浏览器取消�
 
 ## Task plans
 
-`ops_plan_step_update` 在状态转移前读取当前步骤开始后的最近审计 run，将 run ID、Tool、状态、退出码和脱敏输出摘要自动附加到 evidence；仅在没有可用 run 时要求调用方手写证据。
+`ops_plan_step_update` 只接收步骤编号和目标状态，不再保存运行摘要或额外说明。
 
 复杂任务通过 Eino 专用的 `ops_plan_create`、`ops_plan_step_update` 和 `ops_plan_revise` 三个强类型 Tool 编排。计划和步骤分别写入 `agent_plans`、`agent_plan_steps`，session ID 只取可信 Go context，模型不能为其他会话读写计划。创建时只允许 2–8 个不重复步骤，第一步自动进入 `in_progress`。Store 在单个 SQLite 事务中处理当前步骤的完成、阻塞、跳过和恢复；完成或跳过后自动激活下一步。修订只删除当前及待处理步骤，再按新顺序插入，已完成和已跳过记录保持不变。数据库层始终最多只有一个进行中步骤。
 
@@ -134,7 +134,7 @@ Runner 在调用工具前通过 Go context 绑定当前 session ID，Service 创
 
 SQLite 使用部分唯一索引保证最多只有一个 active provider。切换时服务更新 active route，构建新的 ChatModelAgent 与 Runner，再通过互斥锁原子替换运行时指针；已经取得旧 Runner 的请求可以正常结束，新请求使用新配置。没有 active provider 时才回退到 `OPENAI_*` 环境变量。
 
-审批 Agent 默认继承 active provider，也可以通过 `system_settings.subagent_model_provider_id` 固定使用任一已保存 provider。显式选择的 provider 不会静默回退，且在解除引用前禁止删除。其业务截止时间来自 `subagent_timeout_seconds`，允许 5–120 秒、默认 30 秒；底层 HTTP 客户端仅增加固定清理余量，避免维护两套相互竞争的超时配置。
+人工审批说明 Agent 和 Auto Approval Agent 默认各自继承 active provider。前者可通过 `system_settings.subagent_model_provider_id` 指定模型，后者通过 `automatic_approval_settings.model_provider_id` 独立指定；一方的选择不影响另一方。显式选择的 provider 不会静默回退，且在解除引用前禁止删除。两者的业务截止时间共用 `subagent_timeout_seconds`，允许 5–120 秒、默认 30 秒。
 
 模型发现统一请求配置 Base URL 下的 `GET /models`，兼容 OpenAI 标准的 `data[].id`，同时容忍部分实现的 `models[]` 包装。请求最长 15 秒、响应最大 2 MiB，并禁止 HTTP 重定向，避免 Authorization Header 被转发到其他地址；上游错误在返回 Web 前会经过密钥替换和通用脱敏。
 

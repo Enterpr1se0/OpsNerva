@@ -26,8 +26,6 @@ var (
 	ErrInvalidPlanTransition = errors.New("invalid plan transition")
 )
 
-const persistedToolEvidenceLeakMarker = "[Persisted operational tool evidence from the previous turn."
-
 type PlanTransitionError struct {
 	StepNumber int
 	Status     string
@@ -60,7 +58,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		return nil, err
 	}
 	st := &Store{db: db}
-	if err := st.migrate(ctx); err != nil {
+	if err := st.initializeSchema(ctx); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -299,7 +297,7 @@ func scanWorkspace(row scanner) (domain.Workspace, error) {
 	return workspace, nil
 }
 
-func (s *Store) migrate(ctx context.Context) error {
+func (s *Store) initializeSchema(ctx context.Context) error {
 	const schema = `
 CREATE TABLE IF NOT EXISTS hosts (
   id TEXT PRIMARY KEY,
@@ -353,7 +351,6 @@ CREATE TABLE IF NOT EXISTS approvals (
   status TEXT NOT NULL,
   reason TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
-  expires_at TEXT NOT NULL,
   decided_at TEXT,
   FOREIGN KEY(run_id) REFERENCES runs(id),
   FOREIGN KEY(host_id) REFERENCES hosts(id)
@@ -407,7 +404,6 @@ CREATE TABLE IF NOT EXISTS agent_plan_steps (
   step_number INTEGER NOT NULL,
   title TEXT NOT NULL,
   status TEXT NOT NULL,
-  evidence TEXT NOT NULL DEFAULT '',
   updated_at TEXT NOT NULL,
   PRIMARY KEY(session_id,step_number),
   FOREIGN KEY(session_id) REFERENCES agent_plans(session_id) ON DELETE CASCADE
@@ -519,6 +515,11 @@ CREATE TABLE IF NOT EXISTS system_settings (
   mcp_http_token_hash TEXT NOT NULL DEFAULT '',
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS automatic_approval_settings (
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  model_provider_id TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS mcp_servers (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
@@ -565,505 +566,10 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return err
 	}
-	if err := s.dropLegacyRiskColumns(ctx); err != nil {
-		return err
-	}
-	if err := s.dropLegacySSHShellExpiry(ctx); err != nil {
-		return err
-	}
-	if err := s.migrateSSHShellExitCode(ctx); err != nil {
-		return err
-	}
-	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO chat_sessions(session_id,workspace_id,created_at,updated_at)
-SELECT session_id,'',min(created_at),max(created_at) FROM chat_messages GROUP BY session_id`); err != nil {
-		return err
-	}
-	if err := s.migrateManagedWorkspaces(ctx); err != nil {
-		return err
-	}
-	if _, err := s.db.ExecContext(ctx, `DROP TABLE IF EXISTS file_operations`); err != nil {
-		return err
-	}
-	if _, err := s.db.ExecContext(ctx, `DROP TABLE IF EXISTS session_approval_grants`); err != nil {
-		return err
-	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM agent_tool_settings WHERE name IN ('ssh_approval_status','ssh_task_start','ssh_task_status','ssh_task_tail','ssh_task_list','ssh_file_restore','ssh_file_create','workspace_file_create','ssh_file_search','workspace_file_search','workspace_list')`); err != nil {
-		return err
-	}
-	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO system_settings(id,agent_max_iterations,updated_at) VALUES(1,?,?)`,
-		domain.DefaultAgentMaxIterations, formatTime(time.Now().UTC())); err != nil {
-		return err
-	}
-	for _, statement := range []string{
-		`ALTER TABLE runs ADD COLUMN request_cipher TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE approvals ADD COLUMN request_cipher TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE hosts ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'agent'`,
-		`ALTER TABLE hosts ADD COLUMN agent_enabled INTEGER NOT NULL DEFAULT 1`,
-		`ALTER TABLE hosts ADD COLUMN proxy_jump_host_id TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE hosts ADD COLUMN proxy_id TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE hosts ADD COLUMN password_cipher TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE hosts ADD COLUMN sudo_mode TEXT NOT NULL DEFAULT 'none'`,
-		`ALTER TABLE hosts ADD COLUMN sudo_password_cipher TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE chat_messages ADD COLUMN tool_name TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE chat_messages ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'`,
-		`ALTER TABLE runs ADD COLUMN ai_review_json TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE runs ADD COLUMN tool_name TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE runs ADD COLUMN tool_arguments_json TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE model_providers ADD COLUMN proxy_id TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE model_providers ADD COLUMN user_agent TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE web_search_settings ADD COLUMN proxy_id TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE system_settings ADD COLUMN chat_image_allowed_types_json TEXT NOT NULL DEFAULT '["image/png","image/jpeg","image/webp","image/gif"]'`,
-		`ALTER TABLE system_settings ADD COLUMN system_prompt TEXT DEFAULT NULL`,
-		`ALTER TABLE system_settings ADD COLUMN approval_mode TEXT NOT NULL DEFAULT 'manual'`,
-		`ALTER TABLE system_settings ADD COLUMN mcp_http_enabled INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE system_settings ADD COLUMN mcp_http_token_hash TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE ssh_shell_sessions ADD COLUMN recent_output TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE ssh_shell_events ADD COLUMN source TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE ssh_shell_events ADD COLUMN sensitive INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE ssh_shell_events ADD COLUMN input_bytes INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE ssh_shell_sessions ADD COLUMN termination_reason TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE ssh_shell_sessions ADD COLUMN surface TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE ssh_shell_sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'ssh'`,
-		`ALTER TABLE ssh_shell_sessions ADD COLUMN workspace_id TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE ssh_shell_sessions ADD COLUMN backend TEXT NOT NULL DEFAULT ''`,
-	} {
-		if _, err := s.db.ExecContext(ctx, statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
-			return err
-		}
-	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM chat_messages
-WHERE role='assistant' AND instr(content,?)>0`, persistedToolEvidenceLeakMarker); err != nil {
-		return fmt.Errorf("remove leaked internal Agent context: %w", err)
-	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE ssh_shell_sessions SET termination_reason=
-CASE
-  WHEN status='closed' THEN 'requested_close'
-  WHEN status='interrupted' THEN 'service_stopped'
-  WHEN status='completed' THEN 'remote_exit'
-  WHEN status='failed' AND exit_code IS NOT NULL THEN 'remote_exit'
-  WHEN status='failed' THEN 'connection_lost'
-  ELSE termination_reason
-END
-WHERE termination_reason=''`); err != nil {
-		return err
-	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE ssh_shell_sessions SET surface=
-CASE WHEN session_id='' THEN 'quick' ELSE 'agent' END
-WHERE surface=''`); err != nil {
-		return err
-	}
-	// Migrate the former two-Agent toggles once. Existing installations keep an
-	// explicit disable from either legacy setting; fresh databases already have
-	// the new column and skip this compatibility copy.
-	addedExplanationSetting := false
-	if _, err := s.db.ExecContext(ctx, `ALTER TABLE system_settings ADD COLUMN approval_explanations_enabled INTEGER NOT NULL DEFAULT 1`); err == nil {
-		addedExplanationSetting = true
-	} else if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
-		return err
-	}
-	if addedExplanationSetting {
-		_, err := s.db.ExecContext(ctx, `UPDATE system_settings SET approval_explanations_enabled=
-CASE WHEN subagent_reviews_enabled<>0 AND beginner_explanations_enabled<>0 THEN 1 ELSE 0 END`)
-		if err != nil && !strings.Contains(strings.ToLower(err.Error()), "no such column") {
-			return err
-		}
-	}
-	// Backfill the plain-text audit search column once when it is first added.
-	// request_json is JSON-escaped, so quotes, redirections, and backslashes in
-	// a command never matched a LIKE query against it; search_text stores the
-	// redacted request text without JSON escaping.
-	addedRunSearchText := false
-	if _, err := s.db.ExecContext(ctx, `ALTER TABLE runs ADD COLUMN search_text TEXT NOT NULL DEFAULT ''`); err == nil {
-		addedRunSearchText = true
-	} else if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
-		return err
-	}
-	if addedRunSearchText {
-		if err := s.backfillRunSearchText(ctx); err != nil {
-			return err
-		}
-	}
-	if _, err := s.db.ExecContext(ctx, `ALTER TABLE system_settings ADD COLUMN workspace_shell_mode TEXT NOT NULL DEFAULT 'sandbox'`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
-		return err
-	}
-	if err := s.applyWorkspaceShellPlatformDefault(ctx, runtime.GOOS); err != nil {
-		return err
-	}
-	if _, err := s.db.ExecContext(ctx, `ALTER TABLE system_settings ADD COLUMN subagent_model_provider_id TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
-		return err
-	}
-	if _, err := s.db.ExecContext(ctx, `ALTER TABLE system_settings ADD COLUMN subagent_timeout_seconds INTEGER NOT NULL DEFAULT 30`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
-		return err
-	}
-	if _, err := s.db.ExecContext(ctx, `ALTER TABLE hosts ADD COLUMN private_key_cipher TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
-		return err
-	}
-	if err := s.migrateSharedProxies(ctx); err != nil {
-		return err
-	}
-	return s.migrateNativeOnlyHosts(ctx)
-}
-
-func (s *Store) applyWorkspaceShellPlatformDefault(ctx context.Context, goos string) error {
-	if domain.DefaultWorkspaceShellMode(goos) != domain.WorkspaceShellModeHost {
-		return nil
-	}
-	_, err := s.db.ExecContext(ctx, `UPDATE system_settings SET workspace_shell_mode='host' WHERE workspace_shell_mode='sandbox'`)
+	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO system_settings(
+id,agent_max_iterations,workspace_shell_mode,updated_at) VALUES(1,?,?,?)`,
+		domain.DefaultAgentMaxIterations, domain.DefaultWorkspaceShellMode(runtime.GOOS), formatTime(time.Now().UTC()))
 	return err
-}
-
-func (s *Store) dropLegacySSHShellExpiry(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(ssh_shell_sessions)`)
-	if err != nil {
-		return err
-	}
-	hasExpiry := false
-	for rows.Next() {
-		var cid, notNull, primaryKey int
-		var name, columnType string
-		var defaultValue any
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-			rows.Close()
-			return err
-		}
-		hasExpiry = hasExpiry || name == "expires_at"
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if !hasExpiry {
-		return nil
-	}
-	if _, err := s.db.ExecContext(ctx, `ALTER TABLE ssh_shell_sessions DROP COLUMN expires_at`); err != nil {
-		return fmt.Errorf("drop legacy SSH shell expiry: %w", err)
-	}
-	return nil
-}
-
-func (s *Store) dropLegacyRiskColumns(ctx context.Context) error {
-	for _, table := range []string{"approvals", "runs"} {
-		rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
-		if err != nil {
-			return err
-		}
-		hasRisk := false
-		for rows.Next() {
-			var cid, notNull, primaryKey int
-			var name, columnType string
-			var defaultValue any
-			if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-				rows.Close()
-				return err
-			}
-			hasRisk = hasRisk || name == "risk"
-		}
-		if err := rows.Close(); err != nil {
-			return err
-		}
-		if hasRisk {
-			if _, err := s.db.ExecContext(ctx, `ALTER TABLE `+table+` DROP COLUMN risk`); err != nil {
-				return fmt.Errorf("drop legacy %s.risk: %w", table, err)
-			}
-		}
-	}
-	return nil
-}
-
-func (s *Store) migrateSSHShellExitCode(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(ssh_shell_sessions)`)
-	if err != nil {
-		return err
-	}
-	hasExitCode, exitCodeNotNull := false, false
-	for rows.Next() {
-		var cid, notNull, primaryKey int
-		var name, columnType string
-		var defaultValue any
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-			rows.Close()
-			return err
-		}
-		if name == "exit_code" {
-			hasExitCode = true
-			exitCodeNotNull = notNull != 0
-		}
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if !hasExitCode {
-		_, err := s.db.ExecContext(ctx, `ALTER TABLE ssh_shell_sessions ADD COLUMN exit_code INTEGER`)
-		return err
-	}
-	if !exitCodeNotNull {
-		return nil
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, statement := range []string{
-		`ALTER TABLE ssh_shell_sessions ADD COLUMN nullable_exit_code INTEGER`,
-		`UPDATE ssh_shell_sessions SET nullable_exit_code=CASE WHEN status IN ('completed','failed') AND exit_code>=0 THEN exit_code ELSE NULL END`,
-		`ALTER TABLE ssh_shell_sessions DROP COLUMN exit_code`,
-		`ALTER TABLE ssh_shell_sessions RENAME COLUMN nullable_exit_code TO exit_code`,
-	} {
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("migrate SSH shell exit code: %w", err)
-		}
-	}
-	return tx.Commit()
-}
-
-func (s *Store) migrateSharedProxies(ctx context.Context) error {
-	tableColumns := make(map[string]map[string]bool)
-	for _, table := range []string{"hosts", "model_providers", "web_search_settings"} {
-		rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
-		if err != nil {
-			return err
-		}
-		columns := make(map[string]bool)
-		for rows.Next() {
-			var cid, notNull, primaryKey int
-			var name, columnType string
-			var defaultValue any
-			if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-				rows.Close()
-				return err
-			}
-			columns[name] = true
-		}
-		if err := rows.Close(); err != nil {
-			return err
-		}
-		tableColumns[table] = columns
-	}
-	hasLegacy := false
-	for _, columns := range tableColumns {
-		hasLegacy = hasLegacy || columns["proxy_url"] || columns["proxy_username"] || columns["proxy_password_cipher"]
-	}
-	if !hasLegacy {
-		return nil
-	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	now := formatTime(time.Now().UTC())
-	insertProxy := func(name, proxyURL, username, passwordCipher string) (string, error) {
-		baseName := strings.TrimSpace(name)
-		if baseName == "" {
-			baseName = "Proxy"
-		}
-		candidate := baseName
-		for suffix := 2; ; suffix++ {
-			var count int
-			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM proxies WHERE name=?`, candidate).Scan(&count); err != nil {
-				return "", err
-			}
-			if count == 0 {
-				break
-			}
-			candidate = fmt.Sprintf("%s (%d)", baseName, suffix)
-		}
-		proxyID := ids.New("proxy")
-		if _, err := tx.ExecContext(ctx, `INSERT INTO proxies(id,name,url,username,password_cipher,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`,
-			proxyID, candidate, proxyURL, username, passwordCipher, now, now); err != nil {
-			return "", err
-		}
-		return proxyID, nil
-	}
-
-	if tableColumns["hosts"]["proxy_url"] {
-		rows, err := tx.QueryContext(ctx, `SELECT id,name,proxy_id,proxy_url,proxy_username,proxy_password_cipher FROM hosts WHERE proxy_url<>''`)
-		if err != nil {
-			return err
-		}
-		type legacyHostProxy struct{ id, name, proxyID, url, username, passwordCipher string }
-		values := make([]legacyHostProxy, 0)
-		for rows.Next() {
-			var value legacyHostProxy
-			if err := rows.Scan(&value.id, &value.name, &value.proxyID, &value.url, &value.username, &value.passwordCipher); err != nil {
-				rows.Close()
-				return err
-			}
-			values = append(values, value)
-		}
-		if err := rows.Close(); err != nil {
-			return err
-		}
-		for _, value := range values {
-			if value.proxyID != "" {
-				continue
-			}
-			proxyID, err := insertProxy("SSH · "+value.name, value.url, value.username, value.passwordCipher)
-			if err != nil {
-				return err
-			}
-			if _, err := tx.ExecContext(ctx, `UPDATE hosts SET proxy_id=? WHERE id=?`, proxyID, value.id); err != nil {
-				return err
-			}
-		}
-	}
-	if tableColumns["model_providers"]["proxy_url"] {
-		rows, err := tx.QueryContext(ctx, `SELECT id,name,proxy_id,proxy_url,proxy_username,proxy_password_cipher FROM model_providers WHERE proxy_url<>''`)
-		if err != nil {
-			return err
-		}
-		type legacyModelProxy struct{ id, name, proxyID, url, username, passwordCipher string }
-		values := make([]legacyModelProxy, 0)
-		for rows.Next() {
-			var value legacyModelProxy
-			if err := rows.Scan(&value.id, &value.name, &value.proxyID, &value.url, &value.username, &value.passwordCipher); err != nil {
-				rows.Close()
-				return err
-			}
-			values = append(values, value)
-		}
-		if err := rows.Close(); err != nil {
-			return err
-		}
-		for _, value := range values {
-			if value.proxyID != "" {
-				continue
-			}
-			proxyID, err := insertProxy("Model · "+value.name, value.url, value.username, value.passwordCipher)
-			if err != nil {
-				return err
-			}
-			if _, err := tx.ExecContext(ctx, `UPDATE model_providers SET proxy_id=? WHERE id=?`, proxyID, value.id); err != nil {
-				return err
-			}
-		}
-	}
-	if tableColumns["web_search_settings"]["proxy_url"] {
-		var proxyID, proxyURL, username, passwordCipher string
-		err := tx.QueryRowContext(ctx, `SELECT proxy_id,proxy_url,proxy_username,proxy_password_cipher FROM web_search_settings WHERE id=1 AND proxy_url<>''`).
-			Scan(&proxyID, &proxyURL, &username, &passwordCipher)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		if err == nil && proxyID == "" {
-			proxyID, err = insertProxy("Tavily", proxyURL, username, passwordCipher)
-			if err != nil {
-				return err
-			}
-			if _, err := tx.ExecContext(ctx, `UPDATE web_search_settings SET proxy_id=? WHERE id=1`, proxyID); err != nil {
-				return err
-			}
-		}
-	}
-	for table, columns := range tableColumns {
-		for _, column := range []string{"proxy_url", "proxy_username", "proxy_password_cipher"} {
-			if columns[column] {
-				if _, err := tx.ExecContext(ctx, `ALTER TABLE `+table+` DROP COLUMN `+column); err != nil {
-					return fmt.Errorf("drop legacy %s.%s: %w", table, column, err)
-				}
-			}
-		}
-	}
-	return tx.Commit()
-}
-
-func (s *Store) migrateManagedWorkspaces(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(workspaces)`)
-	if err != nil {
-		return err
-	}
-	hasRoot := false
-	for rows.Next() {
-		var cid, notNull, primaryKey int
-		var name, columnType string
-		var defaultValue any
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-			rows.Close()
-			return err
-		}
-		hasRoot = hasRoot || name == "root"
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if !hasRoot {
-		return nil
-	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, statement := range []string{
-		`DROP TABLE workspaces`,
-		`CREATE TABLE workspaces (
-  id TEXT PRIMARY KEY,
-  access TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-)`,
-		`DELETE FROM workspace_state`,
-	} {
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("migrate managed workspaces: %w", err)
-		}
-	}
-	return tx.Commit()
-}
-
-func (s *Store) migrateNativeOnlyHosts(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(hosts)`)
-	if err != nil {
-		return err
-	}
-	columns := make(map[string]bool)
-	for rows.Next() {
-		var cid, notNull, primaryKey int
-		var name, columnType string
-		var defaultValue any
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-			rows.Close()
-			return err
-		}
-		columns[name] = true
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	obsolete := []string{"transport_backend", "config_alias", "proxy_jump", "identity_file"}
-	needsMigration := false
-	for _, column := range obsolete {
-		needsMigration = needsMigration || columns[column]
-	}
-	if !needsMigration {
-		return nil
-	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, statement := range []string{
-		`DELETE FROM approvals`,
-		`DELETE FROM tasks`,
-		`DELETE FROM runs`,
-		`DELETE FROM hosts`,
-	} {
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("clear legacy SSH data: %w", err)
-		}
-	}
-	for _, column := range obsolete {
-		if columns[column] {
-			if _, err := tx.ExecContext(ctx, `ALTER TABLE hosts DROP COLUMN `+column); err != nil {
-				return fmt.Errorf("drop legacy hosts.%s: %w", column, err)
-			}
-		}
-	}
-	return tx.Commit()
 }
 
 func (s *Store) UpsertHost(ctx context.Context, host domain.Host) (domain.Host, error) {
@@ -1413,6 +919,10 @@ chat_image_allowed_types_json,workspace_shell_mode,mcp_http_enabled,mcp_http_tok
 	if settings.SubagentTimeoutSeconds < domain.MinSubagentTimeoutSeconds || settings.SubagentTimeoutSeconds > domain.MaxSubagentTimeoutSeconds {
 		settings.SubagentTimeoutSeconds = domain.DefaultSubagentTimeoutSeconds
 	}
+	err = s.db.QueryRowContext(ctx, `SELECT model_provider_id FROM automatic_approval_settings WHERE id=1`).Scan(&settings.AutomaticApprovalModelProviderID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return domain.SystemSettings{}, err
+	}
 	return settings, nil
 }
 
@@ -1422,7 +932,12 @@ func (s *Store) SaveSystemSettings(ctx context.Context, settings domain.SystemSe
 	if err != nil {
 		return domain.SystemSettings{}, err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO system_settings(id,agent_max_iterations,system_prompt,approval_mode,approval_explanations_enabled,subagent_model_provider_id,subagent_timeout_seconds,chat_image_allowed_types_json,workspace_shell_mode,mcp_http_enabled,mcp_http_token_hash,updated_at) VALUES(1,?,?,?,?,?,?,?,?,?,?,?)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.SystemSettings{}, err
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `INSERT INTO system_settings(id,agent_max_iterations,system_prompt,approval_mode,approval_explanations_enabled,subagent_model_provider_id,subagent_timeout_seconds,chat_image_allowed_types_json,workspace_shell_mode,mcp_http_enabled,mcp_http_token_hash,updated_at) VALUES(1,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET agent_max_iterations=excluded.agent_max_iterations,
 system_prompt=excluded.system_prompt,
 approval_mode=excluded.approval_mode,
@@ -1437,6 +952,15 @@ updated_at=excluded.updated_at`,
 		settings.AgentMaxIterations, settings.SystemPrompt, settings.ApprovalMode, boolInt(settings.ApprovalExplanationsEnabled), settings.SubagentModelProviderID,
 		settings.SubagentTimeoutSeconds, string(imageTypesJSON), settings.WorkspaceShellMode, boolInt(settings.MCPHTTPEnabled), settings.MCPHTTPTokenHash, formatTime(settings.UpdatedAt))
 	if err != nil {
+		return domain.SystemSettings{}, err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO automatic_approval_settings(id,model_provider_id,updated_at) VALUES(1,?,?)
+ON CONFLICT(id) DO UPDATE SET model_provider_id=excluded.model_provider_id,updated_at=excluded.updated_at`,
+		settings.AutomaticApprovalModelProviderID, formatTime(settings.UpdatedAt))
+	if err != nil {
+		return domain.SystemSettings{}, err
+	}
+	if err := tx.Commit(); err != nil {
 		return domain.SystemSettings{}, err
 	}
 	settings.MCPHTTPTokenConfigured = settings.MCPHTTPTokenHash != ""
@@ -1590,39 +1114,6 @@ func scanProxy(row scanner) (domain.Proxy, error) {
 	return proxy, nil
 }
 
-func (s *Store) backfillRunSearchText(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, request_json FROM runs`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	updates := make(map[string]string)
-	for rows.Next() {
-		var id, requestJSON string
-		if err := rows.Scan(&id, &requestJSON); err != nil {
-			return err
-		}
-		var req domain.ExecRequest
-		// Redaction can break the stored JSON; those rows keep the
-		// request_json LIKE fallback in SearchRuns.
-		if json.Unmarshal([]byte(requestJSON), &req) != nil {
-			continue
-		}
-		if text := req.SearchText(); text != "" {
-			updates[id] = text
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for id, text := range updates {
-		if _, err := s.db.ExecContext(ctx, `UPDATE runs SET search_text=? WHERE id=?`, text, id); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (s *Store) CreateRun(ctx context.Context, run domain.Run) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO runs(id,session_id,host_id,tool_name,tool_arguments_json,request_json,request_cipher,search_text,request_digest,status,ai_review_json,
 started_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, run.ID, run.SessionID, run.HostID, run.ToolName, run.ToolArgumentsJSON, run.RequestJSON, run.RequestCipher, run.SearchText, run.RequestDigest,
@@ -1737,16 +1228,16 @@ func scanRun(row scanner) (domain.Run, error) {
 
 func (s *Store) CreateApproval(ctx context.Context, approval domain.Approval) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO approvals(id,run_id,host_id,request_json,request_cipher,request_digest,
-status,reason,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, approval.ID, approval.RunID,
+status,reason,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, approval.ID, approval.RunID,
 		approval.HostID, approval.RequestJSON, approval.RequestCipher, approval.RequestDigest, approval.Status,
-		approval.Reason, formatTime(approval.CreatedAt), formatTime(approval.ExpiresAt))
+		approval.Reason, formatTime(approval.CreatedAt))
 	return err
 }
 
 func (s *Store) GetApproval(ctx context.Context, id string) (domain.Approval, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT approvals.id,approvals.run_id,runs.session_id,approvals.host_id,approvals.request_json,
 approvals.request_cipher,approvals.request_digest,approvals.status,approvals.reason,
-approvals.created_at,approvals.expires_at,approvals.decided_at FROM approvals
+approvals.created_at,approvals.decided_at FROM approvals
 JOIN runs ON runs.id=approvals.run_id WHERE approvals.id=?`, id)
 	return scanApproval(row)
 }
@@ -1755,14 +1246,9 @@ func (s *Store) ListApprovals(ctx context.Context, status string, limit int) ([]
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	now := formatTime(time.Now().UTC())
-	_, _ = s.db.ExecContext(ctx, `UPDATE runs SET status='expired',error='approval expired',completed_at=?
-WHERE id IN (SELECT run_id FROM approvals WHERE status='pending' AND expires_at < ?)`, now, now)
-	_, _ = s.db.ExecContext(ctx, `UPDATE approvals SET status='expired',reason='approval expired',decided_at=?
-WHERE status='pending' AND expires_at < ?`, now, now)
 	rows, err := s.db.QueryContext(ctx, `SELECT approvals.id,approvals.run_id,runs.session_id,approvals.host_id,
 approvals.request_json,approvals.request_cipher,approvals.request_digest,approvals.status,
-approvals.reason,approvals.created_at,approvals.expires_at,approvals.decided_at FROM approvals
+approvals.reason,approvals.created_at,approvals.decided_at FROM approvals
 JOIN runs ON runs.id=approvals.run_id WHERE (?='' OR approvals.status=?)
 ORDER BY approvals.created_at DESC LIMIT ?`, status, status, limit)
 	if err != nil {
@@ -1783,7 +1269,7 @@ ORDER BY approvals.created_at DESC LIMIT ?`, status, status, limit)
 func (s *Store) ListPendingApprovalsForSession(ctx context.Context, sessionID string) ([]domain.Approval, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT approvals.id,approvals.run_id,runs.session_id,approvals.host_id,
 approvals.request_json,approvals.request_cipher,approvals.request_digest,approvals.status,
-approvals.reason,approvals.created_at,approvals.expires_at,approvals.decided_at FROM approvals
+approvals.reason,approvals.created_at,approvals.decided_at FROM approvals
 JOIN runs ON runs.id=approvals.run_id WHERE runs.session_id=? AND approvals.status='pending'
 ORDER BY approvals.created_at`, sessionID)
 	if err != nil {
@@ -1869,11 +1355,11 @@ func (s *Store) UpdateRunAIReview(ctx context.Context, runID, reviewJSON string)
 
 func scanApproval(row scanner) (domain.Approval, error) {
 	var approval domain.Approval
-	var created, expires string
+	var created string
 	var decided sql.NullString
 	err := row.Scan(&approval.ID, &approval.RunID, &approval.SessionID, &approval.HostID, &approval.RequestJSON, &approval.RequestCipher,
 		&approval.RequestDigest, &approval.Status, &approval.Reason,
-		&created, &expires, &decided)
+		&created, &decided)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Approval{}, ErrNotFound
 	}
@@ -1881,7 +1367,6 @@ func scanApproval(row scanner) (domain.Approval, error) {
 		return domain.Approval{}, err
 	}
 	approval.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-	approval.ExpiresAt, _ = time.Parse(time.RFC3339Nano, expires)
 	if decided.Valid {
 		approval.DecidedAt, _ = time.Parse(time.RFC3339Nano, decided.String)
 	}
@@ -2083,8 +1568,8 @@ func (s *Store) ReplaceAgentPlan(ctx context.Context, plan domain.AgentPlan) (do
 		return domain.AgentPlan{}, err
 	}
 	for _, step := range plan.Steps {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO agent_plan_steps(session_id,step_number,title,status,evidence,updated_at) VALUES(?,?,?,?,?,?)`,
-			plan.SessionID, step.Number, step.Title, step.Status, step.Evidence, formatTime(now)); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO agent_plan_steps(session_id,step_number,title,status,updated_at) VALUES(?,?,?,?,?)`,
+			plan.SessionID, step.Number, step.Title, step.Status, formatTime(now)); err != nil {
 			return domain.AgentPlan{}, err
 		}
 	}
@@ -2108,7 +1593,7 @@ func (s *Store) GetAgentPlan(ctx context.Context, sessionID string) (domain.Agen
 	}
 	plan.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 	plan.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
-	rows, err := s.db.QueryContext(ctx, `SELECT step_number,title,status,evidence,updated_at FROM agent_plan_steps WHERE session_id=? ORDER BY step_number`, sessionID)
+	rows, err := s.db.QueryContext(ctx, `SELECT step_number,title,status,updated_at FROM agent_plan_steps WHERE session_id=? ORDER BY step_number`, sessionID)
 	if err != nil {
 		return domain.AgentPlan{}, err
 	}
@@ -2117,7 +1602,7 @@ func (s *Store) GetAgentPlan(ctx context.Context, sessionID string) (domain.Agen
 	for rows.Next() {
 		var step domain.AgentPlanStep
 		var stepUpdated string
-		if err := rows.Scan(&step.Number, &step.Title, &step.Status, &step.Evidence, &stepUpdated); err != nil {
+		if err := rows.Scan(&step.Number, &step.Title, &step.Status, &stepUpdated); err != nil {
 			return domain.AgentPlan{}, err
 		}
 		step.UpdatedAt, _ = time.Parse(time.RFC3339Nano, stepUpdated)
@@ -2126,7 +1611,7 @@ func (s *Store) GetAgentPlan(ctx context.Context, sessionID string) (domain.Agen
 	return plan, rows.Err()
 }
 
-func (s *Store) TransitionAgentPlanStep(ctx context.Context, sessionID string, stepNumber int, status, evidence string) (domain.AgentPlan, error) {
+func (s *Store) TransitionAgentPlanStep(ctx context.Context, sessionID string, stepNumber int, status string) (domain.AgentPlan, error) {
 	now := time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -2146,8 +1631,8 @@ func (s *Store) TransitionAgentPlanStep(ctx context.Context, sessionID string, s
 	if !validTransition {
 		return domain.AgentPlan{}, &PlanTransitionError{StepNumber: stepNumber, Status: currentStatus, Target: status}
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE agent_plan_steps SET status=?,evidence=?,updated_at=? WHERE session_id=? AND step_number=?`,
-		status, evidence, formatTime(now), sessionID, stepNumber); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE agent_plan_steps SET status=?,updated_at=? WHERE session_id=? AND step_number=?`,
+		status, formatTime(now), sessionID, stepNumber); err != nil {
 		return domain.AgentPlan{}, err
 	}
 	planStatus := "blocked"
@@ -2183,7 +1668,7 @@ func (s *Store) TransitionAgentPlanStep(ctx context.Context, sessionID string, s
 
 // ReviseAgentPlanRemaining replaces only the mutable portion of a plan. Steps
 // already completed or skipped remain immutable history with their original
-// evidence and timestamps.
+// timestamps.
 func (s *Store) ReviseAgentPlanRemaining(ctx context.Context, sessionID string, titles []string) (domain.AgentPlan, error) {
 	now := time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -2244,8 +1729,8 @@ func (s *Store) ReviseAgentPlanRemaining(ctx context.Context, sessionID string, 
 		if index == 0 {
 			status = "in_progress"
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO agent_plan_steps(session_id,step_number,title,status,evidence,updated_at) VALUES(?,?,?,?,?,?)`,
-			sessionID, retained+index+1, title, status, "", formatTime(now)); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO agent_plan_steps(session_id,step_number,title,status,updated_at) VALUES(?,?,?,?,?)`,
+			sessionID, retained+index+1, title, status, formatTime(now)); err != nil {
 			return domain.AgentPlan{}, err
 		}
 	}
@@ -2267,7 +1752,7 @@ func (s *Store) ListChatModelMessages(ctx context.Context, sessionID string, lim
 }
 
 // ListChatContextMessages returns the persisted, provider-relevant transcript.
-// Reasoning is deliberately excluded, while tool evidence and failed turns are
+// Reasoning is deliberately excluded, while tool results and failed turns are
 // retained so the next model run can recover operational state.
 func (s *Store) ListChatContextMessages(ctx context.Context, sessionID string) ([]domain.ChatMessage, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id,role,content,tool_name,status,created_at FROM chat_messages
@@ -2474,16 +1959,31 @@ func (s *Store) DeleteChatSession(ctx context.Context, sessionID string) error {
 	if count == 0 {
 		return ErrNotFound
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM audit_events
+WHERE run_id IN (SELECT id FROM runs WHERE session_id=?)
+   OR (json_valid(data_json) AND json_extract(data_json,'$.session_id')=?)`, sessionID, sessionID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM approvals WHERE run_id IN (SELECT id FROM runs WHERE session_id=?)`, sessionID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM tasks WHERE run_id IN (SELECT id FROM runs WHERE session_id=?)`, sessionID); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM chat_messages WHERE session_id=?`, sessionID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM checkpoints WHERE id=?`, sessionID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM ssh_shell_sessions WHERE session_id=?`, sessionID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM ssh_shell_sessions
+WHERE session_id=? OR run_id IN (SELECT id FROM runs WHERE session_id=?)`, sessionID, sessionID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM agent_plans WHERE session_id=?`, sessionID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM runs WHERE session_id=?`, sessionID); err != nil {
 		return err
 	}
 	return tx.Commit()

@@ -251,7 +251,7 @@ func (s *Server) deleteWorkspace(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) agentTools(w http.ResponseWriter, _ *http.Request) {
 	if s.agent == nil {
-		writeJSON(w, http.StatusOK, agent.ToolCatalog{Agent: "ops-pilot", Framework: "Eino InferTool", ExecutionMode: "sequential", Tools: []agent.ToolDescriptor{}})
+		writeJSON(w, http.StatusOK, agent.ToolCatalog{Agent: "ops-nerva", Framework: "Eino InferTool", ExecutionMode: "sequential", Tools: []agent.ToolDescriptor{}})
 		return
 	}
 	writeJSON(w, http.StatusOK, s.agent.ToolCatalog())
@@ -538,30 +538,14 @@ func (s *Server) deleteWorkspaceEntry(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) uploadWorkspaceFile(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, (100<<20)+(1<<20))
-	if err := r.ParseMultipartForm(8 << 20); err != nil {
-		status := http.StatusBadRequest
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			status = http.StatusRequestEntityTooLarge
-		}
-		writeErrorStatus(w, fmt.Errorf("invalid workspace upload: %w", err), status)
-		return
-	}
-	if r.MultipartForm != nil {
-		defer r.MultipartForm.RemoveAll()
-	}
-	file, header, err := r.FormFile("file")
-	if err != nil {
-		writeErrorStatus(w, fmt.Errorf("file is required"), http.StatusBadRequest)
-		return
-	}
-	defer file.Close()
-	if header.Size > 100<<20 {
-		writeErrorStatus(w, fmt.Errorf("workspace upload exceeds 100 MiB"), http.StatusRequestEntityTooLarge)
-		return
-	}
-	result, err := s.service.UploadWorkspaceFile(r.Context(), r.PathValue("id"), r.FormValue("path"), header.Filename, file, actor(r))
+	result, err := s.service.UploadWorkspaceFile(
+		r.Context(),
+		r.PathValue("id"),
+		r.URL.Query().Get("path"),
+		r.URL.Query().Get("filename"),
+		r.Body,
+		actor(r),
+	)
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, store.ErrNotFound) {
@@ -1081,7 +1065,9 @@ func (s *Server) diagnostics(ctx context.Context) observability.Diagnostics {
 		result.Agent = observability.AgentDiagnostics{
 			Available: s.agent.Available(), Source: status.Source, ProviderName: redactor.Redact(status.Name), Model: redactor.Redact(status.Model),
 			ToolCount: len(catalog.Tools), ApprovalAgentAvailable: status.ApprovalAgentAvailable,
-			ModelError: redactor.Redact(status.Error), ApprovalError: redactor.Redact(status.ApprovalError),
+			AutomaticApprovalAgentAvailable: status.AutomaticApprovalAgentAvailable,
+			ModelError:                      redactor.Redact(status.Error), ApprovalError: redactor.Redact(status.ApprovalError),
+			AutomaticApprovalError: redactor.Redact(status.AutomaticApprovalError),
 		}
 	} else {
 		result.Agent.Source = "none"
@@ -1282,7 +1268,7 @@ func (s *Server) saveModelProvider(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if (result.Active || settings.SubagentModelProviderID == result.ID) && s.agent != nil {
+	if (result.Active || settings.SubagentModelProviderID == result.ID || settings.AutomaticApprovalModelProviderID == result.ID) && s.agent != nil {
 		if err := s.agent.Reload(r.Context()); err != nil {
 			writeError(w, err)
 			return
@@ -1965,7 +1951,7 @@ func (s *Server) deleteChatSession(w http.ResponseWriter, r *http.Request) {
 		writeErrorStatus(w, fmt.Errorf("cannot delete a conversation while its Agent run is active"), http.StatusConflict)
 		return
 	}
-	if err := s.service.DeleteChatSession(r.Context(), r.PathValue("id"), actor(r)); err != nil {
+	if err := s.service.DeleteChatSession(r.Context(), r.PathValue("id")); err != nil {
 		writeError(w, err)
 		return
 	}

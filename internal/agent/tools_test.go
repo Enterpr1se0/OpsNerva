@@ -245,9 +245,11 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 			schema := string(descriptor.InputSchema)
 			if descriptor.Guard != "approval_required" || !strings.Contains(schema, `"action"`) ||
 				!strings.Contains(schema, `"shell_id"`) || !strings.Contains(schema, `"input"`) ||
-				!strings.Contains(schema, `"submit"`) || !strings.Contains(schema, `"after_sequence"`) ||
-				!strings.Contains(schema, `"coalesce"`) || !strings.Contains(schema, `"reason"`) ||
-				strings.Contains(schema, `"ttl_seconds"`) || strings.Contains(schema, `"extend_seconds"`) {
+				!strings.Contains(schema, `"submit"`) || !strings.Contains(schema, `"wait_seconds"`) ||
+				!strings.Contains(schema, `"reason"`) || strings.Contains(schema, `"after_sequence"`) ||
+				strings.Contains(schema, `"coalesce"`) ||
+				strings.Contains(schema, `"ttl_seconds"`) || strings.Contains(schema, `"extend_seconds"`) ||
+				!strings.Contains(descriptor.Description, "output waits") || strings.Contains(descriptor.Description, "status refreshes") {
 				t.Fatalf("ssh_shell metadata does not reflect its runtime schema: %#v", descriptor)
 			}
 		}
@@ -264,8 +266,10 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 			schema := string(descriptor.InputSchema)
 			if descriptor.Guard != "approval_required" || !strings.Contains(schema, `"action"`) ||
 				!strings.Contains(schema, `"shell_id"`) || !strings.Contains(schema, `"input"`) ||
-				!strings.Contains(schema, `"submit"`) || !strings.Contains(schema, `"after_sequence"`) ||
-				!strings.Contains(schema, `"coalesce"`) || strings.Contains(schema, `"ttl_seconds"`) {
+				!strings.Contains(schema, `"submit"`) || !strings.Contains(schema, `"wait_seconds"`) ||
+				strings.Contains(schema, `"after_sequence"`) || strings.Contains(schema, `"coalesce"`) ||
+				strings.Contains(schema, `"ttl_seconds"`) || !strings.Contains(descriptor.Description, "output waits") ||
+				strings.Contains(descriptor.Description, "status refreshes") {
 				t.Fatalf("workspace_shell metadata does not expose interactive actions: %#v", descriptor)
 			}
 		}
@@ -300,12 +304,48 @@ func TestSSHShellActionValidationReportsExactFields(t *testing.T) {
 		t.Fatalf("unexpected field details = %#v", validation.validation)
 	}
 
-	valid := SSHShellInput{Action: "status", ShellID: "shell-1", Coalesce: true, Reason: "read new output"}
-	if err := validateSSHShellActionFields(valid, "status",
-		[]string{"action", "shell_id", "after_sequence", "wait_seconds", "coalesce", "reason"},
+	valid := SSHShellInput{Action: "output", ShellID: "shell-1", WaitSeconds: 2, Reason: "read new output"}
+	if err := validateSSHShellActionFields(valid, "output",
+		[]string{"action", "shell_id", "wait_seconds", "reason"},
 		nil,
 	); err != nil {
-		t.Fatalf("valid status fields were rejected: %v", err)
+		t.Fatalf("valid output fields were rejected: %v", err)
+	}
+}
+
+func TestModelShellOutputReturnsLatestAgentInputResponse(t *testing.T) {
+	events := []domain.SSHShellEvent{
+		{Sequence: 1, Stream: "stdout", Content: "initial prompt\n"},
+		{Sequence: 2, Stream: "input", Source: "agent", Content: "first\r"},
+		{Sequence: 3, Stream: "stdout", Content: "first response\n"},
+		{Sequence: 4, Stream: "input", Source: "agent", Content: "second\r"},
+		{Sequence: 5, Stream: "stdout", Content: "second response\n"},
+		{Sequence: 6, Stream: "status", Status: "running"},
+	}
+	if output := modelShellOutput(events); output != "second response\n" {
+		t.Fatalf("latest input response = %q", output)
+	}
+}
+
+func TestModelShellResultDoesNotExposeEventCursor(t *testing.T) {
+	encoded, err := json.Marshal(shellToolResult{ShellID: "shell-1", Status: "running", Output: "done\n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(encoded)
+	if strings.Contains(result, "sequence") || strings.Contains(result, "events") || strings.Contains(result, "recent_output") {
+		t.Fatalf("model shell result exposes transport details: %s", result)
+	}
+}
+
+func TestSSHShellUsageNamesOutputAction(t *testing.T) {
+	encoded, err := json.Marshal(domain.SSHShellUsage{Input: "input", Output: "output", Close: "close"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(encoded)
+	if !strings.Contains(result, `"output":"output"`) || strings.Contains(result, `"status"`) {
+		t.Fatalf("shell usage does not expose the output action cleanly: %s", result)
 	}
 }
 
@@ -508,15 +548,22 @@ func TestTaskToolResultsExposeRejectionAndStderr(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if execResult.Status != "rejected" || execResult.Code != "" || execResult.OperatorInstruction == "" {
+	if execResult.Status != "rejected" || execResult.AutoApproved || execResult.Code != "" || execResult.OperatorInstruction == "" {
 		t.Fatalf("rejected execution was not exposed as an operator interruption: %#v", execResult)
+	}
+	autoApproved, err := CompactExecToolResult(domain.ExecResult{RunID: "run_auto", Status: "completed", AutoApproved: true}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !autoApproved.AutoApproved {
+		t.Fatalf("automatic approval marker was dropped from the Tool result: %#v", autoApproved)
 	}
 
 	task := domain.Task{
 		ID:                  "task_rejected",
 		RunID:               "run_rejected",
 		Status:              "rejected",
-		OperatorInstruction: "stop the test and only summarize existing evidence",
+		OperatorInstruction: "stop the test and only summarize existing results",
 	}
 	fullStatus, err := normalizeTaskResult(task, domain.ExecResult{Status: "rejected", OperatorInstruction: task.OperatorInstruction}, "", nil)
 	if err != nil {
@@ -530,7 +577,7 @@ func TestTaskToolResultsExposeRejectionAndStderr(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(encoded), `"operator_instruction":"stop the test and only summarize existing evidence"`) {
+	if !strings.Contains(string(encoded), `"operator_instruction":"stop the test and only summarize existing results"`) {
 		t.Fatalf("serialized Tool result lost the operator instruction: %s", encoded)
 	}
 
@@ -1217,6 +1264,9 @@ func TestUnifiedSkillToolReadsTheLiveAdministratorRegistry(t *testing.T) {
 			t.Fatal(infoErr)
 		}
 		if info.Name == "skill" {
+			if !strings.Contains(info.Desc, "custom-diagnosis") || !strings.Contains(info.Desc, "Use the administrator workflow") {
+				t.Fatalf("enabled Skill summary was not included in the function description: %q", info.Desc)
+			}
 			skillTool = candidate.(tool.InvokableTool)
 		}
 	}
@@ -1243,13 +1293,6 @@ func TestUnifiedSkillToolReadsTheLiveAdministratorRegistry(t *testing.T) {
 	}
 	if disabled.OK || disabled.Status != "failed" || disabled.Code != "configuration_required" || !strings.Contains(disabled.Message, "disabled") {
 		t.Fatalf("disabled skill did not return a structured failure: %#v", disabled)
-	}
-	listed, err := skillTool.InvokableRun(ctx, `{}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(listed, "custom-diagnosis") {
-		t.Fatalf("disabled skill remained discoverable: %s", listed)
 	}
 }
 
@@ -1286,7 +1329,7 @@ func TestPlanStepUpdateReturnsCurrentPlanWithoutAbortingToolNode(t *testing.T) {
 	if updateTool == nil {
 		t.Fatal("ops_plan_step_update tool was not registered")
 	}
-	resultJSON, err := updateTool.InvokableRun(ctx, `{"step_number":2,"status":"completed","evidence":"skipped step one"}`)
+	resultJSON, err := updateTool.InvokableRun(ctx, `{"step_number":2,"status":"completed"}`)
 	if err != nil {
 		t.Fatalf("invalid plan transition aborted the ToolNode: %v", err)
 	}

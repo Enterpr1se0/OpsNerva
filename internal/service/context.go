@@ -11,6 +11,7 @@ type sessionContextKey struct{}
 type blockingApprovalContextKey struct{}
 type approvalNotifierContextKey struct{}
 type executionOwnerContextKey struct{}
+type approvalUserRequestContextKey struct{}
 
 type executionOwner struct {
 	ToolCallID string
@@ -36,6 +37,24 @@ func SessionIDFromContext(ctx context.Context) string {
 	}
 	value, _ := ctx.Value(sessionContextKey{}).(string)
 	return value
+}
+
+// WithApprovalUserRequest binds the current user turn to any approval review
+// started by that Agent run. It is control-plane context, never a tool field.
+func WithApprovalUserRequest(ctx context.Context, request string) context.Context {
+	request = strings.TrimSpace(request)
+	if request == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, approvalUserRequestContextKey{}, request)
+}
+
+func approvalUserRequestFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	value, _ := ctx.Value(approvalUserRequestContextKey{}).(string)
+	return strings.TrimSpace(value)
 }
 
 // WithMCPClientSession isolates MCP-owned interactive shells from Agent

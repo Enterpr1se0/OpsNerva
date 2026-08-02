@@ -238,7 +238,7 @@ func (s *Service) prepareRemoteFileChange(req domain.ExecRequest) (domain.ExecRe
 		return req, fmt.Errorf("remote file change is missing")
 	}
 	suffix := time.Now().UTC().Format("20060102T150405Z") + "-" + ids.New("file")
-	tempPath := posixpath.Join(posixpath.Dir(req.RemotePath), ".opspilot-"+posixpath.Base(req.RemotePath)+"-"+suffix+".tmp")
+	tempPath := posixpath.Join(posixpath.Dir(req.RemotePath), ".opsnerva-"+posixpath.Base(req.RemotePath)+"-"+suffix+".tmp")
 	validatorCommand, err := s.validatorCommandFor(req.Validator, "remote", req.RemotePath, tempPath)
 	if err != nil {
 		return req, err

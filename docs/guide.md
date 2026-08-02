@@ -34,9 +34,9 @@ flowchart LR
 
 ### 桌面 App
 
-桌面版适用于 Windows 和 Linux。Tauri 会启动内置 Go sidecar，等待本地服务就绪后再显示主界面；再次启动只会聚焦已有窗口。后端仅监听随机的 `127.0.0.1` 端口。启用 MCP Server Mode 后，关闭窗口或点击“隐藏到托盘”会保持 sidecar 与 MCP Endpoint 运行；通过托盘图标或菜单恢复窗口，选择“退出”才会结束服务。未启用 MCP Server Mode 时关闭窗口会直接退出。
+桌面版适用于 Windows 和 Linux。Tauri 会启动内置 Go sidecar，等待本地服务就绪后再显示主界面；再次启动只会聚焦已有窗口。后端仅监听随机的 `127.0.0.1` 端口。启用 MCP Server Mode 后，关闭窗口会隐藏到托盘，“轻量模式”会销毁窗口和 WebView，sidecar 与 MCP Endpoint 继续运行；通过托盘图标或菜单重新创建窗口，选择“退出”才会结束服务。未启用 MCP Server Mode 时关闭窗口会直接退出。
 
-首次启动会在系统应用数据目录创建 `io.opspilot.desktop/config.yaml`、`.data/` 和 `workspace/`。桌面壳打开统一的 Web 初始化页面，由用户创建管理员密码；之后可在配置页面修改密码。
+首次启动会在安装目录创建 `config.yaml`、`data/` 和 `workspace/`。桌面壳打开统一的 Web 初始化页面，由用户创建管理员密码；之后可在配置页面修改密码。
 
 从源码构建需要 Go 1.26+、Node.js 22.13+ 和 Rust stable。Windows 生成 NSIS 安装包：
 
@@ -69,7 +69,7 @@ Docker 保持独立的 Web 服务部署方式，不包含 Tauri 或 Rust 运行�
 ```bash
 docker build -t opsnerva .
 docker run --rm -p 8080:8080 \
-  -v opsnerva-data:/app/.data \
+  -v opsnerva-data:/app/data \
   -v opsnerva-workspace:/app/workspace \
   opsnerva
 ```
@@ -105,7 +105,6 @@ Windows 不需要安装 `make`：
 ```powershell
 git clone https://github.com/Enterpr1se0/eino-ops-agent.git
 Set-Location eino-ops-agent
-Copy-Item configs/config.example.yaml configs/config.local.yaml
 npm --prefix web install
 npm --prefix web run build
 New-Item -ItemType Directory -Force bin | Out-Null
@@ -124,13 +123,13 @@ go build -buildvcs=false -trimpath -ldflags="-s -w" -o bin/ops-agent.exe ./cmd/o
 5. 如需管理远程主机，打开 **配置 → SSH 主机** 添加主机，然后扫描并核对 Host Key 指纹。
 6. 回到 **Agent**，新建会话即可开始使用。
 
-快捷启动生成的 `config.yaml` 修改后需重启生效。数据、加密主密钥、日志和 SQLite 数据库默认写入 EXE 同目录的 `.data/`，Workspace 文件写入同目录的 `workspace/`。
+快捷启动生成的 `config.yaml` 修改后需重启生效。数据、加密主密钥、日志和 SQLite 数据库默认写入安装目录的 `data/`，Workspace 文件写入同目录的 `workspace/`。配置中的相对路径均以 `config.yaml` 所在目录为基准。
 
 自动启动之外仍可显式指定配置：
 
 ```bash
-cp configs/config.example.yaml configs/config.local.yaml
-./bin/ops-agent --config configs/config.local.yaml serve
+cp configs/config.example.yaml bin/config.local.yaml
+./bin/ops-agent --config bin/config.local.yaml serve
 ```
 
 ### 修改监听地址
@@ -138,14 +137,14 @@ cp configs/config.example.yaml configs/config.local.yaml
 默认监听 `0.0.0.0:8080`。快捷启动可以修改 EXE 同目录的 `config.yaml`，也可以在启动时覆盖：
 
 ```bash
-OPS_AGENT_LISTEN='127.0.0.1:9090' ./bin/ops-agent --config configs/config.local.yaml serve
+OPS_AGENT_LISTEN='127.0.0.1:9090' ./bin/ops-agent --config bin/config.local.yaml serve
 ```
 
 PowerShell 使用：
 
 ```powershell
 $env:OPS_AGENT_LISTEN = '127.0.0.1:9090'
-.\bin\ops-agent.exe --config configs/config.local.yaml serve
+.\bin\ops-agent.exe --config bin/config.local.yaml serve
 ```
 
 `0.0.0.0` 允许其他设备访问，`127.0.0.1` 仅允许本机访问。局域网或公网部署应配置 HTTPS 反向代理，并设置 `OPS_AGENT_SECURE_COOKIES=true`。
@@ -191,7 +190,7 @@ Agent 页面右侧的 Conversations 会列出最近会话，标题取首条用�
 
 服务在 `workspace_dir`（默认启动目录下的 `workspace/`）中托管全部 Workspace。首次初始化会创建 `default/read_write`，之后可在系统设置中按名称新增、修改权限或移除；每个 Workspace 固定使用 `<workspace_dir>/<名称>/`，无需填写或查看宿主机绝对路径。在系统设置中删除 Workspace 会先解除登记（Agent 立即失去访问权），再永久删除对应目录及其中全部文件，无法恢复；审计事件会记录目录路径与删除结果。每个 Agent 会话持久化绑定一个 Workspace；对话左侧的选择器负责首次绑定和后续切换，运行中的 Agent 禁止切换。模型没有 Workspace 列表工具，所有 `workspace_*` Tool 都由服务端读取当前会话绑定，Tool schema 不接受 `workspace_id`。文件面板可进入子目录、点击上传或拖入多个不超过 100 MiB 的文件、预览文本，并从文件列表或预览窗口把原文件下载到浏览器。服务端通过操作系统文件事件监听当前打开的目录，再以 SSE 通知 Web 静默刷新，因此 Web 上传、Agent Tool、Workspace Shell 和外部编辑器产生的变化使用同一条刷新链路；监听不会递归扫描整个项目。Web 删除会直接永久删除宿主机文件或目录，确认后无法恢复。这些操作不会自动改写提示词或触发 LLM。文本预览上限为 1 MiB，二进制文件只显示元数据和 SHA256，但仍可直接下载。Web 上传使用 CSRF、防路径穿越、敏感文件名拒绝、禁止覆盖、同目录临时文件、`fsync` 和原子落盘。
 
-`workspace_shell` 用于解压、构建、测试、打包和交互式调试。`action=run` 执行一次性脚本并一次返回完整输出；`start/input/status/list/interrupt/close` 管理持续 PTY，`input.wait_seconds` 可等待本次输入的输出稳定后再返回。Agent 创建的 Workspace Shell 会进入右上角统一 Shell 列表并可直接打开观察；Workspace 文件栏中用户手动新建的终端只保留在当前 Workspace，不重复展示。交互 Sandbox 保留专用 PTY 的控制终端，因此 Bash 作业控制及 `vim`、`top` 等全屏程序可用。Web 终端接收原始 ANSI 事件，Agent Tool 结果使用跨输出块清理后的可读文本。系统设置提供 `Sandbox`、`Host Shell`、`Disabled` 三种模式；Linux 默认 Sandbox，Windows 默认 Host Shell，设置变化不会让已审批请求切换执行边界。Sandbox 仅支持 Linux，通过 `workspace_sandbox_path`（默认 `bwrap`，也可用 `OPS_AGENT_WORKSPACE_SANDBOX`）启动隔离的 user/mount/PID/network namespace，只挂载只读系统运行目录、独立 `/tmp` 和目标 Workspace，并禁用网络与嵌套 user namespace；缺少 Bubblewrap 或 namespace 权限时直接失败，不会降级执行。Workspace 的 `read_only/read_write` 决定沙箱挂载权限，`.env*`、`.ssh` 和系统隐藏文件等敏感路径会被遮蔽。交互会话持续到主动关闭、进程退出或服务停止，不设置 TTL。
+`workspace_shell` 用于解压、构建、测试、打包和交互式调试。`action=run` 执行一次性脚本并一次返回完整输出；`start/input/output/list/interrupt/close` 管理持续 PTY，`input.wait_seconds` 可等待本次输入的输出稳定后再返回，`output` 用于继续等待和读取最近一次输入的后续输出。Agent 创建的 Workspace Shell 会进入右上角统一 Shell 列表并可直接打开观察；Workspace 文件栏中用户手动新建的终端只保留在当前 Workspace，不重复展示。交互 Sandbox 保留专用 PTY 的控制终端，因此 Bash 作业控制及 `vim`、`top` 等全屏程序可用。Web 终端接收原始 ANSI 事件，Agent Tool 结果使用跨输出块清理后的可读文本。系统设置提供 `Sandbox`、`Host Shell`、`Disabled` 三种模式；Linux 默认 Sandbox，Windows 默认 Host Shell，设置变化不会让已审批请求切换执行边界。Sandbox 仅支持 Linux，通过 `workspace_sandbox_path`（默认 `bwrap`，也可用 `OPS_AGENT_WORKSPACE_SANDBOX`）启动隔离的 user/mount/PID/network namespace，只挂载只读系统运行目录、独立 `/tmp` 和目标 Workspace，并禁用网络与嵌套 user namespace；缺少 Bubblewrap 或 namespace 权限时直接失败，不会降级执行。Workspace 的 `read_only/read_write` 决定沙箱挂载权限，`.env*`、`.ssh` 和系统隐藏文件等敏感路径会被遮蔽。交互会话持续到主动关闭、进程退出或服务停止，不设置 TTL。
 
 Host Shell 直接拥有当前服务账户可用的宿主机文件系统与网络权限：Unix 使用 Bash，Windows 优先使用 PowerShell 7 (`pwsh.exe`) 并回退 Windows PowerShell。它仅允许 `read_write` Workspace，并遵循当前审批模式。省略 `cwd` 时固定使用 Workspace 根目录；Bash、PowerShell、Python 等子进程统一声明 UTF-8 环境。实际后端、Workspace、脚本、相对工作目录、环境与超时全部进入加密请求摘要；模式或请求内容变化不会修改已经开始的执行。`Disabled` 会在审批前拒绝调用。
 
@@ -209,10 +208,10 @@ SSH 主机间迁移单个普通文件使用 `ssh_file_transfer`。OpsNerva 分�
 
 ```bash
 OPS_AGENT_LOG_LEVEL=info ./bin/ops-agent serve
-tail -f .data/ops-agent.log | jq
+tail -f data/ops-agent.log | jq
 ```
 
-日志默认保存在 `.data/ops-agent.log`，单文件 20 MiB、保留 3 个备份，可通过配置文件的 `logging` 段或 `OPS_AGENT_LOG_*` 环境变量调整。Web 诊断包包含 `diagnostics.json`、当前日志和现存轮转备份；未启用文件日志时则包含当前进程的内存日志 JSONL。诊断清单只提供版本、平台、日志配置、Agent 状态以及主机/模型/MCP/Workspace/Skill 数量，不包含系统 Prompt、主机地址、目录路径或凭据。Web 缓冲区不跨重启，轮转文件会保留。成功的普通 GET/HEAD/OPTIONS 不写访问日志，超过 2 秒的只读请求记录为 Warn；写请求记录为 Info，4xx/5xx 分别记录为 Warn/Error。内置日志不记录 HTTP 正文、API Key、SSH/sudo 密码、模型 reasoning 正文、完整参数或 stdout/stderr；结构化敏感字段、消息和错误文本中的常见凭据格式会统一替换为 `[REDACTED]`，导出时还会重新清理已有日志。
+日志默认保存在 `data/ops-agent.log`，单文件 20 MiB、保留 3 个备份，可通过配置文件的 `logging` 段或 `OPS_AGENT_LOG_*` 环境变量调整。Web 诊断包包含 `diagnostics.json`、当前日志和现存轮转备份；未启用文件日志时则包含当前进程的内存日志 JSONL。诊断清单只提供版本、平台、日志配置、Agent 状态以及主机/模型/MCP/Workspace/Skill 数量，不包含系统 Prompt、主机地址、目录路径或凭据。Web 缓冲区不跨重启，轮转文件会保留。成功的普通 GET/HEAD/OPTIONS 不写访问日志，超过 2 秒的只读请求记录为 Warn；写请求记录为 Info，4xx/5xx 分别记录为 Warn/Error。内置日志不记录 HTTP 正文、API Key、SSH/sudo 密码、模型 reasoning 正文、完整参数或 stdout/stderr；结构化敏感字段、消息和错误文本中的常见凭据格式会统一替换为 `[REDACTED]`，导出时还会重新清理已有日志。
 
 ## 注册第一个主机
 
@@ -242,16 +241,16 @@ Eino Agent 的 `ssh_tunnel` 支持 `start`、`list` 和 `stop`。`start` 把目�
 ## 审批模式
 
 - `Manual`：主 Agent 和 MCP Client 的执行请求暂停并等待用户允许或拒绝。
-- `Auto`：无 Tool 的独立审批 Agent 审查全部请求。允许时立即执行，拒绝时终止；模型不可用、超时或响应无效时回退人工审批。
+- `Auto`：无 Tool 的独立审批 Agent 对照当前用户请求审查精确操作。允许时立即执行，明确拒绝时终止；要求人工判断、缺少用户请求、模型不可用、超时或响应无效时回退人工审批。
 - `Full access`：主 Agent 和 MCP Client 的请求直接执行。
 
-三种模式都保留参数校验、主机与 Workspace 授权、SSH 认证与 Host Key、文件版本绑定、凭据脱敏、系统权限和审计。审批 Agent 与主 Agent 使用独立 Runner，可单独选择模型和超时。它只接收标准化请求、目标主机能力、当前计划步骤和请求摘要；没有 Tool，也不调用批准 API。审查结果与操作说明随 Run 持久化。Manual 下开启“人工审批说明”时，同一审批 Agent 会在后台生成建议，建议不代替用户决定。
+三种模式都保留参数校验、主机与 Workspace 授权、SSH 认证与 Host Key、文件版本绑定、凭据脱敏、系统权限和审计。人工审批说明 Agent 与 Auto Approval Agent 分别使用独立 Runner、Prompt、Service 接口、并发槽和模型选择，仅共用超时设置。Auto Approval Agent 只接收由控制面绑定的当前用户请求、标准化操作、目标主机能力、当前计划目标/步骤和请求摘要；没有 Tool，也不调用批准 API。Tool reason 和计划不能扩大用户授权。Auto 审查结果随 Run 持久化。Manual 下开启“人工审批说明”时，原有说明 Agent 在后台生成操作与风险说明，建议不代替用户决定。MCP Client 不提供用户原始请求，因此 Auto 会回退人工审批。
 
 人工审批绑定主机、目录、命令/脚本、参数、环境和文件内容的 SHA-256。审批后任何修改都会使摘要失效。Web 审批框只提供“允许本次”和“拒绝并说明”，不保存会话级授权。主 Agent 的原始 Tool 调用会在 Service 层真正暂停；刷新页面或临时断网不会取消 Agent Loop。批准并执行完成后，真实结果返回同一个 Tool Call。拒绝时填写的内容会作为 `operator_instruction` 返回被暂停的 Tool。
 
 如果主 Agent 已产生 Tool 结果却以空正文结束，Runtime 不会重跑原 Agent Loop。它会把本轮已持久化的脱敏 Tool 结果和最新计划交给一个 `MaxIterations=1`、无 Tool、无 checkpoint 的独立总结 Agent，仅补生成最终回复；该路径不能再次执行操作。总结仍失败时会返回明确错误，并保留原 Tool 结果供下一轮继续。
 
-部署、修复、迁移和多组件诊断等复杂任务会先调用 `ops_plan_create` 创建 2–8 个可验证步骤。`ops_plan_step_update` 会自动把当前步骤开始后的最近审计 run 摘要附加到 evidence；没有可用 run 时仍需填写原因。它可完成、阻塞、跳过当前步骤或恢复已阻塞步骤；完成和跳过都会自动启动下一步，越级更新仍会被拒绝。顺序或范围变化时，`ops_plan_revise` 可替换全部未完成步骤，已完成和已跳过的历史保持不变。计划存储在 SQLite 并由会话 state 返回，Web 持续显示当前状态；刷新、断网或达到 Agent 迭代上限后可从原步骤继续。
+部署、修复、迁移和多组件诊断等复杂任务会先调用 `ops_plan_create` 创建 2–8 个可验证步骤。`ops_plan_step_update` 只接收步骤编号和目标状态，可完成、阻塞、跳过当前步骤或恢复已阻塞步骤；完成和跳过都会自动启动下一步，越级更新仍会被拒绝。顺序或范围变化时，`ops_plan_revise` 可替换全部未完成步骤，已完成和已跳过的历史保持不变。计划存储在 SQLite 并由会话 state 返回，Web 持续显示当前状态；刷新、断网或达到 Agent 迭代上限后可从原步骤继续。
 
 CLI 审批示例：
 
@@ -269,7 +268,7 @@ CLI 审批示例：
   "mcpServers": {
     "opsnerva": {
       "command": "/absolute/path/to/bin/ops-agent",
-      "args": ["--config", "/absolute/path/to/configs/config.local.yaml", "mcp"]
+      "args": ["--config", "/absolute/path/to/bin/config.yaml", "mcp"]
     }
   }
 }
@@ -308,7 +307,7 @@ Web 的 **Extensions / MCP Servers** 还支持反向角色：让 OpsNerva 作为
 - `ssh_host_list` / `ssh_host_inspect`
 - `ssh_exec` / `ssh_run_script`（可选 `background: true` 启动后台任务，默认同步执行）
 - `ssh_tunnel`（`action=start|list|stop`；本机监听固定为 `127.0.0.1`）
-- `ssh_shell`（`action=start|input|status|list|interrupt|close`；MCP 终端与 Web、会话终端隔离）
+- `ssh_shell`（`action=start|input|output|list|interrupt|close`；MCP 终端与 Web、会话终端隔离）
 - `ssh_task`（`action=status|cancel`；status 可用 `wait_seconds`、`block_until=terminal|output` 阻塞等待，并用输出字节偏移只取增量；单次等待截止返回 `wait_deadline_reached=true`，不会改变任务状态。后台命令未填写 `timeout_seconds` 时使用 `max_timeout_seconds`）
 - `ssh_file_read`（可选 `metadata_only=true` 或 `pattern` 搜索模式）/ `ssh_file_list`
 - `ssh_file_edit` / `ssh_file_transfer`
@@ -317,7 +316,7 @@ Web 的 **Extensions / MCP Servers** 还支持反向角色：让 OpsNerva 作为
 
 ## 数据安全
 
-- `.data/master.key` 首次运行生成，权限为 `0600`；生产演示可通过 `OPS_AGENT_MASTER_KEY` 注入 Base64 编码的 32 字节密钥。
+- `data/master.key` 首次运行生成，权限为 `0600`；生产演示可通过 `OPS_AGENT_MASTER_KEY` 注入 Base64 编码的 32 字节密钥。
 - Web 模型提供商的 API Key 同样采用 AES-256-GCM 加密保存，HTTP API 只暴露是否已配置密钥。
 - 主机 SSH/sudo 密码采用 AES-256-GCM 加密保存；HTTP 和 LLM 工具只暴露 `has_password`、`has_sudo_password` 能力标记。
 - 原始请求和 stdout/stderr 加密保存；数据库只额外保存脱敏视图用于检索和模型上下文。
