@@ -748,6 +748,18 @@ type Run struct {
 	CompletedAt       time.Time      `json:"completed_at,omitempty,omitzero"`
 }
 
+type RunSearchFilter struct {
+	Query         string
+	QueryScope    string
+	HostID        string
+	SessionID     string
+	ToolName      string
+	Status        string
+	StartedAfter  time.Time
+	StartedBefore time.Time
+	Limit         int
+}
+
 type Approval struct {
 	ID            string         `json:"id"`
 	RunID         string         `json:"run_id"`

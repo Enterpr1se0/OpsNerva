@@ -1147,15 +1147,48 @@ func likePattern(query string) string {
 }
 
 func (s *Store) SearchRuns(ctx context.Context, query, hostID, sessionID string, limit int) ([]domain.Run, error) {
-	pattern := likePattern(query)
+	return s.SearchRunsFiltered(ctx, domain.RunSearchFilter{
+		Query: query, QueryScope: "all", HostID: hostID, SessionID: sessionID, Limit: limit,
+	})
+}
+
+func (s *Store) SearchRunsFiltered(ctx context.Context, filter domain.RunSearchFilter) ([]domain.Run, error) {
 	statement := `SELECT id,session_id,host_id,tool_name,tool_arguments_json,request_json,request_cipher,request_digest,status,
 exit_code,stdout_redacted,stderr_redacted,stdout_cipher,stderr_cipher,error,ai_review_json,started_at,completed_at
-FROM runs WHERE (?='' OR session_id=?) AND (?='' OR host_id=?) AND (?='' OR search_text LIKE ? ESCAPE '\' OR request_json LIKE ? ESCAPE '\'
-		OR tool_arguments_json LIKE ? ESCAPE '\' OR stdout_redacted LIKE ? ESCAPE '\' OR stderr_redacted LIKE ? ESCAPE '\') ORDER BY started_at DESC`
-	arguments := []any{sessionID, sessionID, hostID, hostID, query, pattern, pattern, pattern, pattern, pattern}
-	if limit > 0 {
+FROM runs WHERE (?='' OR session_id=?) AND (?='' OR host_id=?) AND (?='' OR tool_name=?) AND (?='' OR status=?)`
+	arguments := []any{
+		filter.SessionID, filter.SessionID, filter.HostID, filter.HostID,
+		filter.ToolName, filter.ToolName, filter.Status, filter.Status,
+	}
+	if !filter.StartedAfter.IsZero() {
+		statement += " AND started_at>=?"
+		arguments = append(arguments, formatTime(filter.StartedAfter.UTC()))
+	}
+	if !filter.StartedBefore.IsZero() {
+		statement += " AND started_at<=?"
+		arguments = append(arguments, formatTime(filter.StartedBefore.UTC()))
+	}
+	if filter.Query != "" {
+		pattern := likePattern(filter.Query)
+		switch filter.QueryScope {
+		case "", "all":
+			statement += ` AND (search_text LIKE ? ESCAPE '\' OR request_json LIKE ? ESCAPE '\' OR tool_arguments_json LIKE ? ESCAPE '\'
+				OR stdout_redacted LIKE ? ESCAPE '\' OR stderr_redacted LIKE ? ESCAPE '\')`
+			arguments = append(arguments, pattern, pattern, pattern, pattern, pattern)
+		case "request":
+			statement += ` AND (search_text LIKE ? ESCAPE '\' OR request_json LIKE ? ESCAPE '\' OR tool_arguments_json LIKE ? ESCAPE '\')`
+			arguments = append(arguments, pattern, pattern, pattern)
+		case "output":
+			statement += ` AND (stdout_redacted LIKE ? ESCAPE '\' OR stderr_redacted LIKE ? ESCAPE '\')`
+			arguments = append(arguments, pattern, pattern)
+		default:
+			return nil, fmt.Errorf("invalid history query_scope: use all, request, or output")
+		}
+	}
+	statement += " ORDER BY started_at DESC"
+	if filter.Limit > 0 {
 		statement += " LIMIT ?"
-		arguments = append(arguments, limit)
+		arguments = append(arguments, filter.Limit)
 	}
 	rows, err := s.db.QueryContext(ctx, statement, arguments...)
 	if err != nil {
@@ -1174,20 +1207,41 @@ FROM runs WHERE (?='' OR session_id=?) AND (?='' OR host_id=?) AND (?='' OR sear
 }
 
 func (s *Store) SearchRunsRegex(ctx context.Context, pattern, hostID, sessionID string, limit int) ([]domain.Run, error) {
+	return s.SearchRunsRegexFiltered(ctx, pattern, domain.RunSearchFilter{
+		QueryScope: "all", HostID: hostID, SessionID: sessionID, Limit: limit,
+	})
+}
+
+func (s *Store) SearchRunsRegexFiltered(ctx context.Context, pattern string, filter domain.RunSearchFilter) ([]domain.Run, error) {
 	expression, err := regexp.CompilePOSIX(pattern)
 	if err != nil {
 		return nil, fmt.Errorf("invalid POSIX history regex: %w", err)
 	}
-	runs, err := s.SearchRuns(ctx, "", hostID, sessionID, 0)
+	limit := filter.Limit
+	filter.Query = ""
+	filter.Limit = 0
+	runs, err := s.SearchRunsFiltered(ctx, filter)
 	if err != nil {
 		return nil, err
 	}
 	matched := make([]domain.Run, 0)
 	for _, run := range runs {
-		parts := []string{run.RequestJSON, run.ToolArgumentsJSON, run.StdoutRedacted, run.StderrRedacted}
-		var request domain.ExecRequest
-		if json.Unmarshal([]byte(run.RequestJSON), &request) == nil {
-			parts = append(parts, request.SearchText())
+		var parts []string
+		switch filter.QueryScope {
+		case "", "all":
+			parts = []string{run.RequestJSON, run.ToolArgumentsJSON, run.StdoutRedacted, run.StderrRedacted}
+		case "request":
+			parts = []string{run.RequestJSON, run.ToolArgumentsJSON}
+		case "output":
+			parts = []string{run.StdoutRedacted, run.StderrRedacted}
+		default:
+			return nil, fmt.Errorf("invalid history query_scope: use all, request, or output")
+		}
+		if filter.QueryScope != "output" {
+			var request domain.ExecRequest
+			if json.Unmarshal([]byte(run.RequestJSON), &request) == nil {
+				parts = append(parts, request.SearchText())
+			}
 		}
 		if !expression.MatchString(strings.Join(parts, "\n")) {
 			continue

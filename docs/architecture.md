@@ -108,7 +108,7 @@ HTTP Chat Handler 使用保留 request logger/value、但移除浏览器取消�
 
 ## Audit storage
 
-`ssh_history` 默认按字面量检索，也支持经过 POSIX 编译校验的 `regex` 模式；正则仅匹配当前会话允许读取的请求文本、Tool 参数和脱敏输出。
+`ssh_history` 始终限制在当前会话，可按主机、Tool、状态和 RFC3339 开始时间过滤。文本检索默认使用字面量，也支持经过 POSIX 编译校验的 `regex`，并可通过 `query_scope=all|request|output` 限定匹配范围。搜索只返回运行摘要；指定 `run_id` 才返回结构化 Tool 参数、规范化请求和完整脱敏输出。
 
 `runs.request_json`、stdout 和 stderr 的可检索字段均为脱敏视图；对应原文采用 AES-256-GCM 写入 cipher 字段。MCP/Eino 历史工具永远不会返回 cipher 或解密内容。只有本地审批和显式 `audit show --raw` 会解密。
 

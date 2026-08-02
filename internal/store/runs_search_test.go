@@ -157,6 +157,46 @@ func TestSearchRunsFiltersAndFallbacks(t *testing.T) {
 	}
 }
 
+func TestSearchRunsFilteredByStructuredFieldsAndQueryScope(t *testing.T) {
+	st, ctx := newSearchStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, run := range []domain.Run{
+		{
+			ID: "run-request", SessionID: "session-a", HostID: "host-a", ToolName: "ssh_exec",
+			RequestJSON: `{"mode":"program","program":"systemctl","args":["status","nginx"]}`,
+			SearchText:  "systemctl\nstatus\nnginx", RequestDigest: "digest-request", Status: "completed", StartedAt: now.Add(-time.Minute),
+		},
+		{
+			ID: "run-output", SessionID: "session-a", HostID: "host-a", ToolName: "ssh_file_read",
+			RequestJSON: `{"mode":"remote_read","remote_path":"/var/log/app.log"}`,
+			SearchText:  "/var/log/app.log", RequestDigest: "digest-output", Status: "created", StartedAt: now,
+		},
+	} {
+		if err := st.CreateRun(ctx, run); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.UpdateRun(ctx, domain.Run{ID: "run-output", Status: "failed", ExitCode: 1, StderrRedacted: "nginx timeout", CompletedAt: now.Add(time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+
+	filtered, err := st.SearchRunsFiltered(ctx, domain.RunSearchFilter{
+		Query: "nginx", QueryScope: "output", HostID: "host-a", SessionID: "session-a",
+		ToolName: "ssh_file_read", Status: "failed", StartedAfter: now.Add(-time.Second), StartedBefore: now.Add(time.Second),
+	})
+	if err != nil || len(filtered) != 1 || filtered[0].ID != "run-output" {
+		t.Fatalf("structured output filter = %#v, err=%v", filtered, err)
+	}
+	requestOnly, err := st.SearchRunsFiltered(ctx, domain.RunSearchFilter{Query: "nginx", QueryScope: "request", SessionID: "session-a"})
+	if err != nil || len(requestOnly) != 1 || requestOnly[0].ID != "run-request" {
+		t.Fatalf("request scope = %#v, err=%v", requestOnly, err)
+	}
+	regexOutput, err := st.SearchRunsRegexFiltered(ctx, `nginx[[:space:]]+timeout`, domain.RunSearchFilter{QueryScope: "output", SessionID: "session-a", Status: "failed"})
+	if err != nil || len(regexOutput) != 1 || regexOutput[0].ID != "run-output" {
+		t.Fatalf("regex output filter = %#v, err=%v", regexOutput, err)
+	}
+}
+
 func TestSearchRunsFiltersBySession(t *testing.T) {
 	st, ctx := newSearchStore(t)
 	now := time.Now().UTC()

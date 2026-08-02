@@ -312,7 +312,7 @@ Web 的 **Extensions / MCP Servers** 还支持反向角色：让 OpsNerva 作为
 - `ssh_file_read`（可选 `metadata_only=true` 或 `pattern` 搜索模式）/ `ssh_file_list`
 - `ssh_file_edit` / `ssh_file_transfer`
 - `workspace_file_list` / `workspace_file_read`（可选 `tail_lines` 或 `pattern` 搜索模式）/ `workspace_file_edit` / `workspace_file_delete` / `workspace_file_upload` / `workspace_file_download` / `workspace_shell`。这些工具只在 Eino Agent 中提供，Workspace 由 Web 会话绑定，模型不能列出或自行选择其他 Workspace；无会话语义的 MCP Server 不暴露这组工具。
-- `ssh_history`（支持 `literal` / POSIX `regex`）和通用 `skill` 仅提供给 OpsNerva 主 Agent，不通过自身 MCP Server 暴露。完整执行历史只在 Web 管理端查看。
+- `ssh_history` 可按请求/输出文本、主机、工具、状态和 RFC3339 时间范围组合检索，并支持 `literal` / POSIX `regex`。检索返回结构化摘要；指定 `run_id` 后返回该运行的结构化请求和完整脱敏输出。它和通用 `skill` 仅提供给 OpsNerva 主 Agent，不通过自身 MCP Server 暴露；Web 管理端仍可查看全局执行历史。
 
 ## 数据安全
 

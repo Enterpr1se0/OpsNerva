@@ -301,6 +301,9 @@ func fileSearchSchemaOption() toolutils.Option {
 		if jsonTagName == "match_mode" {
 			schema.Enum = []any{string(domain.FileSearchLiteral), string(domain.FileSearchRegex)}
 		}
+		if jsonTagName == "query_scope" {
+			schema.Enum = []any{"all", "request", "output"}
+		}
 	})
 }
 
@@ -390,11 +393,16 @@ func invalidWorkspaceShellValue(input WorkspaceShellInput, action, message strin
 }
 
 type HistorySearchInput struct {
-	RunID     string                     `json:"run_id,omitempty" jsonschema:"exact audit run identifier; mutually exclusive with search filters"`
-	Query     string                     `json:"query,omitempty" jsonschema:"substring or POSIX regular expression matched against command text and redacted output; secrets appear as [REDACTED]"`
-	MatchMode domain.FileSearchMatchMode `json:"match_mode,omitempty" jsonschema:"query mode: literal (default) or regex using POSIX regular expressions"`
-	HostID    string                     `json:"host_id,omitempty" jsonschema:"optional registered host identifier"`
-	Limit     int                        `json:"limit,omitempty" jsonschema:"optional maximum results; omitted returns every matching audited run"`
+	RunID         string                     `json:"run_id,omitempty" jsonschema:"exact audit run identifier; mutually exclusive with search filters"`
+	Query         string                     `json:"query,omitempty" jsonschema:"substring or POSIX regular expression matched against command text and redacted output; secrets appear as [REDACTED]"`
+	MatchMode     domain.FileSearchMatchMode `json:"match_mode,omitempty" jsonschema:"query mode: literal (default) or regex using POSIX regular expressions"`
+	QueryScope    string                     `json:"query_scope,omitempty" jsonschema:"where query matches: all (default), request, or output"`
+	HostID        string                     `json:"host_id,omitempty" jsonschema:"optional registered host identifier"`
+	ToolName      string                     `json:"tool_name,omitempty" jsonschema:"optional exact tool name such as ssh_exec or ssh_file_read"`
+	Status        string                     `json:"status,omitempty" jsonschema:"optional exact execution status such as completed, failed, approval_required, rejected, or cancelled"`
+	StartedAfter  string                     `json:"started_after,omitempty" jsonschema:"optional inclusive RFC3339 start-time lower bound"`
+	StartedBefore string                     `json:"started_before,omitempty" jsonschema:"optional inclusive RFC3339 start-time upper bound"`
+	Limit         int                        `json:"limit,omitempty" jsonschema:"optional maximum results; omitted returns every matching audited run"`
 }
 
 type WebSearchInput struct {
@@ -409,42 +417,113 @@ type WebExtractInput struct {
 	URLs []string `json:"urls" jsonschema:"1-5 specific public HTTP/HTTPS page URLs; never include credentials, private addresses, or private operational data"`
 }
 
-type HistoryRun struct {
-	ID                string    `json:"id"`
-	SessionID         string    `json:"session_id,omitempty"`
-	HostID            string    `json:"host_id"`
-	ToolName          string    `json:"tool_name,omitempty"`
-	ToolArgumentsJSON string    `json:"tool_arguments_json,omitempty"`
-	RequestJSON       string    `json:"request_json"`
-	RequestDigest     string    `json:"request_digest"`
-	Status            string    `json:"status"`
-	ExitCode          int       `json:"exit_code"`
-	StdoutRedacted    string    `json:"stdout_redacted,omitempty"`
-	StderrRedacted    string    `json:"stderr_redacted,omitempty"`
-	Error             string    `json:"error,omitempty"`
-	StartedAt         time.Time `json:"started_at"`
-	CompletedAt       time.Time `json:"completed_at,omitempty,omitzero"`
+type HistoryRunSummary struct {
+	ID          string    `json:"id"`
+	HostID      string    `json:"host_id"`
+	ToolName    string    `json:"tool_name,omitempty"`
+	Mode        string    `json:"mode,omitempty"`
+	Operation   string    `json:"operation"`
+	Status      string    `json:"status"`
+	ExitCode    int       `json:"exit_code"`
+	DurationMS  int64     `json:"duration_ms,omitempty"`
+	StartedAt   time.Time `json:"started_at"`
+	CompletedAt time.Time `json:"completed_at,omitempty,omitzero"`
+}
+
+type HistoryRunDetail struct {
+	HistoryRunSummary
+	ToolArguments any    `json:"tool_arguments,omitempty"`
+	Request       any    `json:"request"`
+	Stdout        string `json:"stdout_redacted,omitempty"`
+	Stderr        string `json:"stderr_redacted,omitempty"`
+	Error         string `json:"error,omitempty"`
 }
 
 type HistoryOutput struct {
-	Runs []HistoryRun `json:"runs"`
+	Runs *[]HistoryRunSummary `json:"runs,omitempty"`
+	Run  *HistoryRunDetail    `json:"run,omitempty"`
 }
 
-func historyRun(run domain.Run) HistoryRun {
-	return HistoryRun{
-		ID: run.ID, SessionID: run.SessionID, HostID: run.HostID,
-		ToolName: run.ToolName, ToolArgumentsJSON: run.ToolArgumentsJSON,
-		RequestJSON: run.RequestJSON, RequestDigest: run.RequestDigest,
-		Status: run.Status, ExitCode: run.ExitCode,
-		StdoutRedacted: run.StdoutRedacted, StderrRedacted: run.StderrRedacted,
-		Error: run.Error, StartedAt: run.StartedAt, CompletedAt: run.CompletedAt,
+func historyJSON(raw string) any {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var value any
+	if json.Unmarshal([]byte(raw), &value) == nil {
+		return value
+	}
+	return raw
+}
+
+func historyOperation(run domain.Run, request domain.ExecRequest) string {
+	switch request.Mode {
+	case domain.ExecProgram:
+		return strings.Join(append([]string{request.Program}, request.Args...), " ")
+	case domain.ExecScript, domain.ExecWorkspaceShell:
+		if strings.TrimSpace(request.Reason) != "" {
+			return request.Reason
+		}
+	case domain.ExecRemoteRead:
+		return "read " + request.RemotePath
+	case domain.ExecRemoteSearch:
+		return "search " + request.RemotePath
+	case domain.ExecRemoteEdit:
+		return "edit " + request.RemotePath
+	case domain.ExecWorkspaceRead:
+		return "read " + request.WorkspaceID + ":" + request.RelativePath
+	case domain.ExecWorkspaceSearch:
+		return "search " + request.WorkspaceID + ":" + request.RelativePath
+	case domain.ExecWorkspaceEdit:
+		return "edit " + request.WorkspaceID + ":" + request.RelativePath
+	case domain.ExecWorkspaceDelete:
+		return "delete " + request.WorkspaceID + ":" + request.RelativePath
+	case domain.ExecWorkspaceDirectoryList:
+		return "list " + request.WorkspaceID + ":" + request.RelativePath
+	case domain.ExecWorkspaceUpload:
+		return request.WorkspaceID + ":" + request.RelativePath + " -> " + request.RemotePath
+	case domain.ExecWorkspaceDownload:
+		return request.RemotePath + " -> " + request.WorkspaceID + ":" + request.RelativePath
+	case domain.ExecSSHFileTransfer:
+		return request.SourceHostID + ":" + request.SourcePath + " -> " + request.HostID + ":" + request.RemotePath
+	case domain.ExecSSHTunnelStart:
+		return fmt.Sprintf("%s:%d -> localhost:%d", request.TunnelRemoteHost, request.TunnelRemotePort, request.TunnelLocalPort)
+	case domain.ExecSSHShellStart, domain.ExecWorkspaceShellStart:
+		return string(request.Mode)
+	}
+	if request.Mode != "" {
+		return string(request.Mode)
+	}
+	if run.ToolName != "" {
+		return run.ToolName
+	}
+	return "execution"
+}
+
+func historyRunSummary(run domain.Run) HistoryRunSummary {
+	var request domain.ExecRequest
+	_ = json.Unmarshal([]byte(run.RequestJSON), &request)
+	duration := int64(0)
+	if !run.CompletedAt.IsZero() && !run.StartedAt.IsZero() && !run.CompletedAt.Before(run.StartedAt) {
+		duration = run.CompletedAt.Sub(run.StartedAt).Milliseconds()
+	}
+	return HistoryRunSummary{
+		ID: run.ID, HostID: run.HostID, ToolName: run.ToolName, Mode: string(request.Mode),
+		Operation: historyOperation(run, request), Status: run.Status, ExitCode: run.ExitCode,
+		DurationMS: duration, StartedAt: run.StartedAt, CompletedAt: run.CompletedAt,
 	}
 }
 
-func historyRuns(runs []domain.Run) []HistoryRun {
-	result := make([]HistoryRun, len(runs))
+func historyRunDetail(run domain.Run) HistoryRunDetail {
+	return HistoryRunDetail{
+		HistoryRunSummary: historyRunSummary(run), ToolArguments: historyJSON(run.ToolArgumentsJSON),
+		Request: historyJSON(run.RequestJSON), Stdout: run.StdoutRedacted, Stderr: run.StderrRedacted, Error: run.Error,
+	}
+}
+
+func historyRunSummaries(runs []domain.Run) []HistoryRunSummary {
+	result := make([]HistoryRunSummary, len(runs))
 	for index, run := range runs {
-		result[index] = historyRun(run)
+		result[index] = historyRunSummary(run)
 	}
 	return result
 }
@@ -789,25 +868,63 @@ func RunWorkspaceFileReadTool(ctx context.Context, svc *service.Service, input W
 }
 
 func ReadHistoryTool(ctx context.Context, svc *service.Service, input HistorySearchInput) (HistoryOutput, error) {
-	if input.RunID != "" {
-		if input.Query != "" || input.MatchMode != "" || input.HostID != "" || input.Limit != 0 {
+	runID := strings.TrimSpace(input.RunID)
+	if runID != "" {
+		if input.Query != "" || input.MatchMode != "" || input.QueryScope != "" || input.HostID != "" || input.ToolName != "" || input.Status != "" || input.StartedAfter != "" || input.StartedBefore != "" || input.Limit != 0 {
 			return HistoryOutput{}, fmt.Errorf("invalid history input: run_id is mutually exclusive with search filters")
 		}
-		result, err := svc.GetRun(ctx, input.RunID, false)
+		result, err := svc.GetRun(ctx, runID, false)
 		if err != nil {
 			return HistoryOutput{}, err
 		}
-		return HistoryOutput{Runs: []HistoryRun{historyRun(result.Run)}}, nil
+		detail := historyRunDetail(result.Run)
+		return HistoryOutput{Run: &detail}, nil
+	}
+	if input.Limit < 0 {
+		return HistoryOutput{}, fmt.Errorf("invalid history input: limit must be non-negative")
 	}
 	matchMode := input.MatchMode
 	if matchMode == "" {
 		matchMode = domain.FileSearchLiteral
 	}
-	if matchMode == domain.FileSearchRegex && strings.TrimSpace(input.Query) == "" {
-		return HistoryOutput{}, fmt.Errorf("invalid history input: query is required with match_mode=regex")
+	if strings.TrimSpace(input.Query) == "" && (input.MatchMode != "" || input.QueryScope != "") {
+		return HistoryOutput{}, fmt.Errorf("invalid history input: query is required with match_mode or query_scope")
 	}
-	runs, err := svc.SearchRunsMatching(ctx, input.Query, matchMode, input.HostID, input.Limit)
-	return HistoryOutput{Runs: historyRuns(runs)}, err
+	queryScope := strings.TrimSpace(input.QueryScope)
+	if queryScope == "" {
+		queryScope = "all"
+	}
+	if queryScope != "all" && queryScope != "request" && queryScope != "output" {
+		return HistoryOutput{}, fmt.Errorf("invalid history input: query_scope must be all, request, or output")
+	}
+	parseBound := func(name, value string) (time.Time, error) {
+		if strings.TrimSpace(value) == "" {
+			return time.Time{}, nil
+		}
+		parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(value))
+		if err != nil {
+			return time.Time{}, fmt.Errorf("invalid history input: %s must be RFC3339: %w", name, err)
+		}
+		return parsed.UTC(), nil
+	}
+	startedAfter, err := parseBound("started_after", input.StartedAfter)
+	if err != nil {
+		return HistoryOutput{}, err
+	}
+	startedBefore, err := parseBound("started_before", input.StartedBefore)
+	if err != nil {
+		return HistoryOutput{}, err
+	}
+	if !startedAfter.IsZero() && !startedBefore.IsZero() && startedAfter.After(startedBefore) {
+		return HistoryOutput{}, fmt.Errorf("invalid history input: started_after must not be later than started_before")
+	}
+	runs, err := svc.SearchRunsMatching(ctx, domain.RunSearchFilter{
+		Query: input.Query, QueryScope: queryScope, HostID: strings.TrimSpace(input.HostID),
+		ToolName: strings.TrimSpace(input.ToolName), Status: strings.TrimSpace(input.Status), StartedAfter: startedAfter,
+		StartedBefore: startedBefore, Limit: input.Limit,
+	}, matchMode)
+	summaries := historyRunSummaries(runs)
+	return HistoryOutput{Runs: &summaries}, err
 }
 
 func ReadSkillTool(ctx context.Context, svc *service.Service, input SkillInput, actor string) (SkillOutput, error) {
@@ -1495,7 +1612,7 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_history", "Search only this conversation's audited commands and redacted results by literal substring (default) or POSIX regular expression, or provide run_id to get one exact run from this conversation. Secrets are stored as [REDACTED]. Raw encrypted output is never exposed to the model.", func(ctx context.Context, input HistorySearchInput) (any, error) {
+	if err := appendTool(toolutils.InferTool("ssh_history", "Search only this conversation's audited executions by request/output text, host, tool, status, or start time. Search returns structured summaries; provide one run_id to read that run's complete structured request and untruncated redacted output. Secrets are stored as [REDACTED].", func(ctx context.Context, input HistorySearchInput) (any, error) {
 		result, err := ReadHistoryTool(ctx, svc, input)
 		return normalizeValueToolResult(ctx, "ssh_history", result, err)
 	}, fileSearchSchemaOption())); err != nil {

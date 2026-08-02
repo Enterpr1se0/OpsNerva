@@ -255,7 +255,9 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 		}
 		if descriptor.Name == "ssh_history" {
 			schema := string(descriptor.InputSchema)
-			if descriptor.Category != "history" || !strings.Contains(schema, `"match_mode"`) || !strings.Contains(schema, `"literal"`) || !strings.Contains(schema, `"regex"`) {
+			if descriptor.Category != "history" || !strings.Contains(schema, `"match_mode"`) || !strings.Contains(schema, `"literal"`) || !strings.Contains(schema, `"regex"`) ||
+				!strings.Contains(schema, `"query_scope"`) || !strings.Contains(schema, `"tool_name"`) || !strings.Contains(schema, `"status"`) ||
+				!strings.Contains(schema, `"started_after"`) || !strings.Contains(schema, `"started_before"`) {
 				t.Fatalf("ssh_history metadata is incomplete: %#v", descriptor)
 			}
 		}
@@ -1117,12 +1119,15 @@ func TestUnifiedHistoryToolSearchesAndReadsExactRun(t *testing.T) {
 	}
 	reviewJSON := `{"status":"completed","model":"private-review-model","explanation":{"summary":"SUBAGENT_SUMMARY_SENTINEL","mechanism":"SUBAGENT_MECHANISM_SENTINEL","risks":["SUBAGENT_RISK_SENTINEL"]},"reviewed_at":"2026-07-29T00:00:00Z"}`
 	for _, run := range []domain.Run{
-		{ID: "run-nginx", SessionID: "session-a", HostID: "host-a", RequestJSON: `{"program":"nginx"}`, RequestDigest: "digest-a", Status: "completed", AIReviewJSON: reviewJSON, StartedAt: now.Add(-time.Minute)},
-		{ID: "run-disk", SessionID: "session-b", HostID: "host-b", RequestJSON: `{"program":"df"}`, RequestDigest: "digest-b", Status: "completed", StartedAt: now},
+		{ID: "run-nginx", SessionID: "session-a", HostID: "host-a", ToolName: "ssh_exec", ToolArgumentsJSON: `{"host_id":"host-a","program":"nginx"}`, RequestJSON: `{"mode":"program","program":"nginx"}`, RequestDigest: "digest-a", Status: "completed", AIReviewJSON: reviewJSON, StartedAt: now.Add(-time.Minute)},
+		{ID: "run-disk", SessionID: "session-b", HostID: "host-b", ToolName: "ssh_file_read", ToolArgumentsJSON: `{"host_id":"host-b","path":"/var/log/disk"}`, RequestJSON: `{"mode":"remote_read","remote_path":"/var/log/disk"}`, RequestDigest: "digest-b", Status: "created", StartedAt: now},
 	} {
 		if err := st.CreateRun(ctx, run); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := st.UpdateRun(ctx, domain.Run{ID: "run-disk", Status: "failed", ExitCode: 1, StderrRedacted: "disk full", Error: "read failed", CompletedAt: now.Add(2 * time.Second)}); err != nil {
+		t.Fatal(err)
 	}
 	storedRun, err := st.GetRun(ctx, "run-nginx")
 	if err != nil {
@@ -1140,11 +1145,23 @@ func TestUnifiedHistoryToolSearchesAndReadsExactRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(searched.Runs) != 1 || searched.Runs[0].ID != "run-nginx" {
+	if searched.Runs == nil || len(*searched.Runs) != 1 || (*searched.Runs)[0].ID != "run-nginx" || (*searched.Runs)[0].Operation != "nginx" {
 		t.Fatalf("history search result = %#v", searched)
 	}
-	regexMatched, err := ReadHistoryTool(ctx, svc, HistorySearchInput{Query: `nginx|"df"`, MatchMode: domain.FileSearchRegex, Limit: 10})
-	if err != nil || len(regexMatched.Runs) != 2 {
+	outputMatched, err := ReadHistoryTool(ctx, svc, HistorySearchInput{Query: "disk full", QueryScope: "output", ToolName: "ssh_file_read", Status: "failed", StartedAfter: now.Add(-time.Second).Format(time.RFC3339), Limit: 10})
+	if err != nil || outputMatched.Runs == nil || len(*outputMatched.Runs) != 1 || (*outputMatched.Runs)[0].ID != "run-disk" || (*outputMatched.Runs)[0].DurationMS != 2000 {
+		t.Fatalf("structured history filters = %#v, err=%v", outputMatched, err)
+	}
+	requestOnly, err := ReadHistoryTool(ctx, svc, HistorySearchInput{Query: "disk full", QueryScope: "request"})
+	if err != nil || requestOnly.Runs == nil || len(*requestOnly.Runs) != 0 {
+		t.Fatalf("request-scoped history matched output: %#v, err=%v", requestOnly, err)
+	}
+	emptyJSON, err := json.Marshal(requestOnly)
+	if err != nil || string(emptyJSON) != `{"runs":[]}` {
+		t.Fatalf("empty history search is ambiguous: %s, err=%v", emptyJSON, err)
+	}
+	regexMatched, err := ReadHistoryTool(ctx, svc, HistorySearchInput{Query: `nginx|/var/log/disk`, MatchMode: domain.FileSearchRegex, Limit: 10})
+	if err != nil || regexMatched.Runs == nil || len(*regexMatched.Runs) != 2 {
 		t.Fatalf("history regex search result = %#v, err=%v", regexMatched, err)
 	}
 	if _, err := ReadHistoryTool(ctx, svc, HistorySearchInput{Query: `[`, MatchMode: domain.FileSearchRegex}); err == nil || !strings.Contains(err.Error(), "POSIX") {
@@ -1159,26 +1176,35 @@ func TestUnifiedHistoryToolSearchesAndReadsExactRun(t *testing.T) {
 			t.Fatalf("history exposed command explainer data %q: %s", leaked, encodedHistory)
 		}
 	}
+	for _, verbose := range []string{"request_json", "tool_arguments_json", "stdout_redacted", "stderr_redacted"} {
+		if strings.Contains(string(encodedHistory), verbose) {
+			t.Fatalf("history search summary contains full run field %q: %s", verbose, encodedHistory)
+		}
+	}
 	exact, err := ReadHistoryTool(ctx, svc, HistorySearchInput{RunID: "run-disk"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(exact.Runs) != 1 || exact.Runs[0].ID != "run-disk" {
+	if exact.Run == nil || exact.Run.ID != "run-disk" || exact.Run.Stderr != "disk full" || exact.Run.Error != "read failed" {
 		t.Fatalf("exact history result = %#v", exact)
+	}
+	request, ok := exact.Run.Request.(map[string]any)
+	if !ok || request["remote_path"] != "/var/log/disk" {
+		t.Fatalf("exact history request is not structured: %#v", exact.Run.Request)
 	}
 	sessionCtx := service.WithSessionID(ctx, "session-a")
 	sessionRuns, err := ReadHistoryTool(sessionCtx, svc, HistorySearchInput{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sessionRuns.Runs) != 1 || sessionRuns.Runs[0].ID != "run-nginx" {
+	if sessionRuns.Runs == nil || len(*sessionRuns.Runs) != 1 || (*sessionRuns.Runs)[0].ID != "run-nginx" {
 		t.Fatalf("session history leaked another conversation: %#v", sessionRuns)
 	}
 	if _, err := ReadHistoryTool(sessionCtx, svc, HistorySearchInput{RunID: "run-disk"}); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("exact history read crossed session boundary: %v", err)
 	}
 	sessionExact, err := ReadHistoryTool(sessionCtx, svc, HistorySearchInput{RunID: "run-nginx"})
-	if err != nil || len(sessionExact.Runs) != 1 || sessionExact.Runs[0].ID != "run-nginx" {
+	if err != nil || sessionExact.Run == nil || sessionExact.Run.ID != "run-nginx" {
 		t.Fatalf("current-session exact history failed: %#v err=%v", sessionExact, err)
 	}
 

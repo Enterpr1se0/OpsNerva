@@ -2529,12 +2529,13 @@ func (s *Service) SearchRuns(ctx context.Context, query, hostID string, limit in
 	return s.store.SearchRuns(ctx, query, hostID, SessionIDFromContext(ctx), limit)
 }
 
-func (s *Service) SearchRunsMatching(ctx context.Context, query string, matchMode domain.FileSearchMatchMode, hostID string, limit int) ([]domain.Run, error) {
+func (s *Service) SearchRunsMatching(ctx context.Context, filter domain.RunSearchFilter, matchMode domain.FileSearchMatchMode) ([]domain.Run, error) {
+	filter.SessionID = SessionIDFromContext(ctx)
 	switch matchMode {
 	case "", domain.FileSearchLiteral:
-		return s.store.SearchRuns(ctx, query, hostID, SessionIDFromContext(ctx), limit)
+		return s.store.SearchRunsFiltered(ctx, filter)
 	case domain.FileSearchRegex:
-		return s.store.SearchRunsRegex(ctx, query, hostID, SessionIDFromContext(ctx), limit)
+		return s.store.SearchRunsRegexFiltered(ctx, filter.Query, filter)
 	default:
 		return nil, fmt.Errorf("invalid history match_mode: use literal or regex")
 	}
