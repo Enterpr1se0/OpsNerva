@@ -15,8 +15,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	headers,
   })
   if (!response.ok) {
-    const body = await response.json().catch(() => ({ error: response.statusText }))
-    throw new Error(body.error || response.statusText)
+		throw await responseError(response)
   }
   if (response.status === 204) return undefined as T
   return response.json()
@@ -143,6 +142,71 @@ export function sftpDownloadURL(hostId:string,path:string){
 	return `/api/v1/hosts/${encodeURIComponent(hostId)}/sftp/files?path=${encodeURIComponent(path)}`
 }
 
+async function responseError(response:Response){
+	const body=await response.json().catch(()=>({error:response.statusText}))
+	const error=new Error(body.error||response.statusText) as Error&{status?:number}
+	error.status=response.status
+	return error
+}
+
+async function consumeAgentEventStream(response:Response,onEvent:(event:AgentEvent)=>void){
+	if(!response.ok||!response.body)throw await responseError(response)
+	const reader=response.body.getReader()
+	const decoder=new TextDecoder()
+	let buffer=''
+	let terminalEventReceived=false
+	let flushTimer:number|undefined
+	let pending:AgentEvent[]=[]
+
+	const flushPending=()=>{
+		if(flushTimer!==undefined)window.clearTimeout(flushTimer)
+		flushTimer=undefined
+		const events=pending
+		pending=[]
+		for(const event of events)onEvent(event)
+	}
+	const isContentDelta=(event:AgentEvent)=>
+		!!event.content&&(event.type==='reasoning'||event.type==='tool_output'||(event.type==='message'&&event.role!=='tool'))
+	const sameContentStream=(left:AgentEvent,right:AgentEvent)=>
+		left.type===right.type&&left.role===right.role&&left.tool_name===right.tool_name&&
+		left.tool_call_id===right.tool_call_id&&left.segment_id===right.segment_id&&
+		left.session_id===right.session_id&&left.run_id===right.run_id&&left.stream===right.stream&&
+		left.status===right.status
+	const dispatch=(event:AgentEvent)=>{
+		if(event.type==='done'||event.type==='error'||event.type==='interrupted')terminalEventReceived=true
+		if(!isContentDelta(event)){
+			flushPending()
+			onEvent(event)
+			return
+		}
+		const previous=pending.at(-1)
+		if(previous&&sameContentStream(previous,event)){
+			previous.content=(previous.content||'')+event.content
+			previous.event_id=event.event_id||previous.event_id
+		}else pending.push({...event})
+		if(flushTimer===undefined)flushTimer=window.setTimeout(flushPending,40)
+	}
+	const processFrame=(frame:string)=>{
+		const data=frame.split('\n').filter(line=>line.startsWith('data:')).map(line=>line.slice(5).replace(/^ /,'')).join('\n')
+		if(!data)return
+		dispatch(JSON.parse(data) as AgentEvent)
+	}
+
+	try{
+		while(true){
+			const{value,done}=await reader.read()
+			if(done)break
+			buffer+=decoder.decode(value,{stream:true})
+			buffer=buffer.replace(/\r\n/g,'\n')
+			let boundary=buffer.indexOf('\n\n')
+			while(boundary>=0){processFrame(buffer.slice(0,boundary));buffer=buffer.slice(boundary+2);boundary=buffer.indexOf('\n\n')}
+		}
+		buffer+=decoder.decode()
+	}finally{flushPending()}
+	if(buffer.trim())throw new Error('SSE stream ended with an incomplete event')
+	if(!terminalEventReceived)throw new Error('SSE stream ended before the Agent sent a terminal event')
+}
+
 export async function streamChat(sessionId: string, workspaceId:string, message: string, images:File[], onEvent: (event: AgentEvent) => void, signal?: AbortSignal) {
 	const body=new FormData()
 	body.set('session_id',sessionId)
@@ -156,72 +220,12 @@ export async function streamChat(sessionId: string, workspaceId:string, message:
 	body,
     signal,
   })
-  if (!response.ok || !response.body) {
-    const body = await response.json().catch(() => ({ error: response.statusText }))
-    throw new Error(body.error || response.statusText)
-  }
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  let terminalEventReceived = false
-  let flushTimer: number | undefined
-  let pending: AgentEvent[] = []
+	return consumeAgentEventStream(response,onEvent)
+}
 
-  const flushPending = () => {
-    if (flushTimer !== undefined) window.clearTimeout(flushTimer)
-    flushTimer = undefined
-    const events = pending
-    pending = []
-    for (const event of events) onEvent(event)
-  }
-  const isContentDelta = (event: AgentEvent) =>
-    !!event.content && (event.type === 'reasoning' || event.type === 'tool_output' || (event.type === 'message' && event.role !== 'tool'))
-  const sameContentStream = (left: AgentEvent, right: AgentEvent) =>
-    left.type === right.type && left.role === right.role && left.tool_name === right.tool_name &&
-    left.tool_call_id === right.tool_call_id && left.segment_id === right.segment_id &&
-    left.session_id === right.session_id && left.run_id === right.run_id && left.stream === right.stream &&
-    left.status === right.status
-  const dispatch = (event: AgentEvent) => {
-    if (event.type === 'done' || event.type === 'error' || event.type === 'interrupted') terminalEventReceived = true
-    if (!isContentDelta(event)) {
-      flushPending()
-      onEvent(event)
-      return
-    }
-    const previous = pending.at(-1)
-    if (previous && sameContentStream(previous, event)) {
-      previous.content = (previous.content || '') + event.content
-    } else {
-      pending.push({ ...event })
-    }
-    if (flushTimer === undefined) flushTimer = window.setTimeout(flushPending, 40)
-  }
-  const processFrame = (frame: string) => {
-    const data = frame.split('\n')
-      .filter((line) => line.startsWith('data:'))
-      .map((line) => line.slice(5).replace(/^ /, ''))
-      .join('\n')
-    if (!data) return // SSE comments are connection/heartbeat frames.
-    dispatch(JSON.parse(data) as AgentEvent)
-  }
-
-  try {
-    while (true) {
-      const { value, done } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      buffer = buffer.replace(/\r\n/g, '\n')
-      let boundary = buffer.indexOf('\n\n')
-      while (boundary >= 0) {
-        processFrame(buffer.slice(0, boundary))
-        buffer = buffer.slice(boundary + 2)
-        boundary = buffer.indexOf('\n\n')
-      }
-    }
-    buffer += decoder.decode()
-  } finally {
-    flushPending()
-  }
-  if (buffer.trim()) throw new Error('SSE stream ended with an incomplete event')
-  if (!terminalEventReceived) throw new Error('SSE stream ended before the Agent sent a terminal event')
+export async function reconnectChatStream(sessionId:string,after:number,onEvent:(event:AgentEvent)=>void,signal?:AbortSignal){
+	const response=await fetch(`/api/v1/chat/${encodeURIComponent(sessionId)}/events?after=${Math.max(0,after)}`,{
+		credentials:'same-origin',headers:{Accept:'text/event-stream'},signal,
+	})
+	return consumeAgentEventStream(response,onEvent)
 }

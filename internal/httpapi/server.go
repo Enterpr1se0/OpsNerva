@@ -42,6 +42,7 @@ import (
 type Server struct {
 	service       *service.Service
 	agent         *agent.Runtime
+	chatEvents    *chatEventHub
 	auth          *security.WebAuth
 	secureCookies bool
 	mux           *http.ServeMux
@@ -73,7 +74,7 @@ func New(svc *service.Service, agentRuntime *agent.Runtime, auth *security.WebAu
 	s := &Server{
 		service: svc, agent: agentRuntime, auth: auth, secureCookies: options.SecureCookies,
 		mux: http.NewServeMux(), loginAttempts: make(map[string]loginAttempt),
-		mcpHTTP: mcpserver.New(svc, options.Version).HTTPHandler(), options: options,
+		mcpHTTP: mcpserver.New(svc, options.Version).HTTPHandler(), chatEvents: newChatEventHub(), options: options,
 	}
 	s.routes()
 	return s
@@ -177,6 +178,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/logs/export", s.exportLogs)
 	s.mux.HandleFunc("POST /api/v1/chat", s.chat)
 	s.mux.HandleFunc("GET /api/v1/chat/sessions", s.chatSessions)
+	s.mux.HandleFunc("GET /api/v1/chat/{id}/events", s.chatEventsStream)
 	s.mux.HandleFunc("POST /api/v1/chat/{id}/cancel", s.cancelChatSession)
 	s.mux.HandleFunc("PUT /api/v1/chat/{id}/workspace", s.setChatSessionWorkspace)
 	s.mux.HandleFunc("DELETE /api/v1/chat/{id}", s.deleteChatSession)
@@ -1680,9 +1682,22 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	streamAgentEvents(w, r, 10*time.Second, func(emit func(agent.Event)) {
 		queryCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Minute)
 		defer cancel()
-		_, err := s.agent.QueryWithAttachments(queryCtx, sessionID, message, attachments, emit)
+		started := false
+		publish := func(event agent.Event) {
+			if event.Type == "session" {
+				started = true
+			}
+			event = s.chatEvents.publish(sessionID, event)
+			emit(event)
+		}
+		_, err := s.agent.QueryWithAttachments(queryCtx, sessionID, message, attachments, publish)
 		if err != nil && !errors.Is(err, context.Canceled) {
-			emit(agent.Event{Type: "error", Error: err.Error(), SessionID: sessionID})
+			event := agent.Event{Type: "error", Error: err.Error(), SessionID: sessionID}
+			if started {
+				publish(event)
+			} else {
+				emit(event)
+			}
 		}
 	})
 }
@@ -1955,6 +1970,7 @@ func (s *Server) deleteChatSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	s.chatEvents.delete(r.PathValue("id"))
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -1,4 +1,4 @@
-import { FormEvent, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { FormEvent, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -11,7 +11,7 @@ import {
   Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronLeft, ChevronRight, CircleDot, Copy, Cpu, Edit3, Eye, EyeOff, FileText, FolderOpen, FolderOutput, FunctionSquare, History, ImagePlus, KeyRound, LockKeyhole, LogOut, Minimize2, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen,
   Cable, Download, ListChecks, LoaderCircle, Plus, Power, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, Square, TerminalSquare, Trash2, UploadCloud, UserRound, X, Zap,
 } from 'lucide-react'
-import { api, chatAttachmentURL, sftpDownloadURL, sshShellEventsURL, streamChat, workspaceDownloadURL, workspaceFileEventsURL } from './api'
+import { api, chatAttachmentURL, reconnectChatStream, sftpDownloadURL, sshShellEventsURL, streamChat, workspaceDownloadURL, workspaceFileEventsURL } from './api'
 import { CopyButton, CopyablePre } from './CopyButton'
 import i18n, { localeFor, type SupportedLanguage } from './i18n'
 import { TextFileEditor } from './TextFileEditor'
@@ -23,9 +23,31 @@ type PendingChatImage = {id:string;file:File;url:string}
 type ChatEntry = { id: string; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; tool?: string; toolCallId?:string; runId?:string; transient?:boolean; liveStdout?:string; liveStderr?:string; transferredBytes?:number; transferTotalBytes?:number; images?:ChatEntryImage[]; active?: boolean; streaming?: boolean; status?: 'pending' | 'completed' | 'failed' }
 type ModelRetryState = {attempt:number;max:number;readyAt:number}
 type ActiveChatStream = { id: string; sessionId: string; controller: AbortController }
+type ConnectionRetryState = {attempt:number;readyAt:number}
 
 function historyEntries(messages:ChatMessage[],sessionID:string):ChatEntry[]{
   return messages.map((item,index)=>({id:`history_${item.id||`${index}_${item.created_at}`}`,kind:item.role,content:item.content,tool:item.tool_name,status:item.status,images:item.attachments?.map(image=>({id:image.id,name:image.name,mimeType:image.mime_type,sizeBytes:image.size_bytes,url:chatAttachmentURL(sessionID,image.id)}))}))
+}
+
+function reconnectBaseEntries(messages:ChatMessage[],sessionID:string){
+	const entries=historyEntries(messages,sessionID)
+	for(let index=entries.length-1;index>=0;index--){
+		if(entries[index].kind==='user'&&entries[index].status==='pending')return entries.slice(0,index+1)
+	}
+	return entries
+}
+
+function newChatSessionID(){return `session_${clientId().replace(/[^A-Za-z0-9]/g,'')}`}
+function reconnectDelay(attempt:number){return attempt<=1?0:Math.min(10_000,500*2**Math.min(attempt-2,5))}
+function errorStatus(error:unknown){const status=(error as{status?:unknown})?.status;return typeof status==='number'?status:0}
+function waitForReconnect(delay:number,signal:AbortSignal){
+	if(delay<=0)return Promise.resolve()
+	return new Promise<void>((resolve,reject)=>{
+		const timer=window.setTimeout(done,delay)
+		function done(){signal.removeEventListener('abort',cancel);resolve()}
+		function cancel(){window.clearTimeout(timer);signal.removeEventListener('abort',cancel);reject(new DOMException('Aborted','AbortError'))}
+		signal.addEventListener('abort',cancel,{once:true})
+	})
 }
 
 function deactivateReasoning(entry:ChatEntry):ChatEntry{
@@ -1253,17 +1275,21 @@ function ChatPage({ hosts, approvals, runs, workspaceShells, capabilities, setti
   const [detachedRunning,setDetachedRunning]=useState(false)
 	const [stopping,setStopping]=useState(false)
 	const [modelRetry,setModelRetry]=useState<ModelRetryState|null>(null)
+	const [connectionRetry,setConnectionRetry]=useState<ConnectionRetryState|null>(null)
 	const [retryClock,setRetryClock]=useState(0)
   const [reasoningSeen, setReasoningSeen] = useState(false)
   const [plan,setPlan]=useState<AgentPlan|null>(null)
+	const [planExpanded,setPlanExpanded]=useState(false)
 	const [approvalNotice,setApprovalNotice]=useState('')
 	const [workspaceID,setWorkspaceID]=useState(recalledWorkspace)
 	const [boundWorkspaceID,setBoundWorkspaceID]=useState('')
 	const [workspaceSwitching,setWorkspaceSwitching]=useState(false)
   const messagesRef=useRef<HTMLDivElement>(null)
   const stickToLatest=useRef(true)
+	const userScrollFrame=useRef(0)
 	  const activeStreamRef=useRef<ActiveChatStream|null>(null)
 	  const imageURLsRef=useRef(new Set<string>())
+	const reconnectErrorRef=useRef('')
   const sessionLoadRef=useRef('')
   const agentHosts = useMemo(() => hosts.filter(host => host.agent_enabled), [hosts])
   const hostNames = useMemo(() => agentHosts.map(host => host.name).join(', '), [agentHosts])
@@ -1272,15 +1298,16 @@ function ChatPage({ hosts, approvals, runs, workspaceShells, capabilities, setti
 	const sessionBusy=running||detachedRunning
 	const selectedWorkspace=capabilities.workspaces.find(workspace=>workspace.id===workspaceID)||capabilities.workspaces[0]
 	useEffect(()=>{if(!selectedWorkspace)return;if(workspaceID!==selectedWorkspace.id)setWorkspaceID(selectedWorkspace.id);rememberWorkspace(selectedWorkspace.id)},[selectedWorkspace,workspaceID])
+	useEffect(()=>{if(!plan)setPlanExpanded(false);else if(plan.status==='active')setPlanExpanded(true)},[plan?.session_id,plan?.status])
 	useEffect(()=>{
-		if(!modelRetry)return
+		if(!modelRetry&&!connectionRetry)return
 		setRetryClock(Date.now())
 		const timer=window.setInterval(()=>setRetryClock(Date.now()),1000)
 		return()=>window.clearInterval(timer)
-	},[modelRetry])
+	},[modelRetry,connectionRetry])
 	useEffect(()=>{onStreamingChange(running)},[running,onStreamingChange])
 	useEffect(()=>()=>onStreamingChange(false),[onStreamingChange])
-	useEffect(()=>()=>{sessionLoadRef.current='';const stream=activeStreamRef.current;activeStreamRef.current=null;stream?.controller.abort()},[])
+	useEffect(()=>()=>{sessionLoadRef.current='';const stream=activeStreamRef.current;activeStreamRef.current=null;stream?.controller.abort();window.cancelAnimationFrame(userScrollFrame.current)},[])
 	useEffect(()=>()=>{for(const url of imageURLsRef.current)URL.revokeObjectURL(url);imageURLsRef.current.clear()},[])
 	const addImages=(files:File[])=>{const accepted=files.filter(file=>imageTypes.includes(file.type));if(accepted.length!==files.length)setImageNotice(t('chat.imageTypeRejected'));if(!accepted.length)return;const next=accepted.map(file=>{const url=URL.createObjectURL(file);imageURLsRef.current.add(url);return{id:clientId(),file,url}});setPendingImages(current=>[...current,...next])}
 	const removePendingImage=(id:string)=>{setPendingImages(current=>{const target=current.find(image=>image.id===id);if(target){URL.revokeObjectURL(target.url);imageURLsRef.current.delete(target.url)}return current.filter(image=>image.id!==id)});setImageInputKey(value=>value+1)}
@@ -1305,6 +1332,7 @@ function ChatPage({ hosts, approvals, runs, workspaceShells, capabilities, setti
     stream.controller.abort()
     setRunning(false)
     setModelRetry(null)
+		setConnectionRetry(null)
   }, [])
 
   const loadSession = useCallback(async (id: string) => {
@@ -1315,23 +1343,12 @@ function ChatPage({ hosts, approvals, runs, workspaceShells, capabilities, setti
     try {
       const state = await api.chatState(id)
       if(sessionLoadRef.current!==requestID)return
-	      setEntries(historyEntries(state.messages||[],id));setDetachedRunning(!!state.active);setStopping(false);setModelRetry(null);setPlan(state.plan||null);setWorkspaceID(state.workspace_id||'');setBoundWorkspaceID(state.workspace_id||'')
+	      setEntries(historyEntries(state.messages||[],id));setDetachedRunning(!!state.active);setStopping(false);setModelRetry(null);setConnectionRetry(null);setPlan(state.plan||null);setWorkspaceID(state.workspace_id||'');setBoundWorkspaceID(state.workspace_id||'')
       setSessionId(id); rememberSession(id); setHistoryError('')
       void refresh()
     } catch (err) { if(sessionLoadRef.current===requestID)setHistoryError(errorText(err)) }
     finally { if(sessionLoadRef.current===requestID)setLoadingSession('') }
   }, [refresh])
-
-  useEffect(()=>{
-    if(!sessionId||running||!detachedRunning)return
-    let active=true
-    const sync=async()=>{
-	      try{const state=await api.chatState(sessionId);if(!active)return;setDetachedRunning(!!state.active);setPlan(state.plan||null);setEntries(old=>[...historyEntries(state.messages||[],sessionId),...old.filter(item=>item.kind==='error'&&!item.id.startsWith('history_'))]);if(!state.active){setStopping(false);void refreshSessions()}}
-      catch(err){if(active)setHistoryError(errorText(err))}
-    }
-    void sync();const timer=window.setInterval(()=>void sync(),2500)
-    return()=>{active=false;window.clearInterval(timer)}
-  },[sessionId,running,detachedRunning,refreshSessions])
 
   const activeSessionCount=useMemo(()=>sessions.filter(item=>item.active).length,[sessions])
   useEffect(()=>{
@@ -1340,11 +1357,19 @@ function ChatPage({ hosts, approvals, runs, workspaceShells, capabilities, setti
     return()=>window.clearInterval(timer)
   },[activeSessionCount,refreshSessions])
 
-  useEffect(()=>{
+  useLayoutEffect(()=>{
     if(!stickToLatest.current)return
-    const frame=window.requestAnimationFrame(()=>{const container=messagesRef.current;if(container)container.scrollTop=container.scrollHeight})
-    return()=>window.cancelAnimationFrame(frame)
+    const container=messagesRef.current
+    if(container)container.scrollTop=container.scrollHeight
   },[entries,loadingSession])
+
+	const trackUserScroll=()=>{
+		window.cancelAnimationFrame(userScrollFrame.current)
+		userScrollFrame.current=window.requestAnimationFrame(()=>{
+			const container=messagesRef.current
+			if(container)stickToLatest.current=container.scrollHeight-container.scrollTop-container.clientHeight<90
+		})
+	}
 
   useEffect(() => {
     let active = true
@@ -1366,11 +1391,11 @@ function ChatPage({ hosts, approvals, runs, workspaceShells, capabilities, setti
     sessionLoadRef.current=''
     setLoadingSession('')
     setHistoryOpen(false)
-	    stickToLatest.current=true;setSessionId('');setBoundWorkspaceID('');setEntries([]); setMessage('');clearPendingImages(); setHistoryError(''); setReasoningSeen(false);setDetachedRunning(false);setStopping(false);setModelRetry(null);setPlan(null); rememberSession(newSessionMarker)
+	    stickToLatest.current=true;setSessionId('');setBoundWorkspaceID('');setEntries([]); setMessage('');clearPendingImages(); setHistoryError(''); setReasoningSeen(false);setDetachedRunning(false);setStopping(false);setModelRetry(null);setConnectionRetry(null);setPlan(null); rememberSession(newSessionMarker)
     void refreshSessions()
   }
 
-	const switchSession = (id:string) => {
+  const switchSession = (id:string) => {
 		if(workspaceSwitching)return
     setHistoryOpen(false)
     if(id===sessionId){
@@ -1378,7 +1403,7 @@ function ChatPage({ hosts, approvals, runs, workspaceShells, capabilities, setti
       return
     }
     detachActiveStream()
-		setStopping(false)
+		setDetachedRunning(false);setStopping(false);setConnectionRetry(null)
     void loadSession(id)
     void refreshSessions()
   }
@@ -1409,68 +1434,154 @@ function ChatPage({ hosts, approvals, runs, workspaceShells, capabilities, setti
     finally { setDeletingSession(false); setSessionDeleteCandidate(null) }
   }
 
+	const handleAgentFrame=useCallback((frame:AgentEvent,userEntryID='',workspace='')=>{
+		const updateUser=(item:ChatEntry,status:'completed'|'failed')=>item.kind==='user'&&(userEntryID?item.id===userEntryID:item.status==='pending')?{...item,status}:item
+		if(frame.session_id){
+			if(activeStreamRef.current)activeStreamRef.current.sessionId=frame.session_id
+			setSessionId(frame.session_id)
+			if(workspace)setBoundWorkspaceID(workspace)
+			rememberSession(frame.session_id)
+		}
+		if(frame.type==='retry'){
+			const now=Date.now()
+			setRetryClock(now)
+			setModelRetry({attempt:frame.retry_attempt||1,max:frame.retry_max||1,readyAt:now+(frame.retry_delay_ms||0)})
+		}else if(['approval','reasoning','tool','tool_output','message','done','interrupted','error'].includes(frame.type))setModelRetry(null)
+		if(frame.type==='approval'){
+			setEntries(old=>updateActiveToolStatus(old.map(item=>updateUser(item,'completed')),'approval_required',frame.run_id))
+			setApprovalNotice('')
+			void refreshApprovals()
+		}
+		if(frame.type==='tool_output')setEntries(old=>appendToolOutput(old,frame))
+		if(frame.type==='reasoning'&&frame.content){
+			setReasoningSeen(true)
+			const reasoningID=`reasoning_${frame.segment_id||'current'}`
+			setEntries(old=>{
+				const existing=old.find(item=>item.id===reasoningID)
+				if(existing)return old.map(item=>item.id===reasoningID?{...item,content:item.content+frame.content,active:true}:item)
+				return[...old.filter(item=>item.id!=='streaming').map(deactivateReasoning),{id:reasoningID,kind:'reasoning',content:frame.content!,active:true},{id:'streaming',kind:'assistant',content:'',streaming:true}]
+			})
+		}
+		if(frame.type==='tool'&&frame.content){
+			if(frame.tool_name==='workspace_shell'){
+				const shell=workspaceShellStartedByTool(frame.content)
+				if(shell)onWorkspaceShellStarted(shell)
+			}
+			setEntries(old=>{
+				const callID=frame.tool_call_id||''
+				let index=callID?old.findIndex(item=>item.kind==='tool'&&item.toolCallId===callID):-1
+				if(index<0&&!callID){
+					for(let itemIndex=old.length-1;itemIndex>=0;itemIndex--){
+						const item=old[itemIndex]
+						if(item.kind==='tool'&&item.transient&&item.tool===frame.tool_name){index=itemIndex;break}
+					}
+				}
+				const transient=frame.status==='in_progress'
+				if(index>=0)return old.map((item,itemIndex)=>itemIndex===index?{...item,content:frame.content!,tool:frame.tool_name||item.tool,toolCallId:callID||item.toolCallId,runId:textValue(parseRecord(frame.content!).run_id)||item.runId,liveStdout:transient?item.liveStdout:undefined,liveStderr:transient?item.liveStderr:undefined,transient}:item)
+				const entry:ChatEntry={id:callID?`tool_${callID}`:clientId(),kind:'tool',content:frame.content!,tool:frame.tool_name,toolCallId:callID||undefined,runId:textValue(parseRecord(frame.content!).run_id)||undefined,transient}
+				return[...old.filter(item=>item.id!=='streaming').map(deactivateReasoning),entry,{id:'streaming',kind:'assistant',content:'',streaming:true}]
+			})
+			if(frame.tool_name?.startsWith('ops_plan_')){const nextPlan=planFromToolContent(frame.content);if(nextPlan)setPlan(nextPlan)}
+			if(/approval_id|approval_required/.test(frame.content))void refresh()
+		}
+		if(frame.type==='message'&&frame.content)setEntries(old=>{
+			const streaming=old.find(item=>item.id==='streaming')
+			if(streaming)return old.map(item=>item.id==='streaming'?{...item,content:item.content+frame.content}:deactivateReasoning(item))
+			return[...old.map(deactivateReasoning),{id:'streaming',kind:'assistant',content:frame.content!,streaming:true}]
+		})
+		if(frame.type==='done'){
+			setStopping(false)
+			setEntries(old=>old.map(item=>updateUser(item,'completed')).map(item=>item.id==='streaming'?{...item,streaming:false}:item))
+		}
+		if(frame.type==='interrupted'){
+			setStopping(false)
+			setEntries(old=>[...updateActiveToolStatus(old.filter(item=>item.id!=='streaming').map(item=>updateUser(deactivateReasoning(item),'failed')),'interrupted'),{id:clientId(),kind:'assistant',content:frame.content||t('chat.stopped')}])
+		}
+		if(frame.type==='error')setEntries(old=>[...updateActiveToolStatus(old.map(item=>updateUser(item.id==='streaming'?{...item,streaming:false}:item,'failed')),'failed'),{id:clientId(),kind:'error',content:frame.error||t('chat.agentError')}])
+	},[onWorkspaceShellStarted,refresh,refreshApprovals,t])
+
+	useEffect(()=>{
+		if(!sessionId||running||!detachedRunning)return
+		let active=true
+		const controller=new AbortController()
+		const reconnect=async()=>{
+			let attempt=0
+			while(active&&!controller.signal.aborted){
+				attempt++
+				const delay=reconnectDelay(attempt)
+				const now=Date.now()
+				setRetryClock(now)
+				setConnectionRetry({attempt,readyAt:now+delay})
+				try{
+					await waitForReconnect(delay,controller.signal)
+					const state=await api.chatState(sessionId)
+					if(!active)return
+					setPlan(state.plan||null)
+					setBoundWorkspaceID(state.workspace_id||'')
+					if(!state.active){
+						setEntries(old=>[...historyEntries(state.messages||[],sessionId),...old.filter(item=>item.kind==='error'&&!item.id.startsWith('history_'))])
+						setDetachedRunning(false);setStopping(false);setConnectionRetry(null);setHistoryError('')
+						void refreshSessions();void refresh()
+						return
+					}
+					setEntries(reconnectBaseEntries(state.messages||[],sessionId))
+					setReasoningSeen(false)
+					setConnectionRetry(null)
+					setHistoryError('')
+					await reconnectChatStream(sessionId,0,frame=>{if(active)handleAgentFrame(frame)},controller.signal)
+					attempt=0
+				}catch(err){
+					if(!active||controller.signal.aborted)return
+					const status=errorStatus(err)
+					if(status===400||status===401||status===403||status===404){
+						setEntries(old=>[...old.filter(item=>item.id!=='streaming'),{id:clientId(),kind:'error',content:reconnectErrorRef.current||errorText(err)}])
+						setDetachedRunning(false);setStopping(false);setConnectionRetry(null)
+						return
+					}
+				}
+			}
+		}
+		void reconnect()
+		return()=>{active=false;controller.abort()}
+	},[detachedRunning,handleAgentFrame,refresh,refreshSessions,running,sessionId])
+
 	  const sendQuery = async (query:string,queryImages:PendingChatImage[]) => {
 	    query=query.trim(); if((!query&&!queryImages.length)||sessionBusy||loadingSession||workspaceSwitching)return
-    let querySessionID=sessionId
+	    let querySessionID=sessionId||newChatSessionID()
     const userEntryID=clientId()
     const streamID=clientId()
     const controller=new AbortController()
-    activeStreamRef.current={id:streamID,sessionId:sessionId,controller}
+		const workspace=selectedWorkspace?.id||''
+		activeStreamRef.current={id:streamID,sessionId:querySessionID,controller}
     const isAttached=()=>activeStreamRef.current?.id===streamID
     stickToLatest.current=true
-    setApprovalNotice('');setReasoningSeen(false);setStopping(false);setModelRetry(null);setRunning(true)
+		setSessionId(querySessionID);rememberSession(querySessionID)
+		reconnectErrorRef.current=''
+		setApprovalNotice('');setReasoningSeen(false);setStopping(false);setModelRetry(null);setConnectionRetry(null);setRunning(true)
 	    const entryImages=queryImages.map(image=>({id:image.id,name:image.file.name,mimeType:image.file.type,sizeBytes:image.file.size,url:image.url}))
 	    setEntries((old) => [...old, { id: userEntryID, kind: 'user', content: query, images:entryImages, status:'pending' }, { id: 'streaming', kind: 'assistant', content: '', streaming:true }])
 	    try {
-      await streamChat(sessionId, selectedWorkspace?.id||'', query, queryImages.map(image=>image.file), (frame: AgentEvent) => {
-        if(!isAttached())return
-	        if (frame.session_id) { querySessionID=frame.session_id;activeStreamRef.current!.sessionId=frame.session_id;setSessionId(frame.session_id);setBoundWorkspaceID(selectedWorkspace?.id||'');rememberSession(frame.session_id) }
-        if(frame.type==='retry'){const now=Date.now();setRetryClock(now);setModelRetry({attempt:frame.retry_attempt||1,max:frame.retry_max||1,readyAt:now+(frame.retry_delay_ms||0)})}
-        else if(['approval','reasoning','tool','tool_output','message','done','interrupted','error'].includes(frame.type))setModelRetry(null)
-        if (frame.type === 'approval') { setEntries(old=>updateActiveToolStatus(old.map(item=>item.id===userEntryID?{...item,status:'completed'}:item),'approval_required',frame.run_id));setApprovalNotice('');void refreshApprovals() }
-        if(frame.type==='tool_output'){
-          setEntries(old=>appendToolOutput(old,frame))
-        }
-        if (frame.type === 'reasoning' && frame.content) {
-          setReasoningSeen(true)
-          const reasoningID=`reasoning_${frame.segment_id||'current'}`
-          setEntries((old) => {
-            const existing=old.find((item)=>item.id===reasoningID)
-            if(existing)return old.map((item)=>item.id===reasoningID?{...item,content:item.content+frame.content,active:true}:item)
-            return [...old.filter((item)=>item.id!=='streaming').map(deactivateReasoning),{id:reasoningID,kind:'reasoning',content:frame.content!,active:true},{id:'streaming',kind:'assistant',content:'',streaming:true}]
-          })
-        }
-        if (frame.type === 'tool' && frame.content) {
-		  if(frame.tool_name==='workspace_shell'){
-			  const shell=workspaceShellStartedByTool(frame.content)
-			  if(shell)onWorkspaceShellStarted(shell)
-		  }
-          setEntries(old=>{
-            const callID=frame.tool_call_id||''
-            let index=callID?old.findIndex(item=>item.kind==='tool'&&item.toolCallId===callID):-1
-            if(index<0&&!callID){
-              for(let itemIndex=old.length-1;itemIndex>=0;itemIndex--){
-                const item=old[itemIndex]
-                if(item.kind==='tool'&&item.transient&&item.tool===frame.tool_name){index=itemIndex;break}
-              }
-            }
-            const transient=frame.status==='in_progress'
-            if(index>=0)return old.map((item,itemIndex)=>itemIndex===index?{...item,content:frame.content!,tool:frame.tool_name||item.tool,toolCallId:callID||item.toolCallId,runId:textValue(parseRecord(frame.content!).run_id)||item.runId,liveStdout:transient?item.liveStdout:undefined,liveStderr:transient?item.liveStderr:undefined,transient}:item)
-            const entry:ChatEntry={id:callID?`tool_${callID}`:clientId(),kind:'tool',content:frame.content!,tool:frame.tool_name,toolCallId:callID||undefined,runId:textValue(parseRecord(frame.content!).run_id)||undefined,transient}
-            return [...old.filter(item=>item.id!=='streaming').map(deactivateReasoning),entry,{id:'streaming',kind:'assistant',content:'',streaming:true}]
-          })
-          if(frame.tool_name?.startsWith('ops_plan_')){const nextPlan=planFromToolContent(frame.content);if(nextPlan)setPlan(nextPlan)}
-          if(/approval_id|approval_required/.test(frame.content))void refresh()
-        }
-        if (frame.type === 'message' && frame.content) setEntries((old) => old.map((item) => item.id === 'streaming' ? {...item, content: item.content + frame.content} : deactivateReasoning(item)))
-        if (frame.type === 'done') setEntries(old=>old.map(item=>item.id===userEntryID?{...item,status:'completed'}:item.id==='streaming'?{...item,streaming:false}:item))
-			if (frame.type === 'interrupted') {setStopping(false);setDetachedRunning(false);setEntries(old=>[...updateActiveToolStatus(old.filter(item=>item.id!=='streaming').map(item=>item.id===userEntryID?{...item,status:'failed' as const}:deactivateReasoning(item)),'interrupted'),{id:clientId(),kind:'assistant',content:frame.content||t('chat.stopped')}])}
-			if (frame.type === 'error') setEntries((old) => [...updateActiveToolStatus(old.map(item=>item.id===userEntryID?{...item,status:'failed' as const}:item.id==='streaming'?{...item,streaming:false}:item),'failed'), { id: clientId(), kind: 'error', content: frame.error || t('chat.agentError') }])
-      },controller.signal)
-    } catch (err) { if(isAttached()){setModelRetry(null);setEntries((old) => [...updateActiveToolStatus(old.map(item=>item.id===userEntryID?{...item,status:'failed' as const}:item),'failed'), { id: clientId(), kind: 'error', content: errorText(err) }])} }
+			await streamChat(querySessionID,workspace,query,queryImages.map(image=>image.file),(frame:AgentEvent)=>{
+				if(!isAttached())return
+				if(frame.session_id)querySessionID=frame.session_id
+				handleAgentFrame(frame,userEntryID,workspace)
+			},controller.signal)
+		}catch(err){
+			if(isAttached()&&!controller.signal.aborted){
+				setModelRetry(null)
+				const status=errorStatus(err)
+				if(status>0&&status<500&&status!==408&&status!==429){
+					setEntries(old=>[...updateActiveToolStatus(old.map(item=>item.id===userEntryID?{...item,status:'failed' as const}:item),'failed'),{id:clientId(),kind:'error',content:errorText(err)}])
+				}else{
+					reconnectErrorRef.current=errorText(err)
+					setDetachedRunning(true)
+				}
+			}
+		}
     finally {
       if(!isAttached())return
       setModelRetry(null)
+			setConnectionRetry(null)
       setEntries((old) => old.filter((item) => item.id !== 'streaming' || item.content !== '').map((item)=>item.id==='streaming'?{...item,streaming:false}:deactivateReasoning(item)))
       setRunning(false)
 		setStopping(false)
@@ -1501,6 +1612,8 @@ function ChatPage({ hosts, approvals, runs, workspaceShells, capabilities, setti
 	  max:modelRetry.max,
 	  delay:retryDelay,
   }):''
+	const connectionRetryDelay=connectionRetry?Math.max(0,Math.ceil((connectionRetry.readyAt-retryClock)/1000)):0
+	const connectionRetryLabel=connectionRetry?t('chat.reconnecting',{attempt:connectionRetry.attempt,delay:connectionRetryDelay}):''
 	const setChatPanelCollapsed=(panel:ChatPanel,collapsed:boolean)=>{
 		rememberChatPanelCollapsed(panel,collapsed)
 		if(panel==='workspace')setWorkspacePanelCollapsed(collapsed)
@@ -1512,16 +1625,19 @@ function ChatPage({ hosts, approvals, runs, workspaceShells, capabilities, setti
     <div className="chat-main panel">
 	  <div className="panel-header"><div><Bot size={18}/><span>{t('chat.session')}</span>{workspacePanelCollapsed&&<button className="chat-panel-open-button" onClick={()=>setChatPanelCollapsed('workspace',false)} title={t('workspace.expandPanel')} aria-label={t('workspace.expandPanel')}><PanelLeftOpen size={15}/></button>}</div><div className="chat-header-actions">{conversationPanelCollapsed&&<button className="chat-panel-open-button conversation-panel-open-button" onClick={()=>setChatPanelCollapsed('conversations',false)} title={t('chat.expandConversations')} aria-label={t('chat.expandConversations')}><PanelRightOpen size={15}/></button>}<span className="session-id">{sessionId ? sessionId.slice(0, 20) : t('chat.newSession')}</span><button className="mobile-history-button" onClick={()=>setHistoryOpen(true)} title={t('chat.conversations')} aria-label={t('chat.openConversations')}><History size={15}/>{activeSessionCount>0&&<em>{activeSessionCount}</em>}</button></div></div>
       <div className="session-approval-slot">{currentApprovals.length>0&&<ApprovalDialog key={currentApprovals[0].id} approval={currentApprovals[0]} pendingCount={currentApprovals.length} hosts={hosts} running={sessionBusy} stopping={stopping} onStop={()=>void stopAgent()} refresh={refresh} refreshApprovals={refreshApprovals} onApproved={result=>{setEntries(old=>updateToolRunStatus(old,result.run_id,result.status==='running'?'in_progress':result.status));if(result.shell?.kind==='workspace')onWorkspaceShellStarted(result.shell)}} onNotice={setApprovalNotice}/>} {approvalNotice&&currentApprovals.length===0&&<div className="approval-toast"><ShieldCheck size={14}/><span>{approvalNotice}</span><button onClick={()=>setApprovalNotice('')}><X size={13}/></button></div>}</div>
-      <div className="session-plan-slot">{plan&&<SessionPlan plan={plan}/>}</div>
-      <div className="messages" ref={messagesRef} onScroll={event=>{const element=event.currentTarget;stickToLatest.current=element.scrollHeight-element.scrollTop-element.clientHeight<90}}>
-		{entries.length === 0 && <div className="empty-chat"><div className="radar"><Activity size={35}/></div><h2>{t('chat.emptyTitle')}</h2></div>}
-        {entries.map((entry) => <ChatBubble key={entry.id} entry={entry} runs={runs} hosts={hosts}/>) }
-		{running&&modelRetry&&<div className="thinking"><span/><span/><span/> {modelRetryLabel}</div>}
-		{running&&!modelRetry&&!reasoningSeen&&!streamingResponseStarted&&<div className="thinking"><span/><span/><span/> {t('chat.waitingModel')}</div>}
-		{detachedRunning&&!running&&<div className="thinking background-agent"><span/><span/><span/> {t('chat.backgroundRunning')}</div>}
-      </div>
+      <div className="session-plan-slot">{plan&&<SessionPlan plan={plan} expanded={planExpanded} onExpanded={setPlanExpanded}/>}</div>
+		<div className="conversation-view">
+			<div className="messages" ref={messagesRef} onWheel={trackUserScroll} onTouchMove={trackUserScroll} onPointerUp={trackUserScroll}>
+				{entries.length === 0 && <div className="empty-chat"><div className="radar"><Activity size={35}/></div><h2>{t('chat.emptyTitle')}</h2></div>}
+				{entries.map((entry) => <ChatBubble key={entry.id} entry={entry} runs={runs} hosts={hosts}/>) }
+				{running&&modelRetry&&<div className="thinking"><span/><span/><span/> {modelRetryLabel}</div>}
+				{running&&!modelRetry&&!reasoningSeen&&!streamingResponseStarted&&<div className="thinking"><span/><span/><span/> {t('chat.waitingModel')}</div>}
+				{detachedRunning&&!running&&connectionRetry&&<div className="thinking background-agent"><span/><span/><span/> {connectionRetryLabel}</div>}
+			</div>
+			{plan&&planExpanded&&<SessionPlanSteps plan={plan}/>}
+		</div>
 		  <form className="composer" onSubmit={submit}>
-			  {sessionBusy&&<div className="llm-work-status" role="status" aria-live="polite"><LoaderCircle className="spin" size={13}/><b>{stopping?t('chat.stopping'):modelRetryLabel||t('chat.running')}</b><button type="button" className="agent-stop-button" onClick={()=>void stopAgent()} disabled={stopping||!(activeStreamRef.current?.sessionId||sessionId)} title={t('chat.stopTitle')}><Square size={11} fill="currentColor"/>{t('chat.stop')}</button></div>}
+			  {sessionBusy&&<div className="llm-work-status" role="status" aria-live="polite"><LoaderCircle className="spin" size={13}/><b>{stopping?t('chat.stopping'):connectionRetryLabel||modelRetryLabel||t('chat.running')}</b><button type="button" className="agent-stop-button" onClick={()=>void stopAgent()} disabled={stopping||!(activeStreamRef.current?.sessionId||sessionId)} title={t('chat.stopTitle')}><Square size={11} fill="currentColor"/>{t('chat.stop')}</button></div>}
 			  <div className="context-line"><ApprovalModeStatus settings={settings} onChanged={onSettingsChanged} onError={onError}/><span className="composer-hosts" title={agentHosts.length?t('chat.hostsCount',{count:agentHosts.length,names:hostNames}):t('chat.noHosts')}><Server size={13}/>{agentHosts.length?t('chat.hostsCount',{count:agentHosts.length,names:hostNames}):t('chat.noHosts')}</span><span className="composer-model" title={modelName || t('chat.noModel')}><Cpu size={13}/>{modelName || t('chat.noModel')}</span></div>
 			  {pendingImages.length>0&&<div className="composer-images">{pendingImages.map(image=><div key={image.id}><img src={image.url} alt={image.file.name}/><span title={image.file.name}>{image.file.name}</span><button type="button" onClick={()=>removePendingImage(image.id)} title={t('chat.removeImage')}><X size={11}/></button></div>)}</div>}
 			  {imageNotice&&<div className="composer-image-notice">{imageNotice}<button type="button" onClick={()=>setImageNotice('')}><X size={11}/></button></div>}
@@ -1685,14 +1801,17 @@ function ChatWorkspacePanel({workspaces,workspaceID,shells,switching,disabled,bo
 	</>
 }
 
-function SessionPlan({plan}:{plan:AgentPlan}){
+function SessionPlan({plan,expanded,onExpanded}:{plan:AgentPlan;expanded:boolean;onExpanded:(expanded:boolean)=>void}){
 	const {t}=useTranslation()
-  const [expanded,setExpanded]=useState(plan.status==='active')
-  useEffect(()=>{if(plan.status==='active')setExpanded(true)},[plan.session_id,plan.status])
 	const completed=plan.steps.filter(step=>step.status==='completed'||step.status==='skipped').length
   const current=plan.steps.find(step=>step.status==='in_progress'||step.status==='blocked')
   const progress=plan.steps.length?Math.round(completed/plan.steps.length*100):0
-	return <details className={`session-plan ${plan.status}`} open={expanded} onToggle={event=>setExpanded(event.currentTarget.open)}><summary><span className="plan-icon"><ListChecks size={16}/></span><span className="plan-summary-copy"><b>{plan.goal}</b><small>{current?t(current.status==='blocked'?'plan.blockedAt':'plan.current',{current:current.number,total:plan.steps.length,title:current.title}):t('plan.completed',{completed,total:plan.steps.length})}</small></span><span className="plan-progress"><i><em style={{width:`${progress}%`}}/></i><b>{progress}%</b></span><span className={`plan-state ${plan.status}`}>{t(`statusLabels.${plan.status}`,{defaultValue:plan.status})}</span><ChevronRight size={14}/></summary><ol>{plan.steps.map(step=><li className={step.status} key={step.number}><span className="plan-step-marker">{step.status==='completed'?<Check size={12}/>:step.status==='skipped'?<ChevronRight size={12}/>:step.status==='in_progress'?<LoaderCircle size={12}/>:step.status==='blocked'?<ShieldAlert size={12}/>:step.number}</span><div><b>{step.title}</b></div><em>{t(`statusLabels.${step.status}`,{defaultValue:step.status.replace('_',' ')})}</em></li>)}</ol></details>
+	return <details className={`session-plan ${plan.status}`} open={expanded} onToggle={event=>onExpanded(event.currentTarget.open)}><summary><span className="plan-icon"><ListChecks size={16}/></span><span className="plan-summary-copy"><b>{plan.goal}</b><small>{current?t(current.status==='blocked'?'plan.blockedAt':'plan.current',{current:current.number,total:plan.steps.length,title:current.title}):t('plan.completed',{completed,total:plan.steps.length})}</small></span><span className="plan-progress"><i><em style={{width:`${progress}%`}}/></i><b>{progress}%</b></span><span className={`plan-state ${plan.status}`}>{t(`statusLabels.${plan.status}`,{defaultValue:plan.status})}</span><ChevronRight size={14}/></summary></details>
+}
+
+function SessionPlanSteps({plan}:{plan:AgentPlan}){
+	const {t}=useTranslation()
+	return <section className={`session-plan-view ${plan.status}`}><ol className="session-plan-steps">{plan.steps.map(step=><li className={step.status} key={step.number}><span className="plan-step-marker">{step.status==='completed'?<Check size={12}/>:step.status==='skipped'?<ChevronRight size={12}/>:step.status==='in_progress'?<LoaderCircle size={12}/>:step.status==='blocked'?<ShieldAlert size={12}/>:step.number}</span><div><b>{step.title}</b></div><em>{t(`statusLabels.${step.status}`,{defaultValue:step.status.replace('_',' ')})}</em></li>)}</ol></section>
 }
 
 const ChatBubble=memo(function ChatBubble({ entry, runs, hosts }: {entry: ChatEntry;runs:Run[];hosts:Host[]}) {

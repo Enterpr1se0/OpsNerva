@@ -232,6 +232,7 @@ export interface ServerLogResponse {
 }
 
 export interface AgentEvent {
+	event_id?: number
   type: string
   role?: string
   tool_name?: string

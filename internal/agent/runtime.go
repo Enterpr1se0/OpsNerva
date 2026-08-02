@@ -189,6 +189,7 @@ func (t *toolCallTracker) removeNamed(target capturedToolCall) {
 }
 
 type Event struct {
+	EventID          uint64 `json:"event_id,omitempty"`
 	Type             string `json:"type"`
 	Role             string `json:"role,omitempty"`
 	ToolName         string `json:"tool_name,omitempty"`

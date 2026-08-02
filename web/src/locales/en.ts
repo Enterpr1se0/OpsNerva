@@ -149,7 +149,7 @@ const en = {
     session: 'OpsNerva session', newSession: 'NEW SESSION', conversations: 'Conversations', openConversations: 'Open conversations', closeConversations: 'Close conversations', collapseConversations: 'Collapse conversations', expandConversations: 'Expand conversations',
     newConversation: 'New conversation', noSaved: 'No conversations', saved: 'Saved', hosts: 'Hosts',
     emptyTitle: 'What should we investigate?',
-    waitingModel: 'Waiting for model response', retryWaiting: 'Model request failed · retry {{attempt}}/{{max}} in {{delay}}s', retryingModel: 'Retrying model · attempt {{attempt}}/{{max}}', backgroundRunning: 'Running in the background. Reloading will not interrupt it.',
+    waitingModel: 'Waiting for model response', retryWaiting: 'Model request failed · retry {{attempt}}/{{max}} in {{delay}}s', retryingModel: 'Retrying model · attempt {{attempt}}/{{max}}', reconnecting: 'Reconnecting · attempt {{attempt}} · {{delay}}s',
     stopping: 'Stopping Agent', running: 'LLM running', stop: 'Stop', stopTitle: 'Stop Agent run',
     hostsCount: '{{count}} hosts: {{names}}', noHosts: 'No hosts available to Agent', workspaceSelected: 'Workspace: {{id}}', noWorkspace: 'No Workspace', noModel: 'No active model',
     configureModel: 'Configure and activate a model provider', loadingConversation: 'Loading conversation...',

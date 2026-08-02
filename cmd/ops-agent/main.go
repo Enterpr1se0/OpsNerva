@@ -33,7 +33,7 @@ import (
 	"eino-ops-agent/internal/store"
 )
 
-const version = "0.1.8"
+const version = "0.1.9"
 
 type application struct {
 	config    config.Config
