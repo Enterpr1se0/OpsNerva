@@ -32,15 +32,26 @@ type modelCatalogEntry struct {
 }
 
 type resolvedModelProvider struct {
-	ID            string
-	Kind          string
-	BaseURL       string
-	APIKey        string
-	ProxyID       string
-	ProxyURL      string
-	ProxyUsername string
-	ProxyPassword string
-	UserAgent     string
+	ID              string
+	Kind            string
+	BaseURL         string
+	APIKey          string
+	ProxyID         string
+	ProxyURL        string
+	ProxyUsername   string
+	ProxyPassword   string
+	UserAgent       string
+	ReasoningEffort string
+}
+
+func normalizeReasoningEffort(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "", "low", "medium", "high", "xhigh":
+		return value, nil
+	default:
+		return "", fmt.Errorf("reasoning_effort must be low, medium, high, xhigh, or empty")
+	}
 }
 
 func validateProviderUserAgent(value string) (string, error) {
@@ -129,6 +140,7 @@ func (s *Service) resolveModelProvider(
 	inputAPIKey string,
 	inputProxyID *string,
 	inputUserAgent *string,
+	inputReasoningEffort *string,
 ) (resolvedModelProvider, error) {
 	result := resolvedModelProvider{
 		ID: strings.TrimSpace(providerID), Kind: strings.TrimSpace(kind), APIKey: strings.TrimSpace(inputAPIKey),
@@ -145,6 +157,7 @@ func (s *Service) resolveModelProvider(
 		result.BaseURL = cfg.BaseURL
 		result.ProxyID = provider.ProxyID
 		result.UserAgent = cfg.UserAgent
+		result.ReasoningEffort = cfg.ReasoningEffort
 		if result.APIKey == "" {
 			result.APIKey = cfg.APIKey
 		}
@@ -158,11 +171,18 @@ func (s *Service) resolveModelProvider(
 	if inputUserAgent != nil {
 		result.UserAgent = *inputUserAgent
 	}
+	if inputReasoningEffort != nil {
+		result.ReasoningEffort = *inputReasoningEffort
+	}
 	normalizedUserAgent, err := validateProviderUserAgent(result.UserAgent)
 	if err != nil {
 		return resolvedModelProvider{}, err
 	}
 	result.UserAgent = normalizedUserAgent
+	result.ReasoningEffort, err = normalizeReasoningEffort(result.ReasoningEffort)
+	if err != nil {
+		return resolvedModelProvider{}, err
+	}
 	if result.Kind == "" {
 		result.Kind = "openai_compatible"
 	}
@@ -189,6 +209,7 @@ func (s *Service) ModelTestConfig(ctx context.Context, input domain.ModelTestInp
 		ctx, input.ID, input.Kind, input.BaseURL, input.APIKey,
 		input.ProxyID,
 		input.UserAgent,
+		input.ReasoningEffort,
 	)
 	if err != nil {
 		return config.Model{}, err
@@ -198,7 +219,7 @@ func (s *Service) ModelTestConfig(ctx context.Context, input domain.ModelTestInp
 		return config.Model{}, fmt.Errorf("model is required")
 	}
 	return config.Model{
-		APIKey: resolved.APIKey, Kind: resolved.Kind, BaseURL: resolved.BaseURL, Name: model, UserAgent: resolved.UserAgent,
+		APIKey: resolved.APIKey, Kind: resolved.Kind, BaseURL: resolved.BaseURL, Name: model, ReasoningEffort: resolved.ReasoningEffort, UserAgent: resolved.UserAgent,
 		ProxyURL: resolved.ProxyURL, ProxyUsername: resolved.ProxyUsername, ProxyPassword: resolved.ProxyPassword,
 	}, nil
 }
@@ -208,6 +229,7 @@ func (s *Service) DiscoverModels(ctx context.Context, input domain.ModelDiscover
 		ctx, input.ID, input.Kind, input.BaseURL, input.APIKey,
 		input.ProxyID,
 		input.UserAgent,
+		nil,
 	)
 	if err != nil {
 		return domain.ModelCatalog{}, err

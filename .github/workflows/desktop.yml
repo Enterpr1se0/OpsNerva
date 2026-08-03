@@ -11,11 +11,17 @@ on:
       - "go.mod"
       - "go.sum"
   push:
+    branches:
+      - main
     tags:
       - "v*"
 
 permissions:
   contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   package:
@@ -65,6 +71,10 @@ jobs:
 
       - name: Install web dependencies
         run: npm ci
+        working-directory: web
+
+      - name: Build web frontend
+        run: npm run build
         working-directory: web
 
       - name: Test Go backend

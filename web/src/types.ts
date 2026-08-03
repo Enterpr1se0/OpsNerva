@@ -326,6 +326,7 @@ export interface ChatState {
 }
 
 export type ModelProviderKind = 'openai' | 'deepseek' | 'anthropic' | 'openai_compatible' | 'ollama'
+export type ModelReasoningEffort = '' | 'low' | 'medium' | 'high' | 'xhigh'
 
 export interface Proxy {
 	id: string
@@ -360,6 +361,7 @@ export interface ModelProvider {
   kind: ModelProviderKind
   base_url?: string
 	model: string
+	reasoning_effort?: ModelReasoningEffort
 	has_api_key: boolean
 	proxy_id?: string
 	user_agent?: string
@@ -374,6 +376,7 @@ export interface ModelProviderInput {
   kind: ModelProviderKind
   base_url: string
 	model: string
+	reasoning_effort: ModelReasoningEffort
 	api_key: string
 	proxy_id: string
 	user_agent: string
@@ -390,6 +393,7 @@ export interface ModelDiscoveryInput {
 
 export interface ModelTestInput extends ModelDiscoveryInput {
   model: string
+	reasoning_effort: ModelReasoningEffort
 }
 
 export interface ModelCatalog {

@@ -15,6 +15,7 @@ import (
 	"eino-ops-agent/internal/observability"
 	"eino-ops-agent/internal/proxyx"
 
+	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/cloudwego/eino-ext/components/model/claude"
 	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/components/model"
@@ -45,13 +46,21 @@ func newChatModel(ctx context.Context, cfg config.Model, timeout time.Duration, 
 			APIKey: cfg.APIKey, Model: cfg.Name, MaxTokens: maxTokens,
 			HTTPClient: httpClient, RequestTimeout: timeout,
 		}
+		if cfg.ReasoningEffort != "" {
+			claudeCfg.ThinkingConfig = &anthropic.ThinkingConfigParamUnion{
+				OfAdaptive: &anthropic.ThinkingConfigAdaptiveParam{},
+			}
+			claudeCfg.AdditionalRequestFields = map[string]any{
+				"output_config.effort": cfg.ReasoningEffort,
+			}
+		}
 		if cfg.BaseURL != "" {
 			claudeCfg.BaseURL = &cfg.BaseURL
 		}
 		return claude.NewChatModel(ctx, claudeCfg)
 	}
 	openaiCfg := &openai.ChatModelConfig{
-		APIKey: cfg.APIKey, BaseURL: cfg.BaseURL, Model: cfg.Name, Timeout: timeout, HTTPClient: httpClient,
+		APIKey: cfg.APIKey, BaseURL: cfg.BaseURL, Model: cfg.Name, ReasoningEffort: openai.ReasoningEffortLevel(cfg.ReasoningEffort), Timeout: timeout, HTTPClient: httpClient,
 	}
 	if maxTokens > 0 {
 		name := strings.ToLower(strings.TrimSpace(cfg.Name))

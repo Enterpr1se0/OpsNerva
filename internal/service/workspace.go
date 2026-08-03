@@ -1242,11 +1242,11 @@ func (s *Service) WriteWorkspaceShell(ctx context.Context, shellID, sessionID, w
 	return s.WriteSSHShell(ctx, shellID, sessionID, input, reason, actor)
 }
 
-func (s *Service) WriteWorkspaceShellPage(ctx context.Context, shellID, sessionID, workspaceID, input string, maxWait time.Duration, maxOutputBytes int, reason, actor string) (domain.SSHShellOutputPage, error) {
+func (s *Service) WriteWorkspaceShellPage(ctx context.Context, shellID, sessionID, workspaceID, input string, queryDelay time.Duration, maxOutputBytes int, reason, actor string) (domain.SSHShellOutputPage, error) {
 	if _, err := s.workspaceShellTarget(ctx, shellID, sessionID, workspaceID); err != nil {
 		return domain.SSHShellOutputPage{}, err
 	}
-	return s.WriteSSHShellPage(ctx, shellID, sessionID, input, maxWait, maxOutputBytes, reason, actor)
+	return s.WriteSSHShellPage(ctx, shellID, sessionID, input, queryDelay, maxOutputBytes, reason, actor)
 }
 
 func (s *Service) WaitWorkspaceShellOutput(ctx context.Context, shellID, sessionID, workspaceID, reason, actor string) (domain.SSHShellSnapshot, error) {
@@ -1256,11 +1256,11 @@ func (s *Service) WaitWorkspaceShellOutput(ctx context.Context, shellID, session
 	return s.WaitSSHShellOutput(ctx, shellID, sessionID, reason, actor)
 }
 
-func (s *Service) QueryWorkspaceShellOutput(ctx context.Context, shellID, sessionID, workspaceID string, afterSequence *uint64, maxWait time.Duration, maxOutputBytes int, reason, actor string) (domain.SSHShellOutputPage, error) {
+func (s *Service) QueryWorkspaceShellOutput(ctx context.Context, shellID, sessionID, workspaceID string, afterSequence *uint64, queryDelay time.Duration, maxOutputBytes int, reason, actor string) (domain.SSHShellOutputPage, error) {
 	if _, err := s.workspaceShellTarget(ctx, shellID, sessionID, workspaceID); err != nil {
 		return domain.SSHShellOutputPage{}, err
 	}
-	return s.QuerySSHShellOutput(ctx, shellID, sessionID, afterSequence, maxWait, maxOutputBytes, reason, actor)
+	return s.QuerySSHShellOutput(ctx, shellID, sessionID, afterSequence, queryDelay, maxOutputBytes, reason, actor)
 }
 
 func (s *Service) GetWorkspaceShellSnapshot(ctx context.Context, shellID, sessionID, workspaceID string, after uint64, wait time.Duration, coalesce bool, reason, actor string) (domain.SSHShellSnapshot, error) {

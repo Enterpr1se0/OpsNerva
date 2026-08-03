@@ -1138,7 +1138,7 @@ func TestInteractiveHostWorkspaceShellStreamsInputAndOutput(t *testing.T) {
 	if _, err := svc.SetChatSessionWorkspace(context.Background(), shell.SessionID, "", "test"); err == nil {
 		t.Fatal("active Workspace terminal allowed conversation Workspace switch")
 	}
-	if _, err := svc.WriteWorkspaceShell(ctx, shell.ID, shell.SessionID, shell.WorkspaceID, "printf 'workspace-pty:%s\\n' \"$PTY_FIXTURE\"\r", "", "eino-agent"); err != nil {
+	if _, err := svc.WriteWorkspaceShellPage(ctx, shell.ID, shell.SessionID, shell.WorkspaceID, "printf 'workspace-pty:%s\\n' \"$PTY_FIXTURE\"\r", 0, 0, "", "eino-agent"); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(3 * time.Second)
@@ -1154,14 +1154,14 @@ func TestInteractiveHostWorkspaceShellStreamsInputAndOutput(t *testing.T) {
 			t.Fatalf("Workspace PTY output did not arrive: %#v", snapshot)
 		}
 	}
-	if _, err := svc.WriteWorkspaceShell(ctx, shell.ID, shell.SessionID, shell.WorkspaceID, "sleep 10\r", "", "eino-agent"); err != nil {
+	if _, err := svc.WriteWorkspaceShellPage(ctx, shell.ID, shell.SessionID, shell.WorkspaceID, "sleep 10\r", 0, 0, "", "eino-agent"); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(50 * time.Millisecond)
 	if _, err := svc.InterruptWorkspaceShell(ctx, shell.ID, shell.SessionID, shell.WorkspaceID, "", "eino-agent"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.WriteWorkspaceShell(ctx, shell.ID, shell.SessionID, shell.WorkspaceID, "printf 'workspace-interrupt-ok\\n'\r", "", "eino-agent"); err != nil {
+	if _, err := svc.WriteWorkspaceShellPage(ctx, shell.ID, shell.SessionID, shell.WorkspaceID, "printf 'workspace-interrupt-ok\\n'\r", 0, 0, "", "eino-agent"); err != nil {
 		t.Fatal(err)
 	}
 	deadline = time.Now().Add(3 * time.Second)

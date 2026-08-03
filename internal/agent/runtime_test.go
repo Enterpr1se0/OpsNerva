@@ -171,7 +171,8 @@ func TestProviderSendsHelloAndAcceptsNonEmptyResponse(t *testing.T) {
 			return
 		}
 		var request struct {
-			Messages []struct {
+			ReasoningEffort string `json:"reasoning_effort"`
+			Messages        []struct {
 				Content string `json:"content"`
 			} `json:"messages"`
 		}
@@ -180,6 +181,9 @@ func TestProviderSendsHelloAndAcceptsNonEmptyResponse(t *testing.T) {
 		}
 		if len(request.Messages) != 1 || request.Messages[0].Content != "Hello" {
 			t.Fatalf("unexpected test prompt %#v", request.Messages)
+		}
+		if request.ReasoningEffort != "high" {
+			t.Fatalf("reasoning_effort = %q, want high", request.ReasoningEffort)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
@@ -191,7 +195,7 @@ func TestProviderSendsHelloAndAcceptsNonEmptyResponse(t *testing.T) {
 	defer server.Close()
 
 	result, err := (&Runtime{}).TestProvider(context.Background(), config.Model{
-		APIKey: "fixture-key", BaseURL: server.URL + "/v1", Name: "fixture-model",
+		APIKey: "fixture-key", BaseURL: server.URL + "/v1", Name: "fixture-model", ReasoningEffort: "high",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -274,6 +278,12 @@ func TestProviderAnthropicUsesNativeMessagesRequest(t *testing.T) {
 			MaxTokens int             `json:"max_tokens"`
 			Model     string          `json:"model"`
 			Messages  json.RawMessage `json:"messages"`
+			Thinking  struct {
+				Type string `json:"type"`
+			} `json:"thinking"`
+			OutputConfig struct {
+				Effort string `json:"effort"`
+			} `json:"output_config"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Errorf("decode Anthropic request: %v", err)
@@ -286,6 +296,9 @@ func TestProviderAnthropicUsesNativeMessagesRequest(t *testing.T) {
 		if request.Model != "claude-fixture" || !strings.Contains(string(request.Messages), "Hello") {
 			t.Errorf("unexpected Anthropic request: model=%q messages=%s", request.Model, request.Messages)
 		}
+		if request.Thinking.Type != "adaptive" || request.OutputConfig.Effort != "high" {
+			t.Errorf("unexpected Anthropic reasoning config: thinking=%q effort=%q", request.Thinking.Type, request.OutputConfig.Effort)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
   "id":"msg_fixture","type":"message","role":"assistant","model":"claude-fixture",
@@ -297,7 +310,7 @@ func TestProviderAnthropicUsesNativeMessagesRequest(t *testing.T) {
 	defer server.Close()
 
 	result, err := (&Runtime{}).TestProvider(context.Background(), config.Model{
-		APIKey: apiKey, Kind: "anthropic", BaseURL: server.URL, Name: "claude-fixture", UserAgent: userAgent,
+		APIKey: apiKey, Kind: "anthropic", BaseURL: server.URL, Name: "claude-fixture", ReasoningEffort: "high", UserAgent: userAgent,
 	})
 	if err != nil {
 		t.Fatal(err)

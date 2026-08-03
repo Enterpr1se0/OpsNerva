@@ -490,6 +490,14 @@ func (s *Service) SaveModelProvider(ctx context.Context, input domain.ModelProvi
 	input.BaseURL = strings.TrimSpace(input.BaseURL)
 	input.Model = strings.TrimSpace(input.Model)
 	input.ProxyID = strings.TrimSpace(input.ProxyID)
+	reasoningEffort := ""
+	if input.ReasoningEffort != nil {
+		var err error
+		reasoningEffort, err = normalizeReasoningEffort(*input.ReasoningEffort)
+		if err != nil {
+			return domain.ModelProvider{}, err
+		}
+	}
 	userAgent := ""
 	if input.UserAgent != nil {
 		normalizedUserAgent, err := validateProviderUserAgent(*input.UserAgent)
@@ -525,7 +533,7 @@ func (s *Service) SaveModelProvider(ctx context.Context, input domain.ModelProvi
 
 	provider := domain.ModelProvider{
 		ID: input.ID, Name: input.Name, Kind: input.Kind, BaseURL: input.BaseURL, Model: input.Model,
-		ProxyID: input.ProxyID, UserAgent: userAgent,
+		ProxyID: input.ProxyID, UserAgent: userAgent, ReasoningEffort: reasoningEffort,
 	}
 	if input.ID != "" {
 		existing, err := s.store.GetModelProvider(ctx, input.ID)
@@ -537,6 +545,9 @@ func (s *Service) SaveModelProvider(ctx context.Context, input domain.ModelProvi
 		provider.APIKeyCipher = existing.APIKeyCipher
 		if input.UserAgent == nil {
 			provider.UserAgent = existing.UserAgent
+		}
+		if input.ReasoningEffort == nil {
+			provider.ReasoningEffort = existing.ReasoningEffort
 		}
 	}
 	if key := strings.TrimSpace(input.APIKey); key != "" {
@@ -558,7 +569,7 @@ func (s *Service) SaveModelProvider(ctx context.Context, input domain.ModelProvi
 	}
 	s.audit(ctx, "", "model_provider_saved", actor, map[string]any{
 		"provider_id": saved.ID, "name": saved.Name, "kind": saved.Kind, "model": saved.Model,
-		"proxy_id": saved.ProxyID,
+		"proxy_id": saved.ProxyID, "reasoning_effort": saved.ReasoningEffort,
 	})
 	return saved, nil
 }
@@ -810,7 +821,7 @@ func (s *Service) ModelProviderConfig(ctx context.Context, id string) (config.Mo
 		return config.Model{}, domain.ModelProvider{}, err
 	}
 	return config.Model{
-		APIKey: string(key), Kind: provider.Kind, BaseURL: provider.BaseURL, Name: provider.Model, UserAgent: provider.UserAgent,
+		APIKey: string(key), Kind: provider.Kind, BaseURL: provider.BaseURL, Name: provider.Model, ReasoningEffort: provider.ReasoningEffort, UserAgent: provider.UserAgent,
 		ProxyURL: proxy.URL, ProxyUsername: proxy.Username, ProxyPassword: proxy.Password,
 	}, provider, nil
 }

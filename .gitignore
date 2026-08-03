@@ -1,6 +1,7 @@
 /data/
 bin/
 /dist/
+/web/dist/
 web/node_modules/
 web/src-tauri/binaries/
 web/src-tauri/gen/schemas/

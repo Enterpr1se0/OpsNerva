@@ -1,6 +1,6 @@
 .PHONY: dev-api dev-web build build-go build-web test test-web check clean
 
-dev-api:
+dev-api: build-web
 	go run ./cmd/ops-agent serve
 
 dev-web:
@@ -16,7 +16,7 @@ build-go: build-web
 	mkdir -p bin
 	go build -buildvcs=false -trimpath -ldflags="-s -w" -o bin/ops-agent ./cmd/ops-agent
 
-test:
+test: build-web
 	go test ./...
 
 test-web: build-web

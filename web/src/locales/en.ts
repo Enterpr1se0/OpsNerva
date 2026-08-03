@@ -221,6 +221,7 @@ const en = {
     editTitle: 'Edit provider', newTitle: 'New model provider',
     displayName: 'Display name', providerType: 'Provider type', modelId: 'Model ID', fetching: 'Fetching...', fetchModels: 'Fetch models', selectModel: 'Select a model...',
     modelPlaceholder: 'Fetch models or enter an ID', available: '{{count}} models available', enterManually: 'enter manually', apiKey: 'API key', keepKey: 'Leave blank to keep current key',
+		reasoningEffort: 'Reasoning effort',
     baseUrl: 'Base URL', officialEndpoint: 'Blank uses the official OpenAI endpoint',
     userAgent: 'User-Agent override', userAgentHint: 'Blank keeps the SDK default; set this when a gateway rejects SDK requests',
 		proxy: 'Proxy', noProxy: 'Direct',

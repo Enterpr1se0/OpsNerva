@@ -25,8 +25,8 @@ const (
 	maxSSHShellReasonBytes      = 500
 	maxSSHShellRecentBytes      = 16 << 10
 	maxSSHShellOutputEventBytes = 4 << 10
-	shellResponseQuietPeriod    = 400 * time.Millisecond
-	shellResponseMaxWait        = 5 * time.Second
+	defaultShellQueryDelay      = time.Duration(domain.DefaultShellQueryDelaySeconds) * time.Second
+	maxShellQueryDelay          = time.Duration(domain.MaxShellQueryDelaySeconds) * time.Second
 )
 
 type sshShellState struct {
@@ -210,11 +210,14 @@ func (s *Service) ReadableSSHShellSnapshot(ctx context.Context, snapshot domain.
 }
 
 func (s *Service) WriteSSHShell(ctx context.Context, id, expectedSessionID, input, reason, actor string) (domain.SSHShellSnapshot, error) {
-	page, err := s.WriteSSHShellPage(ctx, id, expectedSessionID, input, shellResponseMaxWait, 0, reason, actor)
+	page, err := s.WriteSSHShellPage(ctx, id, expectedSessionID, input, defaultShellQueryDelay, 0, reason, actor)
 	return page.Snapshot, err
 }
 
-func (s *Service) WriteSSHShellPage(ctx context.Context, id, expectedSessionID, input string, maxWait time.Duration, maxOutputBytes int, reason, actor string) (domain.SSHShellOutputPage, error) {
+func (s *Service) WriteSSHShellPage(ctx context.Context, id, expectedSessionID, input string, queryDelay time.Duration, maxOutputBytes int, reason, actor string) (domain.SSHShellOutputPage, error) {
+	if err := validateShellQueryDelay(queryDelay); err != nil {
+		return domain.SSHShellOutputPage{}, err
+	}
 	_, before, err := s.liveSSHShell(id, expectedSessionID)
 	if err != nil {
 		return domain.SSHShellOutputPage{}, err
@@ -222,22 +225,26 @@ func (s *Service) WriteSSHShellPage(ctx context.Context, id, expectedSessionID, 
 	if err := s.SendSSHShellInput(ctx, id, expectedSessionID, input, reason, actor); err != nil {
 		return domain.SSHShellOutputPage{}, err
 	}
-	page, err := s.collectSSHShellResponsePageWithPolicy(ctx, id, expectedSessionID, before, maxWait, shellResponseQuietPeriod, maxOutputBytes, "", "")
+	if err := waitShellQueryDelay(ctx, queryDelay); err != nil {
+		return domain.SSHShellOutputPage{}, err
+	}
+	snapshot, hasMore, err := s.getSSHShellSnapshotPage(ctx, id, expectedSessionID, before, 0, maxOutputBytes, false, "", "")
+	page := domain.SSHShellOutputPage{Snapshot: snapshot, HasMore: hasMore}
 	if err == nil && (actor == "eino-agent" || actor == "mcp-client") {
 		s.markSSHShellResponseRead(id, expectedSessionID, page.Snapshot.NextSequence)
 	}
 	return page, err
 }
 
-// WaitSSHShellOutput waits for the next response batch using the same server-side
-// policy as input. A quiet terminal returns quickly; continuously refreshing
-// programs return after the hard deadline and keep running in the PTY.
 func (s *Service) WaitSSHShellOutput(ctx context.Context, id, expectedSessionID, reason, actor string) (domain.SSHShellSnapshot, error) {
-	page, err := s.QuerySSHShellOutput(ctx, id, expectedSessionID, nil, shellResponseMaxWait, 0, reason, actor)
+	page, err := s.QuerySSHShellOutput(ctx, id, expectedSessionID, nil, defaultShellQueryDelay, 0, reason, actor)
 	return page.Snapshot, err
 }
 
-func (s *Service) QuerySSHShellOutput(ctx context.Context, id, expectedSessionID string, afterSequence *uint64, maxWait time.Duration, maxOutputBytes int, reason, actor string) (domain.SSHShellOutputPage, error) {
+func (s *Service) QuerySSHShellOutput(ctx context.Context, id, expectedSessionID string, afterSequence *uint64, queryDelay time.Duration, maxOutputBytes int, reason, actor string) (domain.SSHShellOutputPage, error) {
+	if err := validateShellQueryDelay(queryDelay); err != nil {
+		return domain.SSHShellOutputPage{}, err
+	}
 	var after uint64
 	var err error
 	if afterSequence == nil {
@@ -248,8 +255,15 @@ func (s *Service) QuerySSHShellOutput(ctx context.Context, id, expectedSessionID
 	if err != nil {
 		return domain.SSHShellOutputPage{}, err
 	}
+	if _, _, err := s.getSSHShellSnapshotPage(ctx, id, expectedSessionID, after, 0, maxOutputBytes, false, "", ""); err != nil {
+		return domain.SSHShellOutputPage{}, err
+	}
 	s.setSSHShellOutputOwner(ctx, id, expectedSessionID, actor)
-	page, err := s.collectSSHShellResponsePageWithPolicy(ctx, id, expectedSessionID, after, maxWait, shellResponseQuietPeriod, maxOutputBytes, reason, actor)
+	if err := waitShellQueryDelay(ctx, queryDelay); err != nil {
+		return domain.SSHShellOutputPage{}, err
+	}
+	snapshot, hasMore, err := s.getSSHShellSnapshotPage(ctx, id, expectedSessionID, after, 0, maxOutputBytes, false, reason, actor)
+	page := domain.SSHShellOutputPage{Snapshot: snapshot, HasMore: hasMore}
 	if err == nil && (actor == "eino-agent" || actor == "mcp-client") {
 		s.markSSHShellResponseRead(id, expectedSessionID, page.Snapshot.NextSequence)
 	}
@@ -322,62 +336,25 @@ func (s *Service) setSSHShellOutputOwner(ctx context.Context, id, expectedSessio
 	}
 }
 
-func (s *Service) collectSSHShellResponse(ctx context.Context, id, expectedSessionID string, after uint64, reason, actor string) (domain.SSHShellSnapshot, error) {
-	return s.collectSSHShellResponseWithPolicy(ctx, id, expectedSessionID, after, shellResponseMaxWait, shellResponseQuietPeriod, reason, actor)
+func waitShellQueryDelay(ctx context.Context, delay time.Duration) error {
+	if delay == 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
-func (s *Service) collectSSHShellResponseWithPolicy(ctx context.Context, id, expectedSessionID string, after uint64, maxWait, quietPeriod time.Duration, reason, actor string) (domain.SSHShellSnapshot, error) {
-	page, err := s.collectSSHShellResponsePageWithPolicy(ctx, id, expectedSessionID, after, maxWait, quietPeriod, 0, reason, actor)
-	return page.Snapshot, err
-}
-
-func (s *Service) collectSSHShellResponsePageWithPolicy(ctx context.Context, id, expectedSessionID string, after uint64, maxWait, quietPeriod time.Duration, maxOutputBytes int, reason, actor string) (domain.SSHShellOutputPage, error) {
-	deadline := time.Now().Add(maxWait)
-	cursor := after
-	hadOutput := false
-	waitDeadlineReached := false
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			waitDeadlineReached = maxWait > 0
-			break
-		}
-		wait := remaining
-		waitingUntilDeadline := true
-		if hadOutput && wait > quietPeriod {
-			wait = quietPeriod
-			waitingUntilDeadline = false
-		}
-		next, hasMore, err := s.getSSHShellSnapshotPage(ctx, id, expectedSessionID, cursor, wait, maxOutputBytes, false, "", "")
-		if err != nil {
-			return domain.SSHShellOutputPage{}, err
-		}
-		if len(next.Events) == 0 {
-			waitDeadlineReached = waitingUntilDeadline && shellStatusActive(next.Shell.Status)
-			break
-		}
-		cursor = next.NextSequence
-		if shellSnapshotHasOutput(next) {
-			hadOutput = true
-		}
-		if hasMore || !shellStatusActive(next.Shell.Status) {
-			break
-		}
+func validateShellQueryDelay(delay time.Duration) error {
+	if delay < 0 || delay > maxShellQueryDelay {
+		return fmt.Errorf("wait_seconds must be between 0 and %d", int(maxShellQueryDelay/time.Second))
 	}
-	snapshot, hasMore, err := s.getSSHShellSnapshotPage(ctx, id, expectedSessionID, after, 0, maxOutputBytes, false, reason, actor)
-	if err != nil {
-		return domain.SSHShellOutputPage{}, err
-	}
-	return domain.SSHShellOutputPage{Snapshot: snapshot, HasMore: hasMore, WaitDeadlineReached: waitDeadlineReached}, nil
-}
-
-func shellSnapshotHasOutput(snapshot domain.SSHShellSnapshot) bool {
-	for _, event := range snapshot.Events {
-		if (event.Stream == "stdout" || event.Stream == "stderr") && event.Content != "" {
-			return true
-		}
-	}
-	return false
+	return nil
 }
 
 func (s *Service) SendSSHShellInput(ctx context.Context, id, expectedSessionID, input, reason, actor string) error {
@@ -1126,8 +1103,8 @@ func marshalSSHShell(shell domain.SSHShell) ([]byte, error) {
 
 func sshShellUsage() *domain.SSHShellUsage {
 	return &domain.SSHShellUsage{
-		Input:  "action=input sends raw bytes and returns a bounded output page; submit=true appends a carriage return",
-		Output: "action=output waits for a bounded output page; pass next_sequence as after_sequence to continue",
+		Input:  "action=input sends raw bytes, delays wait_seconds, then reads one bounded output page; submit=true appends a carriage return",
+		Output: "action=output delays wait_seconds, then reads one bounded output page; pass next_sequence as after_sequence to continue",
 		Close:  "call action=close when finished; the shell remains active until it is closed or disconnected",
 	}
 }

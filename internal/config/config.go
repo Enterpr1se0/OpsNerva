@@ -58,14 +58,15 @@ type SSH struct {
 }
 
 type Model struct {
-	APIKey        string `yaml:"-"`
-	Kind          string `yaml:"kind"`
-	BaseURL       string `yaml:"base_url"`
-	Name          string `yaml:"name"`
-	UserAgent     string `yaml:"user_agent"`
-	ProxyURL      string `yaml:"-"`
-	ProxyUsername string `yaml:"-"`
-	ProxyPassword string `yaml:"-"`
+	APIKey          string `yaml:"-"`
+	Kind            string `yaml:"kind"`
+	BaseURL         string `yaml:"base_url"`
+	Name            string `yaml:"name"`
+	ReasoningEffort string `yaml:"reasoning_effort"`
+	UserAgent       string `yaml:"user_agent"`
+	ProxyURL        string `yaml:"-"`
+	ProxyUsername   string `yaml:"-"`
+	ProxyPassword   string `yaml:"-"`
 }
 
 type Limits struct {
@@ -174,6 +175,12 @@ func resolvePath(baseDir, path string) string {
 }
 
 func validateOperationsConfig(cfg *Config) error {
+	cfg.Model.ReasoningEffort = strings.ToLower(strings.TrimSpace(cfg.Model.ReasoningEffort))
+	switch cfg.Model.ReasoningEffort {
+	case "", "low", "medium", "high", "xhigh":
+	default:
+		return fmt.Errorf("model.reasoning_effort must be low, medium, high, xhigh, or empty")
+	}
 	dataRoot, _ := filepath.Abs(cfg.DataDir)
 	if sameOrWithin(cfg.WorkspaceDir, dataRoot) || sameOrWithin(dataRoot, cfg.WorkspaceDir) {
 		return fmt.Errorf("workspace_dir cannot overlap the application data directory")
@@ -223,6 +230,7 @@ func applyEnv(cfg *Config) {
 	setString(&cfg.Model.APIKey, "OPENAI_API_KEY")
 	setString(&cfg.Model.BaseURL, "OPENAI_BASE_URL")
 	setString(&cfg.Model.Name, "OPENAI_MODEL")
+	setString(&cfg.Model.ReasoningEffort, "OPENAI_REASONING_EFFORT")
 	setInt(&cfg.Limits.GlobalConcurrency, "OPS_AGENT_GLOBAL_CONCURRENCY")
 	setInt(&cfg.Limits.HostConcurrency, "OPS_AGENT_HOST_CONCURRENCY")
 }

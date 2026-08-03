@@ -443,6 +443,7 @@ CREATE TABLE IF NOT EXISTS model_providers (
   api_key_cipher TEXT NOT NULL DEFAULT '',
   proxy_id TEXT NOT NULL DEFAULT '',
   user_agent TEXT NOT NULL DEFAULT '',
+  reasoning_effort TEXT NOT NULL DEFAULT '',
   active INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -517,6 +518,9 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
 		return err
 	}
 	if err := s.ensureColumn(ctx, "ssh_shell_sessions", "response_sequence", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "model_providers", "reasoning_effort", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO system_settings(
@@ -677,13 +681,13 @@ func (s *Store) UpsertModelProvider(ctx context.Context, provider domain.ModelPr
 	}
 	provider.UpdatedAt = now
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO model_providers(id,name,kind,base_url,model,api_key_cipher,proxy_id,user_agent,active,created_at,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?)
+INSERT INTO model_providers(id,name,kind,base_url,model,api_key_cipher,proxy_id,user_agent,reasoning_effort,active,created_at,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET name=excluded.name,kind=excluded.kind,base_url=excluded.base_url,
 model=excluded.model,api_key_cipher=excluded.api_key_cipher,proxy_id=excluded.proxy_id,
-user_agent=excluded.user_agent,updated_at=excluded.updated_at`,
+user_agent=excluded.user_agent,reasoning_effort=excluded.reasoning_effort,updated_at=excluded.updated_at`,
 		provider.ID, provider.Name, provider.Kind, provider.BaseURL, provider.Model, provider.APIKeyCipher,
-		provider.ProxyID, provider.UserAgent,
+		provider.ProxyID, provider.UserAgent, provider.ReasoningEffort,
 		boolInt(provider.Active), formatTime(provider.CreatedAt), formatTime(provider.UpdatedAt))
 	if err != nil {
 		return domain.ModelProvider{}, err
@@ -692,19 +696,19 @@ user_agent=excluded.user_agent,updated_at=excluded.updated_at`,
 }
 
 func (s *Store) GetModelProvider(ctx context.Context, id string) (domain.ModelProvider, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id,name,kind,base_url,model,api_key_cipher,proxy_id,user_agent,active,created_at,updated_at
+	row := s.db.QueryRowContext(ctx, `SELECT id,name,kind,base_url,model,api_key_cipher,proxy_id,user_agent,reasoning_effort,active,created_at,updated_at
 FROM model_providers WHERE id=?`, id)
 	return scanModelProvider(row)
 }
 
 func (s *Store) ActiveModelProvider(ctx context.Context) (domain.ModelProvider, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id,name,kind,base_url,model,api_key_cipher,proxy_id,user_agent,active,created_at,updated_at
+	row := s.db.QueryRowContext(ctx, `SELECT id,name,kind,base_url,model,api_key_cipher,proxy_id,user_agent,reasoning_effort,active,created_at,updated_at
 FROM model_providers WHERE active=1 LIMIT 1`)
 	return scanModelProvider(row)
 }
 
 func (s *Store) ListModelProviders(ctx context.Context) ([]domain.ModelProvider, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,kind,base_url,model,api_key_cipher,proxy_id,user_agent,active,created_at,updated_at
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,kind,base_url,model,api_key_cipher,proxy_id,user_agent,reasoning_effort,active,created_at,updated_at
 FROM model_providers ORDER BY active DESC,name`)
 	if err != nil {
 		return nil, err
@@ -1005,7 +1009,7 @@ func scanModelProvider(row scanner) (domain.ModelProvider, error) {
 	var active int
 	var created, updated string
 	err := row.Scan(&provider.ID, &provider.Name, &provider.Kind, &provider.BaseURL, &provider.Model,
-		&provider.APIKeyCipher, &provider.ProxyID, &provider.UserAgent, &active, &created, &updated)
+		&provider.APIKeyCipher, &provider.ProxyID, &provider.UserAgent, &provider.ReasoningEffort, &active, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.ModelProvider{}, ErrNotFound
 	}

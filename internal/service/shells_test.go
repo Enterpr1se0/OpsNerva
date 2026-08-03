@@ -63,7 +63,7 @@ func (s *fakeShellSession) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-func TestWriteSSHShellWaitsForDelayedOutput(t *testing.T) {
+func TestWriteSSHShellDelaysBeforeReadingOutput(t *testing.T) {
 	svc, _, host := newTestService(t)
 	ctx := WithSessionID(context.Background(), "session-delayed-shell")
 	if _, err := svc.PrepareChatSession(ctx, "session-delayed-shell", "", "test"); err != nil {
@@ -85,10 +85,15 @@ func TestWriteSSHShellWaitsForDelayedOutput(t *testing.T) {
 	session.outputDelay = 40 * time.Millisecond
 	session.mu.Unlock()
 
-	snapshot, err := svc.WriteSSHShell(context.Background(), shellID, "session-delayed-shell", "echo delayed\r", "", "test")
+	started := time.Now()
+	page, err := svc.WriteSSHShellPage(context.Background(), shellID, "session-delayed-shell", "echo delayed\r", 80*time.Millisecond, 0, "", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
+	if elapsed := time.Since(started); elapsed < 70*time.Millisecond {
+		t.Fatalf("shell input returned before its query delay: %s", elapsed)
+	}
+	snapshot := page.Snapshot
 	var output strings.Builder
 	for _, event := range snapshot.Events {
 		if event.Stream == "stdout" {
@@ -119,7 +124,7 @@ func TestAgentShellOutputStreamsBeforeTheToolResult(t *testing.T) {
 	events, unsubscribe := svc.SubscribeExecutionEvents(sessionID)
 	defer unsubscribe()
 	toolCtx := WithExecutionOwner(context.Background(), "call-shell-input", "ssh_shell", `{"action":"input"}`)
-	if _, err := svc.WriteSSHShell(toolCtx, approved.Shell.ID, sessionID, "echo live\r", "", "eino-agent"); err != nil {
+	if _, err := svc.WriteSSHShellPage(toolCtx, approved.Shell.ID, sessionID, "echo live\r", 0, 0, "", "eino-agent"); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -216,7 +221,7 @@ func TestShellOutputPagePaginatesReadableStreamsWithoutLoss(t *testing.T) {
 	}
 }
 
-func TestShellOutputPageReportsWaitDeadline(t *testing.T) {
+func TestShellOutputQueryDelayIsNotWokenByOutput(t *testing.T) {
 	svc, _, host := newTestService(t)
 	const sessionID = "session-shell-wait-deadline"
 	ctx := WithSessionID(context.Background(), sessionID)
@@ -236,17 +241,42 @@ func TestShellOutputPageReportsWaitDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	after := shell.LastSequence
+	svc.shellMu.RLock()
+	session := svc.shells[shell.ID].session.(*fakeShellSession)
+	svc.shellMu.RUnlock()
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		session.callback("stdout", []byte("arrived-early\n"))
+	}()
 	started := time.Now()
-	page, err := svc.QuerySSHShellOutput(context.Background(), shell.ID, sessionID, &after, 40*time.Millisecond, 1024, "", "eino-agent")
+	page, err := svc.QuerySSHShellOutput(context.Background(), shell.ID, sessionID, &after, 80*time.Millisecond, 1024, "", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.WaitDeadlineReached || len(page.Snapshot.Events) != 0 || time.Since(started) < 30*time.Millisecond {
-		t.Fatalf("wait deadline page = %#v after %s", page, time.Since(started))
+	if elapsed := time.Since(started); elapsed < 70*time.Millisecond {
+		t.Fatalf("shell output returned before its query delay: %s", elapsed)
+	}
+	if len(page.Snapshot.Events) != 1 || page.Snapshot.Events[0].Content != "arrived-early\n" {
+		t.Fatalf("delayed shell output page = %#v", page)
 	}
 }
 
-func TestContinuousShellOutputReturnsABatchWithoutStoppingThePTY(t *testing.T) {
+func TestShellOutputQueryDelayHonorsCancellationAndLimit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if err := waitShellQueryDelay(ctx, time.Second); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("canceled shell query delay = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("canceled shell query delay returned too late: %s", elapsed)
+	}
+	if err := validateShellQueryDelay(maxShellQueryDelay + time.Second); err == nil {
+		t.Fatal("out-of-range shell query delay was accepted")
+	}
+}
+
+func TestContinuousShellOutputIsReadAfterQueryDelayWithoutStoppingThePTY(t *testing.T) {
 	svc, _, host := newTestService(t)
 	const sessionID = "session-continuous-shell"
 	ctx := WithSessionID(context.Background(), sessionID)
@@ -285,7 +315,7 @@ func TestContinuousShellOutputReturnsABatchWithoutStoppingThePTY(t *testing.T) {
 		}
 	}()
 	started := time.Now()
-	snapshot, err := svc.collectSSHShellResponseWithPolicy(context.Background(), approved.Shell.ID, sessionID, before, 120*time.Millisecond, 30*time.Millisecond, "", "")
+	page, err := svc.QuerySSHShellOutput(context.Background(), approved.Shell.ID, sessionID, &before, 120*time.Millisecond, 0, "", "")
 	close(stop)
 	<-done
 	if err != nil {
@@ -294,8 +324,8 @@ func TestContinuousShellOutputReturnsABatchWithoutStoppingThePTY(t *testing.T) {
 	if elapsed := time.Since(started); elapsed < 90*time.Millisecond || elapsed > 500*time.Millisecond {
 		t.Fatalf("continuous output collection duration = %s", elapsed)
 	}
-	if snapshot.Shell.Status != "running" || !shellSnapshotHasOutput(snapshot) {
-		t.Fatalf("continuous program did not return a live output batch: %#v", snapshot)
+	if page.Snapshot.Shell.Status != "running" || len(page.Snapshot.Events) == 0 {
+		t.Fatalf("continuous program did not return a live output batch: %#v", page.Snapshot)
 	}
 }
 
@@ -315,20 +345,22 @@ func TestShellOutputIncludesDataProducedBetweenToolCalls(t *testing.T) {
 		t.Fatal(err)
 	}
 	inputCtx := WithExecutionOwner(context.Background(), "call-shell-input", "ssh_shell", `{"action":"input"}`)
-	inputSnapshot, err := svc.WriteSSHShell(inputCtx, approved.Shell.ID, sessionID, "long-command\r", "", "eino-agent")
+	inputPage, err := svc.WriteSSHShellPage(inputCtx, approved.Shell.ID, sessionID, "long-command\r", 0, 0, "", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
+	inputSnapshot := inputPage.Snapshot
 	svc.shellMu.RLock()
 	state := svc.shells[approved.Shell.ID]
 	svc.shellMu.RUnlock()
 	state.session.(*fakeShellSession).callback("stdout", []byte("late-result\n"))
 
 	outputCtx := WithExecutionOwner(context.Background(), "call-shell-output", "ssh_shell", `{"action":"output"}`)
-	outputSnapshot, err := svc.WaitSSHShellOutput(outputCtx, approved.Shell.ID, sessionID, "", "eino-agent")
+	outputPage, err := svc.QuerySSHShellOutput(outputCtx, approved.Shell.ID, sessionID, nil, 0, 0, "", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
+	outputSnapshot := outputPage.Snapshot
 	var output strings.Builder
 	for _, event := range outputSnapshot.Events {
 		if event.Stream == "stdout" {
@@ -396,10 +428,11 @@ func TestInteractiveSSHShellApprovalIsolationCompleteOutputAndSensitiveRedaction
 	}
 	shellID := approved.Shell.ID
 
-	snapshot, err := svc.WriteSSHShell(context.Background(), shellID, "session-shell", "printf hello\r", "test input", "test")
+	page, err := svc.WriteSSHShellPage(context.Background(), shellID, "session-shell", "printf hello\r", 0, 0, "test input", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
+	snapshot := page.Snapshot
 	var output strings.Builder
 	for _, event := range snapshot.Events {
 		if event.Stream == "stdout" {
@@ -425,10 +458,11 @@ func TestInteractiveSSHShellApprovalIsolationCompleteOutputAndSensitiveRedaction
 	}
 
 	largeInput := strings.Repeat("output-", 8_000) + "\r"
-	snapshot, err = svc.WriteSSHShell(context.Background(), shellID, "session-shell", largeInput, "", "test")
+	page, err = svc.WriteSSHShellPage(context.Background(), shellID, "session-shell", largeInput, 0, 0, "", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
+	snapshot = page.Snapshot
 	output.Reset()
 	for _, event := range snapshot.Events {
 		if event.Stream == "stdout" {
@@ -438,7 +472,7 @@ func TestInteractiveSSHShellApprovalIsolationCompleteOutputAndSensitiveRedaction
 	if output.String() != largeInput {
 		t.Fatalf("interactive shell output was truncated: got=%d want=%d", output.Len(), len(largeInput))
 	}
-	if _, err := svc.WriteSSHShell(context.Background(), shellID, "different-session", "whoami\r", "", "test"); !errors.Is(err, store.ErrNotFound) {
+	if _, err := svc.WriteSSHShellPage(context.Background(), shellID, "different-session", "whoami\r", 0, 0, "", "test"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("cross-session shell input was not hidden: %v", err)
 	}
 
@@ -480,7 +514,7 @@ func TestInteractiveSSHShellApprovalIsolationCompleteOutputAndSensitiveRedaction
 		t.Fatalf("readable terminal snapshot leaked split ANSI: %q", incremental.RecentOutput)
 	}
 	fakeSession.callback("stdout", []byte("Password:"))
-	if _, err := svc.WriteSSHShell(context.Background(), shellID, "session-shell", "should-not-be-sent\r", "", "test"); err == nil || !strings.Contains(err.Error(), "private Web terminal") {
+	if _, err := svc.WriteSSHShellPage(context.Background(), shellID, "session-shell", "should-not-be-sent\r", 0, 0, "", "test"); err == nil || !strings.Contains(err.Error(), "private Web terminal") {
 		t.Fatalf("Agent input was accepted at a credential prompt: %v", err)
 	}
 	shellBeforeSecret, err := svc.store.GetSSHShell(context.Background(), shellID)
@@ -553,10 +587,11 @@ func TestMCPInteractiveSSHShellUsesIsolatedSurface(t *testing.T) {
 		t.Fatalf("MCP shell was not isolated: %#v", approved.Shell)
 	}
 	shellID := approved.Shell.ID
-	snapshot, err := svc.WriteSSHShell(ctx, shellID, mcpClientSessionID, "whoami\r", "", "mcp-client")
+	page, err := svc.WriteSSHShellPage(ctx, shellID, mcpClientSessionID, "whoami\r", 0, 0, "", "mcp-client")
 	if err != nil {
 		t.Fatal(err)
 	}
+	snapshot := page.Snapshot
 	if len(snapshot.Events) == 0 || snapshot.Events[0].Stream != "input" || snapshot.Events[0].Source != "agent" {
 		t.Fatalf("MCP shell input source is incorrect: %#v", snapshot.Events)
 	}

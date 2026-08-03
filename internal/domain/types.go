@@ -80,28 +80,30 @@ type HostCapability struct {
 }
 
 type ModelProvider struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	Kind         string    `json:"kind"`
-	BaseURL      string    `json:"base_url,omitempty"`
-	Model        string    `json:"model"`
-	APIKeyCipher string    `json:"-"`
-	HasAPIKey    bool      `json:"has_api_key"`
-	ProxyID      string    `json:"proxy_id,omitempty"`
-	UserAgent    string    `json:"user_agent,omitempty"`
-	Active       bool      `json:"active"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID              string    `json:"id"`
+	Name            string    `json:"name"`
+	Kind            string    `json:"kind"`
+	BaseURL         string    `json:"base_url,omitempty"`
+	Model           string    `json:"model"`
+	ReasoningEffort string    `json:"reasoning_effort,omitempty"`
+	APIKeyCipher    string    `json:"-"`
+	HasAPIKey       bool      `json:"has_api_key"`
+	ProxyID         string    `json:"proxy_id,omitempty"`
+	UserAgent       string    `json:"user_agent,omitempty"`
+	Active          bool      `json:"active"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 type ModelProviderInput struct {
-	ID      string `json:"id,omitempty"`
-	Name    string `json:"name"`
-	Kind    string `json:"kind"`
-	BaseURL string `json:"base_url,omitempty"`
-	Model   string `json:"model"`
-	APIKey  string `json:"api_key,omitempty"`
-	ProxyID string `json:"proxy_id,omitempty"`
+	ID              string  `json:"id,omitempty"`
+	Name            string  `json:"name"`
+	Kind            string  `json:"kind"`
+	BaseURL         string  `json:"base_url,omitempty"`
+	Model           string  `json:"model"`
+	ReasoningEffort *string `json:"reasoning_effort,omitempty"`
+	APIKey          string  `json:"api_key,omitempty"`
+	ProxyID         string  `json:"proxy_id,omitempty"`
 	// UserAgent is a pointer so an omitted field keeps the stored value while
 	// an explicit empty string clears it, matching the test/discovery inputs.
 	UserAgent *string `json:"user_agent,omitempty"`
@@ -117,13 +119,14 @@ type ModelDiscoveryInput struct {
 }
 
 type ModelTestInput struct {
-	ID        string  `json:"id,omitempty"`
-	Kind      string  `json:"kind,omitempty"`
-	BaseURL   *string `json:"base_url,omitempty"`
-	Model     string  `json:"model"`
-	APIKey    string  `json:"api_key,omitempty"`
-	ProxyID   *string `json:"proxy_id,omitempty"`
-	UserAgent *string `json:"user_agent,omitempty"`
+	ID              string  `json:"id,omitempty"`
+	Kind            string  `json:"kind,omitempty"`
+	BaseURL         *string `json:"base_url,omitempty"`
+	Model           string  `json:"model"`
+	ReasoningEffort *string `json:"reasoning_effort,omitempty"`
+	APIKey          string  `json:"api_key,omitempty"`
+	ProxyID         *string `json:"proxy_id,omitempty"`
+	UserAgent       *string `json:"user_agent,omitempty"`
 }
 
 type Proxy struct {
@@ -665,9 +668,8 @@ type SSHShellSnapshot struct {
 }
 
 type SSHShellOutputPage struct {
-	Snapshot            SSHShellSnapshot
-	HasMore             bool
-	WaitDeadlineReached bool
+	Snapshot SSHShellSnapshot
+	HasMore  bool
 }
 
 type SSHShellList struct {
@@ -683,6 +685,9 @@ type SSHShellUsage struct {
 }
 
 const (
+	DefaultShellQueryDelaySeconds = 5
+	MaxShellQueryDelaySeconds     = 600
+
 	SSHShellKindSSH               = "ssh"
 	SSHShellKindWorkspace         = "workspace"
 	SSHShellSurfaceAgent          = "agent"

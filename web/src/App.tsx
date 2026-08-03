@@ -16,7 +16,7 @@ import { api, chatAttachmentURL, reconnectChatStream, sftpDownloadURL, sshShellE
 import { CopyButton, CopyablePre } from './CopyButton'
 import i18n, { localeFor, type SupportedLanguage } from './i18n'
 import { TextFileEditor } from './TextFileEditor'
-import type { AgentEvent, AgentPlan, Approval, ApprovalExecutionResult, ApprovalMode, ChatMessage, ChatSession, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelProvider, ModelProviderInput, ModelProviderKind, Proxy, ProxyInput, Run, ServerLogEntry, SFTPFileEntry, SSHShell, SSHShellEvent, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
+import type { AgentEvent, AgentPlan, Approval, ApprovalExecutionResult, ApprovalMode, ChatMessage, ChatSession, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, Run, ServerLogEntry, SFTPFileEntry, SSHShell, SSHShellEvent, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
 
 type Page = 'chat' | 'ssh' | 'config' | 'extensions' | 'audit' | 'logs'
 type ChatEntryImage = {id:string;name:string;mimeType:string;sizeBytes:number;url:string}
@@ -481,7 +481,7 @@ function App() {
 				agentAvailable={!!health?.agent_available} modelName={health?.model?.model} refresh={refresh} refreshConnections={refreshConnections}
 				refreshApprovals={refreshApprovals} onCreateWorkspaceShell={createWorkspaceShell} onOpenWorkspaceShell={setSelectedShell} onWorkspaceShellStarted={observeAgentWorkspaceShell} onSettingsChanged={setSettings}
 				onHostChanged={host=>setHosts(current=>current.map(item=>item.id===host.id?host:item))}
-				onModelChanged={provider=>{setProviders(current=>current.map(item=>({...item,active:item.id===provider.id})));void api.health().then(setHealth).catch(err=>reportError(errorText(err)))}}
+				onModelChanged={provider=>{setProviders(current=>current.map(item=>item.id===provider.id?provider:{...item,active:provider.active?false:item.active}));void api.health().then(setHealth).catch(err=>reportError(errorText(err)))}}
 				sidebarTarget={chatSidebarTarget} onSessionDeleted={removeSessionState} onError={reportError} onStreamingChange={setAgentStreaming}
 			/>
 			{page === 'ssh' && <SSHWorkspacePage
@@ -608,6 +608,35 @@ function ComposerModelSelector({providers,fallbackModel,disabled,onChanged,onErr
 		<div className="composer-selector-menu composer-model-menu">
 			{providers.map(provider=><button type="button" className={provider.active?'active':''} disabled={disabled||!!busy} onClick={()=>void activate(provider)} key={provider.id}><span><b>{provider.name}</b><small>{provider.model}</small></span>{busy===provider.id?<LoaderCircle className="spin" size={13}/>:provider.active?<Check size={13}/>:null}</button>)}
 			{!providers.length&&<span className="composer-selector-empty">{t('chat.noModel')}</span>}
+		</div>
+	</details>
+}
+
+const reasoningEfforts:ModelReasoningEffort[]=['','low','medium','high','xhigh']
+
+function ComposerReasoningSelector({providers,disabled,onChanged,onError}:{providers:ModelProvider[];disabled:boolean;onChanged:(provider:ModelProvider)=>void;onError:(message:string)=>void}){
+	const {t}=useTranslation()
+	const [open,setOpen]=useState(false)
+	const [busy,setBusy]=useState(false)
+	const active=providers.find(provider=>provider.active)
+	const current=active?.reasoning_effort||''
+	const apply=async(reasoningEffort:ModelReasoningEffort)=>{
+		if(!active||disabled||busy||reasoningEffort===current){setOpen(false);return}
+		setBusy(true)
+		try{
+			const updated=await api.saveModelProvider({
+				id:active.id,name:active.name,kind:active.kind,base_url:active.base_url||'',model:active.model,
+				reasoning_effort:reasoningEffort,api_key:'',proxy_id:active.proxy_id||'',user_agent:active.user_agent||'',
+			})
+			onChanged(updated)
+			setOpen(false)
+		}catch(err){onError(errorText(err))}
+		finally{setBusy(false)}
+	}
+	return <details className="composer-selector composer-reasoning" open={open} onToggle={event=>setOpen(event.currentTarget.open)}>
+		<summary title={t('models.reasoningEffort')} aria-label={t('models.reasoningEffort')}>{busy?<LoaderCircle className="spin" size={13}/>:<BrainCircuit size={13}/>}<span>{current||'default'}</span><ChevronRight size={11}/></summary>
+		<div className="composer-selector-menu composer-reasoning-menu">
+			{reasoningEfforts.map(value=><button type="button" className={value===current?'active':''} disabled={!active||disabled||busy} onClick={()=>void apply(value)} key={value||'default'}><span><b>{value||'default'}</b></span>{value===current&&<Check size={13}/>}</button>)}
 		</div>
 	</details>
 }
@@ -1953,7 +1982,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		</div>
 		  <form className="composer" onSubmit={submit}>
 			  {(sessionBusy||toolsRunning)&&<div className="llm-work-status" role="status" aria-live="polite"><LoaderCircle className="spin" size={13}/><b>{stopping?t('chat.stopping'):connectionRetryLabel||modelRetryLabel||t(sessionBusy?'chat.running':'chat.toolsRunning')}</b><button type="button" className="agent-stop-button" onClick={()=>void stopAgent()} disabled={stopping||!(activeStreamRef.current?.sessionId||sessionId)} title={t('chat.stopTitle')}><Square size={11} fill="currentColor"/>{t('chat.stop')}</button></div>}
-			  <div className="context-line"><ApprovalModeStatus settings={settings} onChanged={onSettingsChanged} onError={onError}/><ComposerHostSelector hosts={hosts} disabled={sessionBusy} onChanged={onHostChanged} onError={onError}/><ComposerModelSelector providers={providers} fallbackModel={modelName} disabled={sessionBusy} onChanged={onModelChanged} onError={onError}/></div>
+			  <div className="context-line"><ApprovalModeStatus settings={settings} onChanged={onSettingsChanged} onError={onError}/><ComposerHostSelector hosts={hosts} disabled={sessionBusy} onChanged={onHostChanged} onError={onError}/><div className="composer-model-controls"><ComposerReasoningSelector providers={providers} disabled={sessionBusy} onChanged={onModelChanged} onError={onError}/><ComposerModelSelector providers={providers} fallbackModel={modelName} disabled={sessionBusy} onChanged={onModelChanged} onError={onError}/></div></div>
 			  {pendingImages.length>0&&<div className="composer-images">{pendingImages.map(image=><div key={image.id}><img src={image.url} alt={image.file.name}/><span title={image.file.name}>{image.file.name}</span><button type="button" onClick={()=>removePendingImage(image.id)} title={t('chat.removeImage')}><X size={11}/></button></div>)}</div>}
 			  {imageNotice&&<div className="composer-image-notice">{imageNotice}<button type="button" onClick={()=>setImageNotice('')}><X size={11}/></button></div>}
 			  <div className="input-row"><label className="image-attach-button" title={t('chat.addImages')}><ImagePlus size={18}/><input key={imageInputKey} type="file" accept={imageTypes.join(',')} multiple disabled={!agentAvailable||sessionBusy||workspaceSwitching||!!loadingSession} onChange={event=>addImages(Array.from(event.target.files||[]))}/></label><textarea value={message} onChange={(event) => setMessage(event.target.value)} onPaste={event=>{const files=Array.from(event.clipboardData.files).filter(file=>file.type.startsWith('image/'));if(files.length)addImages(files)}} placeholder={!agentAvailable?t('chat.configureModel'):loadingSession?t('chat.loadingConversation'):sessionBusy?t('chat.busyPlaceholder'):t('chat.prompt')} disabled={!agentAvailable||sessionBusy||workspaceSwitching||!!loadingSession} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }}/><button aria-label={t('common.next')} disabled={!agentAvailable || sessionBusy || workspaceSwitching || !!loadingSession || (!message.trim()&&!pendingImages.length)}><Send size={18}/></button></div>
@@ -2985,7 +3014,7 @@ function ProxiesPage({proxies,showAddresses,onToggleAddresses,refresh}:{proxies:
 	</div>
 }
 
-const emptyProviderForm: ModelProviderInput = {name:'',kind:'openai',base_url:'',model:'gpt-4o-mini',api_key:'',proxy_id:'',user_agent:''}
+const emptyProviderForm: ModelProviderInput = {name:'',kind:'openai',base_url:'',model:'gpt-4o-mini',reasoning_effort:'',api_key:'',proxy_id:'',user_agent:''}
 const providerLabels: Record<ModelProviderKind,string> = {
   openai: 'OpenAI', deepseek: 'DeepSeek', anthropic: 'Anthropic', openai_compatible: 'OpenAI-compatible', ollama: 'Ollama',
 }
@@ -3010,9 +3039,9 @@ function ModelsPage({providers,proxies,showAddresses,onToggleAddresses,refresh}:
   const editing=!!form.id
 
   const openCreate=()=>{setForm(emptyProviderForm);setCatalog([]);setShowForm(true)}
-  const openEdit=(provider:ModelProvider)=>{setForm({id:provider.id,name:provider.name,kind:provider.kind,base_url:provider.base_url||'',model:provider.model,api_key:'',proxy_id:provider.proxy_id||'',user_agent:provider.user_agent||''});setCatalog([]);setShowForm(true)}
+  const openEdit=(provider:ModelProvider)=>{setForm({id:provider.id,name:provider.name,kind:provider.kind,base_url:provider.base_url||'',model:provider.model,reasoning_effort:provider.reasoning_effort||'',api_key:'',proxy_id:provider.proxy_id||'',user_agent:provider.user_agent||''});setCatalog([]);setShowForm(true)}
   const changeKind=(kind:ModelProviderKind)=>{setCatalog([]);setForm({...form,kind,...providerDefaults[kind]})}
-	const discover=async()=>{setDiscovering(true);try{const {name:_name,model:_model,...payload}=form;const result=await api.discoverModels(payload);setCatalog(result.models);setForm(current=>({...current,model:result.models.includes(current.model)?current.model:''}));notify(t('models.found',{count:result.count}))}catch(err){setCatalog([]);notify(errorText(err),'error')}finally{setDiscovering(false)}}
+	const discover=async()=>{setDiscovering(true);try{const {name:_name,model:_model,reasoning_effort:_reasoningEffort,...payload}=form;const result=await api.discoverModels(payload);setCatalog(result.models);setForm(current=>({...current,model:result.models.includes(current.model)?current.model:''}));notify(t('models.found',{count:result.count}))}catch(err){setCatalog([]);notify(errorText(err),'error')}finally{setDiscovering(false)}}
 		const setTestRunning=(key:string,running:boolean)=>setTesting(current=>{const next=new Set(current);if(running)next.add(key);else next.delete(key);return next})
 		const testForm=async()=>{const key='form';setTestRunning(key,true);try{const {name:_name,...payload}=form;const result=await api.testModelConfiguration(payload);notify(t('models.healthy',{name:result.model,response:result.response,latency:result.latency_ms}))}catch(err){notify(errorText(err),'error')}finally{setTestRunning(key,false)}}
 	const save=async(event:FormEvent)=>{event.preventDefault();setBusy('save');try{const saved=await api.saveModelProvider(form);notify(t('models.saved',{name:saved.name}));setShowForm(false);setForm(emptyProviderForm);await refresh()}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
@@ -3027,6 +3056,7 @@ function ModelsPage({providers,proxies,showAddresses,onToggleAddresses,refresh}:
 		<label><span>{t('models.displayName')}</span><input value={form.name} onChange={event=>setForm({...form,name:event.target.value})} required/></label>
 		<label><span>{t('models.providerType')}</span><select value={form.kind} onChange={event=>changeKind(event.target.value as ModelProviderKind)}>{(Object.keys(providerLabels) as ModelProviderKind[]).map(kind=><option key={kind} value={kind}>{providerLabels[kind]}</option>)}</select></label>
 		<label className="model-id-field"><span className="field-title"><span>{t('models.modelId')}</span><button type="button" onClick={discover} disabled={discovering}><RefreshCw size={12}/>{discovering?t('models.fetching'):t('models.fetchModels')}</button></span>{catalog.length>0?<select value={form.model} onChange={event=>setForm({...form,model:event.target.value})} required><option value="">{t('models.selectModel')}</option>{catalog.map(model=><option value={model} key={model}>{model}</option>)}</select>:<input value={form.model} onChange={event=>setForm({...form,model:event.target.value})} placeholder={t('models.modelPlaceholder')} required/>}{catalog.length>0&&<small>{t('models.available',{count:catalog.length})} · <button type="button" onClick={()=>setCatalog([])}>{t('models.enterManually')}</button></small>}</label>
+			<label><span>{t('models.reasoningEffort')}</span><select value={form.reasoning_effort} onChange={event=>setForm({...form,reasoning_effort:event.target.value as ModelProviderInput['reasoning_effort']})}><option value="">default</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select></label>
 			<label><span>{t('models.apiKey')}</span><PasswordInput autoComplete="new-password" value={form.api_key} onChange={event=>{setCatalog([]);setForm({...form,api_key:event.target.value})}} placeholder={editing?t('models.keepKey'):''}/></label>
 			<label className="base-url-field"><span>{t('models.baseUrl')}</span><input value={form.base_url} onChange={event=>{setCatalog([]);setForm({...form,base_url:event.target.value})}} placeholder={form.kind==='openai'?t('models.officialEndpoint'):''}/></label>
 			<label><span>{t('models.userAgent')}</span><input value={form.user_agent} onChange={event=>{setCatalog([]);setForm({...form,user_agent:event.target.value})}} placeholder={t('models.userAgentHint')}/></label>

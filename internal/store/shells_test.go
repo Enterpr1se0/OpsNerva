@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestOpenMigratesShellOutputColumns(t *testing.T) {
+func TestOpenMigratesAddedColumns(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "shell-migration.db")
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -30,6 +30,13 @@ CREATE TABLE ssh_shell_events (
   sensitive INTEGER NOT NULL DEFAULT 0, input_bytes INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
   PRIMARY KEY(shell_id,sequence)
+);
+CREATE TABLE model_providers (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, kind TEXT NOT NULL,
+  base_url TEXT NOT NULL DEFAULT '', model TEXT NOT NULL,
+  api_key_cipher TEXT NOT NULL DEFAULT '', proxy_id TEXT NOT NULL DEFAULT '',
+  user_agent TEXT NOT NULL DEFAULT '', active INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );`)
 	if closeErr := db.Close(); err == nil {
 		err = closeErr
@@ -46,6 +53,7 @@ CREATE TABLE ssh_shell_events (
 	for table, column := range map[string]string{
 		"ssh_shell_sessions": "response_sequence",
 		"ssh_shell_events":   "content_readable",
+		"model_providers":    "reasoning_effort",
 	} {
 		rows, err := st.db.QueryContext(context.Background(), "PRAGMA table_info("+table+")")
 		if err != nil {

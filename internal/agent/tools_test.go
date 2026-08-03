@@ -404,7 +404,12 @@ func TestShellToolOutputPolicyDefaultsAndValidatesBounds(t *testing.T) {
 	if err != nil || wait != 0 || maxBytes != minimum {
 		t.Fatalf("explicit shell output policy = %s, %d, %v", wait, maxBytes, err)
 	}
-	invalidWait, invalidMax := 31, (4<<20)+1
+	maximum := domain.MaxShellQueryDelaySeconds
+	wait, _, err = shellToolOutputPolicy(&maximum, nil)
+	if err != nil || wait != 600*time.Second {
+		t.Fatalf("maximum shell wait = %s, %v", wait, err)
+	}
+	invalidWait, invalidMax := 601, (4<<20)+1
 	if _, _, err := shellToolOutputPolicy(&invalidWait, nil); err == nil {
 		t.Fatal("out-of-range shell wait was accepted")
 	}

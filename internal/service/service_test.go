@@ -2215,13 +2215,14 @@ func TestCredentialReadUsesManualApproval(t *testing.T) {
 func TestModelProvidersEncryptKeysAndSwitchActiveProvider(t *testing.T) {
 	svc, _, _ := newTestService(t)
 	ctx := context.Background()
+	reasoningEffort := "xhigh"
 	first, err := svc.SaveModelProvider(ctx, domain.ModelProviderInput{
-		Name: "primary", Kind: "openai", Model: "gpt-test", APIKey: "sk-super-secret",
+		Name: "primary", Kind: "openai", Model: "gpt-test", ReasoningEffort: &reasoningEffort, APIKey: "sk-super-secret",
 	}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !first.HasAPIKey || first.Active {
+	if !first.HasAPIKey || first.Active || first.ReasoningEffort != "xhigh" {
 		t.Fatalf("unexpected saved provider %#v", first)
 	}
 	stored, err := svc.store.GetModelProvider(ctx, first.ID)
@@ -2270,8 +2271,14 @@ func TestModelProvidersEncryptKeysAndSwitchActiveProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updatedCfg.APIKey != "sk-super-secret" {
-		t.Fatal("blank API key update did not preserve the encrypted key")
+	if updatedCfg.APIKey != "sk-super-secret" || updatedCfg.ReasoningEffort != "xhigh" {
+		t.Fatalf("blank update did not preserve provider settings: %#v", updatedCfg)
+	}
+	invalidReasoningEffort := "maximum"
+	if _, err := svc.SaveModelProvider(ctx, domain.ModelProviderInput{
+		ID: first.ID, Name: first.Name, Kind: first.Kind, Model: first.Model, ReasoningEffort: &invalidReasoningEffort,
+	}, "test"); err == nil {
+		t.Fatal("invalid reasoning effort was accepted")
 	}
 }
 
