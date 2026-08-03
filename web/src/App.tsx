@@ -1229,8 +1229,9 @@ function SkillsPage({skills,refresh}:{skills:ManagedSkill[];refresh:()=>Promise<
 	useEffect(()=>{if(!skills.length){setSelectedName('');setSelected(null);setDraft('');return}if(!selectedName||!skills.some(skill=>skill.name===selectedName))setSelectedName(skills[0].name)},[skills,selectedName])
 	useEffect(()=>{if(!selectedName)return;let cancelled=false;setLoading(true);setError('');api.skill(selectedName).then(skill=>{if(cancelled)return;setSelected(skill);setDraft(skill.content||'')}).catch(err=>{if(!cancelled)setError(errorText(err))}).finally(()=>{if(!cancelled)setLoading(false)});return()=>{cancelled=true}},[selectedName])
 	const dirty=!!selected&&draft!==selected.content
-	const selectFile=(file:File|null)=>{setUploadFile(file);if(file&&!uploadName){const base=file.name.replace(/\.(markdown|md|zip)$/i,'').replace(/[^A-Za-z0-9_.-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,64);setUploadName(base)}}
-	const upload=async(event:FormEvent)=>{event.preventDefault();if(!uploadFile)return;setUploading(true);setError('');try{const result=await api.uploadSkill(uploadName.trim(),uploadFile);await refresh();setSelectedName(result.name);setSelected(result);setDraft(result.content||'');setUploadOpen(false);setUploadName('');setUploadFile(null);notify(t('skills.uploaded',{name:result.name}))}catch(err){setError(errorText(err))}finally{setUploading(false)}}
+	const markdownUpload=!!uploadFile&&/\.(?:md|markdown)$/i.test(uploadFile.name)
+	const selectFile=(file:File|null)=>{setUploadFile(file);if(file&&/\.(?:md|markdown)$/i.test(file.name)&&!uploadName){const base=file.name.replace(/\.(markdown|md)$/i,'').replace(/[^A-Za-z0-9_.-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,64);setUploadName(base)}else if(file)setUploadName('')}
+	const upload=async(event:FormEvent)=>{event.preventDefault();if(!uploadFile)return;setUploading(true);setError('');try{const results=await api.uploadSkill(uploadName.trim(),uploadFile);const result=results[0]!;await refresh();setSelectedName(result.name);setSelected(result);setDraft(result.content||'');setUploadOpen(false);setUploadName('');setUploadFile(null);notify(t(results.length===1?'skills.uploaded':'skills.uploadedMany',{name:result.name,count:results.length}))}catch(err){setError(errorText(err))}finally{setUploading(false)}}
 	const save=async()=>{if(!selected)return;setSaving(true);setError('');try{const result=await api.saveSkill(selected.name,draft);setSelected(result);setDraft(result.content||'');await refresh();notify(t('skills.saved',{name:result.name}))}catch(err){setError(errorText(err))}finally{setSaving(false)}}
 	const permanentlyDelete=async()=>{if(!deleteName)return;setDeleting(true);setError('');try{await api.deleteSkill(deleteName);setDeleteName('');setSelectedName('');setSelected(null);setDraft('');await refresh();notify(t('skills.deleted',{name:deleteName}))}catch(err){setError(errorText(err))}finally{setDeleting(false)}}
 	const toggleEnabled=async()=>{if(!selected)return;setToggling(true);setError('');try{const result=await api.setSkillEnabled(selected.name,!selected.enabled);setSelected(result);setDraft(result.content||draft);await refresh();notify(t(result.enabled?'skills.toggledEnabled':'skills.toggledDisabled',{name:result.name}))}catch(err){setError(errorText(err))}finally{setToggling(false)}}
@@ -1238,7 +1239,7 @@ function SkillsPage({skills,refresh}:{skills:ManagedSkill[];refresh:()=>Promise<
 	return <div className="skills-page page-stack">
 			<div className="page-actions"><div/><button className="primary" onClick={()=>{setUploadOpen(value=>!value);setError('')}}><UploadCloud size={15}/>{uploadOpen?t('skills.closeUpload'):t('skills.uploadSkill')}</button></div>
 		{error&&<div className="skill-error"><ShieldAlert size={15}/>{error}<button onClick={()=>setError('')}><X size={14}/></button></div>}
-		{uploadOpen&&<form className="skill-upload-panel panel" onSubmit={upload}><div><div className="skill-upload-icon"><UploadCloud size={20}/></div><span><b>{t('skills.uploadPackage')}</b><small>{t('skills.packageHelp')}</small></span></div><label><span>{t('skills.skillName')}</span><input value={uploadName} onChange={event=>setUploadName(event.target.value)} pattern="[A-Za-z0-9][A-Za-z0-9_.-]{0,63}" required/></label><label className="skill-file-picker"><FileText size={15}/><span><b>{uploadFile?.name||t('skills.choosePackage')}</b><small>{uploadFile?formatFileSize(uploadFile.size):t('skills.maxPackage')}</small></span><input type="file" accept=".md,.markdown,.zip,text/markdown,application/zip" onChange={event=>selectFile(event.target.files?.[0]||null)} required/></label><button className="primary" disabled={uploading||!uploadFile||!uploadName.trim()}>{uploading?<LoaderCircle className="spin" size={14}/>:<UploadCloud size={14}/>} {uploading?t('common.uploading'):t('skills.uploadActivate')}</button></form>}
+		{uploadOpen&&<form className="skill-upload-panel panel" onSubmit={upload}><div><div className="skill-upload-icon"><UploadCloud size={20}/></div><span><b>{t('skills.uploadPackage')}</b><small>{t('skills.packageHelp')}</small></span></div>{markdownUpload&&<label><span>{t('skills.skillName')}</span><input value={uploadName} onChange={event=>setUploadName(event.target.value)} pattern="[A-Za-z0-9][A-Za-z0-9_.-]{0,63}" required/></label>}<label className="skill-file-picker"><FileText size={15}/><span><b>{uploadFile?.name||t('skills.choosePackage')}</b><small>{uploadFile?formatFileSize(uploadFile.size):t('skills.maxPackage')}</small></span><input type="file" accept=".md,.markdown,.zip,.7z,text/markdown,application/zip,application/x-7z-compressed" onChange={event=>selectFile(event.target.files?.[0]||null)} required/></label><button className="primary" disabled={uploading||!uploadFile||(markdownUpload&&!uploadName.trim())}>{uploading?<LoaderCircle className="spin" size={14}/>:<UploadCloud size={14}/>} {uploading?t('common.uploading'):t('skills.uploadActivate')}</button></form>}
 		<section className="skill-registry-summary panel"><div><BookOpen size={19}/><span><b>{t('skills.summary',{enabled:skills.filter(skill=>skill.enabled).length,total:skills.length})}</b></span></div><label><Search size={14}/><input value={query} onChange={event=>setQuery(event.target.value)} placeholder={t('skills.search')}/></label></section>
 		<div className="skill-manager-layout">
 			<section className="skill-list panel">{filtered.length?filtered.map(skill=><button className={`${selectedName===skill.name?'active':''} ${skill.enabled?'':'disabled'}`} onClick={()=>setSelectedName(skill.name)} key={skill.name}><div className="skill-card-icon"><BookOpen size={16}/></div><span><code>{skill.name}</code>{skill.summary&&<p>{skill.summary}</p>}<small><em className={skill.enabled?'enabled':'disabled'}>{skill.enabled?t('common.enabled'):t('common.disabled')}</em>{skill.file_count||1} {t('common.files')} · {formatFileSize(skill.size_bytes||0)}{skill.updated_at?` · ${new Date(skill.updated_at).toLocaleDateString(localeFor(instance.language))}`:''}</small></span><ChevronRight size={14}/></button>):<div className="skill-list-empty"><BookOpen size={23}/><b>{skills.length?t('skills.noMatch'):t('skills.noneInstalled')}</b></div>}</section>
@@ -1464,6 +1465,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
   const messagesRef=useRef<HTMLDivElement>(null)
   const stickToLatest=useRef(true)
 	const userScrollFrame=useRef(0)
+	const disclosureScrollFrame=useRef(0)
 	  const activeStreamRef=useRef<ActiveChatStream|null>(null)
 	  const imageURLsRef=useRef(new Set<string>())
 	const reconnectErrorRef=useRef('')
@@ -1482,7 +1484,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	},[modelRetry,connectionRetry])
 	useEffect(()=>{onStreamingChange(running)},[running,onStreamingChange])
 	useEffect(()=>()=>onStreamingChange(false),[onStreamingChange])
-	useEffect(()=>()=>{sessionLoadRef.current='';const stream=activeStreamRef.current;activeStreamRef.current=null;stream?.controller.abort();window.cancelAnimationFrame(userScrollFrame.current)},[])
+	useEffect(()=>()=>{sessionLoadRef.current='';const stream=activeStreamRef.current;activeStreamRef.current=null;stream?.controller.abort();window.cancelAnimationFrame(userScrollFrame.current);window.cancelAnimationFrame(disclosureScrollFrame.current)},[])
 	useEffect(()=>()=>{for(const url of imageURLsRef.current)URL.revokeObjectURL(url);imageURLsRef.current.clear()},[])
 	const addImages=(files:File[])=>{const accepted=files.filter(file=>imageTypes.includes(file.type));if(accepted.length!==files.length)setImageNotice(t('chat.imageTypeRejected'));if(!accepted.length)return;const next=accepted.map(file=>{const url=URL.createObjectURL(file);imageURLsRef.current.add(url);return{id:clientId(),file,url}});setPendingImages(current=>[...current,...next])}
 	const removePendingImage=(id:string)=>{setPendingImages(current=>{const target=current.find(image=>image.id===id);if(target){URL.revokeObjectURL(target.url);imageURLsRef.current.delete(target.url)}return current.filter(image=>image.id!==id)});setImageInputKey(value=>value+1)}
@@ -1545,6 +1547,19 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			if(container)stickToLatest.current=container.scrollHeight-container.scrollTop-container.clientHeight<90
 		})
 	}
+
+	const preserveToolDisclosurePosition=useCallback((summary:HTMLElement)=>{
+		const container=messagesRef.current
+		if(!container||!container.contains(summary))return
+		window.cancelAnimationFrame(userScrollFrame.current)
+		stickToLatest.current=false
+		const top=summary.getBoundingClientRect().top
+		window.cancelAnimationFrame(disclosureScrollFrame.current)
+		disclosureScrollFrame.current=window.requestAnimationFrame(()=>{
+			if(!container.isConnected||!summary.isConnected)return
+			container.scrollTop+=summary.getBoundingClientRect().top-top
+		})
+	},[])
 
   useEffect(() => {
     let active = true
@@ -1812,7 +1827,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		<div className="conversation-view">
 			<div className="messages" ref={messagesRef} onWheel={trackUserScroll} onTouchMove={trackUserScroll} onPointerUp={trackUserScroll}>
 				{entries.length === 0 && <div className="empty-chat"><div className="radar"><Activity size={35}/></div><h2>{t('chat.emptyTitle')}</h2></div>}
-				{entries.map((entry) => <ChatBubble key={entry.id} entry={entry} runs={runs} hosts={hosts}/>) }
+				{entries.map((entry) => <ChatBubble key={entry.id} entry={entry} runs={runs} hosts={hosts} onToolDisclosure={preserveToolDisclosurePosition}/>) }
 				{running&&modelRetry&&<div className="thinking"><span/><span/><span/> {modelRetryLabel}</div>}
 				{running&&!modelRetry&&!reasoningSeen&&!streamingResponseStarted&&<div className="thinking"><span/><span/><span/> {t('chat.waitingModel')}</div>}
 				{detachedRunning&&!running&&connectionRetry&&<div className="thinking background-agent"><span/><span/><span/> {connectionRetryLabel}</div>}
@@ -1991,9 +2006,9 @@ function SessionPlanSteps({plan}:{plan:AgentPlan}){
 	return <section className={`session-plan-view ${plan.status}`}><ol className="session-plan-steps">{plan.steps.map(step=><li className={step.status} key={step.number}><span className="plan-step-marker">{step.status==='completed'?<Check size={12}/>:step.status==='skipped'?<ChevronRight size={12}/>:step.status==='in_progress'?<LoaderCircle size={12}/>:step.status==='blocked'?<ShieldAlert size={12}/>:step.number}</span><div><b>{step.title}</b></div><em>{t(`statusLabels.${step.status}`,{defaultValue:step.status.replace('_',' ')})}</em></li>)}</ol></section>
 }
 
-const ChatBubble=memo(function ChatBubble({ entry, runs, hosts }: {entry: ChatEntry;runs:Run[];hosts:Host[]}) {
+const ChatBubble=memo(function ChatBubble({ entry, runs, hosts, onToolDisclosure }: {entry: ChatEntry;runs:Run[];hosts:Host[];onToolDisclosure:(summary:HTMLElement)=>void}) {
 	const {t}=useTranslation()
-  if (entry.kind === 'tool') return <ToolEventCard entry={entry} runs={runs} hosts={hosts}/>
+  if (entry.kind === 'tool') return <ToolEventCard entry={entry} runs={runs} hosts={hosts} onDisclosure={onToolDisclosure}/>
   if (entry.kind === 'reasoning') return <ReasoningCard content={entry.content} active={!!entry.active}/>
   if (entry.kind === 'assistant' && !entry.content) return null
 	return <div className={`bubble ${entry.kind} ${entry.status||''}`}><div className="avatar">{entry.kind === 'user' ? <UserRound size={17}/> : entry.kind === 'error' ? '!' : <Bot size={17}/>}</div><div><span className="bubble-label">{entry.kind === 'user' ? <>{t('chat.operator')}{entry.status==='failed'&&<em>{t('chat.responseFailed')}</em>}{entry.status==='pending'&&<em>{t('chat.processing')}</em>}</> : entry.kind === 'error' ? t('common.error') : 'OpsNerva'}</span>{entry.images&&entry.images.length>0&&<div className="message-images">{entry.images.map(image=><a href={image.url} target="_blank" rel="noopener noreferrer" title={`${image.name} · ${formatFileSize(image.sizeBytes)}`} key={image.id}><img src={image.url} alt={image.name}/><span>{image.name}</span></a>)}</div>}{entry.content&&<div className={`bubble-copy ${entry.kind==='assistant'&&!entry.streaming?'markdown-body':''}`}>{entry.kind==='assistant'&&!entry.streaming?<Markdown skipHtml remarkPlugins={[remarkGfm]} components={{a:({href,children})=><a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,img:({alt})=><span className="markdown-image-blocked">{t('chat.blockedImage',{alt:alt||t('common.image')})}</span>,pre:({children})=><CopyablePre>{children}</CopyablePre>}}>{entry.content}</Markdown>:entry.content}</div>}</div></div>
@@ -2059,7 +2074,7 @@ function DiffViewer({change}:{change:JsonRecord}){
 	return <section className="diff-viewer"><header><span><FileText size={14}/>{t('tool.fileEdit')}</span><div><em className="add">+{numberValue(change.additions)}</em><em className="delete">-{numberValue(change.deletions)}</em><CopyButton value={diff}/></div></header><div className="diff-scroll" role="table" aria-label={t('tool.diff')}><div className="diff-lines">{rows.map((row,index)=><div className={`diff-line ${row.kind}`} role="row" key={index}><span className="old-line">{row.oldLine??''}</span><span className="new-line">{row.newLine??''}</span><code>{row.text||' '}</code></div>)}</div></div></section>
 }
 
-function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host[]}){
+function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run[];hosts:Host[];onDisclosure:(summary:HTMLElement)=>void}){
 	const {t}=useTranslation()
   const payload=parseRecord(entry.content)
 	const taskPayload=jsonRecord(payload.task)
@@ -2200,8 +2215,8 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
 	const resultExitCode=resultPayload?.exit_code
 	const exitCode=typeof payload.exit_code==='number'?payload.exit_code:typeof resultExitCode==='number'?resultExitCode:run?.exit_code??'—'
 	const autoApproved=payload.auto_approved===true||resultPayload?.auto_approved===true||runAutoApproved(run)
-  return <details className={`tool-event tool-event-rich ${status}`} open={expanded} onToggle={event=>setExpanded(event.currentTarget.open)}>
-	<summary><div className="tool-summary-icon"><TerminalSquare size={15}/></div><div className="tool-summary-copy"><div className="tool-summary-operation"><b>{eventToolLabel||entry.tool||t('common.functions')}:</b><code title={commandSummary}>{commandSummary}</code></div>{targets.length>0&&<div className="tool-summary-targets">{targets.map((target,index)=><span className={`tool-target-chip ${target.kind}`} title={`${target.label}: ${[target.name,target.id].filter(Boolean).join(' · ')}`} key={`${target.kind}_${target.id||target.name}_${index}`}>{target.kind==='host'?<Server size={11}/>:target.kind==='workspace'?<FolderOpen size={11}/>:<ListChecks size={11}/>}<em>{target.label}</em>{target.name&&<b>{target.name}</b>}{target.id&&<code>{target.id}</code>}</span>)}</div>}</div><div className="tool-summary-statuses">{autoApproved&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}<span className={`tool-status ${status}`}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight size={14}/>{stdoutPreview&&<div className="tool-summary-preview"><span>{shellAction==='output'?shellActionLabel:t('tool.latestStdout',{count:Math.min(3,stdoutPreview.split('\n').length)})}</span><pre>{stdoutPreview}</pre></div>}</summary>
+	  return <details className={`tool-event tool-event-rich ${status}`} open={expanded}>
+		<summary onClick={event=>{event.preventDefault();onDisclosure(event.currentTarget);setExpanded(value=>!value)}}><div className="tool-summary-icon"><TerminalSquare size={15}/></div><div className="tool-summary-copy"><div className="tool-summary-operation"><b>{eventToolLabel||entry.tool||t('common.functions')}:</b><code title={commandSummary}>{commandSummary}</code></div>{targets.length>0&&<div className="tool-summary-targets">{targets.map((target,index)=><span className={`tool-target-chip ${target.kind}`} title={`${target.label}: ${[target.name,target.id].filter(Boolean).join(' · ')}`} key={`${target.kind}_${target.id||target.name}_${index}`}>{target.kind==='host'?<Server size={11}/>:target.kind==='workspace'?<FolderOpen size={11}/>:<ListChecks size={11}/>}<em>{target.label}</em>{target.name&&<b>{target.name}</b>}{target.id&&<code>{target.id}</code>}</span>)}</div>}</div><div className="tool-summary-statuses">{autoApproved&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}<span className={`tool-status ${status}`}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight size={14}/>{stdoutPreview&&<div className="tool-summary-preview"><span>{shellAction==='output'?shellActionLabel:t('tool.latestStdout',{count:Math.min(3,stdoutPreview.split('\n').length)})}</span><pre>{stdoutPreview}</pre></div>}</summary>
     <div className="tool-event-body">
 	  {shellPrimaryAction&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellPrimaryContent||'—'}/><pre>{shellPrimaryContent||'—'}</pre></div></section>}
       {(shellOperation||entry.tool==='ssh_exec'||entry.tool==='ssh_run_script')&&toolArguments&&<CompactTable title={t('tool.actualParameters')} columns={[t('tool.parameter'),t('tool.value')]} rows={Object.entries(toolArguments).map(([key,value])=>[key,value])}/>}
@@ -2854,9 +2869,10 @@ function ModelsPage({providers,proxies,showAddresses,onToggleAddresses,refresh}:
 	const {t,i18n:instance}=useTranslation()
 	const notify=useNotifier()
   const [showForm,setShowForm]=useState(false)
-  const [form,setForm]=useState<ModelProviderInput>(emptyProviderForm)
-  const [busy,setBusy]=useState('')
-	const [deleteCandidate,setDeleteCandidate]=useState<ModelProvider|null>(null)
+	  const [form,setForm]=useState<ModelProviderInput>(emptyProviderForm)
+	  const [busy,setBusy]=useState('')
+	  const [testing,setTesting]=useState<Set<string>>(()=>new Set())
+		const [deleteCandidate,setDeleteCandidate]=useState<ModelProvider|null>(null)
   const [catalog,setCatalog]=useState<string[]>([])
   const [discovering,setDiscovering]=useState(false)
   const editing=!!form.id
@@ -2865,10 +2881,11 @@ function ModelsPage({providers,proxies,showAddresses,onToggleAddresses,refresh}:
   const openEdit=(provider:ModelProvider)=>{setForm({id:provider.id,name:provider.name,kind:provider.kind,base_url:provider.base_url||'',model:provider.model,api_key:'',proxy_id:provider.proxy_id||'',user_agent:provider.user_agent||''});setCatalog([]);setShowForm(true)}
   const changeKind=(kind:ModelProviderKind)=>{setCatalog([]);setForm({...form,kind,...providerDefaults[kind]})}
 	const discover=async()=>{setDiscovering(true);try{const {name:_name,model:_model,...payload}=form;const result=await api.discoverModels(payload);setCatalog(result.models);setForm(current=>({...current,model:result.models.includes(current.model)?current.model:''}));notify(t('models.found',{count:result.count}))}catch(err){setCatalog([]);notify(errorText(err),'error')}finally{setDiscovering(false)}}
-	const testForm=async()=>{setBusy('test-form');try{const {name:_name,...payload}=form;const result=await api.testModelConfiguration(payload);notify(t('models.healthy',{name:result.model,response:result.response,latency:result.latency_ms}))}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
+		const setTestRunning=(key:string,running:boolean)=>setTesting(current=>{const next=new Set(current);if(running)next.add(key);else next.delete(key);return next})
+		const testForm=async()=>{const key='form';setTestRunning(key,true);try{const {name:_name,...payload}=form;const result=await api.testModelConfiguration(payload);notify(t('models.healthy',{name:result.model,response:result.response,latency:result.latency_ms}))}catch(err){notify(errorText(err),'error')}finally{setTestRunning(key,false)}}
 	const save=async(event:FormEvent)=>{event.preventDefault();setBusy('save');try{const saved=await api.saveModelProvider(form);notify(t('models.saved',{name:saved.name}));setShowForm(false);setForm(emptyProviderForm);await refresh()}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
 	const activate=async(provider:ModelProvider)=>{setBusy(provider.id);try{await api.activateModelProvider(provider.id);notify(t('models.activated',{name:provider.name}));await refresh()}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
-	const test=async(provider:ModelProvider)=>{setBusy(`test-${provider.id}`);try{const result=await api.testModelProvider(provider.id);notify(t('models.healthy',{name:provider.name,response:result.response,latency:result.latency_ms}))}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
+		const test=async(provider:ModelProvider)=>{setTestRunning(provider.id,true);try{const result=await api.testModelProvider(provider.id);notify(t('models.healthy',{name:provider.name,response:result.response,latency:result.latency_ms}))}catch(err){notify(errorText(err),'error')}finally{setTestRunning(provider.id,false)}}
 	const remove=async()=>{const provider=deleteCandidate;if(!provider)return;setBusy(`delete-${provider.id}`);try{await api.deleteModelProvider(provider.id);notify(t('models.deleted',{name:provider.name}));await refresh()}catch(err){notify(errorText(err),'error')}finally{setBusy('');setDeleteCandidate(null)}}
 
   return <div className="page-stack">
@@ -2883,13 +2900,13 @@ function ModelsPage({providers,proxies,showAddresses,onToggleAddresses,refresh}:
 			<label><span>{t('models.userAgent')}</span><input value={form.user_agent} onChange={event=>{setCatalog([]);setForm({...form,user_agent:event.target.value})}} placeholder={t('models.userAgentHint')}/></label>
 			<label className="proxy-select-field"><span>{t('common.proxy')}</span><select value={form.proxy_id} onChange={event=>{setCatalog([]);setForm({...form,proxy_id:event.target.value})}}><option value="">{t('common.direct')}</option>{proxies.map(proxy=><option value={proxy.id} key={proxy.id}>{proxy.name} · {proxy.url}</option>)}</select></label>
       </div>
-	  <div className="form-actions"><button type="button" onClick={()=>setShowForm(false)}>{t('common.cancel')}</button><button type="button" className="test-config" onClick={testForm} disabled={!!busy||!form.model}><Activity size={14}/>{busy==='test-form'?t('models.sendingHello'):t('models.testModel')}</button><button className="primary" disabled={!!busy}>{busy==='save'?t('common.saving'):t('models.saveProvider')}</button></div>
+		  <div className="form-actions"><button type="button" onClick={()=>setShowForm(false)}>{t('common.cancel')}</button><button type="button" className="test-config" onClick={testForm} disabled={!!busy||testing.has('form')||!form.model}><Activity size={14}/>{testing.has('form')?t('models.sendingHello'):t('models.testModel')}</button><button className="primary" disabled={!!busy}>{busy==='save'?t('common.saving'):t('models.saveProvider')}</button></div>
     </form></ConfigurationEditorPage>}
     {!showForm&&<div className="model-grid">{providers.map(provider=>{const proxy=proxies.find(item=>item.id===provider.proxy_id);return <article className={`model-card panel ${provider.active?'active':''}`} key={provider.id}>
 	  <div className="model-card-head"><div className="provider-glyph"><Cpu size={21}/></div><div><h3>{provider.name}</h3><span>{providerLabels[provider.kind]}</span></div>{provider.active&&<em><Zap size={12}/>{t('models.active')}</em>}</div>
       <div className="model-name">{provider.model}</div>
 	  <dl><div><dt>{t('models.endpoint')}</dt><dd>{provider.base_url?(showAddresses?provider.base_url:'••••••'):t('models.providerDefault')}</dd></div><div><dt>{t('models.proxy')}</dt><dd title={showAddresses?proxy?.url:undefined}>{proxy?.name||t('models.noProxy')}</dd></div>{provider.user_agent&&<div><dt>{t('models.userAgent')}</dt><dd>{provider.user_agent}</dd></div>}<div><dt>{t('models.credential')}</dt><dd>{provider.has_api_key?t('models.encryptedKey'):t('models.noApiKey')}</dd></div><div><dt>{t('common.updated')}</dt><dd>{new Date(provider.updated_at).toLocaleString(localeFor(instance.language))}</dd></div></dl>
-	  <div className="model-actions"><button onClick={()=>test(provider)} disabled={!!busy}><Activity size={14}/>{busy===`test-${provider.id}`?t('common.testing'):t('common.test')}</button><button onClick={()=>openEdit(provider)} disabled={!!busy}><Edit3 size={14}/>{t('common.edit')}</button>{!provider.active&&<button className="use-model" onClick={()=>activate(provider)} disabled={!!busy}><Zap size={14}/>{busy===provider.id?t('models.switching'):t('models.useModel')}</button>}<button className="danger" title={t('common.delete')} onClick={()=>setDeleteCandidate(provider)} disabled={!!busy}><Trash2 size={14}/></button></div>
+		  <div className="model-actions"><button onClick={()=>test(provider)} disabled={!!busy||testing.has(provider.id)}><Activity size={14}/>{testing.has(provider.id)?t('common.testing'):t('common.test')}</button><button onClick={()=>openEdit(provider)} disabled={!!busy}><Edit3 size={14}/>{t('common.edit')}</button>{!provider.active&&<button className="use-model" onClick={()=>activate(provider)} disabled={!!busy}><Zap size={14}/>{busy===provider.id?t('models.switching'):t('models.useModel')}</button>}<button className="danger" title={t('common.delete')} onClick={()=>setDeleteCandidate(provider)} disabled={!!busy}><Trash2 size={14}/></button></div>
     </article>})}</div>}
 		{!showForm&&!providers.length&&<Empty icon={<Cpu/>} title={t('models.emptyTitle')}/>}
 		{deleteCandidate&&<DestructiveConfirmDialog

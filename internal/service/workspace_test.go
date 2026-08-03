@@ -1040,6 +1040,68 @@ func TestHostWorkspaceShellRequiresFreshOneTimeApproval(t *testing.T) {
 	}
 }
 
+func TestHostWorkspaceShellStreamsOutputBeforeCompletion(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is not installed")
+	}
+	svc, root := newWorkspaceService(t, "read_write")
+	mode := domain.WorkspaceShellModeHost
+	if _, err := svc.SaveSystemSettings(context.Background(), domain.SystemSettingsInput{
+		AgentMaxIterations: domain.DefaultAgentMaxIterations, WorkspaceShellMode: &mode,
+	}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	const sessionID = "workspace-shell-stream"
+	events, unsubscribe := svc.SubscribeExecutionEvents(sessionID)
+	defer unsubscribe()
+	ctx := WithExecutionOwner(WithSessionID(context.Background(), sessionID), "call-workspace-shell", "workspace_shell", `{"action":"run"}`)
+	pending, err := svc.RunWorkspaceShell(ctx, "project", "pwd\nprintf 'first\\n'\nsleep 0.4\nprintf 'second\\n'", ".", nil, 10, "test streaming output", "eino-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ApproveAsync(context.Background(), pending.ApprovalID, "reviewed", "operator"); err != nil {
+		t.Fatal(err)
+	}
+
+	var output strings.Builder
+	deadline := time.After(3 * time.Second)
+	for !strings.Contains(output.String(), "first\n") {
+		select {
+		case event := <-events:
+			if event.RunID == pending.RunID && event.Stream == "stdout" {
+				output.WriteString(event.Content)
+			}
+		case <-deadline:
+			t.Fatalf("Workspace shell output did not stream before completion: %q", output.String())
+		}
+	}
+	run, err := svc.Store().GetRun(context.Background(), pending.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != "running" {
+		t.Fatalf("first output arrived after completion: status=%s output=%q", run.Status, output.String())
+	}
+	if strings.Contains(output.String(), root) || !strings.Contains(output.String(), "$WORKSPACE") {
+		t.Fatalf("stream exposed Workspace root: %q", output.String())
+	}
+	completionDeadline := time.After(3 * time.Second)
+	for {
+		select {
+		case event := <-events:
+			if event.RunID != pending.RunID || !terminalExecutionStatus(event.Status) {
+				continue
+			}
+			if event.Status != "completed" {
+				t.Fatalf("Workspace shell ended with status %q", event.Status)
+			}
+			return
+		case <-completionDeadline:
+			t.Fatal("Workspace shell did not complete after streaming output")
+		}
+	}
+}
+
 func TestInteractiveHostWorkspaceShellStreamsInputAndOutput(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash is not installed")

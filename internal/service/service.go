@@ -1933,7 +1933,11 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 	} else if req.Mode == domain.ExecWorkspaceDownload {
 		raw, execErr = s.executeWorkspaceDownload(ctx, connection, req, actor)
 	} else if isWorkspaceMode(req.Mode) {
-		raw, execErr = s.executeWorkspace(ctx, req, actor)
+		var workspaceStream func(string, []byte)
+		if outputSink != nil {
+			workspaceStream = outputSink.Write
+		}
+		raw, execErr = s.executeWorkspace(ctx, req, actor, workspaceStream)
 	} else if streaming, ok := s.transport.(sshx.StreamingTransport); ok && outputSink != nil {
 		raw, execErr = streaming.ExecStream(ctx, connection, transportReq, outputSink.Write)
 	} else {

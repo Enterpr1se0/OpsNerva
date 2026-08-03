@@ -304,10 +304,7 @@ func (s *Server) uploadSkill(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 	name := strings.TrimSpace(r.FormValue("name"))
-	if name == "" {
-		name = strings.TrimSuffix(filepath.Base(header.Filename), filepath.Ext(header.Filename))
-	}
-	result, err := s.service.ImportAdminSkill(r.Context(), name, header.Filename, file, actor(r))
+	result, err := s.service.ImportAdminSkills(r.Context(), name, header.Filename, file, actor(r))
 	if err != nil {
 		writeErrorStatus(w, err, http.StatusBadRequest)
 		return

@@ -17,12 +17,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bodgit/sevenzip"
 )
 
 const (
-	maxSkillPackageBytes = 8 << 20
-	maxSkillFileBytes    = 2 << 20
-	maxSkillFiles        = 128
+	maxSkillPackageBytes   = 8 << 20
+	maxSkillFileBytes      = 2 << 20
+	maxSkillArchiveEntries = 4096
 )
 
 var (
@@ -141,27 +143,44 @@ func (r *Registry) SetEnabled(name string, enabled bool) (Skill, error) {
 }
 
 func (r *Registry) Import(name, filename string, source io.Reader) (Skill, error) {
-	if err := r.ensure(); err != nil {
-		return Skill{}, err
-	}
-	name = strings.TrimSpace(name)
-	if !validSkillName(name) {
-		return Skill{}, fmt.Errorf("invalid skill name: use 1-64 letters, numbers, dots, underscores or hyphens")
-	}
-	data, err := io.ReadAll(io.LimitReader(source, maxSkillPackageBytes+1))
+	imported, err := r.ImportPackage(name, filename, source)
 	if err != nil {
 		return Skill{}, err
 	}
+	return imported[0], nil
+}
+
+func (r *Registry) ImportPackage(name, filename string, source io.Reader) ([]Skill, error) {
+	if err := r.ensure(); err != nil {
+		return nil, err
+	}
+	name = strings.TrimSpace(name)
+	data, err := io.ReadAll(io.LimitReader(source, maxSkillPackageBytes+1))
+	if err != nil {
+		return nil, err
+	}
 	if len(data) > maxSkillPackageBytes {
-		return Skill{}, fmt.Errorf("skill upload exceeds 8 MiB")
+		return nil, fmt.Errorf("skill upload exceeds 8 MiB")
 	}
 	switch strings.ToLower(filepath.Ext(filename)) {
 	case ".md", ".markdown":
-		return r.importMarkdown(name, data)
+		if name == "" {
+			name = strings.TrimSuffix(filepath.Base(filename), filepath.Ext(filename))
+		}
+		if !validSkillName(name) {
+			return nil, fmt.Errorf("invalid skill name: use 1-64 letters, numbers, dots, underscores or hyphens")
+		}
+		skill, err := r.importMarkdown(name, data)
+		if err != nil {
+			return nil, err
+		}
+		return []Skill{skill}, nil
 	case ".zip":
-		return r.importZIP(name, data)
+		return r.importZIP(name, filename, data)
+	case ".7z":
+		return r.import7Z(name, filename, data)
 	default:
-		return Skill{}, fmt.Errorf("skill upload must be a Markdown or ZIP file")
+		return nil, fmt.Errorf("skill upload must be a Markdown, ZIP or 7z file")
 	}
 }
 
@@ -320,121 +339,283 @@ func (r *Registry) readUnlocked(name string, includeContent bool) (Skill, error)
 	return skill, err
 }
 
-func (r *Registry) importZIP(name string, data []byte) (Skill, error) {
+func (r *Registry) importZIP(name, filename string, data []byte) ([]Skill, error) {
 	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
-		return Skill{}, fmt.Errorf("invalid skill ZIP: %w", err)
+		return nil, fmt.Errorf("invalid skill ZIP: %w", err)
 	}
-	if len(reader.File) == 0 || len(reader.File) > maxSkillFiles {
-		return Skill{}, fmt.Errorf("skill ZIP must contain 1-%d entries", maxSkillFiles)
-	}
-	mainFiles := make([]string, 0, 1)
+	files := make([]skillArchiveFile, 0, len(reader.File))
 	for _, file := range reader.File {
-		clean, err := cleanZIPPath(file.Name)
+		files = append(files, skillArchiveFile{
+			name: file.Name, mode: file.Mode(), uncompressedSize: file.UncompressedSize64, open: file.Open,
+		})
+	}
+	return r.importArchive(name, filename, "ZIP", files)
+}
+
+func (r *Registry) import7Z(name, filename string, data []byte) ([]Skill, error) {
+	reader, err := sevenzip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil, fmt.Errorf("invalid skill 7z: %w", err)
+	}
+	files := make([]skillArchiveFile, 0, len(reader.File))
+	for _, file := range reader.File {
+		files = append(files, skillArchiveFile{
+			name: file.Name, mode: file.Mode(), uncompressedSize: file.UncompressedSize, open: file.Open,
+		})
+	}
+	return r.importArchive(name, filename, "7z", files)
+}
+
+type skillArchiveFile struct {
+	name             string
+	mode             fs.FileMode
+	uncompressedSize uint64
+	open             func() (io.ReadCloser, error)
+}
+
+type skillArchiveRoot struct {
+	name   string
+	prefix string
+}
+
+func (r *Registry) importArchive(preferredName, filename, format string, files []skillArchiveFile) ([]Skill, error) {
+	if len(files) == 0 || len(files) > maxSkillArchiveEntries {
+		return nil, fmt.Errorf("skill %s must contain 1-%d entries", format, maxSkillArchiveEntries)
+	}
+	mainFiles := make([]string, 0)
+	for _, file := range files {
+		clean, err := cleanArchivePath(file.name, format)
 		if err != nil {
-			return Skill{}, err
+			return nil, err
 		}
 		if path.Base(clean) == "SKILL.md" {
 			mainFiles = append(mainFiles, clean)
 		}
 	}
-	if len(mainFiles) != 1 {
-		return Skill{}, fmt.Errorf("skill ZIP must contain exactly one SKILL.md")
+	if len(mainFiles) == 0 {
+		return nil, fmt.Errorf("skill %s must contain at least one SKILL.md", format)
 	}
-	prefix := path.Dir(mainFiles[0])
+	sort.Strings(mainFiles)
+	roots := make([]skillArchiveRoot, 0, len(mainFiles))
+	names := make(map[string]string, len(mainFiles))
+	for _, mainFile := range mainFiles {
+		prefix := path.Dir(mainFile)
+		name := ""
+		if len(mainFiles) == 1 {
+			name = strings.TrimSpace(preferredName)
+		}
+		if name == "" && prefix != "." {
+			name = path.Base(prefix)
+		}
+		if name == "" {
+			name = strings.TrimSuffix(filepath.Base(filename), filepath.Ext(filename))
+		}
+		if !validSkillName(name) {
+			return nil, fmt.Errorf("invalid Skill directory name %q in %s", name, format)
+		}
+		if previous, exists := names[name]; exists {
+			return nil, fmt.Errorf("skill %s contains duplicate Skill name %q in %q and %q", format, name, previous, prefix)
+		}
+		names[name] = prefix
+		roots = append(roots, skillArchiveRoot{name: name, prefix: prefix})
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	temporary, err := os.MkdirTemp(r.root, ".skill-upload-")
+	staging, err := os.MkdirTemp(r.root, ".skill-upload-")
 	if err != nil {
-		return Skill{}, err
+		return nil, err
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = os.RemoveAll(temporary)
+	defer func() { _ = os.RemoveAll(staging) }()
+	for _, root := range roots {
+		if err := os.Mkdir(filepath.Join(staging, root.name), 0o700); err != nil {
+			return nil, err
 		}
-	}()
+	}
 	var total int64
-	for _, file := range reader.File {
-		clean, err := cleanZIPPath(file.Name)
+	for _, file := range files {
+		clean, err := cleanArchivePath(file.name, format)
 		if err != nil {
-			return Skill{}, err
+			return nil, err
 		}
-		relative := clean
-		if prefix != "." {
-			if clean == prefix {
-				continue
-			}
-			if !strings.HasPrefix(clean, prefix+"/") {
-				continue
-			}
-			relative = strings.TrimPrefix(clean, prefix+"/")
-		}
-		if relative == "" {
+		owner, relative := archiveFileOwner(clean, roots)
+		if owner == nil || relative == "" {
 			continue
 		}
 		if relative == metadataFilename {
-			return Skill{}, fmt.Errorf("skill ZIP cannot contain reserved %s", metadataFilename)
+			return nil, fmt.Errorf("skill %s cannot contain reserved %s", format, metadataFilename)
 		}
-		if file.Mode()&os.ModeSymlink != 0 {
-			return Skill{}, fmt.Errorf("skill ZIP cannot contain symbolic links")
+		if file.mode&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("skill %s cannot contain symbolic links", format)
 		}
-		target := filepath.Join(temporary, filepath.FromSlash(relative))
-		if file.FileInfo().IsDir() {
+		target := filepath.Join(staging, owner.name, filepath.FromSlash(relative))
+		if file.mode.IsDir() {
 			if err := os.MkdirAll(target, 0o700); err != nil {
-				return Skill{}, err
+				return nil, err
 			}
 			continue
 		}
-		if file.UncompressedSize64 > maxSkillFileBytes {
-			return Skill{}, fmt.Errorf("skill file %q exceeds 2 MiB", relative)
+		if file.uncompressedSize > maxSkillFileBytes {
+			return nil, fmt.Errorf("skill file %q exceeds 2 MiB", clean)
 		}
-		total += int64(file.UncompressedSize64)
+		total += int64(file.uncompressedSize)
 		if total > maxSkillPackageBytes {
-			return Skill{}, fmt.Errorf("expanded skill ZIP exceeds 8 MiB")
+			return nil, fmt.Errorf("expanded skill %s exceeds 8 MiB", format)
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
-			return Skill{}, err
+			return nil, err
 		}
-		input, err := file.Open()
+		input, err := file.open()
 		if err != nil {
-			return Skill{}, err
+			return nil, err
 		}
 		payload, readErr := io.ReadAll(io.LimitReader(input, maxSkillFileBytes+1))
 		closeErr := input.Close()
 		if readErr != nil {
-			return Skill{}, readErr
+			return nil, readErr
 		}
 		if closeErr != nil {
-			return Skill{}, closeErr
+			return nil, closeErr
 		}
 		if len(payload) > maxSkillFileBytes {
-			return Skill{}, fmt.Errorf("skill file %q exceeds 2 MiB", relative)
+			return nil, fmt.Errorf("skill file %q exceeds 2 MiB", clean)
 		}
 		if err := os.WriteFile(target, payload, 0o600); err != nil {
-			return Skill{}, err
+			return nil, err
 		}
 	}
-	mainData, err := os.ReadFile(filepath.Join(temporary, "SKILL.md"))
-	if err != nil || len(bytes.TrimSpace(mainData)) == 0 {
-		return Skill{}, fmt.Errorf("skill ZIP has an empty or missing SKILL.md")
+	for _, root := range roots {
+		mainData, err := os.ReadFile(filepath.Join(staging, root.name, "SKILL.md"))
+		if err != nil || len(bytes.TrimSpace(mainData)) == 0 {
+			return nil, fmt.Errorf("Skill %q has an empty or missing SKILL.md", root.name)
+		}
 	}
-	if err := replaceDirectory(filepath.Join(r.root, name), temporary); err != nil {
-		return Skill{}, err
+	replacements := make([]directoryReplacement, 0, len(roots))
+	for _, root := range roots {
+		replacements = append(replacements, directoryReplacement{
+			target:      filepath.Join(r.root, root.name),
+			replacement: filepath.Join(staging, root.name),
+		})
 	}
-	committed = true
-	return r.readUnlocked(name, true)
+	if err := replaceDirectories(replacements); err != nil {
+		return nil, err
+	}
+	result := make([]Skill, 0, len(roots))
+	for _, root := range roots {
+		skill, err := r.readUnlocked(root.name, true)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, skill)
+	}
+	return result, nil
 }
 
-func cleanZIPPath(value string) (string, error) {
+func archiveFileOwner(clean string, roots []skillArchiveRoot) (*skillArchiveRoot, string) {
+	ownerIndex := -1
+	for index := range roots {
+		prefix := roots[index].prefix
+		if prefix == "." || clean == prefix || strings.HasPrefix(clean, prefix+"/") {
+			if ownerIndex < 0 || len(prefix) > len(roots[ownerIndex].prefix) {
+				ownerIndex = index
+			}
+		}
+	}
+	if ownerIndex < 0 {
+		return nil, ""
+	}
+	owner := &roots[ownerIndex]
+	if owner.prefix == "." {
+		return owner, clean
+	}
+	if clean == owner.prefix {
+		return owner, ""
+	}
+	return owner, strings.TrimPrefix(clean, owner.prefix+"/")
+}
+
+func cleanArchivePath(value, format string) (string, error) {
 	if value == "" || strings.Contains(value, `\`) || strings.HasPrefix(value, "/") {
-		return "", fmt.Errorf("skill ZIP contains an invalid path")
+		return "", fmt.Errorf("skill %s contains an invalid path", format)
 	}
 	clean := path.Clean(value)
 	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
-		return "", fmt.Errorf("skill ZIP contains a path outside its root")
+		return "", fmt.Errorf("skill %s contains a path outside its root", format)
 	}
 	return clean, nil
+}
+
+type directoryReplacement struct {
+	target      string
+	replacement string
+}
+
+func replaceDirectories(replacements []directoryReplacement) error {
+	if len(replacements) == 0 {
+		return nil
+	}
+	for _, replacement := range replacements {
+		info, err := os.Lstat(replacement.replacement)
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("skill replacement is invalid")
+		}
+		if info, err := os.Lstat(replacement.target); err == nil {
+			if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("existing skill target is invalid")
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+
+	rollbackRoot, err := os.MkdirTemp(filepath.Dir(replacements[0].target), ".skill-rollback-")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(rollbackRoot) }()
+	type replacementState struct {
+		directoryReplacement
+		backup    string
+		hadTarget bool
+		installed bool
+	}
+	states := make([]replacementState, len(replacements))
+	rollback := func(last int) error {
+		var rollbackErrors []error
+		for index := last; index >= 0; index-- {
+			state := states[index]
+			if state.installed {
+				if err := os.RemoveAll(state.target); err != nil {
+					rollbackErrors = append(rollbackErrors, err)
+					continue
+				}
+			}
+			if state.hadTarget {
+				if err := os.Rename(state.backup, state.target); err != nil {
+					rollbackErrors = append(rollbackErrors, err)
+				}
+			}
+		}
+		return errors.Join(rollbackErrors...)
+	}
+	for index, replacement := range replacements {
+		states[index].directoryReplacement = replacement
+		states[index].backup = filepath.Join(rollbackRoot, fmt.Sprintf("%04d", index))
+		if _, err := os.Lstat(replacement.target); err == nil {
+			if err := os.Rename(replacement.target, states[index].backup); err != nil {
+				return errors.Join(err, rollback(index-1))
+			}
+			states[index].hadTarget = true
+		}
+		if err := os.Rename(replacement.replacement, replacement.target); err != nil {
+			return errors.Join(err, rollback(index))
+		}
+		states[index].installed = true
+	}
+	return nil
 }
 
 func replaceDirectory(target, replacement string) error {

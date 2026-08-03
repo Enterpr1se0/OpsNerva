@@ -1346,7 +1346,7 @@ func isWorkspaceMode(mode domain.ExecMode) bool {
 	}
 }
 
-func (s *Service) executeWorkspace(ctx context.Context, req domain.ExecRequest, actor string) (sshx.RawResult, error) {
+func (s *Service) executeWorkspace(ctx context.Context, req domain.ExecRequest, actor string, stream func(string, []byte)) (sshx.RawResult, error) {
 	started := time.Now()
 	workspace, ok := s.workspaceByID(req.WorkspaceID)
 	if !ok {
@@ -1354,7 +1354,7 @@ func (s *Service) executeWorkspace(ctx context.Context, req domain.ExecRequest, 
 	}
 	result := sshx.RawResult{ExitCode: 0}
 	if req.Mode == domain.ExecWorkspaceShell {
-		result, err := s.executeWorkspaceShell(ctx, workspace, req)
+		result, err := s.executeWorkspaceShell(ctx, workspace, req, stream)
 		result.Duration = time.Since(started)
 		return redactWorkspaceResult(result, err, workspace.Root)
 	}
@@ -1390,26 +1390,34 @@ func (s *Service) executeWorkspace(ctx context.Context, req domain.ExecRequest, 
 }
 
 func redactWorkspaceResult(result sshx.RawResult, err error, root string) (sshx.RawResult, error) {
+	roots := workspaceRedactionRoots(root)
+	result.Stdout = []byte(redactWorkspacePaths(string(result.Stdout), roots))
+	result.Stderr = []byte(redactWorkspacePaths(string(result.Stderr), roots))
+	if err != nil && result.ExitCode == 0 {
+		result.ExitCode = 1
+		result.Stderr = []byte(redactWorkspacePaths(err.Error(), roots))
+	}
+	if err != nil {
+		err = fmt.Errorf("%s", redactWorkspacePaths(err.Error(), roots))
+	}
+	return result, err
+}
+
+func workspaceRedactionRoots(root string) []string {
 	roots := []string{root}
 	if resolved, resolveErr := filepath.EvalSymlinks(root); resolveErr == nil && resolved != root {
 		roots = append(roots, resolved)
 	}
-	redactRoot := func(value string) string {
-		for _, candidate := range roots {
+	return roots
+}
+
+func redactWorkspacePaths(value string, roots []string) string {
+	for _, candidate := range roots {
+		if candidate != "" {
 			value = strings.ReplaceAll(value, candidate, "$WORKSPACE")
 		}
-		return value
 	}
-	result.Stdout = []byte(redactRoot(string(result.Stdout)))
-	result.Stderr = []byte(redactRoot(string(result.Stderr)))
-	if err != nil && result.ExitCode == 0 {
-		result.ExitCode = 1
-		result.Stderr = []byte(redactRoot(err.Error()))
-	}
-	if err != nil {
-		err = fmt.Errorf("%s", redactRoot(err.Error()))
-	}
-	return result, err
+	return value
 }
 
 func (s *Service) decorateWorkspaceShellSettings(settings domain.SystemSettings) domain.SystemSettings {
@@ -1543,7 +1551,7 @@ func pathsOverlap(first, second string) bool {
 	return within(first, second) || within(second, first)
 }
 
-func (s *Service) executeWorkspaceShell(ctx context.Context, workspace config.Workspace, req domain.ExecRequest) (sshx.RawResult, error) {
+func (s *Service) executeWorkspaceShell(ctx context.Context, workspace config.Workspace, req domain.ExecRequest, stream func(string, []byte)) (sshx.RawResult, error) {
 	configuredBackend, err := s.configuredWorkspaceShellBackend(ctx)
 	if err != nil {
 		return sshx.RawResult{}, err
@@ -1553,15 +1561,15 @@ func (s *Service) executeWorkspaceShell(ctx context.Context, workspace config.Wo
 	}
 	switch req.WorkspaceShellBackend {
 	case domain.WorkspaceShellModeSandbox:
-		return s.executeWorkspaceSandboxShell(ctx, workspace, req)
+		return s.executeWorkspaceSandboxShell(ctx, workspace, req, stream)
 	case domain.WorkspaceShellModeHost:
-		return s.executeWorkspaceHostShell(ctx, workspace, req)
+		return s.executeWorkspaceHostShell(ctx, workspace, req, stream)
 	default:
 		return sshx.RawResult{}, fmt.Errorf("unsupported workspace shell backend %q", req.WorkspaceShellBackend)
 	}
 }
 
-func (s *Service) executeWorkspaceSandboxShell(ctx context.Context, workspace config.Workspace, req domain.ExecRequest) (sshx.RawResult, error) {
+func (s *Service) executeWorkspaceSandboxShell(ctx context.Context, workspace config.Workspace, req domain.ExecRequest, stream func(string, []byte)) (sshx.RawResult, error) {
 	sandbox, args, environment, err := s.workspaceSandboxCommand(workspace, req, false)
 	if err != nil {
 		return sshx.RawResult{}, err
@@ -1579,7 +1587,7 @@ func (s *Service) executeWorkspaceSandboxShell(ctx context.Context, workspace co
 	command := exec.CommandContext(execCtx, sandbox, args...)
 	command.Env = environment
 	command.Stdin = strings.NewReader(req.Script)
-	return s.runWorkspaceProcess(execCtx, command, timeout, "shell sandbox")
+	return s.runWorkspaceProcess(execCtx, command, timeout, "shell sandbox", workspace.Root, stream)
 }
 
 func (s *Service) workspaceSandboxCommand(workspace config.Workspace, req domain.ExecRequest, interactive bool) (string, []string, []string, error) {
@@ -1681,7 +1689,7 @@ func (s *Service) workspaceSandboxCommand(workspace config.Workspace, req domain
 	return sandbox, args, environment, nil
 }
 
-func (s *Service) executeWorkspaceHostShell(ctx context.Context, workspace config.Workspace, req domain.ExecRequest) (sshx.RawResult, error) {
+func (s *Service) executeWorkspaceHostShell(ctx context.Context, workspace config.Workspace, req domain.ExecRequest, stream func(string, []byte)) (sshx.RawResult, error) {
 	if workspace.Access != "read_write" {
 		return sshx.RawResult{}, fmt.Errorf("host shell is unavailable for read_only workspace %q", workspace.ID)
 	}
@@ -1726,7 +1734,7 @@ func (s *Service) executeWorkspaceHostShell(ctx context.Context, workspace confi
 	if runtime.GOOS != "windows" {
 		command.Stdin = strings.NewReader(req.Script)
 	}
-	result, runErr := s.runWorkspaceProcess(execCtx, command, timeout, "host shell")
+	result, runErr := s.runWorkspaceProcess(execCtx, command, timeout, "host shell", workspace.Root, stream)
 	if cleanupPowerShellScript != nil {
 		if cleanupErr := cleanupPowerShellScript(); cleanupErr != nil {
 			cleanupErr = fmt.Errorf("remove temporary PowerShell script: %w", cleanupErr)
@@ -1809,12 +1817,14 @@ func workspaceHostEnvironment(workspaceRoot string, input map[string]string) []s
 	return environment
 }
 
-func (s *Service) runWorkspaceProcess(execCtx context.Context, command *exec.Cmd, timeout int, operation string) (sshx.RawResult, error) {
-	stdout := &workspaceCaptureBuffer{}
-	stderr := &workspaceCaptureBuffer{}
+func (s *Service) runWorkspaceProcess(execCtx context.Context, command *exec.Cmd, timeout int, operation, workspaceRoot string, stream func(string, []byte)) (sshx.RawResult, error) {
+	stdout := newWorkspaceCaptureBuffer("stdout", workspaceRoot, stream)
+	stderr := newWorkspaceCaptureBuffer("stderr", workspaceRoot, stream)
 	command.Stdout, command.Stderr = stdout, stderr
 	started := time.Now()
 	runErr := command.Run()
+	stdout.Flush()
+	stderr.Flush()
 	result := sshx.RawResult{
 		ExitCode: workspaceExitCode(runErr), Stdout: stdout.Bytes(), Stderr: stderr.Bytes(),
 		Duration: time.Since(started),
@@ -1832,14 +1842,58 @@ func (s *Service) runWorkspaceProcess(execCtx context.Context, command *exec.Cmd
 }
 
 type workspaceCaptureBuffer struct {
-	buffer bytes.Buffer
+	buffer  bytes.Buffer
+	pending strings.Builder
+	stream  string
+	emit    func(string, []byte)
+	redact  func(string) string
 }
 
 func (b *workspaceCaptureBuffer) Write(data []byte) (int, error) {
-	return b.buffer.Write(data)
+	written, err := b.buffer.Write(data)
+	if written == 0 || b.emit == nil {
+		return written, err
+	}
+	b.pending.Write(data[:written])
+	value := b.pending.String()
+	consumed := 0
+	for consumed < len(value) {
+		index := strings.IndexAny(value[consumed:], "\r\n")
+		if index < 0 {
+			break
+		}
+		end := consumed + index + 1
+		if value[end-1] == '\r' && end < len(value) && value[end] == '\n' {
+			end++
+		}
+		b.emit(b.stream, []byte(b.redact(value[consumed:end])))
+		consumed = end
+	}
+	if consumed > 0 {
+		b.pending.Reset()
+		b.pending.WriteString(value[consumed:])
+	}
+	return written, err
 }
 
 func (b *workspaceCaptureBuffer) Bytes() []byte { return bytes.Clone(b.buffer.Bytes()) }
+
+func (b *workspaceCaptureBuffer) Flush() {
+	if b.emit == nil || b.pending.Len() == 0 {
+		return
+	}
+	b.emit(b.stream, []byte(b.redact(b.pending.String())))
+	b.pending.Reset()
+}
+
+func newWorkspaceCaptureBuffer(stream, root string, emit func(string, []byte)) *workspaceCaptureBuffer {
+	roots := workspaceRedactionRoots(root)
+	return &workspaceCaptureBuffer{
+		stream: stream,
+		emit:   emit,
+		redact: func(value string) string { return redactWorkspacePaths(value, roots) },
+	}
+}
 
 func workspaceExitCode(err error) int {
 	if err == nil {

@@ -89,18 +89,20 @@ func (s *Service) SaveAdminSkill(ctx context.Context, name, content, actor strin
 	return skill, nil
 }
 
-func (s *Service) ImportAdminSkill(ctx context.Context, name, filename string, source io.Reader, actor string) (skills.Skill, error) {
+func (s *Service) ImportAdminSkills(ctx context.Context, name, filename string, source io.Reader, actor string) ([]skills.Skill, error) {
 	if s.skills == nil {
-		return skills.Skill{}, fmt.Errorf("skill registry is not configured")
+		return nil, fmt.Errorf("skill registry is not configured")
 	}
-	skill, err := s.skills.Import(name, filename, source)
+	imported, err := s.skills.ImportPackage(name, filename, source)
 	if err != nil {
-		return skills.Skill{}, err
+		return nil, err
 	}
-	s.audit(ctx, "", "skill_uploaded", actor, map[string]any{
-		"skill_name": skill.Name, "content_sha256": skill.ContentSHA256, "file_count": skill.FileCount, "size_bytes": skill.SizeBytes,
-	})
-	return skill, nil
+	for _, skill := range imported {
+		s.audit(ctx, "", "skill_uploaded", actor, map[string]any{
+			"skill_name": skill.Name, "content_sha256": skill.ContentSHA256, "file_count": skill.FileCount, "size_bytes": skill.SizeBytes,
+		})
+	}
+	return imported, nil
 }
 
 func (s *Service) DeleteAdminSkill(ctx context.Context, name, actor string) error {
