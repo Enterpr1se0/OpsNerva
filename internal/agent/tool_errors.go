@@ -25,7 +25,6 @@ type toolCallActivity struct {
 	Name      string
 	Arguments string
 	Status    string
-	RunID     string
 	Result    string
 	Error     string
 }
@@ -240,10 +239,10 @@ func normalizeToolCallErrors(next compose.InvokableToolEndpoint) compose.Invokab
 			if errors.Is(activityErr, context.Canceled) && errors.Is(context.Cause(ctx), context.DeadlineExceeded) {
 				activityErr = context.DeadlineExceeded
 			}
-			status, runID, result, errorText := completedToolActivity(output, activityErr)
+			status, result, errorText := completedToolActivity(output, activityErr)
 			notifyToolActivity(ctx, toolCallActivity{
 				CallID: input.CallID, Name: input.Name, Arguments: input.Arguments,
-				Status: status, RunID: runID, Result: result, Error: errorText,
+				Status: status, Result: result, Error: errorText,
 			})
 		}()
 		defer func() {
@@ -277,7 +276,9 @@ func normalizeToolCallErrors(next compose.InvokableToolEndpoint) compose.Invokab
 	}
 }
 
-func completedToolActivity(output *compose.ToolOutput, err error) (status, runID, result, errorText string) {
+// Execution ownership is bound when the service creates a run. Result payloads
+// can reference runs owned by other tool calls and only determine status here.
+func completedToolActivity(output *compose.ToolOutput, err error) (status, result, errorText string) {
 	status = domain.ChatToolCallCompleted
 	if output != nil {
 		result = output.Result
@@ -292,20 +293,16 @@ func completedToolActivity(output *compose.ToolOutput, err error) (status, runID
 		default:
 			status = domain.ChatToolCallFailed
 		}
-		return status, "", result, errorText
+		return status, result, errorText
 	}
 	var payload map[string]any
 	if json.Unmarshal([]byte(result), &payload) != nil {
-		return status, "", result, ""
+		return status, result, ""
 	}
-	runID = stringField(payload, "run_id")
 	resultStatus := stringField(payload, "status")
 	code := stringField(payload, "code")
 	for _, key := range []string{"result", "task"} {
 		if nested, ok := payload[key].(map[string]any); ok {
-			if runID == "" {
-				runID = stringField(nested, "run_id")
-			}
 			if resultStatus == "" {
 				resultStatus = stringField(nested, "status")
 			}
@@ -333,7 +330,7 @@ func completedToolActivity(output *compose.ToolOutput, err error) (status, runID
 	} else if okValue, exists := payload["ok"].(bool); exists && !okValue && status == domain.ChatToolCallCompleted {
 		status = domain.ChatToolCallFailed
 	}
-	return status, runID, result, ""
+	return status, result, ""
 }
 
 func stringField(payload map[string]any, key string) string {

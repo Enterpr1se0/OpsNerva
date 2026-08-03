@@ -977,6 +977,74 @@ func TestQueryPersistsToolCallPreambleForDisplay(t *testing.T) {
 	}
 }
 
+func TestQueryDoesNotClaimRunReferencedByTaskResult(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	const sessionID = "session_referenced_run"
+	if _, err := st.CreateChatSession(ctx, sessionID, ""); err != nil {
+		t.Fatal(err)
+	}
+	ownerMessageID, err := st.AppendPendingChatMessage(ctx, sessionID, "user", "start background task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.StartChatToolCall(ctx, domain.ChatToolCall{
+		SessionID: sessionID, UserMessageID: ownerMessageID, ToolCallID: "call-owner",
+		ToolName: "ssh_exec", ArgumentsJSON: `{"background":true}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.BindChatToolCallRun(ctx, sessionID, "call-owner", "run-shared"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.FinishChatToolCall(ctx, sessionID, "call-owner", "run-shared", domain.ChatToolCallCompleted,
+		`{"status":"running","run_id":"run-shared","task_id":"task-one"}`, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetChatMessageStatus(ctx, ownerMessageID, "completed"); err != nil {
+		t.Fatal(err)
+	}
+
+	toolCall := schema.ToolCall{
+		ID: "call-task-status", Type: "function",
+		Function: schema.FunctionCall{Name: "ssh_task", Arguments: `{"action":"status","task_id":"task-one"}`},
+	}
+	terminal := schema.AssistantMessage("Task completed.", nil)
+	terminal.ResponseMeta = &schema.ResponseMeta{FinishReason: "stop"}
+	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{{
+		adk.EventFromMessage(schema.AssistantMessage("", []schema.ToolCall{toolCall}), nil, schema.Assistant, ""),
+		adk.EventFromMessage(schema.ToolMessage(`{"status":"completed","run_id":"run-shared","task_id":"task-one","stdout":"ok"}`, "call-task-status", schema.WithToolName("ssh_task")), nil, schema.Tool, "ssh_task"),
+		adk.EventFromMessage(terminal, nil, schema.Assistant, ""),
+	}}}
+	runtime := &Runtime{runner: runner, store: st}
+
+	answer, err := runtime.Query(ctx, sessionID, "check task", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "Task completed." {
+		t.Fatalf("answer = %q", answer)
+	}
+	owner, err := st.GetChatToolCallByRun(ctx, "run-shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner.ToolCallID != "call-owner" {
+		t.Fatalf("run owner changed: %#v", owner)
+	}
+	statusCall, err := st.GetChatToolCall(ctx, sessionID, "call-task-status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if statusCall.Status != domain.ChatToolCallCompleted || statusCall.RunID != "" || !strings.Contains(statusCall.ResultJSON, `"run_id":"run-shared"`) {
+		t.Fatalf("task status call = %#v", statusCall)
+	}
+}
+
 func TestQueryStreamsToolLifecycleWithStableCallID(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")

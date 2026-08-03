@@ -104,11 +104,11 @@ func TestToolCallActivityIsPublishedBeforeExecution(t *testing.T) {
 }
 
 func TestCompletedToolActivityTreatsStartedResourcesAsTerminalCalls(t *testing.T) {
-	status, runID, _, _ := completedToolActivity(&compose.ToolOutput{Result: `{"status":"running","run_id":"run-background","task_id":"task-one"}`}, nil)
-	if status != domain.ChatToolCallCompleted || runID != "run-background" {
-		t.Fatalf("background start lifecycle = status %q, run %q", status, runID)
+	status, _, _ := completedToolActivity(&compose.ToolOutput{Result: `{"status":"running","run_id":"run-background","task_id":"task-one"}`}, nil)
+	if status != domain.ChatToolCallCompleted {
+		t.Fatalf("background start lifecycle status = %q", status)
 	}
-	status, _, _, _ = completedToolActivity(&compose.ToolOutput{Result: `{"ok":false,"status":"unknown","code":"outcome_unknown"}`}, nil)
+	status, _, _ = completedToolActivity(&compose.ToolOutput{Result: `{"ok":false,"status":"unknown","code":"outcome_unknown"}`}, nil)
 	if status != domain.ChatToolCallUnknown {
 		t.Fatalf("unknown lifecycle status = %q", status)
 	}

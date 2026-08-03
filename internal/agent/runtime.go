@@ -955,10 +955,10 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 				})
 				return
 			}
-			if _, persistErr := r.store.FinishChatToolCall(persistCtx, sessionID, activity.CallID, activity.RunID,
+			if _, persistErr := r.store.FinishChatToolCall(persistCtx, sessionID, activity.CallID, "",
 				activity.Status, activity.Result, activity.Error); persistErr != nil && !errors.Is(persistErr, store.ErrNotFound) {
 				logger.ErrorContext(persistCtx, "persist terminal tool call failed", "tool_call_id", activity.CallID,
-					"run_id", activity.RunID, "status", activity.Status, "error", persistErr)
+					"status", activity.Status, "error", persistErr)
 			}
 		})
 		runCtx = service.WithApprovalNotifier(runCtx, func(result domain.ExecResult) {
@@ -1328,8 +1328,8 @@ func (r *Runtime) persistChatToolResult(ctx context.Context, sessionID, userMess
 	if strings.TrimSpace(toolCallID) == "" {
 		return r.store.AppendChatMessage(ctx, sessionID, "tool", content, toolName)
 	}
-	status, runID, _, errorText := completedToolActivity(&compose.ToolOutput{Result: content}, nil)
-	_, err := r.store.FinishChatToolCall(ctx, sessionID, toolCallID, runID, status, content, errorText)
+	status, _, errorText := completedToolActivity(&compose.ToolOutput{Result: content}, nil)
+	_, err := r.store.FinishChatToolCall(ctx, sessionID, toolCallID, "", status, content, errorText)
 	if !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
@@ -1343,7 +1343,7 @@ func (r *Runtime) persistChatToolResult(ctx context.Context, sessionID, userMess
 	}); err != nil {
 		return err
 	}
-	_, err = r.store.FinishChatToolCall(ctx, sessionID, toolCallID, runID, status, content, errorText)
+	_, err = r.store.FinishChatToolCall(ctx, sessionID, toolCallID, "", status, content, errorText)
 	return err
 }
 
