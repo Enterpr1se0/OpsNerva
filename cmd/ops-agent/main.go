@@ -33,7 +33,7 @@ import (
 	"eino-ops-agent/internal/store"
 )
 
-const version = "0.2.1"
+const version = "0.2.2"
 
 type application struct {
 	config    config.Config
@@ -124,8 +124,6 @@ func run(ctx context.Context, args []string) error {
 		return auditCommand(ctx, app, args[1:])
 	case "chat":
 		return chatCommand(ctx, app)
-	case "admin":
-		return adminCommand(ctx, app, args[1:])
 	default:
 		usage()
 		return fmt.Errorf("unknown command %q", args[0])
@@ -206,14 +204,12 @@ func serve(ctx context.Context, app *application, options serveOptions) error {
 		return fmt.Errorf("listen on %s: %w", app.config.ListenAddress, err)
 	}
 	defer listener.Close()
-	webAuth := security.NewWebAuth(app.store, app.config.WebAuth.SessionTTL)
 	server := &http.Server{
 		Addr: app.config.ListenAddress,
-		Handler: httpapi.New(app.service, app.agent, webAuth, httpapi.Options{
-			SecureCookies: app.config.WebAuth.SecureCookies,
-			Version:       version,
-			StartedAt:     app.startedAt,
-			Logging:       app.config.Logging,
+		Handler: httpapi.New(app.service, app.agent, httpapi.Options{
+			Version:   version,
+			StartedAt: app.startedAt,
+			Logging:   app.config.Logging,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second,
 	}
@@ -275,7 +271,6 @@ func printQuickStart(options serveOptions, url string) {
 		fmt.Println("Configuration:", options.ConfigPath)
 	}
 	fmt.Println("Open:", url)
-	fmt.Println("On first start, create the administrator password in the Web interface.")
 	fmt.Println("Press Ctrl+C to stop OpsNerva.")
 	fmt.Println()
 }
@@ -310,22 +305,6 @@ func openQuickStartBrowser(url string) error {
 		return err
 	}
 	go func() { _ = command.Wait() }()
-	return nil
-}
-
-func adminCommand(ctx context.Context, app *application, args []string) error {
-	if len(args) != 1 || args[0] != "reset-password" {
-		return fmt.Errorf("admin command requires reset-password")
-	}
-	password := strings.TrimSpace(os.Getenv("OPS_AGENT_ADMIN_PASSWORD"))
-	if password == "" {
-		return fmt.Errorf("OPS_AGENT_ADMIN_PASSWORD is required to reset the administrator password")
-	}
-	auth := security.NewWebAuth(app.store, app.config.WebAuth.SessionTTL)
-	if err := auth.ResetPassword(ctx, password); err != nil {
-		return err
-	}
-	fmt.Println("administrator password reset; all web sessions revoked")
 	return nil
 }
 
@@ -554,7 +533,6 @@ Usage:
   ops-agent [--config FILE] exec --host ID --program PROGRAM --arg ARG
   ops-agent [--config FILE] approval list|approve|reject
   ops-agent [--config FILE] audit search|show
-	  OPS_AGENT_ADMIN_PASSWORD=... ops-agent [--config FILE] admin reset-password
   ops-agent version`)
 }
 

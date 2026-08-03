@@ -23,7 +23,7 @@ func TestEnsureDefaultFileCreatesLoadableConfigWithoutOverwriting(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "listen_address: 0.0.0.0:8080") || strings.Contains(string(data), "password:") {
+	if !strings.Contains(string(data), "listen_address: 127.0.0.1:8080") || strings.Contains(string(data), "password:") {
 		t.Fatalf("unexpected generated configuration:\n%s", data)
 	}
 	var loaded Config

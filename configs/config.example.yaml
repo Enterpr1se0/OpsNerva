@@ -1,10 +1,6 @@
-listen_address: 0.0.0.0:8080
+listen_address: 127.0.0.1:8080
 data_dir: data
 database_path: data/ops-agent.db
-
-web_auth:
-  # Enable secure cookies when the Web UI is served over HTTPS.
-  secure_cookies: false
 
 # OpsNerva creates one directory per Workspace below this managed root.
 # Relative paths use the configuration file directory. Override with

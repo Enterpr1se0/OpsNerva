@@ -800,10 +800,22 @@ func TestQueryBlocksPersistedToolResultLeakAndUsesFinalizer(t *testing.T) {
 	if answer != "终端已创建。" {
 		t.Fatalf("answer = %q", answer)
 	}
+	visible := ""
+	resetEvents := 0
 	for _, event := range emitted {
 		if containsInternalContextMarker(event.Content) || strings.Contains(event.Content, "private-shell-output") {
 			t.Fatalf("internal context reached the event stream: %#v", emitted)
 		}
+		if event.Type == "message" && event.Role == string(schema.Assistant) {
+			visible += event.Content
+		}
+		if event.Type == "message_reset" && event.Role == string(schema.Assistant) {
+			visible = ""
+			resetEvents++
+		}
+	}
+	if resetEvents != 1 || visible != answer {
+		t.Fatalf("visible answer = %q, resets = %d, events = %#v", visible, resetEvents, emitted)
 	}
 	runnerCalls, _ := runner.snapshot()
 	finalizerCalls, _ := finalizer.snapshot()
@@ -1033,13 +1045,20 @@ func TestQueryStreamingPersistsOnlyTerminalAssistantOutput(t *testing.T) {
 		t.Fatalf("stored messages = %#v", messages)
 	}
 	var assistantEvents []Event
+	visible := ""
+	resetEvents := 0
 	for _, event := range emitted {
 		if event.Type == "message" && event.Role == string(schema.Assistant) {
 			assistantEvents = append(assistantEvents, event)
+			visible += event.Content
+		}
+		if event.Type == "message_reset" && event.Role == string(schema.Assistant) {
+			visible = ""
+			resetEvents++
 		}
 	}
-	if len(assistantEvents) != 1 || assistantEvents[0].Content != answer {
-		t.Fatalf("assistant message events = %#v", assistantEvents)
+	if len(assistantEvents) != 4 || resetEvents != 1 || visible != answer {
+		t.Fatalf("assistant message events = %#v, resets = %d, visible = %q", assistantEvents, resetEvents, visible)
 	}
 }
 

@@ -2286,7 +2286,7 @@ dependencies = [
 
 [[package]]
 name = "opsnerva-desktop"
-version = "0.1.7"
+version = "0.2.2"
 dependencies = [
  "serde",
  "serde_json",

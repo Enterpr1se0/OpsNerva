@@ -1,0 +1,473 @@
+:root {
+  --motion-instant: 90ms;
+  --motion-fast: 140ms;
+  --motion-view: 180ms;
+  --motion-ease: cubic-bezier(.2, .8, .2, 1);
+  --titlebar-height: 36px;
+}
+
+.configuration-editor-form .model-fields .proxy-select-field {
+  grid-column: span 1;
+}
+
+.mcp-import-body {
+  padding: 15px;
+}
+
+.mcp-import-body textarea {
+  display: block;
+  width: 100%;
+  min-height: 260px;
+  max-height: 55vh;
+  resize: vertical;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  outline: 0;
+  background: var(--bg);
+  color: inherit;
+  font: var(--text-control)/1.65 DM Mono, 'Noto Sans SC', monospace;
+  tab-size: 2;
+}
+
+.mcp-import-body textarea:focus {
+  border-color: var(--green);
+}
+
+.mcp-form-spacer {
+  flex: 1 1 auto;
+}
+
+.notification-center {
+  position: fixed;
+  z-index: 240;
+  top: 108px;
+  right: 20px;
+  width: min(380px, calc(100vw - 40px));
+  max-height: calc(100vh - 128px);
+  display: grid;
+  gap: 8px;
+  overflow-y: auto;
+  pointer-events: none;
+}
+
+.app-notification {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) 26px;
+  align-items: start;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #275340;
+  border-radius: 9px;
+  background: color-mix(in srgb, #0b1713 96%, transparent);
+  box-shadow: 0 16px 45px #0008;
+  color: #9eeec2;
+  font-size: var(--text-control);
+  line-height: 1.55;
+  backdrop-filter: blur(14px);
+  pointer-events: auto;
+  animation: notification-enter var(--motion-view) var(--motion-ease) both;
+}
+
+.app-notification.error {
+  border-color: #653333;
+  background: color-mix(in srgb, #281515 96%, transparent);
+  color: #ff9a9a;
+}
+
+.app-notification-icon,
+.app-notification > button {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+}
+
+.app-notification-icon {
+  border-radius: 50%;
+  background: #153b29;
+  color: var(--green);
+}
+
+.app-notification.error .app-notification-icon {
+  background: #3b1d1d;
+  color: #ff8585;
+}
+
+.app-notification > span:nth-child(2) {
+  min-width: 0;
+  padding-top: 3px;
+  overflow-wrap: anywhere;
+}
+
+.app-notification > button {
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  opacity: .72;
+}
+
+.app-notification > button:hover {
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  opacity: 1;
+}
+
+@keyframes notification-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(.98);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-notification {
+    animation: none;
+  }
+}
+
+html,
+body,
+#root,
+.app-frame {
+  min-height: 100%;
+}
+
+body {
+  overscroll-behavior: none;
+}
+
+:where(button, summary, input, textarea, select) {
+  -webkit-tap-highlight-color: transparent;
+}
+
+:where(button, summary, a, input, textarea, select):focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--green) 72%, transparent);
+  outline-offset: 2px;
+}
+
+:where(button:not(:disabled), .session-item, .workspace-file-row, .sftp-row) {
+  transition:
+    color var(--motion-fast) var(--motion-ease),
+    background-color var(--motion-fast) var(--motion-ease),
+    border-color var(--motion-fast) var(--motion-ease),
+    box-shadow var(--motion-fast) var(--motion-ease),
+    opacity var(--motion-fast) var(--motion-ease),
+    transform var(--motion-instant) var(--motion-ease);
+}
+
+:where(button:not(:disabled)):active {
+  transform: scale(.97);
+}
+
+:where(.icon-button, .workspace-panel-actions > button, .workspace-path-row > button, .workspace-path-row > label):not(:disabled):active {
+  transform: scale(.91);
+}
+
+.icon-button.refreshing svg {
+  animation: app-refresh-spin .7s linear infinite;
+}
+
+.nav-item {
+  position: relative;
+  isolation: isolate;
+}
+
+.nav-item::before {
+  content: '';
+  position: absolute;
+  left: 2px;
+  width: 3px;
+  height: 0;
+  border-radius: 3px;
+  background: currentColor;
+  opacity: 0;
+  transition: height var(--motion-fast) var(--motion-ease), opacity var(--motion-fast) var(--motion-ease);
+}
+
+.nav-item.active::before {
+  height: 17px;
+  opacity: 1;
+}
+
+.nav-item > svg {
+  transition: transform var(--motion-fast) var(--motion-ease);
+}
+
+.nav-item:hover > svg {
+  transform: translateX(1px);
+}
+
+.sidebar-conversations.active {
+  animation: app-sidebar-enter var(--motion-view) var(--motion-ease);
+}
+
+.session-item:hover {
+  transform: translateX(2px);
+}
+
+:where(.ssh-shell-popover, .ssh-tunnel-popover, .approval-mode-menu, .composer-selector-menu) {
+  transform-origin: top right;
+  animation: app-popover-in var(--motion-fast) var(--motion-ease);
+}
+
+.approval-mode-menu {
+  transform-origin: bottom left;
+}
+
+.composer-selector-menu {
+  transform-origin: bottom right;
+}
+
+.composer-host-menu {
+  animation-name: app-composer-host-popover-in;
+}
+
+@keyframes app-composer-host-popover-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(6px) scale(.98); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+}
+
+.workspace {
+  view-transition-name: app-workspace;
+}
+
+.topbar h1 {
+  view-transition-name: app-page-title;
+}
+
+::view-transition-old(app-workspace) {
+  animation: app-view-out var(--motion-fast) ease both;
+}
+
+::view-transition-new(app-workspace) {
+  animation: app-view-in var(--motion-view) var(--motion-ease) both;
+}
+
+::view-transition-old(app-page-title) {
+  animation: app-title-out var(--motion-instant) ease both;
+}
+
+::view-transition-new(app-page-title) {
+  animation: app-title-in var(--motion-fast) var(--motion-ease) both;
+}
+
+/* Desktop window shell. Browser navigation retains its normal page chrome. */
+:root[data-runtime='desktop'],
+:root[data-runtime='desktop'] body,
+:root[data-runtime='desktop'] #root,
+:root[data-runtime='desktop'] .app-frame {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.desktop-titlebar {
+  display: none;
+}
+
+:root[data-runtime='desktop'] .desktop-titlebar {
+  position: fixed;
+  z-index: 200;
+  inset: 0 0 auto;
+  height: var(--titlebar-height);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel) 95%, var(--bg));
+  color: var(--muted);
+  user-select: none;
+}
+
+:root[data-runtime='desktop'][data-window-active='false'] .desktop-titlebar {
+  opacity: .72;
+}
+
+.desktop-titlebar-brand {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 13px;
+  color: var(--green);
+}
+
+.desktop-titlebar-brand b {
+  color: inherit;
+  font-size: 12px;
+  letter-spacing: -.1px;
+}
+
+.desktop-window-controls {
+  align-self: stretch;
+  display: flex;
+  align-items: stretch;
+}
+
+.desktop-window-controls button {
+  width: 46px;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: default;
+}
+
+.desktop-window-controls button:hover {
+  background: color-mix(in srgb, var(--muted) 13%, transparent);
+  color: inherit;
+}
+
+.desktop-window-controls button:active {
+  transform: none;
+  background: color-mix(in srgb, var(--muted) 20%, transparent);
+}
+
+.desktop-window-controls .desktop-window-close:hover,
+.desktop-window-controls .desktop-window-close:active {
+  background: #c42b3a;
+  color: #fff;
+}
+
+:root[data-runtime='desktop'] .app-shell {
+  height: calc(100dvh - var(--titlebar-height));
+  min-height: 0;
+  margin-top: var(--titlebar-height);
+}
+
+:root[data-runtime='desktop'] .sidebar {
+  top: var(--titlebar-height);
+  height: calc(100dvh - var(--titlebar-height));
+  padding-top: 10px;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  box-shadow: none;
+  user-select: none;
+}
+
+:root[data-runtime='desktop'] .sidebar-nav {
+  grid-row: 1;
+}
+
+:root[data-runtime='desktop'] .sidebar-conversations {
+  grid-row: 2;
+}
+
+:root[data-runtime='desktop'] .sidebar-foot {
+  grid-row: 3;
+}
+
+:root[data-runtime='desktop'] .sidebar > .brand {
+  display: none;
+}
+
+:root[data-runtime='desktop'] main {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+:root[data-runtime='desktop'] .topbar {
+  position: relative;
+  top: auto;
+  height: 58px;
+  padding: 10px 18px;
+  background: color-mix(in srgb, var(--bg) 88%, var(--panel));
+  backdrop-filter: none;
+  user-select: none;
+}
+
+:root[data-runtime='desktop'] .topbar h1 {
+  font-size: 18px;
+  letter-spacing: -.45px;
+}
+
+:root[data-runtime='desktop'] .top-actions {
+  gap: 7px;
+}
+
+:root[data-runtime='desktop'] .top-actions > .status {
+  height: 30px;
+  padding: 0 9px;
+}
+
+:root[data-runtime='desktop'] .workspace {
+  width: 100%;
+  height: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-width: none;
+  margin: 0;
+  padding: 13px 18px 18px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+:root[data-runtime='desktop'] .workspace-chat {
+  overflow: hidden;
+}
+
+:root[data-runtime='desktop'] .workspace-chat .chat-layout {
+  height: 100%;
+}
+
+:root[data-runtime='desktop'] .configuration-tabs-row {
+  top: 0;
+}
+
+:root[data-runtime='desktop'] .panel {
+  border-radius: 8px;
+  box-shadow: none;
+}
+
+:root[data-runtime='desktop'] :where(.messages, .session-list, .workspace-file-list, .sftp-list, .page-stack, .log-stream) {
+  overscroll-behavior: contain;
+}
+
+@keyframes app-refresh-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes app-sidebar-enter {
+  from { opacity: 0; transform: translateY(4px); }
+}
+
+@keyframes app-popover-in {
+  from { opacity: 0; transform: translateY(-4px) scale(.985); }
+}
+
+@keyframes app-view-out {
+  to { opacity: 0; transform: translateY(2px); }
+}
+
+@keyframes app-view-in {
+  from { opacity: 0; transform: translateY(5px); }
+}
+
+@keyframes app-title-out {
+  to { opacity: 0; transform: translateY(-3px); }
+}
+
+@keyframes app-title-in {
+  from { opacity: 0; transform: translateY(3px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0s !important;
+    animation-duration: 0s !important;
+  }
+}

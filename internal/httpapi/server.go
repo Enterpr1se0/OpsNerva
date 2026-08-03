@@ -19,7 +19,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"eino-ops-agent/internal/agent"
@@ -40,31 +39,21 @@ import (
 )
 
 type Server struct {
-	service       *service.Service
-	agent         *agent.Runtime
-	chatEvents    *chatEventHub
-	auth          *security.WebAuth
-	secureCookies bool
-	mux           *http.ServeMux
-	loginMu       sync.Mutex
-	loginAttempts map[string]loginAttempt
-	mcpHTTP       http.Handler
-	options       Options
+	service    *service.Service
+	agent      *agent.Runtime
+	chatEvents *chatEventHub
+	mux        *http.ServeMux
+	mcpHTTP    http.Handler
+	options    Options
 }
 
 type Options struct {
-	SecureCookies bool
-	Version       string
-	StartedAt     time.Time
-	Logging       config.Logging
+	Version   string
+	StartedAt time.Time
+	Logging   config.Logging
 }
 
-type loginAttempt struct {
-	Count int
-	Reset time.Time
-}
-
-func New(svc *service.Service, agentRuntime *agent.Runtime, auth *security.WebAuth, options Options) *Server {
+func New(svc *service.Service, agentRuntime *agent.Runtime, options Options) *Server {
 	if options.StartedAt.IsZero() {
 		options.StartedAt = time.Now().UTC()
 	}
@@ -72,8 +61,7 @@ func New(svc *service.Service, agentRuntime *agent.Runtime, auth *security.WebAu
 		options.Version = "unknown"
 	}
 	s := &Server{
-		service: svc, agent: agentRuntime, auth: auth, secureCookies: options.SecureCookies,
-		mux: http.NewServeMux(), loginAttempts: make(map[string]loginAttempt),
+		service: svc, agent: agentRuntime, mux: http.NewServeMux(),
 		mcpHTTP: mcpserver.New(svc, options.Version).HTTPHandler(), chatEvents: newChatEventHub(), options: options,
 	}
 	s.routes()
@@ -81,18 +69,12 @@ func New(svc *service.Service, agentRuntime *agent.Runtime, auth *security.WebAu
 }
 
 func (s *Server) Handler() http.Handler {
-	return requestLogMiddleware(recoverMiddleware(corsMiddleware(s.authMiddleware(s.mux))), slog.Default())
+	return requestLogMiddleware(recoverMiddleware(corsMiddleware(s.mux)), slog.Default())
 }
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/mcp", s.serveMCP)
 	s.mux.HandleFunc("GET /api/v1/health", s.health)
-	s.mux.HandleFunc("GET /api/v1/auth/status", s.authStatus)
-	s.mux.HandleFunc("POST /api/v1/auth/initialize", s.initializePassword)
-	s.mux.HandleFunc("GET /api/v1/auth/session", s.authSession)
-	s.mux.HandleFunc("POST /api/v1/auth/login", s.login)
-	s.mux.HandleFunc("POST /api/v1/auth/logout", s.logout)
-	s.mux.HandleFunc("PUT /api/v1/auth/password", s.changePassword)
 	s.mux.HandleFunc("GET /api/v1/proxies", s.listProxies)
 	s.mux.HandleFunc("POST /api/v1/proxies", s.saveProxy)
 	s.mux.HandleFunc("DELETE /api/v1/proxies/{id}", s.deleteProxy)
@@ -128,6 +110,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/mcp-servers/{id}/disable", s.disableMCPServer)
 	s.mux.HandleFunc("POST /api/v1/mcp-servers/{id}/retry", s.retryMCPServer)
 	s.mux.HandleFunc("POST /api/v1/mcp-servers/{id}/test", s.testMCPServer)
+	s.mux.HandleFunc("POST /api/v1/mcp-servers/{id}/oauth", s.startMCPOAuth)
+	s.mux.HandleFunc("DELETE /api/v1/mcp-servers/{id}/oauth", s.clearMCPOAuth)
+	s.mux.HandleFunc("GET /api/v1/mcp/oauth/callback", s.completeMCPOAuth)
 	s.mux.HandleFunc("POST /api/v1/workspaces", s.createWorkspace)
 	s.mux.HandleFunc("PUT /api/v1/workspaces/{id}", s.updateWorkspace)
 	s.mux.HandleFunc("DELETE /api/v1/workspaces/{id}", s.deleteWorkspace)
@@ -477,6 +462,53 @@ func (s *Server) testMCPServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) startMCPOAuth(w http.ResponseWriter, r *http.Request) {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	redirectURL := scheme + "://" + r.Host + "/api/v1/mcp/oauth/callback"
+	result, err := s.service.BeginMCPOAuth(r.Context(), r.PathValue("id"), redirectURL, actor(r))
+	if err != nil {
+		writeErrorStatus(w, err, http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) clearMCPOAuth(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.ClearMCPOAuth(r.Context(), r.PathValue("id"), actor(r))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := s.reloadAgent(r.Context()); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) completeMCPOAuth(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	authorizationError := query.Get("error_description")
+	if authorizationError == "" {
+		authorizationError = query.Get("error")
+	}
+	err := s.service.CompleteMCPOAuth(r.Context(), query.Get("state"), query.Get("code"), query.Get("iss"), authorizationError)
+	if err == nil {
+		err = s.reloadAgent(r.Context())
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>授权失败</title><body>授权失败，可以关闭此窗口。</body></html>`)
+		return
+	}
+	_, _ = io.WriteString(w, `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>授权完成</title><body>授权完成，可以关闭此窗口。<script>window.close()</script></body></html>`)
 }
 
 func (s *Server) reloadAgent(ctx context.Context) error {
@@ -834,183 +866,6 @@ func shellHTTPStatusActive(status string) bool {
 	default:
 		return false
 	}
-}
-
-func (s *Server) authMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.auth == nil || !strings.HasPrefix(r.URL.Path, "/api/v1/") || r.URL.Path == "/api/v1/health" || r.URL.Path == "/api/v1/auth/status" || r.URL.Path == "/api/v1/auth/initialize" || r.URL.Path == "/api/v1/auth/login" {
-			next.ServeHTTP(w, r)
-			return
-		}
-		cookie, err := r.Cookie(security.SessionCookieName)
-		if err != nil {
-			writeErrorStatus(w, fmt.Errorf("authentication required"), http.StatusUnauthorized)
-			return
-		}
-		session, err := s.auth.Authenticate(r.Context(), cookie.Value)
-		if err != nil {
-			s.clearSessionCookie(w)
-			writeErrorStatus(w, fmt.Errorf("authentication required"), http.StatusUnauthorized)
-			return
-		}
-		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
-			provided := strings.TrimSpace(r.Header.Get("X-CSRF-Token"))
-			if provided == "" || provided != session.CSRFToken {
-				writeErrorStatus(w, fmt.Errorf("invalid CSRF token"), http.StatusForbidden)
-				return
-			}
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
-	if s.auth == nil {
-		writeErrorStatus(w, fmt.Errorf("web authentication is unavailable"), http.StatusServiceUnavailable)
-		return
-	}
-	initialized, err := s.auth.IsInitialized(r.Context())
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]bool{"initialized": initialized})
-}
-
-func (s *Server) initializePassword(w http.ResponseWriter, r *http.Request) {
-	if s.auth == nil {
-		writeErrorStatus(w, fmt.Errorf("web authentication is unavailable"), http.StatusServiceUnavailable)
-		return
-	}
-	initialized, err := s.auth.IsInitialized(r.Context())
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	if initialized {
-		writeErrorStatus(w, security.ErrAlreadyInitialized, http.StatusConflict)
-		return
-	}
-	remote := remoteIP(r)
-	if !s.allowLoginAttempt(remote) {
-		writeErrorStatus(w, fmt.Errorf("too many initialization attempts; retry later"), http.StatusTooManyRequests)
-		return
-	}
-	var input struct {
-		Password string `json:"password"`
-	}
-	if !decode(w, r, &input) {
-		return
-	}
-	token, session, err := s.auth.InitializePassword(r.Context(), input.Password)
-	if err != nil {
-		status := http.StatusBadRequest
-		if errors.Is(err, security.ErrAlreadyInitialized) {
-			status = http.StatusConflict
-		}
-		writeErrorStatus(w, err, status)
-		return
-	}
-	s.resetLoginAttempts(remote)
-	s.setSessionCookie(w, token, session)
-	writeJSON(w, http.StatusCreated, map[string]any{"authenticated": true, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt})
-}
-
-func (s *Server) login(w http.ResponseWriter, r *http.Request) {
-	if s.auth == nil {
-		writeErrorStatus(w, fmt.Errorf("web authentication is unavailable"), http.StatusServiceUnavailable)
-		return
-	}
-	remote := remoteIP(r)
-	if !s.allowLoginAttempt(remote) {
-		writeErrorStatus(w, fmt.Errorf("too many login attempts; retry later"), http.StatusTooManyRequests)
-		return
-	}
-	var input struct {
-		Password string `json:"password"`
-	}
-	if !decode(w, r, &input) {
-		return
-	}
-	token, session, err := s.auth.Login(r.Context(), input.Password)
-	if err != nil {
-		time.Sleep(250 * time.Millisecond)
-		writeErrorStatus(w, fmt.Errorf("invalid administrator credentials"), http.StatusUnauthorized)
-		return
-	}
-	s.resetLoginAttempts(remote)
-	s.setSessionCookie(w, token, session)
-	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt})
-}
-
-func (s *Server) setSessionCookie(w http.ResponseWriter, token string, session domain.WebSession) {
-	http.SetCookie(w, &http.Cookie{Name: security.SessionCookieName, Value: token, Path: "/", HttpOnly: true, Secure: s.secureCookies, SameSite: http.SameSiteStrictMode, Expires: session.ExpiresAt, MaxAge: int(time.Until(session.ExpiresAt).Seconds())})
-}
-
-func (s *Server) authSession(w http.ResponseWriter, r *http.Request) {
-	cookie, _ := r.Cookie(security.SessionCookieName)
-	session, err := s.auth.Authenticate(r.Context(), cookie.Value)
-	if err != nil {
-		writeErrorStatus(w, fmt.Errorf("authentication required"), http.StatusUnauthorized)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt})
-}
-
-func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
-	cookie, _ := r.Cookie(security.SessionCookieName)
-	if cookie != nil {
-		_ = s.auth.Logout(r.Context(), cookie.Value)
-	}
-	s.clearSessionCookie(w)
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		Current     string `json:"current_password"`
-		Replacement string `json:"new_password"`
-	}
-	if !decode(w, r, &input) {
-		return
-	}
-	if err := s.auth.ChangePassword(r.Context(), input.Current, input.Replacement); err != nil {
-		writeErrorStatus(w, err, http.StatusBadRequest)
-		return
-	}
-	s.clearSessionCookie(w)
-	writeJSON(w, http.StatusOK, map[string]any{"changed": true, "login_required": true})
-}
-
-func (s *Server) clearSessionCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{Name: security.SessionCookieName, Value: "", Path: "/", HttpOnly: true, Secure: s.secureCookies, SameSite: http.SameSiteStrictMode, MaxAge: -1})
-}
-
-func (s *Server) allowLoginAttempt(remote string) bool {
-	s.loginMu.Lock()
-	defer s.loginMu.Unlock()
-	now := time.Now()
-	attempt := s.loginAttempts[remote]
-	if now.After(attempt.Reset) {
-		attempt = loginAttempt{Reset: now.Add(5 * time.Minute)}
-	}
-	attempt.Count++
-	s.loginAttempts[remote] = attempt
-	return attempt.Count <= 10
-}
-
-func (s *Server) resetLoginAttempts(remote string) {
-	s.loginMu.Lock()
-	delete(s.loginAttempts, remote)
-	s.loginMu.Unlock()
-}
-
-func remoteIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil {
-		return host
-	}
-	return r.RemoteAddr
 }
 
 func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
@@ -2020,7 +1875,7 @@ func writeErrorStatus(w http.ResponseWriter, err error, status int) {
 }
 
 func actor(r *http.Request) string {
-	return "admin-web"
+	return "app"
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
@@ -2029,7 +1884,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 		if origin == "http://localhost:5173" || origin == "http://127.0.0.1:5173" {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		}
 		if r.Method == http.MethodOptions {

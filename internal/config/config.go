@@ -23,15 +23,9 @@ type Config struct {
 	Model                Model         `yaml:"model"`
 	Limits               Limits        `yaml:"limits"`
 	AuditRetention       time.Duration `yaml:"-"`
-	WebAuth              WebAuth       `yaml:"web_auth"`
 	WorkspaceDir         string        `yaml:"workspace_dir"`
 	WorkspaceSandboxPath string        `yaml:"workspace_sandbox_path"`
 	Validators           []Validator   `yaml:"validators"`
-}
-
-type WebAuth struct {
-	SecureCookies bool          `yaml:"secure_cookies"`
-	SessionTTL    time.Duration `yaml:"-"`
 }
 
 type Workspace struct {
@@ -83,7 +77,7 @@ type Limits struct {
 
 func Default() Config {
 	return Config{
-		ListenAddress: "0.0.0.0:8080",
+		ListenAddress: "127.0.0.1:8080",
 		DataDir:       "data",
 		DatabasePath:  "data/ops-agent.db",
 		Logging: Logging{
@@ -101,7 +95,6 @@ func Default() Config {
 			HostConcurrency:    2,
 		},
 		AuditRetention:       30 * 24 * time.Hour,
-		WebAuth:              WebAuth{SessionTTL: 12 * time.Hour},
 		WorkspaceDir:         "workspace",
 		WorkspaceSandboxPath: "bwrap",
 	}
@@ -225,7 +218,6 @@ func applyEnv(cfg *Config) {
 	setInt(&cfg.Logging.MaxBackups, "OPS_AGENT_LOG_MAX_BACKUPS")
 	setInt(&cfg.Logging.RecentLimit, "OPS_AGENT_LOG_RECENT_LIMIT")
 	setString(&cfg.MasterKey, "OPS_AGENT_MASTER_KEY")
-	setBool(&cfg.WebAuth.SecureCookies, "OPS_AGENT_SECURE_COOKIES")
 	setString(&cfg.WorkspaceDir, "OPS_AGENT_WORKSPACE_DIR")
 	setString(&cfg.WorkspaceSandboxPath, "OPS_AGENT_WORKSPACE_SANDBOX")
 	setString(&cfg.Model.APIKey, "OPENAI_API_KEY")

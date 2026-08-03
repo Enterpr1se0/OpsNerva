@@ -899,8 +899,8 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 			if variant.IsStreaming && variant.MessageStream != nil {
 				stream := variant.MessageStream
 				var assistantContent strings.Builder
-				var assistantDisplay strings.Builder
 				var assistantGuard assistantOutputGuard
+				assistantStreamVisible := false
 				assistantHasToolCalls := false
 				var toolResult strings.Builder
 				var reasoning strings.Builder
@@ -919,6 +919,9 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 						if errors.As(recvErr, &retryErr) {
 							retryingStream = true
 							break
+						}
+						if assistantStreamVisible {
+							emit(Event{Type: "message_reset", Role: role, SessionID: sessionID})
 						}
 						stream.Close()
 						return "", recvErr
@@ -963,7 +966,8 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 					if variant.Role == schema.Assistant {
 						assistantContent.WriteString(message.Content)
 						if content := assistantGuard.Write(message.Content); content != "" {
-							assistantDisplay.WriteString(content)
+							emit(Event{Type: "message", Role: role, ToolName: variant.ToolName, Content: content, SessionID: sessionID})
+							assistantStreamVisible = true
 						}
 						continue
 					}
@@ -971,11 +975,15 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 				}
 				stream.Close()
 				if retryingStream {
+					if assistantStreamVisible {
+						emit(Event{Type: "message_reset", Role: role, SessionID: sessionID})
+					}
 					continue
 				}
 				if variant.Role == schema.Assistant {
 					if content := assistantGuard.Finish(); content != "" {
-						assistantDisplay.WriteString(content)
+						emit(Event{Type: "message", Role: role, ToolName: variant.ToolName, Content: content, SessionID: sessionID})
+						assistantStreamVisible = true
 					}
 					if len(assistantChunks) > 0 {
 						merged, mergeErr := schema.ConcatMessages(assistantChunks)
@@ -986,10 +994,13 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 					}
 					if assistantHasToolCalls {
 						assistantToolCallOutputs++
+						if assistantStreamVisible {
+							emit(Event{Type: "message_reset", Role: role, SessionID: sessionID})
+						}
 					} else if assistantContent.Len() > 0 {
 						answerCandidate = assistantContent.String()
-						if !assistantGuard.blocked && assistantDisplay.Len() > 0 {
-							emit(Event{Type: "message", Role: role, ToolName: variant.ToolName, Content: assistantDisplay.String(), SessionID: sessionID})
+						if assistantGuard.blocked && assistantStreamVisible {
+							emit(Event{Type: "message_reset", Role: role, SessionID: sessionID})
 						}
 					} else {
 						assistantEmptyOutputs++

@@ -61,12 +61,12 @@ make build
 
 ### 首次使用
 
-1. 打开 [http://127.0.0.1:8080](http://127.0.0.1:8080)，创建管理员密码（服务端只保存 Argon2id 哈希）。
+1. 启动 OpsNerva App。
 2. 在 **配置 → 模型提供商** 填入 Base URL、Model ID 和 API Key，先**测试**再**使用此模型**；也可用 `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL` 环境变量提供默认模型。
 3. 在 **配置 → SSH 主机** 添加主机，扫描并人工核对 Host Key 指纹后信任。
 4. 回到 **Agent** 新建会话，开始对话。
 
-局域网或公网部署应使用 HTTPS 反向代理，并设置 `OPS_AGENT_SECURE_COOKIES=true`；监听地址等配置详见[使用手册](docs/guide.md#修改监听地址)。
+App API 默认只监听本机，不提供管理员登录，不应暴露到局域网或公网。
 
 ## 审批模式
 
@@ -92,7 +92,7 @@ make check     # 全部测试 + 构建
 
 ## 当前边界
 
-单管理员模式，不包含多租户 RBAC、Vault/SSH CA、远程 MCP OAuth 或 Kubernetes 原生 API，详见[使用手册](docs/guide.md#当前边界)。
+单管理员模式，不包含多租户 RBAC、Vault/SSH CA 或 Kubernetes 原生 API，详见[使用手册](docs/guide.md#当前边界)。
 
 ## License
 

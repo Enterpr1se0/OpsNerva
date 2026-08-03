@@ -56,7 +56,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             set_tray_mode,
             enter_lightweight_mode,
-            open_workspace_directory
+            open_workspace_directory,
+            open_external_url
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
@@ -127,6 +128,41 @@ fn open_workspace_directory(
         .ok_or_else(|| "Workspace directory is unavailable".to_string())?;
     let directory = resolve_workspace_directory(&root, &workspace_id, &relative_path)?;
     open_directory(&directory)
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let parsed = tauri::Url::parse(&url).map_err(|_| "Invalid URL".to_string())?;
+    let loopback = parsed
+        .host_str()
+        .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+        .is_some_and(|address| address.is_loopback())
+        || parsed.host_str() == Some("localhost");
+    if parsed.scheme() != "https" && !(parsed.scheme() == "http" && loopback) {
+        return Err("Only HTTPS and loopback HTTP URLs can be opened".into());
+    }
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("rundll32.exe");
+        command.arg("url.dll,FileProtocolHandler");
+        command
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = Command::new("xdg-open");
+    #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
+    return Err("Opening URLs is unsupported on this platform".into());
+
+    let mut child = command
+        .arg(url)
+        .spawn()
+        .map_err(|error| format!("Open URL: {error}"))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 fn resolve_workspace_directory(

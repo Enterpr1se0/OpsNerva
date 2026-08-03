@@ -1,4 +1,4 @@
-import { FormEvent, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { FormEvent, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -6,10 +6,11 @@ import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
 import type { Terminal as XTermInstance } from '@xterm/xterm'
 import { invoke } from '@tauri-apps/api/core'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import '@xterm/xterm/css/xterm.css'
 import {
-  Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronLeft, ChevronRight, CircleDot, Copy, Cpu, Edit3, Eye, EyeOff, FileText, FolderOpen, FolderOutput, FunctionSquare, History, ImagePlus, KeyRound, LockKeyhole, LogOut, Minimize2, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen,
-  Cable, Download, ListChecks, LoaderCircle, Plus, Power, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, Square, TerminalSquare, Trash2, UploadCloud, UserRound, X, Zap,
+  Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronLeft, ChevronRight, CircleDot, Copy, Cpu, Edit3, Eye, EyeOff, FileText, FolderOpen, FolderOutput, FunctionSquare, History, ImagePlus, KeyRound, LockKeyhole, Maximize2, Minimize2, Minus, Moon, PanelLeftClose, PanelLeftOpen, Sun,
+  Cable, Download, ListChecks, LoaderCircle, LogOut, Plus, Power, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, Square, TerminalSquare, Trash2, UploadCloud, UserRound, X, Zap,
 } from 'lucide-react'
 import { api, chatAttachmentURL, reconnectChatStream, sftpDownloadURL, sshShellEventsURL, streamChat, workspaceDownloadURL, workspaceFileEventsURL } from './api'
 import { CopyButton, CopyablePre } from './CopyButton'
@@ -166,21 +167,68 @@ function errorText(error: unknown) {
 const newSessionMarker = '__new__'
 const defaultChatImageTypes=['image/png','image/jpeg','image/webp','image/gif']
 const desktopRuntime='__TAURI_INTERNALS__' in window
+const desktopWindow=desktopRuntime?getCurrentWindow():null
 function rememberSession(id: string) { try { localStorage.setItem('opsnerva.activeSession', id) } catch { /* storage may be disabled */ } }
 function recalledSession() { try { return localStorage.getItem('opsnerva.activeSession') || '' } catch { return '' } }
 function rememberWorkspace(id:string){try{if(id)localStorage.setItem('opsnerva.activeWorkspace',id)}catch{/* storage may be disabled */}}
 function recalledWorkspace(){try{return localStorage.getItem('opsnerva.activeWorkspace')||''}catch{return''}}
-function rememberSidebarCollapsed(collapsed:boolean){try{localStorage.setItem('opsnerva.sidebarCollapsed',String(collapsed))}catch{/* storage may be disabled */}}
-function recalledSidebarCollapsed(){try{return localStorage.getItem('opsnerva.sidebarCollapsed')==='true'}catch{return false}}
-type ChatPanel='workspace'|'conversations'
-function rememberChatPanelCollapsed(panel:ChatPanel,collapsed:boolean){try{localStorage.setItem(`opsnerva.chatPanel.${panel}`,String(collapsed))}catch{/* storage may be disabled */}}
-function recalledChatPanelCollapsed(panel:ChatPanel){try{return localStorage.getItem(`opsnerva.chatPanel.${panel}`)==='true'}catch{return false}}
+function rememberWorkspacePanelCollapsed(collapsed:boolean){try{localStorage.setItem('opsnerva.chatPanel.workspace',String(collapsed))}catch{/* storage may be disabled */}}
+function recalledWorkspacePanelCollapsed(){try{return localStorage.getItem('opsnerva.chatPanel.workspace')==='true'}catch{return false}}
+type ColorTheme='light'|'dark'
+function recalledColorTheme():ColorTheme{
+	try{const stored=localStorage.getItem('opsnerva.theme');if(stored==='light'||stored==='dark')return stored}catch{/* storage may be disabled */}
+	return 'light'
+}
+function rememberColorTheme(theme:ColorTheme){try{localStorage.setItem('opsnerva.theme',theme)}catch{/* storage may be disabled */}}
+
+function DesktopTitlebar(){
+	const {t}=useTranslation()
+	if(!desktopWindow)return null
+	return <header className="desktop-titlebar" data-tauri-drag-region onDoubleClick={event=>{if(!(event.target as Element).closest('.desktop-window-controls'))void desktopWindow.toggleMaximize().catch(()=>{})}}>
+		<div className="desktop-titlebar-brand" data-tauri-drag-region><TerminalSquare size={14}/><b data-tauri-drag-region>OpsNerva</b></div>
+		<div className="desktop-window-controls">
+			<button type="button" onClick={()=>void desktopWindow.minimize().catch(()=>{})} title={t('shell.minimize')} aria-label={t('shell.minimize')}><Minus size={15}/></button>
+			<button type="button" onClick={()=>void desktopWindow.toggleMaximize().catch(()=>{})} title={t('shell.maximize')} aria-label={t('shell.maximize')}><Maximize2 size={13}/></button>
+			<button type="button" className="desktop-window-close" onClick={()=>void desktopWindow.close().catch(()=>{})} title={t('common.close')} aria-label={t('common.close')}><X size={15}/></button>
+		</div>
+	</header>
+}
+
+function AppFrame({children}:{children:React.ReactNode}){
+	return <div className={`app-frame ${desktopRuntime?'desktop-app-frame':'web-app-frame'}`}><DesktopTitlebar/>{children}</div>
+}
+
+type NotificationTone='success'|'error'
+type AppNotification={id:string;message:string;tone:NotificationTone}
+type NotificationSink=(message:string,tone?:NotificationTone)=>void
+const NotificationContext=createContext<NotificationSink>(()=>{})
+function useNotifier(){return useContext(NotificationContext)}
+
+function NotificationItem({notification,onDismiss}:{notification:AppNotification;onDismiss:(id:string)=>void}){
+	const {t}=useTranslation()
+	useEffect(()=>{
+		if(notification.tone!=='success')return
+		const timer=window.setTimeout(()=>onDismiss(notification.id),4000)
+		return()=>window.clearTimeout(timer)
+	},[notification.id,notification.tone,onDismiss])
+	return <div className={`app-notification ${notification.tone}`} role={notification.tone==='error'?'alert':'status'}>
+		<span className="app-notification-icon">{notification.tone==='error'?<ShieldAlert size={16}/>:<Check size={16}/>}</span>
+		<span>{notification.message}</span>
+		<button type="button" onClick={()=>onDismiss(notification.id)} title={t('common.dismiss')} aria-label={t('common.dismiss')}><X size={14}/></button>
+	</div>
+}
+
+function NotificationCenter({notifications,onDismiss}:{notifications:AppNotification[];onDismiss:(id:string)=>void}){
+	if(!notifications.length)return null
+	return createPortal(<div className="notification-center" aria-live="polite">{notifications.map(notification=><NotificationItem key={notification.id} notification={notification} onDismiss={onDismiss}/>)}</div>,document.body)
+}
 
 function App() {
 	const {t}=useTranslation()
-	const [auth,setAuth]=useState<'checking'|'setup'|'authenticated'|'guest'>('checking')
   const [page, setPage] = useState<Page>('chat')
-  const [sidebarCollapsed,setSidebarCollapsed]=useState(recalledSidebarCollapsed)
+  const [colorTheme,setColorTheme]=useState<ColorTheme>(recalledColorTheme)
+	const [refreshing,setRefreshing]=useState(false)
+	const [chatSidebarTarget,setChatSidebarTarget]=useState<HTMLDivElement|null>(null)
   const [health, setHealth] = useState<Health | null>(null)
   const [hosts, setHosts] = useState<Host[]>([])
   const [providers, setProviders] = useState<ModelProvider[]>([])
@@ -196,38 +244,41 @@ function App() {
   const [sshShells,setSSHShells]=useState<SSHShell[]>([])
   const [selectedShell,setSelectedShell]=useState<SSHShell|null>(null)
   const [openConnectionPanel,setOpenConnectionPanel]=useState<'tunnel'|'shell'|null>(null)
-  const [error, setError] = useState('')
+	const [notifications,setNotifications]=useState<AppNotification[]>([])
 	const [agentStreaming,setAgentStreaming]=useState(false)
+	const dismissNotification=useCallback((id:string)=>setNotifications(current=>current.filter(item=>item.id!==id)),[])
+	const notify=useCallback<NotificationSink>((message,tone='success')=>{
+		const normalized=message.trim()
+		if(!normalized)return
+		setNotifications(current=>{
+			if(tone==='error'&&current.some(item=>item.tone===tone&&item.message===normalized))return current
+			const next=[...current.filter(item=>item.message!==normalized||item.tone!==tone),{id:clientId(),message:normalized,tone}]
+			const successIDs=next.filter(item=>item.tone==='success').map(item=>item.id)
+			const expiredSuccessIDs=new Set(successIDs.slice(0,-4))
+			return next.filter(item=>!expiredSuccessIDs.has(item.id))
+		})
+	},[])
+	const reportError=useCallback((message:string)=>notify(message,'error'),[notify])
 
   const refresh = useCallback(async () => {
     try {
 	  const [nextHealth, nextHosts, nextProviders, nextProxies, nextSettings, nextCapabilities, nextToolCatalog, nextSkills, nextMCPServers, nextApprovals, nextRuns, nextSSHTunnels, nextSSHShells] = await Promise.all([
 		api.health(), api.hosts(), api.modelProviders(), api.proxies(), api.systemSettings(), api.capabilities(), api.llmTools(), api.skills(), api.mcpServers(), api.approvals(), api.runs(), api.sshTunnels(), api.sshShells(),
       ])
-	  setHealth(nextHealth); setHosts(nextHosts); setProviders(nextProviders); setProxies(nextProxies);setSettings(nextSettings);setCapabilities(nextCapabilities);setToolCatalog(nextToolCatalog);setSkills(nextSkills);setMCPServers(nextMCPServers); setApprovals(nextApprovals); setRuns(nextRuns);setSSHTunnels(nextSSHTunnels.tunnels||[]);setSSHShells(nextSSHShells.shells||[]); setError('')
-	} catch (err) { const message=errorText(err);if(/authentication required/i.test(message))setAuth('guest');setError(message) }
-  }, [])
+	  setHealth(nextHealth); setHosts(nextHosts); setProviders(nextProviders); setProxies(nextProxies);setSettings(nextSettings);setCapabilities(nextCapabilities);setToolCatalog(nextToolCatalog);setSkills(nextSkills);setMCPServers(nextMCPServers); setApprovals(nextApprovals); setRuns(nextRuns);setSSHTunnels(nextSSHTunnels.tunnels||[]);setSSHShells(nextSSHShells.shells||[])
+	} catch (err) { notify(errorText(err),'error') }
+  }, [notify])
 	const refreshApprovals=useCallback(async(decidedID?:string)=>{
 		if(decidedID)setApprovals(current=>current.filter(item=>item.id!==decidedID))
 		try{setApprovals(await api.approvals())}
-		catch(err){const message=errorText(err);if(/authentication required/i.test(message))setAuth('guest');setError(message)}
-	},[])
+		catch(err){notify(errorText(err),'error')}
+	},[notify])
 	const removeSessionState=useCallback((sessionID:string)=>{
 		setApprovals(current=>current.filter(item=>item.session_id!==sessionID))
 		setRuns(current=>current.filter(item=>item.session_id!==sessionID))
 		setSSHShells(current=>current.filter(item=>item.session_id!==sessionID))
 	},[])
 
-	useEffect(()=>{
-		void (async()=>{
-			try{
-				const status=await api.authStatus()
-				if(!status.initialized){setAuth('setup');return}
-				await api.authSession()
-				setAuth('authenticated')
-			}catch{setAuth('guest')}
-		})()
-	},[])
 	useEffect(()=>{
 		if(!desktopRuntime)return
 		const handleContextMenu=(event:MouseEvent)=>{
@@ -242,24 +293,56 @@ function App() {
 		if(!desktopRuntime||!settings)return
 		void invoke('set_tray_mode',{enabled:settings.mcp_http_enabled}).catch(()=>{})
 	},[settings?.mcp_http_enabled])
-	useEffect(() => { if(auth==='authenticated')void refresh() }, [auth,refresh])
+	useEffect(()=>{
+		document.documentElement.dataset.theme=colorTheme
+		document.documentElement.style.colorScheme=colorTheme
+		rememberColorTheme(colorTheme)
+	},[colorTheme])
+	useEffect(()=>{
+		const sync=()=>{document.documentElement.dataset.windowActive=document.hasFocus()?'true':'false'}
+		sync();window.addEventListener('focus',sync);window.addEventListener('blur',sync)
+		return()=>{window.removeEventListener('focus',sync);window.removeEventListener('blur',sync)}
+	},[])
+	useEffect(() => { void refresh() }, [refresh])
 	useEffect(() => {
-		if(auth!=='authenticated'||agentStreaming)return
+		if(agentStreaming)return
 		const timer=window.setInterval(()=>{if(document.visibilityState==='visible')void refresh()},10000)
 		return()=>window.clearInterval(timer)
-	},[auth,agentStreaming,refresh])
-
-	if(auth==='checking')return <div className="auth-screen"><div className="auth-loading"><LoaderCircle className="spin" size={25}/><span>{t('shell.securing')}</span></div></div>
-	if(auth==='setup')return <SetupPage onAuthenticated={()=>setAuth('authenticated')} onRequiresLogin={()=>setAuth('guest')}/>
-	if(auth==='guest')return <LoginPage onAuthenticated={()=>setAuth('authenticated')}/>
+	},[agentStreaming,refresh])
+	const navigate=useCallback((next:Page)=>{
+		if(next===page)return
+		const reduced=window.matchMedia('(prefers-reduced-motion: reduce)').matches
+		const transition=(document as Document&{startViewTransition?:(update:()=>void)=>unknown}).startViewTransition
+		if(transition&&!reduced)transition.call(document,()=>setPage(next))
+		else setPage(next)
+	},[page])
+	useEffect(()=>{
+		if(!desktopRuntime)return
+		const pages:Page[]=['chat','ssh','extensions','audit','logs','config']
+		const shortcut=(event:KeyboardEvent)=>{
+			if(!(event.ctrlKey||event.metaKey)||event.altKey||event.shiftKey)return
+			const target=event.target instanceof Element?event.target:null
+			if(target?.closest('input, textarea, select, [contenteditable="true"]'))return
+			const index=Number(event.key)-1
+			if(index<0||index>=pages.length)return
+			event.preventDefault();navigate(pages[index])
+		}
+		window.addEventListener('keydown',shortcut)
+		return()=>window.removeEventListener('keydown',shortcut)
+	},[navigate])
 
   const title = t(`shell.pageTitles.${page}`)
+	const manualRefresh=async()=>{
+		if(refreshing)return
+		setRefreshing(true)
+		try{await refresh()}finally{setRefreshing(false)}
+	}
 	const stopSSHTunnel=async(id:string)=>{
 		try{
 			await api.stopSSHTunnel(id)
 			setSSHTunnels(current=>current.filter(item=>item.id!==id))
 		}catch(err){
-			setError(errorText(err))
+			notify(errorText(err),'error')
 		}
 	}
 	const registerSSHTunnel=(tunnel:SSHTunnel)=>{
@@ -274,26 +357,24 @@ function App() {
 	}
 	const createWorkspaceShell=async(workspaceID:string)=>{
 		try{registerSSHShell(await api.startSSHShell({workspace_id:workspaceID}))}
-		catch(err){setError(errorText(err))}
+		catch(err){notify(errorText(err),'error')}
 	}
 	const observeAgentWorkspaceShell=(shell:SSHShell)=>{
 		rememberSSHShell(shell)
 	}
-	const toggleSidebar=()=>setSidebarCollapsed(current=>{const next=!current;rememberSidebarCollapsed(next);return next})
-
-  return <div className={`app-shell ${sidebarCollapsed?'sidebar-collapsed':''}`}>
+  return <NotificationContext.Provider value={notify}><AppFrame><div className="app-shell">
     <aside className="sidebar">
-      <div className="brand"><div className="brand-mark"><TerminalSquare size={23}/></div><div className="brand-name"><strong>OpsNerva</strong></div><button className="sidebar-toggle" onClick={toggleSidebar} title={t(sidebarCollapsed?'shell.expandSidebar':'shell.collapseSidebar')} aria-label={t(sidebarCollapsed?'shell.expandSidebar':'shell.collapseSidebar')}>{sidebarCollapsed?<PanelLeftOpen size={17}/>:<PanelLeftClose size={17}/>}</button></div>
-      <nav>
-        <Nav active={page === 'chat'} icon={<Bot/>} label={t('shell.nav.agent')} onClick={() => setPage('chat')}/>
-        <Nav active={page === 'ssh'} icon={<TerminalSquare/>} label={t('shell.nav.ssh')} onClick={() => setPage('ssh')}/>
-        <Nav active={page === 'config'} icon={<Settings2/>} label={t('shell.nav.configuration')} onClick={() => setPage('config')}/>
-		<Nav active={page === 'extensions'} icon={<Braces/>} label={t('shell.nav.extensions')} onClick={() => setPage('extensions')}/>
-        <Nav active={page === 'audit'} icon={<History/>} label={t('shell.nav.audit')} onClick={() => setPage('audit')}/>
-        <Nav active={page === 'logs'} icon={<FileText/>} label={t('shell.nav.logs')} onClick={() => setPage('logs')}/>
+      <div className="brand"><div className="brand-mark"><TerminalSquare size={21}/></div><div className="brand-name"><strong>OpsNerva</strong></div></div>
+      <nav className="sidebar-nav">
+		<Nav active={page === 'config'} icon={<Settings2/>} label={t('shell.nav.configuration')} onClick={() => navigate('config')}/>
+        <Nav active={page === 'chat'} icon={<Bot/>} label={t('shell.nav.agent')} onClick={() => navigate('chat')}/>
+        <Nav active={page === 'ssh'} icon={<TerminalSquare/>} label={t('shell.nav.ssh')} onClick={() => navigate('ssh')}/>
+		<Nav active={page === 'extensions'} icon={<Braces/>} label={t('shell.nav.extensions')} onClick={() => navigate('extensions')}/>
+        <Nav active={page === 'audit'} icon={<History/>} label={t('shell.nav.audit')} onClick={() => navigate('audit')}/>
+        <Nav active={page === 'logs'} icon={<FileText/>} label={t('shell.nav.logs')} onClick={() => navigate('logs')}/>
       </nav>
+	  <section className="sidebar-conversations active"><div ref={setChatSidebarTarget}/></section>
       <div className="sidebar-foot">
-			<button className="logout-button" title={t('shell.signOut')} aria-label={t('shell.signOut')} onClick={async()=>{try{await api.logout()}finally{setAuth('guest')}}}><LogOut size={15}/><span>{t('shell.signOut')}</span></button>
         <div className="build">v0.1.7</div>
       </div>
     </aside>
@@ -302,30 +383,41 @@ function App() {
         <SSHTunnelStatus tunnels={sshTunnels} hosts={hosts} open={openConnectionPanel==='tunnel'} onOpenChange={open=>setOpenConnectionPanel(current=>open?'tunnel':current==='tunnel'?null:current)} onStop={stopSSHTunnel} onCreated={registerSSHTunnel}/>
 		<SSHShellStatus shells={sshShells.filter(topbarShell)} hosts={hosts} open={openConnectionPanel==='shell'} onOpenChange={open=>setOpenConnectionPanel(current=>open?'shell':current==='shell'?null:current)} onOpen={shell=>{setOpenConnectionPanel(null);setSelectedShell(shell)}} onCreated={registerSSHShell}/>
         <LanguageSwitch/>
+		<button type="button" className="icon-button theme-toggle-button" title={t(colorTheme==='light'?'shell.darkTheme':'shell.lightTheme')} aria-label={t(colorTheme==='light'?'shell.darkTheme':'shell.lightTheme')} onClick={()=>setColorTheme(current=>current==='light'?'dark':'light')}>{colorTheme==='light'?<Moon size={16}/>:<Sun size={16}/>}</button>
         <span className={`status ${health?.status === 'ok' ? 'online' : ''}`}><CircleDot size={14}/>{health?.status === 'ok' ? t('shell.online') : t('shell.disconnected')}</span>
-        <button className="icon-button" onClick={refresh} title={t('shell.refresh')}><RefreshCw size={17}/></button>
+        <button className={`icon-button ${refreshing?'refreshing':''}`} onClick={()=>void manualRefresh()} disabled={refreshing} title={t(refreshing?'common.refreshing':'shell.refresh')} aria-label={t(refreshing?'common.refreshing':'shell.refresh')}><RefreshCw size={17}/></button>
       </div></header>
-      {error && <div className="global-error"><ShieldAlert size={17}/>{error}<button onClick={() => setError('')}><X size={15}/></button></div>}
-      <section className="workspace">
-			{page === 'chat' && <ChatPage
-				hosts={hosts} approvals={approvals} runs={runs} workspaceShells={sshShells.filter(shell=>shell.kind==='workspace')}
+      <section className={`workspace workspace-${page}`}>
+			<ChatPage visible={page==='chat'} onActivate={()=>navigate('chat')}
+				hosts={hosts} providers={providers} approvals={approvals} runs={runs} workspaceShells={sshShells.filter(shell=>shell.kind==='workspace')}
 				capabilities={capabilities} settings={settings} imageTypes={settings?.chat_image_allowed_types||defaultChatImageTypes}
 				agentAvailable={!!health?.agent_available} modelName={health?.model?.model} refresh={refresh}
 				refreshApprovals={refreshApprovals} onCreateWorkspaceShell={createWorkspaceShell} onOpenWorkspaceShell={setSelectedShell} onWorkspaceShellStarted={observeAgentWorkspaceShell} onSettingsChanged={setSettings}
-				onSessionDeleted={removeSessionState} onError={setError} onStreamingChange={setAgentStreaming}
-			/>}
+				onHostChanged={host=>setHosts(current=>current.map(item=>item.id===host.id?host:item))}
+				onModelChanged={provider=>{setProviders(current=>current.map(item=>({...item,active:item.id===provider.id})));void api.health().then(setHealth).catch(err=>reportError(errorText(err)))}}
+				sidebarTarget={chatSidebarTarget} onSessionDeleted={removeSessionState} onError={reportError} onStreamingChange={setAgentStreaming}
+			/>
 			{page === 'ssh' && <SSHWorkspacePage
 				hosts={hosts} shells={sshShells.filter(shell=>shell.kind!=='workspace'&&shell.surface==='workspace')}
-				onCreated={rememberSSHShell} refresh={refresh} onError={message=>setError(message)}
+				onCreated={rememberSSHShell} refresh={refresh} onError={reportError}
 			/>}
 		{page === 'config' && <ConfigurationPage hosts={hosts} providers={providers} proxies={proxies} settings={settings} capabilities={capabilities} health={health} refresh={refresh}/>}
 		{page === 'extensions' && <ExtensionsPage skills={skills} mcpServers={mcpServers} toolCatalog={toolCatalog} refresh={refresh}/>}
         {page === 'audit' && <AuditPage runs={runs} hosts={hosts}/>}
         {page === 'logs' && <LogsPage/>}
       </section>
-	      {selectedShell&&<SSHShellTerminal key={selectedShell.id} initialShell={selectedShell} relatedShells={selectedShell.kind==='workspace'?sshShells.filter(shell=>shell.kind==='workspace'&&shell.workspace_id===selectedShell.workspace_id&&sshShellActive(shell.status)):[]} onSelect={setSelectedShell} onClose={()=>setSelectedShell(null)} onChanged={()=>void refresh()} onError={message=>setError(message)}/>}
+	      {selectedShell&&<SSHShellTerminal
+			key={selectedShell.id}
+			initialShell={selectedShell}
+			relatedShells={selectedShell.kind==='workspace'?sshShells.filter(shell=>shell.kind==='workspace'&&shell.workspace_id===selectedShell.workspace_id&&sshShellActive(shell.status)):[]}
+			onSelect={setSelectedShell}
+			onClose={()=>setSelectedShell(null)}
+			onChanged={()=>void refresh()}
+			onError={reportError}
+		/>}
     </main>
-  </div>
+	<NotificationCenter notifications={notifications} onDismiss={dismissNotification}/>
+  </div></AppFrame></NotificationContext.Provider>
 }
 
 function LanguageSwitch(){
@@ -366,6 +458,59 @@ function ApprovalModeStatus({settings,onChanged,onError}:{settings:SystemSetting
 		</details>
 		{confirmFullAccess&&<FullAccessConfirmDialog onCancel={()=>setConfirmFullAccess(false)} onConfirm={()=>{setConfirmFullAccess(false);void apply('full_access')}}/>}
 	</>
+}
+
+function hostInputWithAgentState(host:Host,enabled:boolean):HostInput{
+	return {
+		id:host.id,name:host.name,address:host.address,port:host.port,user:host.user,agent_enabled:enabled,
+		auth_type:host.auth_type,private_key:'',known_hosts_file:host.known_hosts_file||'',proxy_jump_host_id:host.proxy_jump_host_id||'',proxy_id:host.proxy_id||'',
+		password:'',sudo_mode:host.sudo_mode,sudo_password:'',
+	}
+}
+
+function ComposerHostSelector({hosts,disabled,onChanged,onError}:{hosts:Host[];disabled:boolean;onChanged:(host:Host)=>void;onError:(message:string)=>void}){
+	const {t}=useTranslation()
+	const [open,setOpen]=useState(false)
+	const [busy,setBusy]=useState('')
+	const activeHosts=hosts.filter(host=>host.agent_enabled)
+	const names=activeHosts.map(host=>host.name).join(', ')
+	const label=activeHosts.length?t('chat.hostsCount',{count:activeHosts.length,names}):t('chat.noHosts')
+	const toggle=async(host:Host)=>{
+		if(disabled||busy)return
+		setBusy(host.id)
+		try{onChanged(await api.saveHost(hostInputWithAgentState(host,!host.agent_enabled)))}
+		catch(err){onError(errorText(err))}
+		finally{setBusy('')}
+	}
+	return <details className="composer-selector composer-hosts" open={open} onToggle={event=>setOpen(event.currentTarget.open)}>
+		<summary title={t('chat.switchHosts')} aria-label={t('chat.switchHosts')} onClick={event=>{if(disabled)event.preventDefault()}}><Server size={13}/><span>{label}</span><ChevronRight size={11}/></summary>
+		<div className="composer-selector-menu composer-host-menu">
+			{hosts.map(host=><button type="button" className={host.agent_enabled?'active':''} disabled={disabled||!!busy} onClick={()=>void toggle(host)} key={host.id}><span><Server size={13}/><b>{host.name}</b></span>{busy===host.id?<LoaderCircle className="spin" size={13}/>:<em>{t(host.agent_enabled?'common.disable':'common.enable')}</em>}</button>)}
+			{!hosts.length&&<span className="composer-selector-empty">{t('chat.noHosts')}</span>}
+		</div>
+	</details>
+}
+
+function ComposerModelSelector({providers,fallbackModel,disabled,onChanged,onError}:{providers:ModelProvider[];fallbackModel?:string;disabled:boolean;onChanged:(provider:ModelProvider)=>void;onError:(message:string)=>void}){
+	const {t}=useTranslation()
+	const [open,setOpen]=useState(false)
+	const [busy,setBusy]=useState('')
+	const active=providers.find(provider=>provider.active)
+	const label=active?.model||fallbackModel||t('chat.noModel')
+	const activate=async(provider:ModelProvider)=>{
+		if(disabled||busy||provider.active){setOpen(false);return}
+		setBusy(provider.id)
+		try{const selected=await api.activateModelProvider(provider.id);onChanged(selected);setOpen(false)}
+		catch(err){onError(errorText(err))}
+		finally{setBusy('')}
+	}
+	return <details className="composer-selector composer-model" open={open} onToggle={event=>setOpen(event.currentTarget.open)}>
+		<summary title={t('chat.switchModel')} aria-label={t('chat.switchModel')} onClick={event=>{if(disabled)event.preventDefault()}}><Cpu size={13}/><span>{label}</span><ChevronRight size={11}/></summary>
+		<div className="composer-selector-menu composer-model-menu">
+			{providers.map(provider=><button type="button" className={provider.active?'active':''} disabled={disabled||!!busy} onClick={()=>void activate(provider)} key={provider.id}><span><b>{provider.name}</b><small>{provider.model}</small></span>{busy===provider.id?<LoaderCircle className="spin" size={13}/>:provider.active?<Check size={13}/>:null}</button>)}
+			{!providers.length&&<span className="composer-selector-empty">{t('chat.noModel')}</span>}
+		</div>
+	</details>
 }
 
 function SSHTunnelStatus({tunnels,hosts,open,onOpenChange,onStop,onCreated}:{tunnels:SSHTunnel[];hosts:Host[];open:boolean;onOpenChange:(open:boolean)=>void;onStop:(id:string)=>Promise<void>;onCreated:(tunnel:SSHTunnel)=>void}){
@@ -446,7 +591,7 @@ function SSHShellStatus({shells,hosts,open,onOpenChange,onOpen,onCreated}:{shell
 	</>
 }
 
-function SSHShellCreateDialog({hosts,onCancel,onCreated}:{hosts:Host[];onCancel:()=>void;onCreated:(shell:SSHShell)=>void}){
+function SSHShellCreateDialog({hosts,surface,onCancel,onCreated}:{hosts:Host[];surface?:'quick'|'workspace';onCancel:()=>void;onCreated:(shell:SSHShell)=>void}){
 	const {t}=useTranslation()
 	const [hostID,setHostID]=useState(hosts[0]?.id||'')
 	const [busy,setBusy]=useState(false)
@@ -455,7 +600,7 @@ function SSHShellCreateDialog({hosts,onCancel,onCreated}:{hosts:Host[];onCancel:
 		event.preventDefault()
 		setBusy(true);setError('')
 		try{
-			const shell=await api.startSSHShell({host_id:hostID})
+			const shell=await api.startSSHShell({host_id:hostID,...(surface?{surface}:{})})
 			onCreated(shell)
 		}catch(err){setError(errorText(err))}
 		finally{setBusy(false)}
@@ -604,37 +749,27 @@ function SSHShellTerminal({initialShell,relatedShells=[],onSelect,onClose,onChan
 
 function SSHWorkspacePage({hosts,shells,onCreated,refresh,onError}:{hosts:Host[];shells:SSHShell[];onCreated:(shell:SSHShell)=>void;refresh:()=>Promise<void>;onError:(message:string)=>void}){
 	const {t}=useTranslation()
-	const [hostID,setHostID]=useState(hosts[0]?.id||'')
 	const [selectedShellID,setSelectedShellID]=useState(shells[0]?.id||'')
-	const [starting,setStarting]=useState(false)
-	useEffect(()=>{
-		if(!hosts.some(host=>host.id===hostID))setHostID(hosts[0]?.id||'')
-	},[hostID,hosts])
+	const [creating,setCreating]=useState(false)
 	useEffect(()=>{
 		if(!shells.some(shell=>shell.id===selectedShellID))setSelectedShellID(shells[0]?.id||'')
 	},[selectedShellID,shells])
 	const selectedShell=shells.find(shell=>shell.id===selectedShellID)
-	const startShell=async()=>{
-		if(!hostID||starting)return
-		setStarting(true)
-		try{
-			const shell=await api.startSSHShell({host_id:hostID,surface:'workspace'})
-			onCreated(shell);setSelectedShellID(shell.id)
-		}catch(err){onError(errorText(err))}
-		finally{setStarting(false)}
-	}
+	const selectedHost=hosts.find(host=>host.id===selectedShell?.host_id)
+	const created=(shell:SSHShell)=>{onCreated(shell);setSelectedShellID(shell.id);setCreating(false)}
 	if(!hosts.length)return <div className="ssh-workspace-empty panel"><Server size={28}/><b>{t('connections.noHosts')}</b></div>
 	return <div className="ssh-workspace">
-		<SFTPBrowser key={hostID} hosts={hosts} hostID={hostID} onHostChange={setHostID}/>
+		<SFTPBrowser key={selectedHost?.id||'disconnected'} host={selectedHost}/>
 		<section className="ssh-workspace-terminal panel">
 			<header className="ssh-terminal-tabs">
 				<div>{shells.map(shell=><button type="button" className={shell.id===selectedShellID?'active':''} onClick={()=>setSelectedShellID(shell.id)} key={shell.id}><i className={shell.status}/><span>{shell.host_name||shell.host_id}</span><small>{shell.elevated?'root':shell.user}</small></button>)}</div>
-				<button type="button" className="ssh-new-terminal" disabled={starting||!hostID} onClick={()=>void startShell()}>{starting?<LoaderCircle className="spin" size={14}/>:<Plus size={14}/>} {t('sshWorkspace.newTerminal')}</button>
+				<button type="button" className="ssh-new-terminal" onClick={()=>setCreating(true)}><Plus size={14}/> {t('sshWorkspace.newTerminal')}</button>
 			</header>
 			<div className="ssh-terminal-stage">
-				{selectedShell?<SSHShellTerminal key={selectedShell.id} initialShell={selectedShell} embedded onClose={()=>setSelectedShellID('')} onChanged={()=>void refresh()} onError={onError}/>:<div className="ssh-terminal-empty"><TerminalSquare size={32}/><b>{t('sshWorkspace.noTerminal')}</b><button type="button" className="primary" disabled={starting} onClick={()=>void startShell()}>{starting?<LoaderCircle className="spin" size={14}/>:<Plus size={14}/>} {t('sshWorkspace.newTerminal')}</button></div>}
+				{selectedShell?<SSHShellTerminal key={selectedShell.id} initialShell={selectedShell} embedded onClose={()=>setSelectedShellID('')} onChanged={()=>void refresh()} onError={onError}/>:<div className="ssh-terminal-empty"><TerminalSquare size={32}/><b>{t('sshWorkspace.noTerminal')}</b><button type="button" className="primary" onClick={()=>setCreating(true)}><Plus size={14}/> {t('sshWorkspace.newTerminal')}</button></div>}
 			</div>
 		</section>
+		{creating&&<SSHShellCreateDialog hosts={hosts} surface="workspace" onCancel={()=>setCreating(false)} onCreated={created}/>}
 	</div>
 }
 
@@ -677,12 +812,13 @@ function decodeTextFile(buffer:ArrayBuffer,name:string){
 	}
 }
 
-function SFTPBrowser({hosts,hostID,onHostChange}:{hosts:Host[];hostID:string;onHostChange:(id:string)=>void}){
+function SFTPBrowser({host}:{host?:Host}){
 	const {t,i18n:instance}=useTranslation()
+	const hostID=host?.id||''
 	const [path,setPath]=useState('')
 	const [pathInput,setPathInput]=useState('')
 	const [entries,setEntries]=useState<SFTPFileEntry[]>([])
-	const [loading,setLoading]=useState(true)
+	const [loading,setLoading]=useState(false)
 	const [busy,setBusy]=useState(false)
 	const [listError,setListError]=useState('')
 	const [notice,setNotice]=useState('')
@@ -784,11 +920,11 @@ function SFTPBrowser({hosts,hostID,onHostChange}:{hosts:Host[];hostID:string;onH
 	}
 	const acceptsFiles=(event:React.DragEvent<HTMLElement>)=>Array.from(event.dataTransfer.types).includes('Files')
 	return <>
-		<aside className={`sftp-browser panel ${dragging?'dragging':''}`} onDragEnter={event=>{if(acceptsFiles(event)){event.preventDefault();setDragging(true)}}} onDragOver={event=>{if(acceptsFiles(event)){event.preventDefault();event.dataTransfer.dropEffect=busy?'none':'copy'}}} onDragLeave={event=>{event.preventDefault();if(!(event.relatedTarget instanceof Node&&event.currentTarget.contains(event.relatedTarget)))setDragging(false)}} onDrop={event=>{if(!acceptsFiles(event))return;event.preventDefault();setDragging(false);if(!busy)void uploadFiles(Array.from(event.dataTransfer.files))}}>
-			<header><div><FolderOpen size={17}/><b>SFTP</b></div><select value={hostID} onChange={event=>onHostChange(event.target.value)}>{hosts.map(host=><option value={host.id} key={host.id}>{host.name} · {host.user}@{host.address}</option>)}</select></header>
-			<form className="sftp-path" onSubmit={event=>{event.preventDefault();void load(pathInput)}}><button type="button" disabled={!path||path==='/'} onClick={()=>void load(remoteParentPath(path))} title={t('workspace.parent')}>‹</button><input value={pathInput} onChange={event=>setPathInput(event.target.value)} aria-label={t('sshWorkspace.remotePath')}/><button type="submit" disabled={loading}><ChevronRight size={13}/></button><button type="button" disabled={loading} onClick={()=>void load(path)} title={t('common.refresh')}><RefreshCw className={loading?'spin':''} size={13}/></button></form>
-			<div className="sftp-actions"><button type="button" disabled={busy||!path} onClick={()=>setNameEditor({mode:'create'})}><Plus size={13}/>{t('sshWorkspace.newDirectory')}</button><label className={busy?'disabled':''}><UploadCloud size={13}/>{t('common.upload')}<input key={inputKey} type="file" multiple disabled={busy||!path} onChange={event=>void uploadFiles(Array.from(event.target.files||[]))}/></label></div>
-			<div className="sftp-list">{loading?<span className="sftp-state"><LoaderCircle className="spin" size={14}/>{t('common.loading')}</span>:listError?<span className="sftp-state error">{listError}</span>:entries.length?entries.map(entry=><div className="sftp-row" key={`${entry.type}:${entry.path}`}><button type="button" className="sftp-entry" onClick={()=>entry.type==='directory'?void load(entry.path):void openTextFile(entry)} title={entry.path}>{openingFile===entry.path?<LoaderCircle className="spin" size={14}/>:entry.type==='directory'?<FolderOpen size={14}/>:<FileText size={14}/>}<span><b>{entry.name}</b><small>{entry.mode} · {entry.type==='directory'?'—':formatFileSize(entry.size||0)} · {new Date(entry.modified_at).toLocaleString(localeFor(instance.language))}</small></span></button>{entry.type!=='directory'&&<button type="button" onClick={()=>download(entry)} title={t('common.download')}><Download size={12}/></button>}<button type="button" onClick={()=>setNameEditor({mode:'rename',entry})} title={t('sshWorkspace.rename')}><Edit3 size={12}/></button><button type="button" className="danger" onClick={()=>setDeleteCandidate({entry})} title={t('common.delete')}><Trash2 size={12}/></button></div>):<span className="sftp-state">{t('workspace.emptyDirectory')}</span>}</div>
+		<aside className={`sftp-browser panel ${dragging?'dragging':''}`} onDragEnter={event=>{if(hostID&&acceptsFiles(event)){event.preventDefault();setDragging(true)}}} onDragOver={event=>{if(hostID&&acceptsFiles(event)){event.preventDefault();event.dataTransfer.dropEffect=busy?'none':'copy'}}} onDragLeave={event=>{event.preventDefault();if(!(event.relatedTarget instanceof Node&&event.currentTarget.contains(event.relatedTarget)))setDragging(false)}} onDrop={event=>{if(!hostID||!acceptsFiles(event))return;event.preventDefault();setDragging(false);if(!busy)void uploadFiles(Array.from(event.dataTransfer.files))}}>
+			<header><div><FolderOpen size={17}/><b>SFTP</b></div><span className="sftp-host">{host?`${host.name} · ${host.user}@${host.address}`:'—'}</span></header>
+			<form className="sftp-path" onSubmit={event=>{event.preventDefault();void load(pathInput)}}><button type="button" disabled={!path||path==='/'} onClick={()=>void load(remoteParentPath(path))} title={t('workspace.parent')}>‹</button><input value={pathInput} disabled={!hostID} onChange={event=>setPathInput(event.target.value)} aria-label={t('sshWorkspace.remotePath')}/><button type="submit" disabled={!hostID||loading}><ChevronRight size={13}/></button><button type="button" disabled={!hostID||loading} onClick={()=>void load(path)} title={t('common.refresh')}><RefreshCw className={loading?'spin':''} size={13}/></button></form>
+			<div className="sftp-actions"><button type="button" disabled={busy||!path} onClick={()=>setNameEditor({mode:'create'})}><Plus size={13}/>{t('sshWorkspace.newDirectory')}</button><label className={busy||!path?'disabled':''}><UploadCloud size={13}/>{t('common.upload')}<input key={inputKey} type="file" multiple disabled={busy||!path} onChange={event=>void uploadFiles(Array.from(event.target.files||[]))}/></label></div>
+			<div className="sftp-list">{!hostID?<span className="sftp-state">{t('sshWorkspace.noTerminal')}</span>:loading?<span className="sftp-state"><LoaderCircle className="spin" size={14}/>{t('common.loading')}</span>:listError?<span className="sftp-state error">{listError}</span>:entries.length?entries.map(entry=><div className="sftp-row" key={`${entry.type}:${entry.path}`}><button type="button" className="sftp-entry" onClick={()=>entry.type==='directory'?void load(entry.path):void openTextFile(entry)} title={entry.path}>{openingFile===entry.path?<LoaderCircle className="spin" size={14}/>:entry.type==='directory'?<FolderOpen size={14}/>:<FileText size={14}/>}<span><b>{entry.name}</b><small>{entry.mode} · {entry.type==='directory'?'—':formatFileSize(entry.size||0)} · {new Date(entry.modified_at).toLocaleString(localeFor(instance.language))}</small></span></button>{entry.type!=='directory'&&<button type="button" onClick={()=>download(entry)} title={t('common.download')}><Download size={12}/></button>}<button type="button" onClick={()=>setNameEditor({mode:'rename',entry})} title={t('sshWorkspace.rename')}><Edit3 size={12}/></button><button type="button" className="danger" onClick={()=>setDeleteCandidate({entry})} title={t('common.delete')}><Trash2 size={12}/></button></div>):<span className="sftp-state">{t('workspace.emptyDirectory')}</span>}</div>
 			{notice&&<div className={`sftp-notice ${noticeError?'error':''}`}>{notice}<button onClick={()=>setNotice('')}><X size={11}/></button></div>}
 			{dragging&&<div className="sftp-drop"><UploadCloud size={28}/><b>{t('workspace.dropFilesHere')}</b></div>}
 		</aside>
@@ -821,25 +957,6 @@ function PasswordInput(props:PasswordInputProps){
 }
 
 
-function SetupPage({onAuthenticated,onRequiresLogin}:{onAuthenticated:()=>void;onRequiresLogin:()=>void}){
-	const {t}=useTranslation()
-	const [password,setPassword]=useState('')
-	const [confirmation,setConfirmation]=useState('')
-	const [busy,setBusy]=useState(false)
-	const [error,setError]=useState('')
-	const submit=async(event:FormEvent)=>{
-		event.preventDefault()
-		if(password!==confirmation){setError(t('password.mismatch'));return}
-		setBusy(true);setError('')
-		try{await api.initializePassword(password);setPassword('');setConfirmation('');onAuthenticated()}
-		catch(err){
-			try{if((await api.authStatus()).initialized){onRequiresLogin();return}}catch{/* keep the initialization error */}
-			setError(errorText(err))
-		}finally{setBusy(false)}
-	}
-	return <div className="auth-screen"><LanguageSwitch/><section className="login-card"><div className="login-mark"><KeyRound size={29}/></div><span>{t('auth.setupLabel')}</span><h1>{t('auth.setupTitle')}</h1><p>{t('auth.setupText')}</p><form onSubmit={submit}><label><span>{t('password.replacement')}</span><div className="login-input"><LockKeyhole size={17}/><PasswordInput aria-label={t('password.replacement')} autoComplete="new-password" minLength={12} value={password} onChange={event=>setPassword(event.target.value)} autoFocus required/></div></label><label><span>{t('password.confirmation')}</span><div className="login-input"><ShieldCheck size={17}/><PasswordInput aria-label={t('password.confirmation')} autoComplete="new-password" minLength={12} value={confirmation} onChange={event=>setConfirmation(event.target.value)} required/></div></label>{error&&<div className="login-error"><ShieldAlert size={15}/>{error}</div>}<button className="primary" disabled={busy||password.length<12||confirmation.length<12}>{busy?<LoaderCircle className="spin" size={17}/>:<ShieldCheck size={17}/>}<span>{busy?t('auth.initializing'):t('auth.initialize')}</span></button></form></section></div>
-}
-
 function DestructiveConfirmDialog({title,busy,onCancel,onConfirm}:{title:string;busy:boolean;onCancel:()=>void;onConfirm:()=>void}){
 	const {t}=useTranslation()
 	useEffect(()=>{const close=(event:KeyboardEvent)=>{if(event.key==='Escape'&&!busy)onCancel()};window.addEventListener('keydown',close);return()=>window.removeEventListener('keydown',close)},[busy,onCancel])
@@ -849,15 +966,6 @@ function DestructiveConfirmDialog({title,busy,onCancel,onConfirm}:{title:string;
 function FullAccessConfirmDialog({onCancel,onConfirm}:{onCancel:()=>void;onConfirm:()=>void}){
 	const {t}=useTranslation()
 	return createPortal(<div className="destructive-dialog-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget)onCancel()}}><section className="destructive-dialog panel" role="dialog" aria-modal="true" aria-labelledby="full-access-dialog-title"><header><ShieldAlert size={21}/><h2 id="full-access-dialog-title">{t('settings.fullAccessTitle')}</h2></header><footer><button type="button" autoFocus onClick={onCancel}>{t('common.cancel')}</button><button type="button" className="danger" onClick={onConfirm}><ShieldAlert size={14}/>{t('common.enable')}</button></footer></section></div>,document.body)
-}
-
-function LoginPage({onAuthenticated}:{onAuthenticated:()=>void}){
-	const {t}=useTranslation()
-	const [password,setPassword]=useState('')
-	const [busy,setBusy]=useState(false)
-	const [error,setError]=useState('')
-	const submit=async(event:FormEvent)=>{event.preventDefault();setBusy(true);setError('');try{await api.login(password);setPassword('');onAuthenticated()}catch(err){setError(errorText(err))}finally{setBusy(false)}}
-		return <div className="auth-screen"><LanguageSwitch/><section className="login-card"><div className="login-mark"><TerminalSquare size={29}/></div><span>{t('auth.subtitle')}</span><h1>{t('auth.title')}</h1><form onSubmit={submit}><label><div className="login-input"><LockKeyhole size={17}/><PasswordInput aria-label={t('password.current')} autoComplete="current-password" value={password} onChange={event=>setPassword(event.target.value)} autoFocus required/></div></label>{error&&<div className="login-error"><ShieldAlert size={15}/>{error}</div>}<button className="primary" disabled={busy||password.length===0}>{busy?<LoaderCircle className="spin" size={17}/>:<ShieldCheck size={17}/>}<span>{busy?t('auth.authenticating'):t('auth.enter')}</span></button></form></section></div>
 }
 
 type ConfigurationSection = 'models' | 'hosts' | 'proxies' | 'system'
@@ -881,16 +989,27 @@ function ConfigurationPage({hosts,providers,proxies,settings,capabilities,health
     ['proxies',<Cable size={17}/>, t('config.tabs.proxies'), t('config.configured',{count:proxies.length})],
     ['system',<SlidersHorizontal size={17}/>, t('config.tabs.system'), t('config.maxIterations',{count:settings?.agent_max_iterations??50})],
 	  ]
-	  const addressToggleLabel=t(showAddresses?'config.hideAddresses':'config.showAddresses')
 	  return <div className="configuration-center page-stack">
-	    <div className="configuration-tabs-row"><div className="configuration-tabs" role="tablist" aria-label={t('config.sections')}>{tabs.map(([id,icon,label,meta])=><button type="button" role="tab" aria-selected={section===id} className={section===id?'active':''} onClick={()=>setSection(id)} key={id}>{icon}<span><b>{label}</b><small>{meta}</small></span><ChevronRight size={15}/></button>)}</div><button type="button" className={`icon-button configuration-address-toggle ${showAddresses?'active':''}`} aria-label={addressToggleLabel} title={addressToggleLabel} onClick={()=>setShowAddresses(value=>!value)}>{showAddresses?<EyeOff size={17}/>:<Eye size={17}/>}</button></div>
+	    <div className="configuration-tabs-row"><div className="configuration-tabs" role="tablist" aria-label={t('config.sections')}>{tabs.map(([id,icon,label,meta])=><button type="button" role="tab" aria-selected={section===id} className={section===id?'active':''} onClick={()=>setSection(id)} key={id}>{icon}<span><b>{label}</b><small>{meta}</small></span><ChevronRight size={15}/></button>)}</div></div>
     <div className="configuration-content" role="tabpanel">
-	  {section==='models'&&<ModelsPage providers={providers} proxies={proxies} health={health} showAddresses={showAddresses} refresh={refresh}/>}
-	  {section==='hosts'&&<HostsPage hosts={hosts} proxies={proxies} showAddresses={showAddresses} refresh={refresh}/>}
-	  {section==='proxies'&&<ProxiesPage proxies={proxies} showAddresses={showAddresses} refresh={refresh}/>}
+	  {section==='models'&&(
+		<ModelsPage providers={providers} proxies={proxies} showAddresses={showAddresses} onToggleAddresses={()=>setShowAddresses(value=>!value)} refresh={refresh}/>
+	  )}
+	  {section==='hosts'&&(
+		<HostsPage hosts={hosts} proxies={proxies} showAddresses={showAddresses} onToggleAddresses={()=>setShowAddresses(value=>!value)} refresh={refresh}/>
+	  )}
+	  {section==='proxies'&&(
+		<ProxiesPage proxies={proxies} showAddresses={showAddresses} onToggleAddresses={()=>setShowAddresses(value=>!value)} refresh={refresh}/>
+	  )}
 	  {section==='system'&&<SystemSettingsPage settings={settings} providers={providers} proxies={proxies} capabilities={capabilities} modelStatus={health?.model} refresh={refresh}/>}
     </div>
   </div>
+}
+
+function AddressVisibilityButton({visible,onToggle}:{visible:boolean;onToggle:()=>void}){
+	const {t}=useTranslation()
+	const label=t(visible?'config.hideAddresses':'config.showAddresses')
+	return <button type="button" className={`icon-button configuration-address-toggle ${visible?'active':''}`} aria-label={label} title={label} onClick={onToggle}>{visible?<EyeOff size={17}/>:<Eye size={17}/>}</button>
 }
 
 type ExtensionSection = 'overview' | 'skills' | 'mcp' | 'tools'
@@ -918,10 +1037,52 @@ function ExtensionsPage({skills,mcpServers,toolCatalog,refresh}:{skills:ManagedS
 }
 
 type MCPFormState = {
-	id?:string;name:string;transport:MCPTransport;command:string;argsText:string;cwd:string;url:string;envText:string;headersText:string;enabled:boolean;clearEnv:boolean;clearHeaders:boolean
+	id:string;name:string;transport:MCPTransport;command:string;argsText:string;cwd:string;url:string;envText:string;headersText:string;enabled:boolean;clearEnv:boolean;clearHeaders:boolean
 }
 
-const emptyMCPForm:MCPFormState={name:'',transport:'stdio',command:'',argsText:'',cwd:'',url:'',envText:'',headersText:'',enabled:false,clearEnv:false,clearHeaders:false}
+const mcpImportExample=JSON.stringify({mcpServers:{'cloudflare-api':{url:'https://mcp.cloudflare.com/mcp'}}},null,2)
+
+function mcpStringMap(value:unknown,serverName:string,field:string){
+	if(value===undefined)return undefined
+	if(!value||typeof value!=='object'||Array.isArray(value))throw new Error(i18n.t('mcp.invalidField',{name:serverName,field}))
+	const result:Record<string,string>={}
+	for(const [name,content] of Object.entries(value)){
+		if(typeof content!=='string')throw new Error(i18n.t('mcp.invalidField',{name:serverName,field}))
+		result[name]=content
+	}
+	return result
+}
+
+function parseMCPImport(value:string):MCPServerInput[]{
+	let parsed:unknown
+	try{parsed=JSON.parse(value)}catch{throw new Error(i18n.t('mcp.invalidConfig'))}
+	if(!parsed||typeof parsed!=='object'||Array.isArray(parsed))throw new Error(i18n.t('mcp.invalidConfig'))
+	const root=(parsed as Record<string,unknown>).mcpServers
+	if(!root||typeof root!=='object'||Array.isArray(root)||!Object.keys(root).length)throw new Error(i18n.t('mcp.invalidConfig'))
+	return Object.entries(root).map(([rawName,value])=>{
+		const name=rawName.trim()
+		if(!name||!value||typeof value!=='object'||Array.isArray(value))throw new Error(i18n.t('mcp.invalidEntry',{name:rawName||'?'}))
+		const entry=value as Record<string,unknown>
+		const url=typeof entry.url==='string'?entry.url.trim():''
+		const command=typeof entry.command==='string'?entry.command.trim():''
+		if((url?1:0)+(command?1:0)!==1)throw new Error(i18n.t('mcp.invalidEntry',{name}))
+		if(entry.args!==undefined&&(!Array.isArray(entry.args)||entry.args.some(item=>typeof item!=='string')))throw new Error(i18n.t('mcp.invalidField',{name,field:'args'}))
+		if(entry.cwd!==undefined&&typeof entry.cwd!=='string')throw new Error(i18n.t('mcp.invalidField',{name,field:'cwd'}))
+		if(entry.disabled!==undefined&&typeof entry.disabled!=='boolean')throw new Error(i18n.t('mcp.invalidField',{name,field:'disabled'}))
+		if(entry.enabled!==undefined&&typeof entry.enabled!=='boolean')throw new Error(i18n.t('mcp.invalidField',{name,field:'enabled'}))
+		return {
+			name,
+			transport:url?'streamable_http':'stdio',
+			command,
+			args:Array.isArray(entry.args)?entry.args as string[]:[],
+			cwd:typeof entry.cwd==='string'?entry.cwd.trim():'',
+			url,
+			env:mcpStringMap(entry.env,name,'env'),
+			headers:mcpStringMap(entry.headers,name,'headers'),
+			enabled:typeof entry.disabled==='boolean'?!entry.disabled:typeof entry.enabled==='boolean'?entry.enabled:true,
+		}
+	})
+}
 
 function parseMCPPairs(value:string,kind:'env'|'header'){
 	const result:Record<string,string>={}
@@ -938,30 +1099,60 @@ function parseMCPPairs(value:string,kind:'env'|'header'){
 
 function MCPServersPage({servers,refresh}:{servers:MCPServer[];refresh:()=>Promise<void>}){
 	const {t,i18n:instance}=useTranslation()
+	const notify=useNotifier()
 	const [form,setForm]=useState<MCPFormState|null>(null)
+	const [importConfig,setImportConfig]=useState<string|null>(null)
 	const [busy,setBusy]=useState('')
-	const [notice,setNotice]=useState('')
 	const [error,setError]=useState('')
 	const [deleteCandidate,setDeleteCandidate]=useState<MCPServer|null>(null)
-	const openCreate=()=>{setForm({...emptyMCPForm});setNotice('');setError('')}
-	const openEdit=(server:MCPServer)=>{setForm({id:server.id,name:server.name,transport:server.transport,command:server.command||'',argsText:(server.args||[]).join('\n'),cwd:server.cwd||'',url:server.url||'',envText:'',headersText:'',enabled:server.enabled,clearEnv:false,clearHeaders:false});setNotice('');setError('')}
+	const [authorizing,setAuthorizing]=useState('')
+	const openCreate=()=>{setForm(null);setImportConfig('');setError('')}
+	const openEdit=(server:MCPServer)=>{setImportConfig(null);setForm({id:server.id,name:server.name,transport:server.transport,command:server.command||'',argsText:(server.args||[]).join('\n'),cwd:server.cwd||'',url:server.url||'',envText:'',headersText:'',enabled:server.enabled,clearEnv:false,clearHeaders:false});setError('')}
+	const importServers=async(event:FormEvent)=>{event.preventDefault();if(importConfig===null)return;setBusy('import');setError('');let imported=0;try{
+		const inputs=parseMCPImport(importConfig)
+		const existingNames=new Set(servers.map(server=>server.name))
+		const duplicate=inputs.find(input=>existingNames.has(input.name))
+		if(duplicate)throw new Error(t('mcp.nameExists',{name:duplicate.name}))
+		for(const input of inputs){await api.saveMCPServer(input);imported++}
+		setImportConfig(null);notify(t('mcp.imported',{count:imported}));await refresh()
+	}catch(err){if(imported)await refresh();setError(imported?t('mcp.importPartial',{count:imported,message:errorText(err)}):errorText(err))}finally{setBusy('')}}
 	const save=async(event:FormEvent)=>{event.preventDefault();if(!form)return;setBusy('save');setError('');try{
 		const input:MCPServerInput={id:form.id,name:form.name.trim(),transport:form.transport,command:form.transport==='stdio'?form.command.trim():'',args:form.transport==='stdio'?form.argsText.split(/\r?\n/).map(item=>item.trim()).filter(Boolean):[],cwd:form.transport==='stdio'?form.cwd.trim():'',url:form.transport==='streamable_http'?form.url.trim():'',enabled:form.enabled}
-		if(!form.id||form.envText.trim()||form.clearEnv)input.env=form.clearEnv?{}:parseMCPPairs(form.envText,'env')
-		if(!form.id||form.headersText.trim()||form.clearHeaders)input.headers=form.clearHeaders?{}:parseMCPPairs(form.headersText,'header')
-			const saved=await api.saveMCPServer(input);setForm(null);setNotice(`${t('mcp.saved',{name:saved.name,status:t(`statusLabels.${saved.status}`,{defaultValue:saved.status})})}${saved.last_error?` · ${saved.last_error}`:''}`);await refresh()
+		if(form.envText.trim()||form.clearEnv)input.env=form.clearEnv?{}:parseMCPPairs(form.envText,'env')
+		if(form.headersText.trim()||form.clearHeaders)input.headers=form.clearHeaders?{}:parseMCPPairs(form.headersText,'header')
+			const saved=await api.saveMCPServer(input);setForm(null);notify(`${t('mcp.saved',{name:saved.name,status:t(`statusLabels.${saved.status}`,{defaultValue:saved.status})})}${saved.last_error?` · ${saved.last_error}`:''}`);await refresh()
 	}catch(err){setError(errorText(err))}finally{setBusy('')}}
-	const test=async(server:MCPServer)=>{setBusy(`test-${server.id}`);setError('');try{const result=await api.testMCPServer(server.id);setNotice(t('mcp.healthy',{count:result.tool_count,latency:result.latency_ms}))}catch(err){setError(errorText(err))}finally{setBusy('')}}
-	const toggle=async(server:MCPServer)=>{setBusy(`toggle-${server.id}`);setError('');try{const result=await api.setMCPServerEnabled(server.id,!server.enabled);setNotice(`${t('mcp.toggled',{name:result.name,state:result.enabled?t('common.enabled'):t('common.disabled'),status:t(`statusLabels.${result.status}`,{defaultValue:result.status})})}${result.last_error?` · ${result.last_error}`:''}`);await refresh()}catch(err){setError(errorText(err))}finally{setBusy('')}}
-	const retry=async(server:MCPServer)=>{setBusy(`retry-${server.id}`);setError('');try{const result=await api.retryMCPServer(server.id);setNotice(t('mcp.reconnected',{name:result.name,count:result.tool_count}));await refresh()}catch(err){setError(errorText(err));await refresh()}finally{setBusy('')}}
-	const remove=async()=>{if(!deleteCandidate)return;const server=deleteCandidate;setBusy(`delete-${server.id}`);setError('');try{await api.deleteMCPServer(server.id);setNotice(t('mcp.deleted',{name:server.name}));await refresh()}catch(err){setError(errorText(err))}finally{setBusy('');setDeleteCandidate(null)}}
+	const test=async(server:MCPServer)=>{setBusy(`test-${server.id}`);setError('');try{const result=await api.testMCPServer(server.id);notify(t('mcp.healthy',{count:result.tool_count,latency:result.latency_ms}))}catch(err){setError(errorText(err))}finally{setBusy('')}}
+	const toggle=async(server:MCPServer)=>{setBusy(`toggle-${server.id}`);setError('');try{const result=await api.setMCPServerEnabled(server.id,!server.enabled);notify(`${t('mcp.toggled',{name:result.name,state:result.enabled?t('common.enabled'):t('common.disabled'),status:t(`statusLabels.${result.status}`,{defaultValue:result.status})})}${result.last_error?` · ${result.last_error}`:''}`);await refresh()}catch(err){setError(errorText(err))}finally{setBusy('')}}
+	const retry=async(server:MCPServer)=>{setBusy(`retry-${server.id}`);setError('');try{const result=await api.retryMCPServer(server.id);notify(t('mcp.reconnected',{name:result.name,count:result.tool_count}));await refresh()}catch(err){setError(errorText(err));await refresh()}finally{setBusy('')}}
+	const authorize=async(server:MCPServer)=>{
+		let popup:Window|null=null
+		if(!desktopRuntime){popup=window.open('about:blank','_blank');if(popup)popup.opener=null}
+		setBusy(`oauth-start-${server.id}`);setError('')
+		try{
+			const result=await api.startMCPOAuth(server.id)
+			if(desktopRuntime)await invoke('open_external_url',{url:result.authorization_url})
+			else if(popup)popup.location.href=result.authorization_url
+			else throw new Error(t('mcp.popupBlocked'))
+			setAuthorizing(server.id);setBusy('')
+			for(let attempt=0;attempt<400;attempt++){
+				await new Promise(resolve=>window.setTimeout(resolve,1500))
+				const current=(await api.mcpServers()).find(item=>item.id===server.id)
+				if(current?.status==='ready'&&current.oauth_configured){notify(t('mcp.authorized',{name:server.name}));await refresh();return}
+				if(current?.status==='error'){setError(current.last_error||t('mcp.authorizationFailed'));await refresh();return}
+			}
+			setError(t('mcp.authorizationExpired'))
+		}catch(err){popup?.close();setError(errorText(err))}finally{setBusy('');setAuthorizing('')}
+	}
+	const clearOAuth=async(server:MCPServer)=>{setBusy(`oauth-clear-${server.id}`);setError('');try{await api.clearMCPOAuth(server.id);notify(t('mcp.authorizationCleared',{name:server.name}));await refresh()}catch(err){setError(errorText(err))}finally{setBusy('')}}
+	const remove=async()=>{if(!deleteCandidate)return;const server=deleteCandidate;setBusy(`delete-${server.id}`);setError('');try{await api.deleteMCPServer(server.id);notify(t('mcp.deleted',{name:server.name}));await refresh()}catch(err){setError(errorText(err))}finally{setBusy('');setDeleteCandidate(null)}}
 		return <div className="mcp-page page-stack">
 			<div className="page-actions"><div/><button className="primary" onClick={openCreate}><Plus size={15}/>{t('mcp.add')}</button></div>
 		<div className="mcp-boundary-note"><ShieldAlert size={16}/><div><b>{t('mcp.boundary')}</b><span>{t('mcp.boundaryText')}</span></div></div>
-		{notice&&<div className="notice">{notice}<button onClick={()=>setNotice('')}><X size={14}/></button></div>}
 		{error&&<div className="skill-error"><ShieldAlert size={15}/>{error}<button onClick={()=>setError('')}><X size={14}/></button></div>}
-		{form&&<form className="mcp-form panel" onSubmit={save}><header><div><Zap size={19}/><span><h3>{form.id?form.name||t('mcp.server'):t('mcp.connect')}</h3></span></div><button type="button" onClick={()=>setForm(null)} title={t('common.close')}><X size={15}/></button></header><div className="mcp-form-grid"><label><span>{t('mcp.displayName')}</span><input value={form.name} onChange={event=>setForm({...form,name:event.target.value})} required/></label><label><span>{t('mcp.transport')}</span><select value={form.transport} onChange={event=>setForm({...form,transport:event.target.value as MCPTransport})}><option value="stdio">{t('mcp.localProcess')}</option><option value="streamable_http">Streamable HTTP</option></select></label>{form.transport==='stdio'?<><label><span>{t('mcp.command')}</span><input value={form.command} onChange={event=>setForm({...form,command:event.target.value})} required/></label><label><span>{t('mcp.cwd')}</span><input value={form.cwd} onChange={event=>setForm({...form,cwd:event.target.value})}/></label><label className="mcp-wide"><span>{t('mcp.args')}</span><textarea value={form.argsText} onChange={event=>setForm({...form,argsText:event.target.value})}/></label></>:<label className="mcp-wide"><span>{t('mcp.endpoint')}</span><input value={form.url} onChange={event=>setForm({...form,url:event.target.value})} required/></label>}<label className="mcp-wide"><span>{t('mcp.env')}</span><textarea value={form.envText} onChange={event=>setForm({...form,envText:event.target.value,clearEnv:false})} placeholder={form.id?t('mcp.preserve'):''}/>{form.id&&<small><label><input type="checkbox" checked={form.clearEnv} onChange={event=>setForm({...form,clearEnv:event.target.checked,envText:event.target.checked?'':form.envText})}/> {t('mcp.clearEnv')}</label></small>}</label><label className="mcp-wide"><span>{t('mcp.headers')}</span><textarea value={form.headersText} onChange={event=>setForm({...form,headersText:event.target.value,clearHeaders:false})} placeholder={form.id?t('mcp.preserve'):''}/>{form.id&&<small><label><input type="checkbox" checked={form.clearHeaders} onChange={event=>setForm({...form,clearHeaders:event.target.checked,headersText:event.target.checked?'':form.headersText})}/> {t('mcp.clearHeaders')}</label></small>}</label></div><footer><label className="mcp-enable-on-save"><input type="checkbox" checked={form.enabled} onChange={event=>setForm({...form,enabled:event.target.checked})}/><i/><span><b>{t('mcp.enableAfterSave')}</b></span></label><button type="button" onClick={()=>setForm(null)}>{t('common.cancel')}</button><button className="primary" disabled={busy==='save'}>{busy==='save'?<LoaderCircle className="spin" size={14}/>:<Save size={14}/>} {busy==='save'?t('common.saving'):t('mcp.saveServer')}</button></footer></form>}
-		<div className="mcp-grid">{servers.map(server=><article className={`mcp-card panel ${server.status}`} key={server.id}><header><div className="mcp-card-icon"><Zap size={19}/></div><span><h3>{server.name}</h3><code>{server.transport==='stdio'?server.command:server.url}</code></span><em className={server.status}><CircleDot size={9}/>{t(`statusLabels.${server.status}`,{defaultValue:server.status})}</em></header><dl><div><dt>{t('mcp.discoveredTools')}</dt><dd>{server.tool_count}</dd></div><div><dt>{t('mcp.secrets')}</dt><dd>{t('mcp.configuredSecrets',{count:(server.env_keys?.length||0)+(server.header_keys?.length||0)})}</dd></div><div><dt>{t('mcp.lastConnected')}</dt><dd>{server.connected_at?new Date(server.connected_at).toLocaleString(localeFor(instance.language)):'—'}</dd></div></dl>{server.last_error&&<div className="mcp-card-error"><ShieldAlert size={13}/><span>{server.last_error}</span></div>}<div className="mcp-actions"><button onClick={()=>void test(server)} disabled={!!busy}><Activity size={13}/>{busy===`test-${server.id}`?t('common.testing'):t('common.test')}</button><button onClick={()=>openEdit(server)} disabled={!!busy}><Edit3 size={13}/>{t('common.edit')}</button>{server.enabled&&server.status!=='ready'&&<button onClick={()=>void retry(server)} disabled={!!busy}><RefreshCw className={busy===`retry-${server.id}`?'spin':''} size={13}/>{t('common.retry')}</button>}<button className={server.enabled?'disable':'enable'} onClick={()=>void toggle(server)} disabled={!!busy}>{busy===`toggle-${server.id}`?<LoaderCircle className="spin" size={13}/>:server.enabled?<X size={13}/>:<Check size={13}/>} {server.enabled?t('common.disable'):t('common.enable')}</button><button className="danger" title={t('common.delete')} onClick={()=>setDeleteCandidate(server)} disabled={!!busy}><Trash2 size={13}/></button></div>{server.tools?.length?<details className="mcp-tools"><summary>{t('mcp.modelTools',{count:server.tools.length})} <ChevronRight size={13}/></summary><div>{server.tools.map(item=><section key={item.exposed_name}><code>{item.exposed_name}</code><span>{t('mcp.remote')} · {item.name}</span><p>{item.description}</p></section>)}</div></details>:null}</article>)}</div>
+		{importConfig!==null&&<form className="mcp-form mcp-import-form panel" onSubmit={importServers}><header><div><Zap size={19}/><span><h3>{t('mcp.importConfig')}</h3></span></div><button type="button" onClick={()=>setImportConfig(null)} title={t('common.close')}><X size={15}/></button></header><div className="mcp-import-body"><textarea autoFocus spellCheck={false} aria-label={t('mcp.config')} value={importConfig} onChange={event=>setImportConfig(event.target.value)} placeholder={mcpImportExample}/></div><footer><span className="mcp-form-spacer"/><button type="button" onClick={()=>setImportConfig(null)}>{t('common.cancel')}</button><button className="primary" disabled={busy==='import'||!importConfig.trim()}>{busy==='import'?<LoaderCircle className="spin" size={14}/>:<Plus size={14}/>} {busy==='import'?t('mcp.importing'):t('mcp.import')}</button></footer></form>}
+		{form&&<form className="mcp-form panel" onSubmit={save}><header><div><Zap size={19}/><span><h3>{form.name||t('mcp.server')}</h3></span></div><button type="button" onClick={()=>setForm(null)} title={t('common.close')}><X size={15}/></button></header><div className="mcp-form-grid"><label><span>{t('mcp.displayName')}</span><input value={form.name} onChange={event=>setForm({...form,name:event.target.value})} required/></label><label><span>{t('mcp.transport')}</span><select value={form.transport} onChange={event=>setForm({...form,transport:event.target.value as MCPTransport})}><option value="stdio">{t('mcp.localProcess')}</option><option value="streamable_http">Streamable HTTP</option></select></label>{form.transport==='stdio'?<><label><span>{t('mcp.command')}</span><input value={form.command} onChange={event=>setForm({...form,command:event.target.value})} required/></label><label><span>{t('mcp.cwd')}</span><input value={form.cwd} onChange={event=>setForm({...form,cwd:event.target.value})}/></label><label className="mcp-wide"><span>{t('mcp.args')}</span><textarea value={form.argsText} onChange={event=>setForm({...form,argsText:event.target.value})}/></label></>:<label className="mcp-wide"><span>{t('mcp.endpoint')}</span><input value={form.url} onChange={event=>setForm({...form,url:event.target.value})} required/></label>}<label className="mcp-wide"><span>{t('mcp.env')}</span><textarea value={form.envText} onChange={event=>setForm({...form,envText:event.target.value,clearEnv:false})} placeholder={t('mcp.preserve')}/><small><label><input type="checkbox" checked={form.clearEnv} onChange={event=>setForm({...form,clearEnv:event.target.checked,envText:event.target.checked?'':form.envText})}/> {t('mcp.clearEnv')}</label></small></label><label className="mcp-wide"><span>{t('mcp.headers')}</span><textarea value={form.headersText} onChange={event=>setForm({...form,headersText:event.target.value,clearHeaders:false})} placeholder={t('mcp.preserve')}/><small><label><input type="checkbox" checked={form.clearHeaders} onChange={event=>setForm({...form,clearHeaders:event.target.checked,headersText:event.target.checked?'':form.headersText})}/> {t('mcp.clearHeaders')}</label></small></label></div><footer><label className="mcp-enable-on-save"><input type="checkbox" checked={form.enabled} onChange={event=>setForm({...form,enabled:event.target.checked})}/><i/><span><b>{t('mcp.enableAfterSave')}</b></span></label><button type="button" onClick={()=>setForm(null)}>{t('common.cancel')}</button><button className="primary" disabled={busy==='save'}>{busy==='save'?<LoaderCircle className="spin" size={14}/>:<Save size={14}/>} {busy==='save'?t('common.saving'):t('mcp.saveServer')}</button></footer></form>}
+		<div className="mcp-grid">{servers.map(server=><article className={`mcp-card panel ${server.status}`} key={server.id}><header><div className="mcp-card-icon"><Zap size={19}/></div><span><h3>{server.name}</h3><code>{server.transport==='stdio'?server.command:server.url}</code></span><em className={server.status}><CircleDot size={9}/>{t(`statusLabels.${server.status}`,{defaultValue:server.status})}</em></header><dl><div><dt>{t('mcp.discoveredTools')}</dt><dd>{server.tool_count}</dd></div><div><dt>{t('mcp.secrets')}</dt><dd>{server.oauth_configured?t('mcp.oauth'):t('mcp.configuredSecrets',{count:(server.env_keys?.length||0)+(server.header_keys?.length||0)})}</dd></div><div><dt>{t('mcp.lastConnected')}</dt><dd>{server.connected_at?new Date(server.connected_at).toLocaleString(localeFor(instance.language)):'—'}</dd></div></dl>{server.last_error&&<div className="mcp-card-error"><ShieldAlert size={13}/><span>{server.last_error}</span></div>}<div className="mcp-actions"><button onClick={()=>void test(server)} disabled={!!busy||authorizing===server.id}><Activity size={13}/>{busy===`test-${server.id}`?t('common.testing'):t('common.test')}</button><button onClick={()=>openEdit(server)} disabled={!!busy||authorizing===server.id}><Edit3 size={13}/>{t('common.edit')}</button>{server.transport==='streamable_http'&&(server.status==='error'||server.oauth_configured)&&<button onClick={()=>void authorize(server)} disabled={!!busy||!!authorizing}><KeyRound size={13}/>{authorizing===server.id?t('mcp.authorizing'):server.oauth_configured?t('mcp.reauthorize'):t('mcp.authorize')}</button>}{server.oauth_configured&&<button title={t('mcp.clearAuthorization')} onClick={()=>void clearOAuth(server)} disabled={!!busy||!!authorizing}><LogOut size={13}/></button>}{server.enabled&&server.status!=='ready'&&authorizing!==server.id&&<button onClick={()=>void retry(server)} disabled={!!busy}><RefreshCw className={busy===`retry-${server.id}`?'spin':''} size={13}/>{t('common.retry')}</button>}<button className={server.enabled?'disable':'enable'} onClick={()=>void toggle(server)} disabled={!!busy||authorizing===server.id}>{busy===`toggle-${server.id}`?<LoaderCircle className="spin" size={13}/>:server.enabled?<X size={13}/>:<Check size={13}/>} {server.enabled?t('common.disable'):t('common.enable')}</button><button className="danger" title={t('common.delete')} onClick={()=>setDeleteCandidate(server)} disabled={!!busy||authorizing===server.id}><Trash2 size={13}/></button></div>{server.tools?.length?<details className="mcp-tools"><summary>{t('mcp.modelTools',{count:server.tools.length})} <ChevronRight size={13}/></summary><div>{server.tools.map(item=><section key={item.exposed_name}><code>{item.exposed_name}</code><span>{t('mcp.remote')} · {item.name}</span><p>{item.description}</p></section>)}</div></details>:null}</article>)}</div>
 		{!servers.length&&<Empty icon={<Zap/>} title={t('mcp.emptyTitle')}/>}
 		{deleteCandidate&&<DestructiveConfirmDialog title={t('mcp.deleteTitle',{name:deleteCandidate.name})} busy={busy===`delete-${deleteCandidate.id}`} onCancel={()=>setDeleteCandidate(null)} onConfirm={()=>void remove()}/>}
 	</div>
@@ -1019,6 +1210,7 @@ function LLMToolsPage({catalog,refresh}:{catalog:LLMToolCatalog|null;refresh:()=
 
 function SkillsPage({skills,refresh}:{skills:ManagedSkill[];refresh:()=>Promise<void>}){
 	const {t,i18n:instance}=useTranslation()
+	const notify=useNotifier()
 	const [query,setQuery]=useState('')
 	const [selectedName,setSelectedName]=useState('')
 	const [selected,setSelected]=useState<ManagedSkill|null>(null)
@@ -1032,21 +1224,19 @@ function SkillsPage({skills,refresh}:{skills:ManagedSkill[];refresh:()=>Promise<
 	const [deleteName,setDeleteName]=useState('')
 	const [deleting,setDeleting]=useState(false)
 	const [toggling,setToggling]=useState(false)
-	const [notice,setNotice]=useState('')
 	const [error,setError]=useState('')
 	const filtered=useMemo(()=>{const needle=query.trim().toLowerCase();return skills.filter(skill=>!needle||`${skill.name} ${skill.summary}`.toLowerCase().includes(needle))},[skills,query])
 	useEffect(()=>{if(!skills.length){setSelectedName('');setSelected(null);setDraft('');return}if(!selectedName||!skills.some(skill=>skill.name===selectedName))setSelectedName(skills[0].name)},[skills,selectedName])
 	useEffect(()=>{if(!selectedName)return;let cancelled=false;setLoading(true);setError('');api.skill(selectedName).then(skill=>{if(cancelled)return;setSelected(skill);setDraft(skill.content||'')}).catch(err=>{if(!cancelled)setError(errorText(err))}).finally(()=>{if(!cancelled)setLoading(false)});return()=>{cancelled=true}},[selectedName])
 	const dirty=!!selected&&draft!==selected.content
 	const selectFile=(file:File|null)=>{setUploadFile(file);if(file&&!uploadName){const base=file.name.replace(/\.(markdown|md|zip)$/i,'').replace(/[^A-Za-z0-9_.-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,64);setUploadName(base)}}
-	const upload=async(event:FormEvent)=>{event.preventDefault();if(!uploadFile)return;setUploading(true);setError('');setNotice('');try{const result=await api.uploadSkill(uploadName.trim(),uploadFile);await refresh();setSelectedName(result.name);setSelected(result);setDraft(result.content||'');setUploadOpen(false);setUploadName('');setUploadFile(null);setNotice(t('skills.uploaded',{name:result.name}))}catch(err){setError(errorText(err))}finally{setUploading(false)}}
-	const save=async()=>{if(!selected)return;setSaving(true);setError('');setNotice('');try{const result=await api.saveSkill(selected.name,draft);setSelected(result);setDraft(result.content||'');await refresh();setNotice(t('skills.saved',{name:result.name}))}catch(err){setError(errorText(err))}finally{setSaving(false)}}
-	const permanentlyDelete=async()=>{if(!deleteName)return;setDeleting(true);setError('');try{await api.deleteSkill(deleteName);setDeleteName('');setSelectedName('');setSelected(null);setDraft('');await refresh();setNotice(t('skills.deleted',{name:deleteName}))}catch(err){setError(errorText(err))}finally{setDeleting(false)}}
-	const toggleEnabled=async()=>{if(!selected)return;setToggling(true);setError('');setNotice('');try{const result=await api.setSkillEnabled(selected.name,!selected.enabled);setSelected(result);setDraft(result.content||draft);await refresh();setNotice(t(result.enabled?'skills.toggledEnabled':'skills.toggledDisabled',{name:result.name}))}catch(err){setError(errorText(err))}finally{setToggling(false)}}
+	const upload=async(event:FormEvent)=>{event.preventDefault();if(!uploadFile)return;setUploading(true);setError('');try{const result=await api.uploadSkill(uploadName.trim(),uploadFile);await refresh();setSelectedName(result.name);setSelected(result);setDraft(result.content||'');setUploadOpen(false);setUploadName('');setUploadFile(null);notify(t('skills.uploaded',{name:result.name}))}catch(err){setError(errorText(err))}finally{setUploading(false)}}
+	const save=async()=>{if(!selected)return;setSaving(true);setError('');try{const result=await api.saveSkill(selected.name,draft);setSelected(result);setDraft(result.content||'');await refresh();notify(t('skills.saved',{name:result.name}))}catch(err){setError(errorText(err))}finally{setSaving(false)}}
+	const permanentlyDelete=async()=>{if(!deleteName)return;setDeleting(true);setError('');try{await api.deleteSkill(deleteName);setDeleteName('');setSelectedName('');setSelected(null);setDraft('');await refresh();notify(t('skills.deleted',{name:deleteName}))}catch(err){setError(errorText(err))}finally{setDeleting(false)}}
+	const toggleEnabled=async()=>{if(!selected)return;setToggling(true);setError('');try{const result=await api.setSkillEnabled(selected.name,!selected.enabled);setSelected(result);setDraft(result.content||draft);await refresh();notify(t(result.enabled?'skills.toggledEnabled':'skills.toggledDisabled',{name:result.name}))}catch(err){setError(errorText(err))}finally{setToggling(false)}}
 
 	return <div className="skills-page page-stack">
 			<div className="page-actions"><div/><button className="primary" onClick={()=>{setUploadOpen(value=>!value);setError('')}}><UploadCloud size={15}/>{uploadOpen?t('skills.closeUpload'):t('skills.uploadSkill')}</button></div>
-		{notice&&<div className="notice">{notice}<button onClick={()=>setNotice('')}><X size={14}/></button></div>}
 		{error&&<div className="skill-error"><ShieldAlert size={15}/>{error}<button onClick={()=>setError('')}><X size={14}/></button></div>}
 		{uploadOpen&&<form className="skill-upload-panel panel" onSubmit={upload}><div><div className="skill-upload-icon"><UploadCloud size={20}/></div><span><b>{t('skills.uploadPackage')}</b><small>{t('skills.packageHelp')}</small></span></div><label><span>{t('skills.skillName')}</span><input value={uploadName} onChange={event=>setUploadName(event.target.value)} pattern="[A-Za-z0-9][A-Za-z0-9_.-]{0,63}" required/></label><label className="skill-file-picker"><FileText size={15}/><span><b>{uploadFile?.name||t('skills.choosePackage')}</b><small>{uploadFile?formatFileSize(uploadFile.size):t('skills.maxPackage')}</small></span><input type="file" accept=".md,.markdown,.zip,text/markdown,application/zip" onChange={event=>selectFile(event.target.files?.[0]||null)} required/></label><button className="primary" disabled={uploading||!uploadFile||!uploadName.trim()}>{uploading?<LoaderCircle className="spin" size={14}/>:<UploadCloud size={14}/>} {uploading?t('common.uploading'):t('skills.uploadActivate')}</button></form>}
 		<section className="skill-registry-summary panel"><div><BookOpen size={19}/><span><b>{t('skills.summary',{enabled:skills.filter(skill=>skill.enabled).length,total:skills.length})}</b></span></div><label><Search size={14}/><input value={query} onChange={event=>setQuery(event.target.value)} placeholder={t('skills.search')}/></label></section>
@@ -1071,6 +1261,7 @@ type SystemSettingsSection='iterations'|'prompt'|'explanation'|'images'|'shell'
 
 function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus,refresh}:{settings:SystemSettings|null;providers:ModelProvider[];proxies:Proxy[];capabilities:ToolCapabilities;modelStatus?:Health['model'];refresh:()=>Promise<void>}) {
   const {t}=useTranslation()
+	const notify=useNotifier()
   const savedValue=settings?.agent_max_iterations??50
   const savedPrompt=settings?.system_prompt??''
 	const defaultPrompt=settings?.default_system_prompt??''
@@ -1094,21 +1285,20 @@ function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus
 	const [imagesDirty,setImagesDirty]=useState(false)
 	const [shellDirty,setShellDirty]=useState(false)
 	const [savingSection,setSavingSection]=useState<SystemSettingsSection|''>('')
-	const [notice,setNotice]=useState('')
 	useEffect(()=>{if(!iterationsDirty)setMaxIterations(savedValue)},[savedValue,iterationsDirty])
 	useEffect(()=>{if(!promptDirty)setSystemPrompt(savedPrompt)},[savedPrompt,promptDirty])
 	useEffect(()=>{if(!explanationDirty){setExplanationEnabled(savedExplanation);setSubagentProvider(savedSubagentProvider);setAutomaticApprovalProvider(savedAutomaticApprovalProvider);setSubagentTimeout(savedSubagentTimeout)}},[savedExplanation,savedSubagentProvider,savedAutomaticApprovalProvider,savedSubagentTimeout,explanationDirty])
 	useEffect(()=>{if(!imagesDirty)setImageTypes(savedImageTypes)},[savedImageTypes,imagesDirty])
 	useEffect(()=>{if(!shellDirty)setShellMode(savedShellMode)},[savedShellMode,shellDirty])
-	const update=(value:number)=>{setMaxIterations(Math.max(5,Math.min(100,value||5)));setIterationsDirty(true);setNotice('')}
-	const updateSystemPrompt=(value:string)=>{setSystemPrompt(value);setPromptDirty(true);setNotice('')}
-	const restoreDefaultPrompt=()=>{setSystemPrompt(defaultPrompt);setPromptDirty(true);setNotice('')}
-	const toggleExplanation=(value:boolean)=>{setExplanationEnabled(value);setExplanationDirty(true);setNotice('')}
-	const selectSubagentProvider=(value:string)=>{setSubagentProvider(value);setExplanationDirty(true);setNotice('')}
-	const selectAutomaticApprovalProvider=(value:string)=>{setAutomaticApprovalProvider(value);setExplanationDirty(true);setNotice('')}
-	const updateSubagentTimeout=(value:number)=>{setSubagentTimeout(Math.max(5,Math.min(120,value||5)));setExplanationDirty(true);setNotice('')}
-	const toggleImageType=(value:string)=>{setImageTypes(current=>current.includes(value)?current.length===1?current:current.filter(item=>item!==value):[...current,value]);setImagesDirty(true);setNotice('')}
-	const selectShellMode=(value:WorkspaceShellMode)=>{setShellMode(value);setShellDirty(true);setNotice('')}
+	const update=(value:number)=>{setMaxIterations(Math.max(5,Math.min(100,value||5)));setIterationsDirty(true)}
+	const updateSystemPrompt=(value:string)=>{setSystemPrompt(value);setPromptDirty(true)}
+	const restoreDefaultPrompt=()=>{setSystemPrompt(defaultPrompt);setPromptDirty(true)}
+	const toggleExplanation=(value:boolean)=>{setExplanationEnabled(value);setExplanationDirty(true)}
+	const selectSubagentProvider=(value:string)=>{setSubagentProvider(value);setExplanationDirty(true)}
+	const selectAutomaticApprovalProvider=(value:string)=>{setAutomaticApprovalProvider(value);setExplanationDirty(true)}
+	const updateSubagentTimeout=(value:number)=>{setSubagentTimeout(Math.max(5,Math.min(120,value||5)));setExplanationDirty(true)}
+	const toggleImageType=(value:string)=>{setImageTypes(current=>current.includes(value)?current.length===1?current:current.filter(item=>item!==value):[...current,value]);setImagesDirty(true)}
+	const selectShellMode=(value:WorkspaceShellMode)=>{setShellMode(value);setShellDirty(true)}
 	const discard=(section:SystemSettingsSection)=>{
 		switch(section){
 		case 'iterations':setMaxIterations(savedValue);setIterationsDirty(false);break
@@ -1117,7 +1307,6 @@ function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus
 		case 'images':setImageTypes(savedImageTypes);setImagesDirty(false);break
 		case 'shell':setShellMode(savedShellMode);setShellDirty(false);break
 		}
-		setNotice('')
 	}
 	const save=async(section:SystemSettingsSection)=>{
 		const input:SystemSettingsInput={agent_max_iterations:section==='iterations'?maxIterations:savedValue}
@@ -1137,15 +1326,14 @@ function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus
 			case 'images':setImageTypes(result.chat_image_allowed_types);setImagesDirty(false);break
 			case 'shell':setShellMode(result.workspace_shell_mode);setShellDirty(false);break
 			}
-			setNotice(t('settings.saved'))
+			notify(t('settings.saved'))
 			await refresh()
-		}catch(err){setNotice(errorText(err))}finally{setSavingSection('')}
+		}catch(err){notify(errorText(err),'error')}finally{setSavingSection('')}
 	}
 	const submit=(section:SystemSettingsSection)=>(event:FormEvent)=>{event.preventDefault();void save(section)}
 	const busy=!!savingSection
   return <div className="system-settings page-stack">
 
-    {notice&&<div className="notice">{notice}<button onClick={()=>setNotice('')}><X size={14}/></button></div>}
 		<div className="settings-form">
 			<SettingsDisclosure icon={<SlidersHorizontal size={18}/>} title={t('settings.maxIterations')} meta={<strong>{maxIterations}</strong>}>
 				<form onSubmit={submit('iterations')}><div className="iteration-editor"><input aria-label={t('settings.maxIterations')} type="range" min="5" max="100" step="1" value={maxIterations} onChange={event=>update(Number(event.target.value))}/><label><span>{t('settings.rounds')}</span><input type="number" min="5" max="100" value={maxIterations} onChange={event=>update(Number(event.target.value))}/></label></div><div className="iteration-presets"><span>{t('settings.quickPresets')}</span>{[20,50,100].map(value=><button type="button" className={maxIterations===value?'active':''} onClick={()=>update(value)} key={value}><b>{value}</b></button>)}</div><SettingsSectionFooter dirty={iterationsDirty} busy={busy} saving={savingSection==='iterations'} onDiscard={()=>discard('iterations')}/></form>
@@ -1163,22 +1351,21 @@ function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus
 				<form onSubmit={submit('shell')}><div className="workspace-shell-modes" role="group" aria-label={t('settings.shellBackend')}><button type="button" className={shellMode==='sandbox'?'active':''} disabled={!settings?.workspace_sandbox_available} onClick={()=>selectShellMode('sandbox')}><ShieldCheck size={16}/><span><b>{t('settings.sandbox')}</b><small>{settings?.workspace_sandbox_available?t('settings.sandboxAvailable'):t('settings.unavailableHost')}</small></span></button><button type="button" className={`${shellMode==='host'?'active ':''}host`} disabled={!settings?.workspace_host_shell_available} onClick={()=>selectShellMode('host')}><TerminalSquare size={16}/><span><b>{t('settings.hostShell')}</b><small>{settings?.workspace_host_shell_available?`${settings.workspace_shell_name||t('settings.systemShell')} · ${t('settings.fullAuthority')}`:t('settings.noShell')}</small></span></button><button type="button" className={shellMode==='disabled'?'active':''} onClick={()=>selectShellMode('disabled')}><Power size={16}/><span><b>{t('settings.shellDisabled')}</b></span></button></div>{shellMode==='host'&&<div className="workspace-shell-warning"><ShieldAlert size={15}/><b>{t('settings.hostWarning')}</b></div>}{shellMode==='sandbox'&&!settings?.workspace_sandbox_available&&<div className="workspace-shell-warning"><ShieldAlert size={15}/><b>{t('settings.sandboxWarning')}</b></div>}<SettingsSectionFooter dirty={shellDirty} busy={busy} saving={savingSection==='shell'} onDiscard={()=>discard('shell')}/></form>
 			</SettingsDisclosure>
 		</div>
-	<WorkspaceSettingsPanel workspaces={capabilities.workspaces} refresh={refresh} onNotice={setNotice}/>
+	<WorkspaceSettingsPanel workspaces={capabilities.workspaces} refresh={refresh} onNotify={notify}/>
 	<MCPServerModePanel settings={settings} refresh={refresh}/>
 	<WebSearchSettingsPanel proxies={proxies} refresh={refresh}/>
-	<AdminPasswordPanel/>
   </div>
 }
 
-function WorkspaceSettingsPanel({workspaces,refresh,onNotice}:{workspaces:WorkspaceCapability[];refresh:()=>Promise<void>;onNotice:(value:string)=>void}){
+function WorkspaceSettingsPanel({workspaces,refresh,onNotify}:{workspaces:WorkspaceCapability[];refresh:()=>Promise<void>;onNotify:NotificationSink}){
 	const {t}=useTranslation()
 	const empty:WorkspaceInput={id:'',access:'read_only'}
 	const [open,setOpen]=useState(false),[editing,setEditing]=useState(''),[input,setInput]=useState<WorkspaceInput>(empty),[busy,setBusy]=useState(''),[deleteCandidate,setDeleteCandidate]=useState<WorkspaceCapability|null>(null)
-	const beginCreate=()=>{setEditing('');setInput(empty);setOpen(true);onNotice('')}
-	const beginEdit=(workspace:WorkspaceCapability)=>{setEditing(workspace.id);setInput({id:workspace.id,access:workspace.access});setOpen(true);onNotice('')}
+	const beginCreate=()=>{setEditing('');setInput(empty);setOpen(true)}
+	const beginEdit=(workspace:WorkspaceCapability)=>{setEditing(workspace.id);setInput({id:workspace.id,access:workspace.access});setOpen(true)}
 	const close=()=>{setOpen(false);setEditing('');setInput(empty)}
-	const save=async()=>{if(!input.id.trim())return;setBusy('save');onNotice('');try{if(editing)await api.updateWorkspace(editing,{...input,id:editing});else await api.createWorkspace({...input,id:input.id.trim()});await refresh();onNotice(editing?t('workspace.settingsUpdated',{id:editing}):t('workspace.settingsCreated',{id:input.id.trim()}));close()}catch(err){onNotice(errorText(err))}finally{setBusy('')}}
-	const remove=async()=>{if(!deleteCandidate)return;const workspace=deleteCandidate;setBusy(`delete-${workspace.id}`);onNotice('');try{await api.deleteWorkspace(workspace.id);await refresh();onNotice(t('workspace.settingsRemoved',{id:workspace.id}));if(editing===workspace.id)close()}catch(err){onNotice(errorText(err))}finally{setBusy('');setDeleteCandidate(null)}}
+	const save=async()=>{if(!input.id.trim())return;setBusy('save');try{if(editing)await api.updateWorkspace(editing,{...input,id:editing});else await api.createWorkspace({...input,id:input.id.trim()});await refresh();onNotify(editing?t('workspace.settingsUpdated',{id:editing}):t('workspace.settingsCreated',{id:input.id.trim()}));close()}catch(err){onNotify(errorText(err),'error')}finally{setBusy('')}}
+	const remove=async()=>{if(!deleteCandidate)return;const workspace=deleteCandidate;setBusy(`delete-${workspace.id}`);try{await api.deleteWorkspace(workspace.id);await refresh();onNotify(t('workspace.settingsRemoved',{id:workspace.id}));if(editing===workspace.id)close()}catch(err){onNotify(errorText(err),'error')}finally{setBusy('');setDeleteCandidate(null)}}
 	return <SettingsDisclosure className="workspace-settings" icon={<FolderOpen size={18}/>} title={t('settings.capabilities')} meta={t('workspace.registeredCount',{count:workspaces.length})}><div className="workspace-settings-actions"><button type="button" onClick={beginCreate}><Plus size={13}/>{t('workspace.add')}</button></div>{open&&<div className="workspace-settings-editor"><label><span>{t('workspace.id')}</span><input value={input.id} disabled={!!editing} maxLength={64} onChange={event=>setInput(current=>({...current,id:event.target.value}))}/></label><label><span>{t('workspace.permission')}</span><select value={input.access} onChange={event=>setInput(current=>({...current,access:event.target.value as WorkspaceInput['access']}))}><option value="read_only">{t('workspace.readOnly')}</option><option value="read_write">{t('workspace.readWrite')}</option></select></label><div><button type="button" onClick={close}>{t('common.cancel')}</button><button type="button" className="primary" disabled={busy==='save'||!input.id.trim()} onClick={()=>void save()}>{busy==='save'?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {t('common.save')}</button></div></div>}<div className="workspace-settings-list">{workspaces.map(workspace=><div className="workspace-settings-row" key={workspace.id}><code>{workspace.id}</code><em className={workspace.access}>{workspace.access==='read_write'?t('workspace.readWrite'):t('workspace.readOnly')}</em><button type="button" title={t('common.edit')} onClick={()=>beginEdit(workspace)}><Edit3 size={13}/></button><button type="button" className="danger" disabled={busy===`delete-${workspace.id}`} title={t('workspace.remove')} onClick={()=>setDeleteCandidate(workspace)}>{busy===`delete-${workspace.id}`?<LoaderCircle className="spin" size={13}/>:<Trash2 size={13}/>}</button></div>)}{!workspaces.length&&<div className="workspace-settings-empty">{t('settings.noWorkspace')}</div>}</div>{deleteCandidate&&<DestructiveConfirmDialog title={t('workspace.removeTitle',{id:deleteCandidate.id})} busy={busy===`delete-${deleteCandidate.id}`} onCancel={()=>setDeleteCandidate(null)} onConfirm={()=>void remove()}/>}</SettingsDisclosure>
 }
 
@@ -1186,14 +1373,14 @@ const defaultWebSearchInput:WebSearchSettingsInput={enabled:false,base_url:'http
 
 function MCPServerModePanel({settings,refresh}:{settings:SystemSettings|null;refresh:()=>Promise<void>}){
 	const {t}=useTranslation()
-	const [busy,setBusy]=useState<'start'|'stop'|'rotate'|''>(''),[token,setToken]=useState(''),[notice,setNotice]=useState('')
+	const notify=useNotifier()
+	const [busy,setBusy]=useState<'start'|'stop'|'rotate'|''>(''),[token,setToken]=useState('')
 	const enabled=!!settings?.mcp_http_enabled
 	const endpoint=`${window.location.origin}/mcp`
 	useEffect(()=>{if(!enabled)setToken('')},[enabled])
 	const update=async(nextEnabled:boolean,rotate=false)=>{
 		if(!settings)return
 		setBusy(rotate?'rotate':nextEnabled?'start':'stop')
-		setNotice('')
 		try{
 			const result=await api.saveSystemSettings({
 				agent_max_iterations:settings.agent_max_iterations,
@@ -1201,25 +1388,24 @@ function MCPServerModePanel({settings,refresh}:{settings:SystemSettings|null;ref
 				rotate_mcp_http_token:rotate,
 			})
 			setToken(result.mcp_http_token||'')
-			setNotice(t(nextEnabled?'mcpServerMode.started':'mcpServerMode.stopped'))
+			notify(t(nextEnabled?'mcpServerMode.started':'mcpServerMode.stopped'))
 			if(desktopRuntime)await invoke('set_tray_mode',{enabled:result.mcp_http_enabled}).catch(()=>{})
 			await refresh()
-		}catch(err){setNotice(errorText(err))}finally{setBusy('')}
+		}catch(err){notify(errorText(err),'error')}finally{setBusy('')}
 	}
 	const copy=async(value:string,message:string)=>{
-		try{await navigator.clipboard.writeText(value);setNotice(message)}
-		catch(err){setNotice(errorText(err))}
+		try{await navigator.clipboard.writeText(value);notify(message)}
+		catch(err){notify(errorText(err),'error')}
 	}
 	const enterLightweightMode=async()=>{
 		try{await invoke('enter_lightweight_mode')}
-		catch(err){setNotice(errorText(err))}
+		catch(err){notify(errorText(err),'error')}
 	}
 	return <SettingsDisclosure className="mcp-server-mode" icon={<Braces size={18}/>} title={t('mcpServerMode.title')} meta={enabled?t('common.enabled'):t('common.disabled')}>
 		<div className="mcp-server-mode-fields">
 			<label><span>{t('mcpServerMode.endpoint')}</span><div><input readOnly value={endpoint}/><button type="button" title={t('common.copy')} onClick={()=>void copy(endpoint,t('mcpServerMode.endpointCopied'))}><Copy size={13}/></button></div></label>
 			{enabled&&<label><span>{t('mcpServerMode.token')}</span><div><input readOnly type={token?'text':'password'} value={token||'••••••••••••••••'} /><button type="button" disabled={!token} title={t('common.copy')} onClick={()=>void copy(token,t('mcpServerMode.tokenCopied'))}><Copy size={13}/></button></div>{!token&&settings?.mcp_http_token_configured&&<small>{t('mcpServerMode.tokenStored')}</small>}</label>}
 		</div>
-		{notice&&<p>{notice}</p>}
 		<footer>
 			{enabled&&desktopRuntime&&<button type="button" disabled={!!busy} onClick={()=>void enterLightweightMode()}><Minimize2 size={13}/>{t('mcpServerMode.lightweightMode')}</button>}
 			{enabled&&<button type="button" disabled={!!busy} onClick={()=>void update(true,true)}>{busy==='rotate'?<LoaderCircle className="spin" size={13}/>:<RefreshCw size={13}/>} {t('mcpServerMode.rotate')}</button>}
@@ -1230,31 +1416,25 @@ function MCPServerModePanel({settings,refresh}:{settings:SystemSettings|null;ref
 
 function WebSearchSettingsPanel({proxies,refresh}:{proxies:Proxy[];refresh:()=>Promise<void>}){
 	const {t}=useTranslation()
+	const notify=useNotifier()
 	const [stored,setStored]=useState<WebSearchSettings|null>(null),[input,setInput]=useState<WebSearchSettingsInput>(defaultWebSearchInput)
-	const [loading,setLoading]=useState(true),[busy,setBusy]=useState(''),[dirty,setDirty]=useState(false),[notice,setNotice]=useState('')
+	const [loading,setLoading]=useState(true),[busy,setBusy]=useState(''),[dirty,setDirty]=useState(false)
 	const hasEffectiveAPIKey=!!input.api_key?.trim()||!!stored?.has_api_key&&!input.clear_api_key
 	const applyStored=(value:WebSearchSettings)=>{setStored(value);setInput({enabled:value.enabled,base_url:value.base_url,api_key:'',proxy_id:value.proxy_id||'',timeout_seconds:value.timeout_seconds,max_results:value.max_results});setDirty(false)}
-	useEffect(()=>{let active=true;api.webSearchSettings().then(value=>{if(active)applyStored(value)}).catch(err=>{if(active)setNotice(errorText(err))}).finally(()=>{if(active)setLoading(false)});return()=>{active=false}},[])
-	const update=<K extends keyof WebSearchSettingsInput>(key:K,value:WebSearchSettingsInput[K])=>{setInput(current=>({...current,[key]:value}));setDirty(true);setNotice('')}
-	const save=async()=>{setBusy('save');setNotice('');try{const value=await api.saveWebSearchSettings(input);applyStored(value);setNotice(t('webSearch.saved'));await refresh()}catch(err){setNotice(errorText(err))}finally{setBusy('')}}
-	const test=async()=>{setBusy('test');setNotice('');try{const result=await api.testWebSearch();setNotice(t('webSearch.testPassed',{count:result.results.length}))}catch(err){setNotice(errorText(err))}finally{setBusy('')}}
-	const clearKey=()=>{setInput(current=>({...current,enabled:false,api_key:'',clear_api_key:true}));setDirty(true);setNotice('')}
+	useEffect(()=>{let active=true;api.webSearchSettings().then(value=>{if(active)applyStored(value)}).catch(err=>{if(active)notify(errorText(err),'error')}).finally(()=>{if(active)setLoading(false)});return()=>{active=false}},[])
+	const update=<K extends keyof WebSearchSettingsInput>(key:K,value:WebSearchSettingsInput[K])=>{setInput(current=>({...current,[key]:value}));setDirty(true)}
+	const save=async()=>{setBusy('save');try{const value=await api.saveWebSearchSettings(input);applyStored(value);notify(t('webSearch.saved'));await refresh()}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
+	const test=async()=>{setBusy('test');try{const result=await api.testWebSearch();notify(t('webSearch.testPassed',{count:result.results.length}))}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
+	const clearKey=()=>{setInput(current=>({...current,enabled:false,api_key:'',clear_api_key:true}));setDirty(true)}
 	if(loading)return <SettingsDisclosure className="web-search-settings" icon={<Search size={18}/>} title={t('webSearch.title')} meta={t('common.loading')}><div className="settings-loading"><LoaderCircle className="spin" size={16}/>{t('common.loading')}</div></SettingsDisclosure>
-	return <SettingsDisclosure className="web-search-settings" icon={<Search size={18}/>} title={t('webSearch.title')} meta={input.enabled?t('common.enabled'):t('common.disabled')}><label className="web-search-toggle"><span>{t('webSearch.title')}</span><input type="checkbox" checked={input.enabled} onChange={event=>update('enabled',event.target.checked)}/><i/><b>{input.enabled?t('common.enabled'):t('common.disabled')}</b></label><div className="web-search-grid"><label><span>{t('webSearch.baseURL')}</span><input value={input.base_url} onChange={event=>update('base_url',event.target.value)} placeholder="https://api.tavily.com"/></label><label><span>{t('webSearch.apiKey')}</span><PasswordInput value={input.api_key||''} onChange={event=>update('api_key',event.target.value)} placeholder={stored?.has_api_key?t('webSearch.savedSecret'):''}/></label><label><span>{t('common.proxy')}</span><select value={input.proxy_id||''} onChange={event=>update('proxy_id',event.target.value)}><option value="">{t('common.direct')}</option>{proxies.map(proxy=><option value={proxy.id} key={proxy.id}>{proxy.name} · {proxy.url}</option>)}</select></label><label><span>{t('webSearch.timeout')}</span><input type="number" min="5" max="120" value={input.timeout_seconds} onChange={event=>update('timeout_seconds',Number(event.target.value))}/></label><label><span>{t('webSearch.maxResults')}</span><input type="number" min="1" max="20" value={input.max_results} onChange={event=>update('max_results',Number(event.target.value))}/></label></div>{notice&&<p>{notice}</p>}<footer><div>{stored?.has_api_key&&<button type="button" className="danger" onClick={clearKey}>{t('webSearch.clearKey')}</button>}</div><button type="button" disabled={busy!==''||dirty||!stored?.enabled||!stored.has_api_key} onClick={()=>void test()}>{busy==='test'?<LoaderCircle className="spin" size={13}/>:<Search size={13}/>} {t('common.test')}</button><button type="button" className="primary" disabled={busy!==''||!dirty||input.enabled&&!hasEffectiveAPIKey} onClick={()=>void save()}>{busy==='save'?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {t('common.save')}</button></footer></SettingsDisclosure>
-}
-
-function AdminPasswordPanel(){
-		const {t}=useTranslation()
-	const [current,setCurrent]=useState(''),[replacement,setReplacement]=useState(''),[confirmation,setConfirmation]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false)
-		const submit=async(event:FormEvent)=>{event.preventDefault();if(replacement!==confirmation){setNotice(t('password.mismatch'));return}setBusy(true);setNotice('');try{await api.changePassword(current,replacement);window.location.reload()}catch(err){setNotice(errorText(err))}finally{setBusy(false)}}
-		return <form className="admin-password-form" onSubmit={submit}><SettingsDisclosure className="admin-password-panel" icon={<KeyRound size={18}/>} title={t('password.title')}><section><label><span>{t('password.current')}</span><PasswordInput autoComplete="current-password" value={current} onChange={event=>setCurrent(event.target.value)} required/></label><label><span>{t('password.replacement')}</span><PasswordInput autoComplete="new-password" minLength={12} placeholder={t('password.minimum')} value={replacement} onChange={event=>setReplacement(event.target.value)} required/></label><label><span>{t('password.confirmation')}</span><PasswordInput autoComplete="new-password" minLength={12} value={confirmation} onChange={event=>setConfirmation(event.target.value)} required/></label><button className="primary" disabled={busy||replacement.length<12}>{busy?t('password.changing'):t('password.change')}</button></section>{notice&&<p>{notice}</p>}</SettingsDisclosure></form>
+	return <SettingsDisclosure className="web-search-settings" icon={<Search size={18}/>} title={t('webSearch.title')} meta={input.enabled?t('common.enabled'):t('common.disabled')}><label className="web-search-toggle"><span>{t('webSearch.title')}</span><input type="checkbox" checked={input.enabled} onChange={event=>update('enabled',event.target.checked)}/><i/><b>{input.enabled?t('common.enabled'):t('common.disabled')}</b></label><div className="web-search-grid"><label><span>{t('webSearch.baseURL')}</span><input value={input.base_url} onChange={event=>update('base_url',event.target.value)} placeholder="https://api.tavily.com"/></label><label><span>{t('webSearch.apiKey')}</span><PasswordInput value={input.api_key||''} onChange={event=>update('api_key',event.target.value)} placeholder={stored?.has_api_key?t('webSearch.savedSecret'):''}/></label><label><span>{t('common.proxy')}</span><select value={input.proxy_id||''} onChange={event=>update('proxy_id',event.target.value)}><option value="">{t('common.direct')}</option>{proxies.map(proxy=><option value={proxy.id} key={proxy.id}>{proxy.name} · {proxy.url}</option>)}</select></label><label><span>{t('webSearch.timeout')}</span><input type="number" min="5" max="120" value={input.timeout_seconds} onChange={event=>update('timeout_seconds',Number(event.target.value))}/></label><label><span>{t('webSearch.maxResults')}</span><input type="number" min="1" max="20" value={input.max_results} onChange={event=>update('max_results',Number(event.target.value))}/></label></div><footer><div>{stored?.has_api_key&&<button type="button" className="danger" onClick={clearKey}>{t('webSearch.clearKey')}</button>}</div><button type="button" disabled={busy!==''||dirty||!stored?.enabled||!stored.has_api_key} onClick={()=>void test()}>{busy==='test'?<LoaderCircle className="spin" size={13}/>:<Search size={13}/>} {t('common.test')}</button><button type="button" className="primary" disabled={busy!==''||!dirty||input.enabled&&!hasEffectiveAPIKey} onClick={()=>void save()}>{busy==='save'?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {t('common.save')}</button></footer></SettingsDisclosure>
 }
 
 function Nav({ active, icon, label, count, warn, onClick }: {active:boolean;icon:React.ReactNode;label:string;count?:number;warn?:boolean;onClick:()=>void}) {
-  return <button className={`nav-item ${active ? 'active' : ''}`} onClick={onClick} title={label} aria-label={label}>{icon}<span>{label}</span>{count !== undefined && <em className={warn ? 'warn' : ''}>{count}</em>}</button>
+  return <button className={`nav-item ${active ? 'active' : ''}`} onClick={onClick} title={label} aria-label={label} aria-current={active?'page':undefined}>{icon}<span>{label}</span>{count !== undefined && <em className={warn ? 'warn' : ''}>{count}</em>}</button>
 }
 
-function ChatPage({ hosts, approvals, runs, workspaceShells, capabilities, settings, imageTypes, agentAvailable, modelName, refresh, refreshApprovals, onCreateWorkspaceShell, onOpenWorkspaceShell, onWorkspaceShellStarted, onSettingsChanged, onSessionDeleted, onError, onStreamingChange }: {hosts:Host[];approvals:Approval[];runs:Run[];workspaceShells:SSHShell[];capabilities:ToolCapabilities;settings:SystemSettings|null;imageTypes:string[];agentAvailable:boolean;modelName?:string;refresh:()=>Promise<void>;refreshApprovals:(decidedID?:string)=>Promise<void>;onCreateWorkspaceShell:(workspaceID:string)=>Promise<void>;onOpenWorkspaceShell:(shell:SSHShell)=>void;onWorkspaceShellStarted:(shell:SSHShell)=>void;onSettingsChanged:(settings:SystemSettings)=>void;onSessionDeleted:(sessionID:string)=>void;onError:(message:string)=>void;onStreamingChange:(streaming:boolean)=>void}) {
+function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, workspaceShells, capabilities, settings, imageTypes, agentAvailable, modelName, refresh, refreshApprovals, onCreateWorkspaceShell, onOpenWorkspaceShell, onWorkspaceShellStarted, onSettingsChanged, onHostChanged, onModelChanged, sidebarTarget, onSessionDeleted, onError, onStreamingChange }: {visible:boolean;onActivate:()=>void;hosts:Host[];providers:ModelProvider[];approvals:Approval[];runs:Run[];workspaceShells:SSHShell[];capabilities:ToolCapabilities;settings:SystemSettings|null;imageTypes:string[];agentAvailable:boolean;modelName?:string;refresh:()=>Promise<void>;refreshApprovals:(decidedID?:string)=>Promise<void>;onCreateWorkspaceShell:(workspaceID:string)=>Promise<void>;onOpenWorkspaceShell:(shell:SSHShell)=>void;onWorkspaceShellStarted:(shell:SSHShell)=>void;onSettingsChanged:(settings:SystemSettings)=>void;onHostChanged:(host:Host)=>void;onModelChanged:(provider:ModelProvider)=>void;sidebarTarget:HTMLDivElement|null;onSessionDeleted:(sessionID:string)=>void;onError:(message:string)=>void;onStreamingChange:(streaming:boolean)=>void}) {
 	const {t,i18n:instance}=useTranslation()
   const [entries, setEntries] = useState<ChatEntry[]>([])
 	  const [message, setMessage] = useState('')
@@ -1267,9 +1447,7 @@ function ChatPage({ hosts, approvals, runs, workspaceShells, capabilities, setti
   const [sessionDeleteCandidate,setSessionDeleteCandidate]=useState<ChatSession|null>(null)
   const [deletingSession,setDeletingSession]=useState(false)
   const [loadingSession, setLoadingSession] = useState('')
-  const [historyOpen,setHistoryOpen]=useState(false)
-  const [workspacePanelCollapsed,setWorkspacePanelCollapsed]=useState(()=>recalledChatPanelCollapsed('workspace'))
-  const [conversationPanelCollapsed,setConversationPanelCollapsed]=useState(()=>recalledChatPanelCollapsed('conversations'))
+  const [workspacePanelCollapsed,setWorkspacePanelCollapsed]=useState(recalledWorkspacePanelCollapsed)
   const [running, setRunning] = useState(false)
   const [detachedRunning,setDetachedRunning]=useState(false)
 	const [stopping,setStopping]=useState(false)
@@ -1290,8 +1468,6 @@ function ChatPage({ hosts, approvals, runs, workspaceShells, capabilities, setti
 	  const imageURLsRef=useRef(new Set<string>())
 	const reconnectErrorRef=useRef('')
   const sessionLoadRef=useRef('')
-  const agentHosts = useMemo(() => hosts.filter(host => host.agent_enabled), [hosts])
-  const hostNames = useMemo(() => agentHosts.map(host => host.name).join(', '), [agentHosts])
   const currentApprovals=useMemo(()=>sessionId?approvals.filter(item=>item.session_id===sessionId):[],[approvals,sessionId])
 	const pendingExplanationID=currentApprovals.find(item=>item.ai_review?.status==='pending')?.id||''
 	const sessionBusy=running||detachedRunning
@@ -1386,17 +1562,17 @@ function ChatPage({ hosts, approvals, runs, workspaceShells, capabilities, setti
 
   const newChat = () => {
 		if(workspaceSwitching)return
+		onActivate()
     detachActiveStream()
     sessionLoadRef.current=''
     setLoadingSession('')
-    setHistoryOpen(false)
 	    stickToLatest.current=true;setSessionId('');setBoundWorkspaceID('');setEntries([]); setMessage('');clearPendingImages(); setHistoryError(''); setReasoningSeen(false);setDetachedRunning(false);setStopping(false);setModelRetry(null);setConnectionRetry(null);setPlan(null); rememberSession(newSessionMarker)
     void refreshSessions()
   }
 
   const switchSession = (id:string) => {
 		if(workspaceSwitching)return
-    setHistoryOpen(false)
+		onActivate()
     if(id===sessionId){
       if(loadingSession){sessionLoadRef.current='';setLoadingSession('')}
       return
@@ -1445,7 +1621,7 @@ function ChatPage({ hosts, approvals, runs, workspaceShells, capabilities, setti
 			const now=Date.now()
 			setRetryClock(now)
 			setModelRetry({attempt:frame.retry_attempt||1,max:frame.retry_max||1,readyAt:now+(frame.retry_delay_ms||0)})
-		}else if(['approval','reasoning','tool','tool_output','message','done','interrupted','error'].includes(frame.type))setModelRetry(null)
+		}else if(['approval','reasoning','tool','tool_output','message','message_reset','done','interrupted','error'].includes(frame.type))setModelRetry(null)
 		if(frame.type==='approval'){
 			setEntries(old=>updateActiveToolStatus(old.map(item=>updateUser(item,'completed')),'approval_required',frame.run_id))
 			setApprovalNotice('')
@@ -1488,6 +1664,7 @@ function ChatPage({ hosts, approvals, runs, workspaceShells, capabilities, setti
 			if(streaming)return old.map(item=>item.id==='streaming'?{...item,content:item.content+frame.content}:deactivateReasoning(item))
 			return[...old.map(deactivateReasoning),{id:'streaming',kind:'assistant',content:frame.content!,streaming:true}]
 		})
+		if(frame.type==='message_reset')setEntries(old=>old.filter(item=>item.id!=='streaming'))
 		if(frame.type==='done'){
 			setStopping(false)
 			setEntries(old=>old.map(item=>updateUser(item,'completed')).map(item=>item.id==='streaming'?{...item,streaming:false}:item))
@@ -1613,16 +1790,23 @@ function ChatPage({ hosts, approvals, runs, workspaceShells, capabilities, setti
   }):''
 	const connectionRetryDelay=connectionRetry?Math.max(0,Math.ceil((connectionRetry.readyAt-retryClock)/1000)):0
 	const connectionRetryLabel=connectionRetry?t('chat.reconnecting',{attempt:connectionRetry.attempt,delay:connectionRetryDelay}):''
-	const setChatPanelCollapsed=(panel:ChatPanel,collapsed:boolean)=>{
-		rememberChatPanelCollapsed(panel,collapsed)
-		if(panel==='workspace')setWorkspacePanelCollapsed(collapsed)
-		else{setConversationPanelCollapsed(collapsed);if(collapsed)setHistoryOpen(false)}
+	const setWorkspaceCollapsed=(collapsed:boolean)=>{
+		rememberWorkspacePanelCollapsed(collapsed)
+		setWorkspacePanelCollapsed(collapsed)
 	}
+	const sessionSidebar=sidebarTarget&&createPortal(<>
+		<header className="sidebar-conversation-head"><span><History size={15}/>{t('chat.conversations')}</span><button className="new-chat-button" onClick={newChat} disabled={workspaceSwitching} title={t('chat.newConversation')} aria-label={t('chat.newConversation')}><Plus size={14}/><span>{t('common.new')}</span></button></header>
+		<div className="session-list">
+			{historyError&&<div className="history-error">{historyError}</div>}
+			{!sessions.length&&!historyError&&<div className="history-empty">{t('chat.noSaved')}</div>}
+			{sessions.map(session=>{const pending=approvals.filter(item=>item.session_id===session.id).length;const active=session.active||(session.id===sessionId&&sessionBusy);return <div className={`session-item ${session.id===sessionId?'active':''}`} key={session.id}><button className="session-open" onClick={()=>switchSession(session.id)} disabled={workspaceSwitching||loadingSession===session.id}><b>{session.title}{pending>0&&<em className="session-approval-count">{t('chat.approvalCount',{count:pending})}</em>}{active&&<em className="session-running-count">{t('chat.runningBadge')}</em>}</b><span>{new Date(session.updated_at).toLocaleString(localeFor(instance.language))} · {t('chat.messageCount',{count:session.message_count})}</span></button><button className="session-delete" onClick={()=>{if(!active)setSessionDeleteCandidate(session)}} disabled={active||workspaceSwitching} title={active?t('chat.cannotDelete'):t('chat.deleteConversation')}><Trash2 size={13}/></button></div>})}
+		</div>
+	</>,sidebarTarget)
 
-  return <div className={`chat-layout ${workspacePanelCollapsed?'workspace-panel-collapsed':''} ${conversationPanelCollapsed?'conversation-panel-collapsed':''}`}>
-		<ChatWorkspacePanel key={selectedWorkspace?.id||''} workspaces={capabilities.workspaces} workspaceID={selectedWorkspace?.id||''} shells={workspaceShells} switching={workspaceSwitching} disabled={sessionBusy||!!loadingSession} bound={!!selectedWorkspace&&boundWorkspaceID===selectedWorkspace.id} onSelect={id=>void switchWorkspace(id)} onCreateShell={onCreateWorkspaceShell} onOpenShell={onOpenWorkspaceShell} onCollapse={()=>setChatPanelCollapsed('workspace',true)}/>
+  return <>{sessionSidebar}<div className={`chat-layout ${workspacePanelCollapsed?'workspace-panel-collapsed ':''}${visible?'':'page-hidden'}`}>
+		<ChatWorkspacePanel key={selectedWorkspace?.id||''} workspaces={capabilities.workspaces} workspaceID={selectedWorkspace?.id||''} shells={workspaceShells} switching={workspaceSwitching} disabled={sessionBusy||!!loadingSession} bound={!!selectedWorkspace&&boundWorkspaceID===selectedWorkspace.id} onSelect={id=>void switchWorkspace(id)} onCreateShell={onCreateWorkspaceShell} onOpenShell={onOpenWorkspaceShell} onCollapse={()=>setWorkspaceCollapsed(true)}/>
     <div className="chat-main panel">
-	  <div className="panel-header"><div><Bot size={18}/><span>{t('chat.session')}</span>{workspacePanelCollapsed&&<button className="chat-panel-open-button" onClick={()=>setChatPanelCollapsed('workspace',false)} title={t('workspace.expandPanel')} aria-label={t('workspace.expandPanel')}><PanelLeftOpen size={15}/></button>}</div><div className="chat-header-actions">{conversationPanelCollapsed&&<button className="chat-panel-open-button conversation-panel-open-button" onClick={()=>setChatPanelCollapsed('conversations',false)} title={t('chat.expandConversations')} aria-label={t('chat.expandConversations')}><PanelRightOpen size={15}/></button>}<span className="session-id">{sessionId ? sessionId.slice(0, 20) : t('chat.newSession')}</span><button className="mobile-history-button" onClick={()=>setHistoryOpen(true)} title={t('chat.conversations')} aria-label={t('chat.openConversations')}><History size={15}/>{activeSessionCount>0&&<em>{activeSessionCount}</em>}</button></div></div>
+	  <div className="panel-header"><div><Bot size={18}/><span>{t('chat.session')}</span>{workspacePanelCollapsed&&<button className="chat-panel-open-button" onClick={()=>setWorkspaceCollapsed(false)} title={t('workspace.expandPanel')} aria-label={t('workspace.expandPanel')}><PanelLeftOpen size={15}/></button>}</div><div className="chat-header-actions"><span className="session-id">{sessionId ? sessionId.slice(0, 20) : t('chat.newSession')}</span></div></div>
       <div className="session-approval-slot">{currentApprovals.length>0&&<ApprovalDialog key={currentApprovals[0].id} approval={currentApprovals[0]} pendingCount={currentApprovals.length} hosts={hosts} running={sessionBusy} stopping={stopping} onStop={()=>void stopAgent()} refresh={refresh} refreshApprovals={refreshApprovals} onApproved={result=>{setEntries(old=>updateToolRunStatus(old,result.run_id,result.status==='running'?'in_progress':result.status));if(result.shell?.kind==='workspace')onWorkspaceShellStarted(result.shell)}} onNotice={setApprovalNotice}/>} {approvalNotice&&currentApprovals.length===0&&<div className="approval-toast"><ShieldCheck size={14}/><span>{approvalNotice}</span><button onClick={()=>setApprovalNotice('')}><X size={13}/></button></div>}</div>
       <div className="session-plan-slot">{plan&&<SessionPlan plan={plan} expanded={planExpanded} onExpanded={setPlanExpanded}/>}</div>
 		<div className="conversation-view">
@@ -1637,20 +1821,14 @@ function ChatPage({ hosts, approvals, runs, workspaceShells, capabilities, setti
 		</div>
 		  <form className="composer" onSubmit={submit}>
 			  {sessionBusy&&<div className="llm-work-status" role="status" aria-live="polite"><LoaderCircle className="spin" size={13}/><b>{stopping?t('chat.stopping'):connectionRetryLabel||modelRetryLabel||t('chat.running')}</b><button type="button" className="agent-stop-button" onClick={()=>void stopAgent()} disabled={stopping||!(activeStreamRef.current?.sessionId||sessionId)} title={t('chat.stopTitle')}><Square size={11} fill="currentColor"/>{t('chat.stop')}</button></div>}
-			  <div className="context-line"><ApprovalModeStatus settings={settings} onChanged={onSettingsChanged} onError={onError}/><span className="composer-hosts" title={agentHosts.length?t('chat.hostsCount',{count:agentHosts.length,names:hostNames}):t('chat.noHosts')}><Server size={13}/>{agentHosts.length?t('chat.hostsCount',{count:agentHosts.length,names:hostNames}):t('chat.noHosts')}</span><span className="composer-model" title={modelName || t('chat.noModel')}><Cpu size={13}/>{modelName || t('chat.noModel')}</span></div>
+			  <div className="context-line"><ApprovalModeStatus settings={settings} onChanged={onSettingsChanged} onError={onError}/><ComposerHostSelector hosts={hosts} disabled={sessionBusy} onChanged={onHostChanged} onError={onError}/><ComposerModelSelector providers={providers} fallbackModel={modelName} disabled={sessionBusy} onChanged={onModelChanged} onError={onError}/></div>
 			  {pendingImages.length>0&&<div className="composer-images">{pendingImages.map(image=><div key={image.id}><img src={image.url} alt={image.file.name}/><span title={image.file.name}>{image.file.name}</span><button type="button" onClick={()=>removePendingImage(image.id)} title={t('chat.removeImage')}><X size={11}/></button></div>)}</div>}
 			  {imageNotice&&<div className="composer-image-notice">{imageNotice}<button type="button" onClick={()=>setImageNotice('')}><X size={11}/></button></div>}
 			  <div className="input-row"><label className="image-attach-button" title={t('chat.addImages')}><ImagePlus size={18}/><input key={imageInputKey} type="file" accept={imageTypes.join(',')} multiple disabled={!agentAvailable||sessionBusy||workspaceSwitching||!!loadingSession} onChange={event=>addImages(Array.from(event.target.files||[]))}/></label><textarea value={message} onChange={(event) => setMessage(event.target.value)} onPaste={event=>{const files=Array.from(event.clipboardData.files).filter(file=>file.type.startsWith('image/'));if(files.length)addImages(files)}} placeholder={!agentAvailable?t('chat.configureModel'):loadingSession?t('chat.loadingConversation'):sessionBusy?t('chat.busyPlaceholder'):t('chat.prompt')} disabled={!agentAvailable||sessionBusy||workspaceSwitching||!!loadingSession} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }}/><button aria-label={t('common.next')} disabled={!agentAvailable || sessionBusy || workspaceSwitching || !!loadingSession || (!message.trim()&&!pendingImages.length)}><Send size={18}/></button></div>
 		  </form>
     </div>
-	{historyOpen&&<button className="conversation-backdrop" onClick={()=>setHistoryOpen(false)} aria-label={t('chat.closeConversations')}/>}
-	<aside className={`context-panel conversation-panel panel ${historyOpen?'mobile-open':''}`}><div className="panel-header"><div><History size={17}/><span>{t('chat.conversations')}</span></div><section className="conversation-header-actions"><button className="new-chat-button" onClick={newChat} disabled={workspaceSwitching} title={t('chat.newConversation')}><Plus size={14}/>{t('common.new')}</button><button className="conversation-collapse-button" onClick={()=>setChatPanelCollapsed('conversations',true)} title={t('chat.collapseConversations')} aria-label={t('chat.collapseConversations')}><PanelRightClose size={14}/></button><button className="conversation-close-button" onClick={()=>setHistoryOpen(false)} title={t('chat.closeConversations')} aria-label={t('chat.closeConversations')}><X size={14}/></button></section></div><div className="session-list">
-      {historyError&&<div className="history-error">{historyError}</div>}
-	  {!sessions.length&&!historyError&&<div className="history-empty">{t('chat.noSaved')}</div>}
-	  {sessions.map(session=>{const pending=approvals.filter(item=>item.session_id===session.id).length;const active=session.active||(session.id===sessionId&&sessionBusy);return <div className={`session-item ${session.id===sessionId?'active':''}`} key={session.id}><button className="session-open" onClick={()=>switchSession(session.id)} disabled={workspaceSwitching||loadingSession===session.id}><b>{session.title}{pending>0&&<em className="session-approval-count">{t('chat.approvalCount',{count:pending})}</em>}{active&&<em className="session-running-count">{t('chat.runningBadge')}</em>}</b><span>{new Date(session.updated_at).toLocaleString(localeFor(instance.language))} · {t('chat.messageCount',{count:session.message_count})} · {session.workspace_id||t('chat.noWorkspace')}</span></button><button className="session-delete" onClick={()=>{if(!active)setSessionDeleteCandidate(session)}} disabled={active||workspaceSwitching} title={active?t('chat.cannotDelete'):t('chat.deleteConversation')}><Trash2 size={13}/></button></div>})}
-	</div><div className="session-summary"><Metric label={t('chat.saved')} value={sessions.length.toString()} tone="green"/><Metric label={t('chat.hosts')} value={agentHosts.length.toString()}/></div></aside>
 	{sessionDeleteCandidate&&<DestructiveConfirmDialog title={t('chat.deleteTitle',{title:sessionDeleteCandidate.title})} busy={deletingSession} onCancel={()=>setSessionDeleteCandidate(null)} onConfirm={()=>void removeSession()}/>}
-  </div>
+  </div></>
 }
 
 function formatFileSize(size:number){if(size<1024)return `${size} B`;if(size<1024*1024)return `${(size/1024).toFixed(1)} KiB`;return `${(size/1024/1024).toFixed(1)} MiB`}
@@ -2592,27 +2770,27 @@ const emptyHostForm: HostInput = {
 function authLabel(value:HostAuthType){return i18n.t(value==='agent'?'hosts.authAgent':value==='key'?'hosts.authKey':'hosts.authPassword')}
 function sudoLabel(value:HostSudoMode){return i18n.t(value==='none'?'hosts.sudoNone':value==='nopasswd'?'hosts.sudoNopasswd':'hosts.sudoPassword')}
 
-function HostsPage({ hosts, proxies, showAddresses, refresh }: {hosts:Host[];proxies:Proxy[];showAddresses:boolean;refresh:()=>Promise<void>}) {
+function HostsPage({ hosts, proxies, showAddresses, onToggleAddresses, refresh }: {hosts:Host[];proxies:Proxy[];showAddresses:boolean;onToggleAddresses:()=>void;refresh:()=>Promise<void>}) {
 	const {t}=useTranslation()
-  const [showForm, setShowForm] = useState(false); const [notice, setNotice] = useState(''); const [saving,setSaving]=useState(false);const [deletingHost,setDeletingHost]=useState('')
+	const notify=useNotifier()
+  const [showForm, setShowForm] = useState(false); const [saving,setSaving]=useState(false);const [deletingHost,setDeletingHost]=useState('')
 	const [deleteCandidate,setDeleteCandidate]=useState<Host|null>(null)
   const [form, setForm] = useState<HostInput>(emptyHostForm)
 	const [privateKeyName,setPrivateKeyName]=useState(''),[privateKeyError,setPrivateKeyError]=useState(''),[existingPrivateKey,setExistingPrivateKey]=useState(false),[privateKeyInputKey,setPrivateKeyInputKey]=useState(0)
 	const [hostKeys,setHostKeys]=useState<Record<string,{fingerprint:string;algorithm?:string;trusted:boolean}>>({}),[hostKeyErrors,setHostKeyErrors]=useState<Record<string,string>>({}),[hostKeyBusy,setHostKeyBusy]=useState('')
   const editing=!!form.id
 	const resetPrivateKey=()=>{setPrivateKeyName('');setPrivateKeyError('');setExistingPrivateKey(false);setPrivateKeyInputKey(value=>value+1)}
-	const openCreate=()=>{setForm(emptyHostForm);resetPrivateKey();setShowForm(true);setNotice('')}
-	const openEdit=(host:Host)=>{setForm({id:host.id,name:host.name,address:host.address,port:host.port,user:host.user,agent_enabled:host.agent_enabled,auth_type:host.auth_type||'agent',private_key:'',known_hosts_file:host.known_hosts_file||'',proxy_jump_host_id:host.proxy_jump_host_id||'',proxy_id:host.proxy_id||'',password:'',sudo_mode:host.sudo_mode||'none',sudo_password:''});setPrivateKeyName('');setPrivateKeyError('');setExistingPrivateKey(host.auth_type==='key'&&host.has_private_key);setPrivateKeyInputKey(value=>value+1);setShowForm(true);setNotice('')}
+	const openCreate=()=>{setForm(emptyHostForm);resetPrivateKey();setShowForm(true)}
+	const openEdit=(host:Host)=>{setForm({id:host.id,name:host.name,address:host.address,port:host.port,user:host.user,agent_enabled:host.agent_enabled,auth_type:host.auth_type||'agent',private_key:'',known_hosts_file:host.known_hosts_file||'',proxy_jump_host_id:host.proxy_jump_host_id||'',proxy_id:host.proxy_id||'',password:'',sudo_mode:host.sudo_mode||'none',sudo_password:''});setPrivateKeyName('');setPrivateKeyError('');setExistingPrivateKey(host.auth_type==='key'&&host.has_private_key);setPrivateKeyInputKey(value=>value+1);setShowForm(true)}
 	const setAuthType=(auth_type:HostAuthType)=>{setForm(current=>({...current,auth_type,password:'',private_key:auth_type==='key'?current.private_key:''}));if(auth_type!=='key'){setPrivateKeyName('');setPrivateKeyError('');setPrivateKeyInputKey(value=>value+1)}}
 	const choosePrivateKey=async(event:React.ChangeEvent<HTMLInputElement>)=>{const selected=event.target.files?.[0];setPrivateKeyError('');if(!selected){setPrivateKeyName('');setForm(current=>({...current,private_key:''}));return}if(selected.size<=0||selected.size>maxPrivateKeyBytes){setPrivateKeyName('');setForm(current=>({...current,private_key:''}));setPrivateKeyError(t('hosts.keySizeError'));return}try{const content=await selected.text();setPrivateKeyName(selected.name);setForm(current=>({...current,private_key:content}))}catch(err){setPrivateKeyName('');setForm(current=>({...current,private_key:''}));setPrivateKeyError(errorText(err))}}
 	const missingPrivateKey=form.auth_type==='key'&&!form.private_key&&!existingPrivateKey
 	const scan = async (host:Host) => {setHostKeyBusy(`scan-${host.id}`);setHostKeyErrors(current=>({...current,[host.id]:''}));try{const key=await api.scanKey(host.id);setHostKeys(current=>({...current,[host.id]:key}))}catch(err){setHostKeyErrors(current=>({...current,[host.id]:errorText(err)}))}finally{setHostKeyBusy('')}}
-	const trust = async (host:Host) => {const key=hostKeys[host.id];if(!key||key.trusted)return;setHostKeyBusy(`trust-${host.id}`);setHostKeyErrors(current=>({...current,[host.id]:''}));try{const trusted=await api.trustKey(host.id,key.fingerprint);setHostKeys(current=>({...current,[host.id]:{...trusted,trusted:true}}));setNotice(t('hosts.trusted',{fingerprint:trusted.fingerprint}))}catch(err){setHostKeyErrors(current=>({...current,[host.id]:errorText(err)}))}finally{setHostKeyBusy('')}}
-	const save = async (event:FormEvent) => { event.preventDefault(); if(missingPrivateKey)return;setSaving(true); try { const saved=await api.saveHost(form); setShowForm(false); setForm(emptyHostForm);resetPrivateKey();setHostKeys(current=>{const next={...current};delete next[saved.id];return next});setHostKeyErrors(current=>{const next={...current};delete next[saved.id];return next}); setNotice(t('hosts.saved',{name:saved.name,action:editing?t('hosts.updated'):t('hosts.registered')})); await refresh();void scan(saved) } catch(err){setNotice(errorText(err))} finally{setSaving(false)} }
-  const probe = async (host:Host) => { try { const info = await api.probe(host.id); setNotice(`${host.name}: ${Object.values(info).join(' · ')}`) } catch(err){setNotice(errorText(err))} }
-	const remove=async()=>{const host=deleteCandidate;if(!host)return;setDeletingHost(host.id);setNotice('');try{await api.deleteHost(host.id);setNotice(t('hosts.deleted',{name:host.name}));await refresh()}catch(err){setNotice(errorText(err))}finally{setDeletingHost('');setDeleteCandidate(null)}}
-		return <div className="page-stack">{!showForm&&<div className="page-actions"><div/><button className="primary" onClick={openCreate}><Plus size={16}/>{t('hosts.add')}</button></div>}
-    {notice && <div className="notice">{notice}<button onClick={()=>setNotice('')}><X size={14}/></button></div>}
+	const trust = async (host:Host) => {const key=hostKeys[host.id];if(!key||key.trusted)return;setHostKeyBusy(`trust-${host.id}`);setHostKeyErrors(current=>({...current,[host.id]:''}));try{const trusted=await api.trustKey(host.id,key.fingerprint);setHostKeys(current=>({...current,[host.id]:{...trusted,trusted:true}}));notify(t('hosts.trusted',{fingerprint:trusted.fingerprint}))}catch(err){setHostKeyErrors(current=>({...current,[host.id]:errorText(err)}))}finally{setHostKeyBusy('')}}
+	const save = async (event:FormEvent) => { event.preventDefault(); if(missingPrivateKey)return;setSaving(true); try { const saved=await api.saveHost(form); setShowForm(false); setForm(emptyHostForm);resetPrivateKey();setHostKeys(current=>{const next={...current};delete next[saved.id];return next});setHostKeyErrors(current=>{const next={...current};delete next[saved.id];return next}); notify(t('hosts.saved',{name:saved.name,action:editing?t('hosts.updated'):t('hosts.registered')})); await refresh();void scan(saved) } catch(err){notify(errorText(err),'error')} finally{setSaving(false)} }
+  const probe = async (host:Host) => { try { const info = await api.probe(host.id); notify(`${host.name}: ${Object.values(info).join(' · ')}`) } catch(err){notify(errorText(err),'error')} }
+	const remove=async()=>{const host=deleteCandidate;if(!host)return;setDeletingHost(host.id);try{await api.deleteHost(host.id);notify(t('hosts.deleted',{name:host.name}));await refresh()}catch(err){notify(errorText(err),'error')}finally{setDeletingHost('');setDeleteCandidate(null)}}
+		return <div className="page-stack">{!showForm&&<div className="page-actions"><div/><div className="page-action-buttons"><AddressVisibilityButton visible={showAddresses} onToggle={onToggleAddresses}/><button className="primary" onClick={openCreate}><Plus size={16}/>{t('hosts.add')}</button></div></div>}
 		{showForm && <ConfigurationEditorPage icon={<Server size={22}/>} title={editing?t('hosts.editTitle'):t('hosts.createTitle')} busy={saving} onBack={()=>setShowForm(false)}><form className="host-form configuration-editor-form panel" onSubmit={save}><div className="form-grid host-fields">
 	  <label><span>{t('hosts.name')}</span><input value={form.name} onChange={event=>setForm({...form,name:event.target.value})} required/></label>
 	  <label><span>{t('hosts.address')}</span><input value={form.address} onChange={event=>setForm({...form,address:event.target.value})} required/></label>
@@ -2636,24 +2814,23 @@ function HostsPage({ hosts, proxies, showAddresses, refresh }: {hosts:Host[];pro
 
 const emptyProxyForm:ProxyInput={name:'',url:'',username:'',password:''}
 
-function ProxiesPage({proxies,showAddresses,refresh}:{proxies:Proxy[];showAddresses:boolean;refresh:()=>Promise<void>}){
+function ProxiesPage({proxies,showAddresses,onToggleAddresses,refresh}:{proxies:Proxy[];showAddresses:boolean;onToggleAddresses:()=>void;refresh:()=>Promise<void>}){
 	const {t,i18n:instance}=useTranslation()
+	const notify=useNotifier()
 	const [form,setForm]=useState<ProxyInput>(emptyProxyForm)
 	const [showForm,setShowForm]=useState(false)
 	const [busy,setBusy]=useState('')
-	const [notice,setNotice]=useState('')
 	const [deleteCandidate,setDeleteCandidate]=useState<Proxy|null>(null)
 	const editing=!!form.id
 	const editingProxy=proxies.find(proxy=>proxy.id===form.id)
 	const preservesPassword=!!editingProxy?.has_password&&form.username===(editingProxy.username||'')&&!form.clear_password
-	const openCreate=()=>{setForm(emptyProxyForm);setShowForm(true);setNotice('')}
-	const openEdit=(proxy:Proxy)=>{setForm({id:proxy.id,name:proxy.name,url:proxy.url,username:proxy.username||'',password:''});setShowForm(true);setNotice('')}
-	const save=async(event:FormEvent)=>{event.preventDefault();setBusy('save');setNotice('');try{const saved=await api.saveProxy(form);setNotice(t('proxies.saved',{name:saved.name}));setForm(emptyProxyForm);setShowForm(false);await refresh()}catch(err){setNotice(errorText(err))}finally{setBusy('')}}
-	const test=async(proxy:Proxy)=>{setBusy(`test-${proxy.id}`);setNotice('');try{const result=await api.testProxy(proxy.id);setNotice(t('proxies.testPassed',{name:proxy.name,status:result.status_code||0,latency:result.latency_ms}))}catch(err){setNotice(errorText(err))}finally{setBusy('')}}
-	const remove=async()=>{const proxy=deleteCandidate;if(!proxy)return;setBusy(`delete-${proxy.id}`);setNotice('');try{await api.deleteProxy(proxy.id);setNotice(t('proxies.deleted',{name:proxy.name}));if(form.id===proxy.id){setForm(emptyProxyForm);setShowForm(false)}await refresh()}catch(err){setNotice(errorText(err))}finally{setBusy('');setDeleteCandidate(null)}}
+	const openCreate=()=>{setForm(emptyProxyForm);setShowForm(true)}
+	const openEdit=(proxy:Proxy)=>{setForm({id:proxy.id,name:proxy.name,url:proxy.url,username:proxy.username||'',password:''});setShowForm(true)}
+	const save=async(event:FormEvent)=>{event.preventDefault();setBusy('save');try{const saved=await api.saveProxy(form);notify(t('proxies.saved',{name:saved.name}));setForm(emptyProxyForm);setShowForm(false);await refresh()}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
+	const test=async(proxy:Proxy)=>{setBusy(`test-${proxy.id}`);try{const result=await api.testProxy(proxy.id);notify(t('proxies.testPassed',{name:proxy.name,status:result.status_code||0,latency:result.latency_ms}))}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
+	const remove=async()=>{const proxy=deleteCandidate;if(!proxy)return;setBusy(`delete-${proxy.id}`);try{await api.deleteProxy(proxy.id);notify(t('proxies.deleted',{name:proxy.name}));if(form.id===proxy.id){setForm(emptyProxyForm);setShowForm(false)}await refresh()}catch(err){notify(errorText(err),'error')}finally{setBusy('');setDeleteCandidate(null)}}
 	return <div className="page-stack">
-		{!showForm&&<div className="page-actions"><div><p>{t('proxies.title')}</p><span>{t('proxies.description')}</span></div><button className="primary" onClick={openCreate}><Plus size={16}/>{t('proxies.add')}</button></div>}
-		{notice&&<div className="notice">{notice}<button onClick={()=>setNotice('')}><X size={14}/></button></div>}
+		{!showForm&&<div className="page-actions"><div><p>{t('proxies.title')}</p><span>{t('proxies.description')}</span></div><div className="page-action-buttons"><AddressVisibilityButton visible={showAddresses} onToggle={onToggleAddresses}/><button className="primary" onClick={openCreate}><Plus size={16}/>{t('proxies.add')}</button></div></div>}
 		{showForm&&<ConfigurationEditorPage icon={<Cable size={22}/>} title={editing?t('proxies.editTitle'):t('proxies.createTitle')} busy={busy==='save'} onBack={()=>setShowForm(false)}><form className="proxy-form configuration-editor-form panel" onSubmit={save}><div className="form-grid proxy-fields"><label><span>{t('proxies.name')}</span><input value={form.name} maxLength={128} onChange={event=>setForm({...form,name:event.target.value})} required/></label><label className="proxy-address-field"><span>{t('proxies.url')}</span><input value={form.url} onChange={event=>setForm({...form,url:event.target.value})} placeholder="socks5://127.0.0.1:1080" required/></label><label><span>{t('proxies.username')}</span><input autoComplete="off" value={form.username} onChange={event=>setForm({...form,username:event.target.value,password:event.target.value?form.password:'',clear_password:false})}/></label><label><span>{t('proxies.password')}</span><PasswordInput autoComplete="new-password" value={form.password} disabled={!form.username} onChange={event=>setForm({...form,password:event.target.value,clear_password:false})} placeholder={preservesPassword?t('proxies.keepPassword'):''}/>{preservesPassword&&<small><button type="button" onClick={()=>setForm({...form,password:'',clear_password:true})}>{t('proxies.clearPassword')}</button></small>}</label></div><div className="form-actions"><button type="button" onClick={()=>setShowForm(false)}>{t('common.cancel')}</button><button className="primary" disabled={busy==='save'}>{busy==='save'?t('common.saving'):t('common.save')}</button></div></form></ConfigurationEditorPage>}
 		{!showForm&&<div className="proxy-grid">{proxies.map(proxy=><article className="proxy-card panel" key={proxy.id}><div className="proxy-card-head"><div><Cable size={20}/></div><span><h3>{proxy.name}</h3><code>{showAddresses?proxy.url:'••••••'}</code></span>{proxy.ssh_compatible&&<em>SSH</em>}</div><dl><div><dt>{t('proxies.authentication')}</dt><dd>{proxy.username?`${proxy.username}${proxy.has_password?` · ${t('proxies.passwordSaved')}`:''}`:t('proxies.noAuthentication')}</dd></div><div><dt>{t('common.updated')}</dt><dd>{new Date(proxy.updated_at).toLocaleString(localeFor(instance.language))}</dd></div></dl><div className="card-actions"><button disabled={!!busy} onClick={()=>void test(proxy)}>{busy===`test-${proxy.id}`?<LoaderCircle className="spin" size={14}/>:<Activity size={14}/>} {t('common.test')}</button><button disabled={!!busy} onClick={()=>openEdit(proxy)}><Edit3 size={14}/>{t('common.edit')}</button><button className="danger" disabled={!!busy} title={t('common.delete')} onClick={()=>setDeleteCandidate(proxy)}><Trash2 size={14}/></button></div></article>)}</div>}
 		{!showForm&&!proxies.length&&<Empty icon={<Cable/>} title={t('proxies.emptyTitle')}/>}
@@ -2673,31 +2850,29 @@ const providerDefaults: Record<ModelProviderKind,Pick<ModelProviderInput,'base_u
   ollama: {base_url:'http://127.0.0.1:11434/v1',model:''},
 }
 
-function ModelsPage({providers,proxies,health,showAddresses,refresh}:{providers:ModelProvider[];proxies:Proxy[];health:Health|null;showAddresses:boolean;refresh:()=>Promise<void>}) {
+function ModelsPage({providers,proxies,showAddresses,onToggleAddresses,refresh}:{providers:ModelProvider[];proxies:Proxy[];showAddresses:boolean;onToggleAddresses:()=>void;refresh:()=>Promise<void>}) {
 	const {t,i18n:instance}=useTranslation()
+	const notify=useNotifier()
   const [showForm,setShowForm]=useState(false)
   const [form,setForm]=useState<ModelProviderInput>(emptyProviderForm)
-  const [notice,setNotice]=useState('')
   const [busy,setBusy]=useState('')
 	const [deleteCandidate,setDeleteCandidate]=useState<ModelProvider|null>(null)
   const [catalog,setCatalog]=useState<string[]>([])
   const [discovering,setDiscovering]=useState(false)
   const editing=!!form.id
 
-  const openCreate=()=>{setForm(emptyProviderForm);setCatalog([]);setShowForm(true);setNotice('')}
-  const openEdit=(provider:ModelProvider)=>{setForm({id:provider.id,name:provider.name,kind:provider.kind,base_url:provider.base_url||'',model:provider.model,api_key:'',proxy_id:provider.proxy_id||'',user_agent:provider.user_agent||''});setCatalog([]);setShowForm(true);setNotice('')}
+  const openCreate=()=>{setForm(emptyProviderForm);setCatalog([]);setShowForm(true)}
+  const openEdit=(provider:ModelProvider)=>{setForm({id:provider.id,name:provider.name,kind:provider.kind,base_url:provider.base_url||'',model:provider.model,api_key:'',proxy_id:provider.proxy_id||'',user_agent:provider.user_agent||''});setCatalog([]);setShowForm(true)}
   const changeKind=(kind:ModelProviderKind)=>{setCatalog([]);setForm({...form,kind,...providerDefaults[kind]})}
-	const discover=async()=>{setDiscovering(true);try{const {name:_name,model:_model,...payload}=form;const result=await api.discoverModels(payload);setCatalog(result.models);setForm(current=>({...current,model:result.models.includes(current.model)?current.model:''}));setNotice(t('models.found',{count:result.count}))}catch(err){setCatalog([]);setNotice(errorText(err))}finally{setDiscovering(false)}}
-	const testForm=async()=>{setBusy('test-form');try{const {name:_name,...payload}=form;const result=await api.testModelConfiguration(payload);setNotice(t('models.healthy',{name:result.model,response:result.response,latency:result.latency_ms}))}catch(err){setNotice(errorText(err))}finally{setBusy('')}}
-	const save=async(event:FormEvent)=>{event.preventDefault();setBusy('save');try{const saved=await api.saveModelProvider(form);setNotice(t('models.saved',{name:saved.name}));setShowForm(false);setForm(emptyProviderForm);await refresh()}catch(err){setNotice(errorText(err))}finally{setBusy('')}}
-	const activate=async(provider:ModelProvider)=>{setBusy(provider.id);try{await api.activateModelProvider(provider.id);setNotice(t('models.activated',{name:provider.name}));await refresh()}catch(err){setNotice(errorText(err))}finally{setBusy('')}}
-	const test=async(provider:ModelProvider)=>{setBusy(`test-${provider.id}`);try{const result=await api.testModelProvider(provider.id);setNotice(t('models.healthy',{name:provider.name,response:result.response,latency:result.latency_ms}))}catch(err){setNotice(errorText(err))}finally{setBusy('')}}
-	const remove=async()=>{const provider=deleteCandidate;if(!provider)return;setBusy(`delete-${provider.id}`);setNotice('');try{await api.deleteModelProvider(provider.id);setNotice(t('models.deleted',{name:provider.name}));await refresh()}catch(err){setNotice(errorText(err))}finally{setBusy('');setDeleteCandidate(null)}}
+	const discover=async()=>{setDiscovering(true);try{const {name:_name,model:_model,...payload}=form;const result=await api.discoverModels(payload);setCatalog(result.models);setForm(current=>({...current,model:result.models.includes(current.model)?current.model:''}));notify(t('models.found',{count:result.count}))}catch(err){setCatalog([]);notify(errorText(err),'error')}finally{setDiscovering(false)}}
+	const testForm=async()=>{setBusy('test-form');try{const {name:_name,...payload}=form;const result=await api.testModelConfiguration(payload);notify(t('models.healthy',{name:result.model,response:result.response,latency:result.latency_ms}))}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
+	const save=async(event:FormEvent)=>{event.preventDefault();setBusy('save');try{const saved=await api.saveModelProvider(form);notify(t('models.saved',{name:saved.name}));setShowForm(false);setForm(emptyProviderForm);await refresh()}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
+	const activate=async(provider:ModelProvider)=>{setBusy(provider.id);try{await api.activateModelProvider(provider.id);notify(t('models.activated',{name:provider.name}));await refresh()}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
+	const test=async(provider:ModelProvider)=>{setBusy(`test-${provider.id}`);try{const result=await api.testModelProvider(provider.id);notify(t('models.healthy',{name:provider.name,response:result.response,latency:result.latency_ms}))}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
+	const remove=async()=>{const provider=deleteCandidate;if(!provider)return;setBusy(`delete-${provider.id}`);try{await api.deleteModelProvider(provider.id);notify(t('models.deleted',{name:provider.name}));await refresh()}catch(err){notify(errorText(err),'error')}finally{setBusy('');setDeleteCandidate(null)}}
 
   return <div className="page-stack">
-	{!showForm&&<div className="page-actions"><div/><button className="primary" onClick={openCreate}><Plus size={16}/>{t('models.add')}</button></div>}
-    {notice&&<div className="notice">{notice}<button onClick={()=>setNotice('')}><X size={14}/></button></div>}
-	{!showForm&&<div className="model-summary panel"><div><span>{t('models.activeRoute')}</span><b>{health?.model?.name||t('models.noModel')}</b>{health?.model?.model&&<small>{health.model.model}</small>}</div><div className={`model-signal ${health?.agent_available?'ready':''}`}><CircleDot size={16}/>{health?.agent_available?t('models.ready'):t('models.offline')}</div></div>}
+	{!showForm&&<div className="page-actions"><div/><div className="page-action-buttons"><AddressVisibilityButton visible={showAddresses} onToggle={onToggleAddresses}/><button className="primary" onClick={openCreate}><Plus size={16}/>{t('models.add')}</button></div></div>}
     {showForm&&<ConfigurationEditorPage icon={<Cpu size={22}/>} title={editing?t('models.editTitle'):t('models.newTitle')} busy={!!busy} onBack={()=>setShowForm(false)}><form className="model-form configuration-editor-form panel" onSubmit={save}>
       <div className="form-grid model-fields">
 		<label><span>{t('models.displayName')}</span><input value={form.name} onChange={event=>setForm({...form,name:event.target.value})} required/></label>

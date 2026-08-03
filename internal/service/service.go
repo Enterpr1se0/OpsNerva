@@ -61,6 +61,10 @@ type Service struct {
 	automaticApprovalSem   chan struct{}
 	mcpMu                  sync.RWMutex
 	mcpRuntime             map[string]*mcpRuntimeState
+	mcpSecretsMu           sync.Mutex
+	mcpOAuthMu             sync.Mutex
+	mcpOAuthFlows          map[string]*mcpOAuthFlow
+	mcpOAuthByServer       map[string]*mcpOAuthFlow
 	executionCtx           context.Context
 	executionCancel        context.CancelFunc
 	executionMu            sync.Mutex
@@ -125,6 +129,7 @@ func New(st *store.Store, transport sshx.Transport, encryptor *security.Encrypto
 		store: st, transport: transport, encryptor: encryptor, redactor: redactor, limits: limits,
 		workspaceSandboxPath: config.Default().WorkspaceSandboxPath,
 		globalSem:            make(chan struct{}, global), hostSems: make(map[string]chan struct{}), tasks: make(map[string]*taskState), workspaces: make(map[string]config.Workspace), validators: make(map[string]config.Validator), mcpRuntime: make(map[string]*mcpRuntimeState),
+		mcpOAuthFlows: make(map[string]*mcpOAuthFlow), mcpOAuthByServer: make(map[string]*mcpOAuthFlow),
 		explanationActive: make(map[string]*approvalExplanationTask), explanationSem: make(chan struct{}, maxConcurrentApprovalExplanations), explanationSlots: make(chan struct{}, maxQueuedApprovalExplanations),
 		automaticApprovalSem: make(chan struct{}, maxConcurrentApprovalExplanations),
 		executionCtx:         executionCtx, executionCancel: executionCancel,

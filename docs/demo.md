@@ -2,9 +2,7 @@
 
 该演示使用一台一次性 Linux 虚拟机或容器 SSH 测试机。不要在没有快照的生产服务器上演示变更操作。
 
-## 0. 登录与模型热切换
-
-首次打开 Web 时展示管理员密码初始化页，由用户设置并确认至少 12 位的密码；初始化成功后直接建立登录会话。说明服务端只保存 Argon2id 哈希，浏览器只保存 HttpOnly Session Cookie，修改类 API 还要求 CSRF Token，SSH 密码、模型 Key 和审计原文不会进入前端存储。
+## 0. 模型热切换
 
 打开 Models 页面，分别配置一个云端 OpenAI-compatible 提供商和一个本地 Ollama 端点。点击 Fetch models 自动获取可用模型并展开下拉框选择；保存前点击 Test model，展示后端发送 `Hello`、模型返回非空文本和调用延迟。保存后 API Key 只显示“Encrypted key stored”，再点击 Use model。Agent 状态和聊天输入区中的模型名会立即变化，服务进程不需要重启。
 

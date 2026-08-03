@@ -44,7 +44,7 @@ func TestWorkspaceUploadStreamsRawRequestBody(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	server := httptest.NewServer(New(svc, nil, nil, Options{}).Handler())
+	server := httptest.NewServer(New(svc, nil, Options{}).Handler())
 	defer server.Close()
 	content := []byte{'W', 0, 'S', 0xff}
 	request, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/workspaces/default/files?path=imports%2Farchive.bin&filename=source.bin", bytes.NewReader(content))
@@ -103,7 +103,7 @@ func TestWorkspaceDownloadStreamsRegularFileAsAttachment(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	server := httptest.NewServer(New(svc, nil, nil, Options{}).Handler())
+	server := httptest.NewServer(New(svc, nil, Options{}).Handler())
 	defer server.Close()
 	response, err := server.Client().Get(server.URL + "/api/v1/workspaces/default/download?path=exports%2Freport.bin")
 	if err != nil {

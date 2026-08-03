@@ -67,73 +67,6 @@ func Open(ctx context.Context, path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-func (s *Store) AdminPasswordHash(ctx context.Context) (string, error) {
-	var hash string
-	err := s.db.QueryRowContext(ctx, `SELECT password_hash FROM admin_credentials WHERE id=1`).Scan(&hash)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", ErrNotFound
-	}
-	return hash, err
-}
-
-func (s *Store) CreateAdminPasswordHash(ctx context.Context, hash string) error {
-	result, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO admin_credentials(id,password_hash,updated_at) VALUES(1,?,?)`, hash, formatTime(time.Now().UTC()))
-	if err != nil {
-		return err
-	}
-	created, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if created != 1 {
-		return ErrAlreadyExists
-	}
-	return nil
-}
-
-func (s *Store) SetAdminPasswordHash(ctx context.Context, hash string) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO admin_credentials(id,password_hash,updated_at) VALUES(1,?,?)
-ON CONFLICT(id) DO UPDATE SET password_hash=excluded.password_hash,updated_at=excluded.updated_at`, hash, formatTime(time.Now().UTC()))
-	return err
-}
-
-func (s *Store) CreateWebSession(ctx context.Context, session domain.WebSession) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO web_sessions(token_hash,csrf_token,created_at,expires_at) VALUES(?,?,?,?)`,
-		session.TokenHash, session.CSRFToken, formatTime(session.CreatedAt), formatTime(session.ExpiresAt))
-	return err
-}
-
-func (s *Store) GetWebSession(ctx context.Context, tokenHash string) (domain.WebSession, error) {
-	var session domain.WebSession
-	var created, expires string
-	err := s.db.QueryRowContext(ctx, `SELECT token_hash,csrf_token,created_at,expires_at FROM web_sessions WHERE token_hash=?`, tokenHash).Scan(
-		&session.TokenHash, &session.CSRFToken, &created, &expires,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return domain.WebSession{}, ErrNotFound
-	}
-	if err != nil {
-		return domain.WebSession{}, err
-	}
-	session.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-	session.ExpiresAt, _ = time.Parse(time.RFC3339Nano, expires)
-	if time.Now().UTC().After(session.ExpiresAt) {
-		_ = s.DeleteWebSession(ctx, tokenHash)
-		return domain.WebSession{}, ErrNotFound
-	}
-	return session, nil
-}
-
-func (s *Store) DeleteWebSession(ctx context.Context, tokenHash string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM web_sessions WHERE token_hash=?`, tokenHash)
-	return err
-}
-
-func (s *Store) DeleteAllWebSessions(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM web_sessions`)
-	return err
-}
-
 func (s *Store) UpsertTask(ctx context.Context, task domain.Task, result domain.ExecResult, taskError string) error {
 	resultJSON, err := json.Marshal(result)
 	if err != nil {
@@ -409,18 +342,6 @@ CREATE TABLE IF NOT EXISTS agent_plan_steps (
   FOREIGN KEY(session_id) REFERENCES agent_plans(session_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_agent_plan_steps_session ON agent_plan_steps(session_id,step_number);
-	CREATE TABLE IF NOT EXISTS admin_credentials (
-	  id INTEGER PRIMARY KEY CHECK(id=1),
-	  password_hash TEXT NOT NULL,
-	  updated_at TEXT NOT NULL
-	);
-	CREATE TABLE IF NOT EXISTS web_sessions (
-	  token_hash TEXT PRIMARY KEY,
-	  csrf_token TEXT NOT NULL,
-	  created_at TEXT NOT NULL,
-	  expires_at TEXT NOT NULL
-	);
-	CREATE INDEX IF NOT EXISTS idx_web_sessions_expires ON web_sessions(expires_at);
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL DEFAULT '',
@@ -827,6 +748,18 @@ func (s *Store) ListMCPServers(ctx context.Context) ([]domain.MCPServer, error) 
 
 func (s *Store) SetMCPServerEnabled(ctx context.Context, id string, enabled bool) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE mcp_servers SET enabled=?,updated_at=? WHERE id=?`, boolInt(enabled), formatTime(time.Now().UTC()), id)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) UpdateMCPServerSecrets(ctx context.Context, id, secretsCipher string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE mcp_servers SET secrets_cipher=?,updated_at=? WHERE id=?`,
+		secretsCipher, formatTime(time.Now().UTC()), id)
 	if err != nil {
 		return err
 	}

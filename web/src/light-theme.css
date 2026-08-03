@@ -1,0 +1,1128 @@
+/* A complete light visual system. Layout remains shared; colors and surfaces do not. */
+:root[data-theme='light'] {
+  color: #18211d;
+  background: #f4f5f6;
+  --bg: #f4f5f6;
+  --panel: #ffffff;
+  --panel-2: #f7f8f9;
+  --line: #dde2df;
+  --muted: #68736e;
+  --green: #167451;
+  --green-2: #0f6545;
+  --amber: #9a620d;
+  --red: #c2414b;
+  --blue: #276fae;
+  --light-canvas: #f4f5f6;
+  --light-sidebar: #fafafa;
+  --light-surface: #ffffff;
+  --light-subtle: #f6f7f8;
+  --light-muted-surface: #eef1ef;
+  --light-border: #dde2df;
+  --light-border-strong: #cbd3cf;
+  --light-text: #18211d;
+  --light-text-secondary: #56625c;
+  --light-text-muted: #7a8580;
+  --light-accent: #167451;
+  --light-accent-hover: #0f6545;
+  --light-accent-soft: #e8f3ed;
+  --light-accent-border: #b9d8c8;
+  --light-warning: #94600d;
+  --light-warning-soft: #fff6e5;
+  --light-warning-border: #ead19c;
+  --light-danger: #bd3e48;
+  --light-danger-soft: #fff0f1;
+  --light-danger-border: #efc4c7;
+  --light-info: #276fae;
+  --light-info-soft: #eef6fc;
+  --light-info-border: #c5daeb;
+  --light-shadow: 0 10px 30px rgb(36 48 42 / 8%);
+  --light-shadow-high: 0 24px 70px rgb(36 48 42 / 16%);
+}
+
+/* Remove every inherited dark paint before composing light components. */
+:root[data-theme='light'] :where(body *:not(.xterm, .xterm *)) {
+  color: inherit;
+  border-color: var(--light-border);
+  background-color: transparent;
+  background-image: none;
+  box-shadow: none;
+}
+
+:root[data-theme='light'] :where(body *:not(.xterm, .xterm *))::before,
+:root[data-theme='light'] :where(body *:not(.xterm, .xterm *))::after {
+  border-color: var(--light-border);
+  background-color: transparent;
+  background-image: none;
+  box-shadow: none;
+}
+
+:root[data-theme='light'] body {
+  background: var(--light-canvas);
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] :where(
+  .panel,
+  .approval-dialog,
+  .connection-dialog,
+  .destructive-dialog,
+  .sftp-overwrite-dialog,
+  .ssh-shell-popover,
+  .ssh-tunnel-popover,
+  .ssh-shell-terminal-dialog,
+  .workspace-preview-dialog,
+  .skill-upload-panel
+) {
+  border-color: var(--light-border);
+  background: var(--light-surface);
+  box-shadow: var(--light-shadow);
+}
+
+:root[data-theme='light'] :where(
+  .panel-header,
+  .composer,
+  .settings-disclosure-body,
+  .run-detail,
+  .audit-head,
+  .workspace-browser-hint,
+  .workspace-preview-dialog > header,
+  .workspace-preview-dialog > .text-file-footer,
+  .sftp-browser > header,
+  .ssh-terminal-tabs,
+  .ssh-shell-terminal-dialog > header,
+  .ssh-shell-terminal-dialog > footer,
+  .web-search-settings .settings-disclosure-body > footer,
+  .mcp-server-mode .settings-disclosure-body > footer
+) {
+  border-color: var(--light-border);
+  background: var(--light-subtle);
+  color: var(--light-text-secondary);
+}
+
+/* Shell and navigation. */
+:root[data-theme='light'] .sidebar {
+  border-color: var(--light-border);
+  background: var(--light-sidebar);
+}
+
+:root[data-theme='light'] .topbar {
+  border-color: var(--light-border);
+  background: rgb(255 255 255 / 92%);
+  box-shadow: 0 1px 10px rgb(40 52 46 / 7%);
+}
+
+:root[data-theme='light'] :where(.brand strong, .topbar h1) {
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] .brand-mark {
+  background: var(--light-accent);
+  color: #ffffff;
+  box-shadow: 0 7px 18px rgb(22 116 81 / 20%);
+}
+
+:root[data-theme='light'] :where(.sidebar-conversations, .sidebar-foot) {
+  border-color: var(--light-border);
+}
+
+:root[data-theme='light'] :where(.sidebar-conversation-head, .build) {
+  color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] .nav-item {
+  background: transparent;
+  color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] .nav-item:hover {
+  background: var(--light-muted-surface);
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] .nav-item.active {
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
+  box-shadow: inset 3px 0 var(--light-accent);
+}
+
+:root[data-theme='light'] :where(.icon-button, .language-switch) {
+  border: 1px solid var(--light-border);
+  background: var(--light-surface);
+  color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] .icon-button:hover {
+  border-color: var(--light-border-strong);
+  background: var(--light-subtle);
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] .language-switch button {
+  background: transparent;
+  color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] .language-switch button.active {
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
+  box-shadow: inset 0 0 0 1px var(--light-accent-border);
+}
+
+:root[data-theme='light'] .status {
+  border-color: var(--light-border);
+  background: var(--light-surface);
+  color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] .status.online {
+  border-color: var(--light-accent-border);
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
+}
+
+/* Common controls. */
+:root[data-theme='light'] :where(input, textarea, select) {
+  border-color: var(--light-border-strong);
+  background: var(--light-surface);
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] :where(input, textarea, select):focus {
+  border-color: var(--light-accent);
+  box-shadow: 0 0 0 3px rgb(22 116 81 / 10%);
+}
+
+:root[data-theme='light'] :where(input, textarea)::placeholder {
+  color: #98a19d;
+}
+
+:root[data-theme='light'] :where(
+  .form-actions button,
+  .card-actions button,
+  .model-actions button,
+  .mcp-actions > button,
+  .text-file-footer button,
+  .settings-section-footer button,
+  .workspace-settings-editor > div > button,
+  .workspace-settings-row > button,
+  .workspace-panel-actions > button,
+  .chat-panel-open-button,
+  .code-copy-button,
+  .sftp-path button,
+  .sftp-actions button,
+  .sftp-actions label,
+  .connection-dialog button,
+  .destructive-dialog button,
+  .approval-actions button,
+  .new-chat-button
+) {
+  border-color: var(--light-border-strong);
+  background: var(--light-surface);
+  color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] :where(
+  .form-actions button,
+  .card-actions button,
+  .model-actions button,
+  .mcp-actions > button,
+  .text-file-footer button,
+  .settings-section-footer button,
+  .workspace-settings-editor > div > button,
+  .workspace-settings-row > button,
+  .workspace-panel-actions > button,
+  .chat-panel-open-button,
+  .code-copy-button,
+  .sftp-path button,
+  .sftp-actions button,
+  .sftp-actions label,
+  .new-chat-button
+):hover {
+  border-color: var(--light-border-strong);
+  background: var(--light-muted-surface);
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] :where(
+  .primary,
+  .input-row > button,
+  .form-actions .primary,
+  .model-actions .use-model,
+  .approval-actions .approve,
+  .text-file-footer button.primary,
+  .workspace-settings-editor button.primary,
+  .ssh-new-terminal
+) {
+  border-color: var(--light-accent);
+  background: var(--light-accent);
+  color: #ffffff;
+}
+
+:root[data-theme='light'] :where(
+  .primary,
+  .input-row > button,
+  .form-actions .primary,
+  .model-actions .use-model,
+  .approval-actions .approve,
+  .text-file-footer button.primary,
+  .workspace-settings-editor button.primary,
+  .ssh-new-terminal
+):hover {
+  border-color: var(--light-accent-hover);
+  background: var(--light-accent-hover);
+  color: #ffffff;
+}
+
+:root[data-theme='light'] :where(button:disabled, label.disabled) {
+  opacity: .48;
+}
+
+:root[data-theme='light'] :where(
+  button.danger,
+  .card-actions .danger,
+  .model-actions .danger,
+  .mcp-actions > button.danger,
+  .session-delete:hover,
+  .workspace-file-delete:hover,
+  .sftp-row > button.danger:hover
+) {
+  border-color: var(--light-danger-border);
+  background: var(--light-danger-soft);
+  color: var(--light-danger);
+}
+
+:root[data-theme='light'] .app-notification {
+  border-color: #b8dac9;
+  background: rgb(248 255 251 / 97%);
+  color: #176b47;
+  box-shadow: 0 14px 35px rgb(24 62 45 / 16%);
+}
+
+:root[data-theme='light'] .app-notification .app-notification-icon {
+  background: #ddf5e8;
+  color: #16804f;
+}
+
+:root[data-theme='light'] .app-notification.error {
+  border-color: var(--light-danger-border);
+  background: var(--light-danger-soft);
+  color: var(--light-danger);
+}
+
+:root[data-theme='light'] .app-notification.error .app-notification-icon {
+  background: #fde4e4;
+  color: var(--light-danger);
+}
+
+/* Conversation list and chat. */
+:root[data-theme='light'] .session-item {
+  border-color: transparent;
+  background: transparent;
+}
+
+:root[data-theme='light'] .session-item:hover {
+  background: var(--light-muted-surface);
+}
+
+:root[data-theme='light'] .session-item.active {
+  border-color: var(--light-accent-border);
+  background: var(--light-accent-soft);
+}
+
+:root[data-theme='light'] :where(.session-open, .session-delete) {
+  background: transparent;
+  color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] .session-open b {
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] .session-item.active .session-open b {
+  color: var(--light-accent);
+}
+
+:root[data-theme='light'] :where(.session-open span, .session-id, .history-empty, .bubble-label, .context-line) {
+  color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] .composer-selector > summary {
+  color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] :where(.composer-selector > summary:hover, .composer-selector[open] > summary) {
+  border-color: var(--light-border-strong);
+  background: var(--light-subtle);
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] .composer-selector-menu {
+  border-color: var(--light-border-strong);
+  background: var(--light-surface);
+  box-shadow: var(--light-shadow-high);
+}
+
+:root[data-theme='light'] .composer-selector-menu button {
+  color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] .composer-selector-menu button:hover:not(:disabled) {
+  background: var(--light-subtle);
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] .composer-selector-menu button.active {
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
+}
+
+:root[data-theme='light'] :where(.composer-selector-menu button small, .composer-selector-empty) {
+  color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] :where(.session-running-count, .session-approval-count) {
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
+}
+
+:root[data-theme='light'] .chat-main {
+  background: var(--light-surface);
+}
+
+:root[data-theme='light'] .composer {
+  border-color: var(--light-border);
+  background: #fbfcfb;
+}
+
+:root[data-theme='light'] .input-row textarea {
+  border-color: var(--light-border-strong);
+  background: var(--light-surface);
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] .input-row > button:disabled {
+  border-color: var(--light-border);
+  background: var(--light-muted-surface);
+  color: #9ba49f;
+}
+
+:root[data-theme='light'] .image-attach-button {
+  border-color: var(--light-border-strong);
+  background: var(--light-surface);
+  color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] .image-attach-button:hover {
+  border-color: var(--light-accent);
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
+}
+
+:root[data-theme='light'] .avatar {
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
+}
+
+:root[data-theme='light'] .bubble.user .avatar {
+  background: #edf0ee;
+  color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] .bubble.error .avatar {
+  background: var(--light-danger-soft);
+  color: var(--light-danger);
+}
+
+:root[data-theme='light'] .bubble-copy {
+  color: #27332d;
+}
+
+:root[data-theme='light'] :where(.thinking, .thinking.background-agent) {
+  color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] .thinking span {
+  background: var(--light-accent);
+}
+
+:root[data-theme='light'] .llm-work-status {
+  border-color: var(--light-info-border);
+  background: var(--light-info-soft);
+  color: var(--light-info);
+}
+
+:root[data-theme='light'] .agent-stop-button {
+  border-color: var(--light-danger-border);
+  background: var(--light-danger-soft);
+  color: var(--light-danger);
+}
+
+:root[data-theme='light'] .composer-image-notice {
+  border-color: var(--light-warning-border);
+  background: var(--light-warning-soft);
+  color: var(--light-warning);
+}
+
+:root[data-theme='light'] .message-images a {
+  border-color: var(--light-border);
+  background: var(--light-subtle);
+  color: var(--light-text-secondary);
+}
+
+/* Markdown is paper-like in light mode. */
+:root[data-theme='light'] .markdown-body {
+  color: #27332d;
+}
+
+:root[data-theme='light'] :where(.markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4, .markdown-body strong) {
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] .markdown-body a {
+  color: var(--light-info);
+  border-color: #a8cae3;
+}
+
+:root[data-theme='light'] .markdown-body code {
+  border-color: #d5dfda;
+  background: #f1f4f2;
+  color: #305744;
+}
+
+:root[data-theme='light'] .markdown-body pre {
+  border-color: #d7ddda;
+  background: #f5f6f6;
+  color: #26332d;
+}
+
+:root[data-theme='light'] .markdown-body pre code {
+  background: transparent;
+  color: #26332d;
+}
+
+:root[data-theme='light'] .markdown-body blockquote {
+  border-left-color: var(--light-accent);
+  background: #f1f6f3;
+  color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] :where(.markdown-body th, .markdown-body td) {
+  border-color: var(--light-border);
+}
+
+:root[data-theme='light'] .markdown-body th {
+  background: var(--light-muted-surface);
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] .markdown-body tr:nth-child(even) td {
+  background: #fafbfa;
+}
+
+:root[data-theme='light'] .markdown-image-blocked {
+  border-color: var(--light-border-strong);
+  background: var(--light-subtle);
+  color: var(--light-text-muted);
+}
+
+/* Reasoning, plans, and tool execution. */
+:root[data-theme='light'] :where(
+  .reasoning-content,
+  .session-plan-steps,
+  .tool-event,
+  .tool-command-block,
+  .tool-context-pane,
+  .tool-structured-result,
+  .tool-generic-note,
+  .tool-no-arguments,
+  .tool-schema-raw,
+  .file-metadata-panel,
+  .command-review-panel,
+  .approval-operation,
+  .approval-request-detail
+) {
+  border-color: var(--light-border);
+  background: var(--light-subtle);
+  color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] :where(.tool-event > summary, .reasoning-latest, .command-review-panel > summary) {
+  background: var(--light-surface);
+  color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] :where(
+  .tool-summary-copy b,
+  .tool-command-head,
+  .tool-context-grid dd,
+  .tool-generic-grid dd,
+  .tool-compact-table td,
+  .tool-array-section code,
+  .tool-object-section h4,
+  .reasoning-title b,
+  .plan-summary-copy b
+) {
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] :where(
+  .tool-summary-copy code,
+  .tool-summary-preview,
+  .tool-context-grid dt,
+  .tool-generic-grid dt,
+  .tool-reason,
+  .tool-instruction,
+  .tool-compact-table th,
+  .reasoning-title span,
+  .plan-summary-copy span
+) {
+  color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] :where(.tool-command-block pre, .tool-output pre, .tool-raw pre, .tool-schema-raw pre) {
+  border-color: var(--light-border);
+  background: #f2f4f3;
+  color: #27352e;
+}
+
+:root[data-theme='light'] .tool-command-head {
+  border-color: var(--light-border);
+  background: #eaeeec;
+}
+
+:root[data-theme='light'] .tool-summary-icon {
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
+}
+
+:root[data-theme='light'] .session-plan-steps {
+  background: rgb(255 255 255 / 97%);
+  box-shadow: var(--light-shadow);
+}
+
+:root[data-theme='light'] .session-plan-steps li:not(:last-child)::before {
+  background: var(--light-border-strong);
+}
+
+:root[data-theme='light'] .plan-step-marker {
+  border-color: var(--light-border-strong);
+  background: var(--light-surface);
+  color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] .session-plan-steps li.in_progress .plan-step-marker,
+:root[data-theme='light'] .session-plan-steps li.completed .plan-step-marker {
+  border-color: var(--light-accent-border);
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
+}
+
+:root[data-theme='light'] .session-plan-steps li.blocked .plan-step-marker {
+  border-color: var(--light-warning-border);
+  background: var(--light-warning-soft);
+  color: var(--light-warning);
+}
+
+/* Approval and confirmation dialogs. */
+:root[data-theme='light'] :where(.approval-modal-backdrop, .connection-dialog-backdrop, .destructive-dialog-backdrop, .workspace-preview-backdrop, .ssh-shell-terminal-backdrop) {
+  background: rgb(48 56 52 / 32%);
+  backdrop-filter: blur(6px);
+}
+
+:root[data-theme='light'] .approval-dialog {
+  border-color: var(--light-warning-border);
+  border-top-color: var(--light-warning);
+  background: var(--light-surface);
+  box-shadow: var(--light-shadow-high);
+}
+
+:root[data-theme='light'] .approval-dialog.elevated {
+  border-color: var(--light-danger-border);
+  border-top-color: var(--light-danger);
+}
+
+:root[data-theme='light'] .approval-dialog-icon {
+  background: var(--light-warning-soft);
+  color: var(--light-warning);
+}
+
+:root[data-theme='light'] :where(.approval-dialog-head h2, .approval-operation > code) {
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] :where(.approval-dialog-head span, .approval-operation dt, .approval-operation dd, .approval-operation p) {
+  color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] .approval-operation {
+  border-color: var(--light-border);
+  background: var(--light-subtle);
+}
+
+:root[data-theme='light'] .approval-operation .approval-command-preview {
+  border-color: var(--light-border-strong);
+  border-left-color: var(--light-accent);
+  background: #f2f4f3;
+  color: #213029;
+}
+
+:root[data-theme='light'] :where(.approval-root-warning, .approval-host-shell-warning) {
+  border-color: var(--light-danger-border);
+  background: var(--light-danger-soft);
+  color: var(--light-danger);
+}
+
+:root[data-theme='light'] :where(.approval-guidance, .reject-guidance) {
+  border-color: var(--light-border);
+  background: var(--light-subtle);
+}
+
+:root[data-theme='light'] :where(.command-review-pending, .approval-wait) {
+  border-color: var(--light-info-border);
+  background: var(--light-info-soft);
+  color: var(--light-info);
+}
+
+:root[data-theme='light'] :where(.review-agent-icon, .approval-toast) {
+  border-color: var(--light-accent-border);
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
+}
+
+:root[data-theme='light'] :where(.review-errors, .approval-dialog-error, .connection-dialog-error, .subagent-runtime-error) {
+  border-color: var(--light-danger-border);
+  background: var(--light-danger-soft);
+  color: var(--light-danger);
+}
+
+/* Configuration, forms, and cards. */
+:root[data-theme='light'] .configuration-tabs-row {
+  background: color-mix(in srgb, var(--light-canvas) 94%, transparent);
+}
+
+:root[data-theme='light'] .configuration-address-toggle.active {
+  border-color: var(--light-accent-border);
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
+}
+
+:root[data-theme='light'] :where(
+  .configuration-tabs > button,
+  .configuration-editor-header,
+  .settings-disclosure > summary,
+  .workspace-settings-editor,
+  .workspace-settings-row,
+  .model-name,
+  .credential-note,
+  .private-key-picker,
+  .host-key-review,
+  .subagent-settings,
+  .workspace-shell-modes > button,
+  .iteration-presets button,
+  .chat-image-formats label
+) {
+  border-color: var(--light-border);
+  background: var(--light-surface);
+  color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] .settings-disclosure > summary:hover {
+  background: var(--light-subtle);
+}
+
+:root[data-theme='light'] :where(.settings-disclosure-icon, .provider-glyph, .server-glyph, .proxy-card-head > div) {
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
+}
+
+:root[data-theme='light'] :where(
+  .settings-disclosure > summary > b,
+  .model-card h3,
+  .host-card h3,
+  .proxy-card h3,
+  .model-name,
+  .private-key-picker b,
+  .workspace-settings-row code
+) {
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] :where(
+  .model-card dt,
+  .model-card dd,
+  .host-card dt,
+  .host-card dd,
+  .proxy-card dt,
+  .proxy-card dd,
+  .form-grid span,
+  .settings-disclosure > summary > em,
+  .workspace-settings-editor > label > span
+) {
+  color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] .model-card.active {
+  border-color: var(--light-accent-border);
+  box-shadow: inset 0 3px var(--light-accent), var(--light-shadow);
+}
+
+:root[data-theme='light'] :where(.model-card-head em, .host-state, .host-key-state.trusted, .host-agent-state.active) {
+  border-color: var(--light-accent-border);
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
+}
+
+:root[data-theme='light'] .host-key-state.untrusted,
+:root[data-theme='light'] .host-key-review {
+  border-color: var(--light-warning-border);
+  background: var(--light-warning-soft);
+  color: var(--light-warning);
+}
+
+:root[data-theme='light'] .host-key-review.trusted,
+:root[data-theme='light'] .credential-note {
+  border-color: var(--light-accent-border);
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
+}
+
+:root[data-theme='light'] .host-agent-toggle > i,
+:root[data-theme='light'] .subagent-toggle > i,
+:root[data-theme='light'] .web-search-toggle > i,
+:root[data-theme='light'] .mcp-enable-on-save > i {
+  border: 1px solid var(--light-border-strong);
+  background: #cfd6d2;
+}
+
+:root[data-theme='light'] :where(.host-agent-toggle, .subagent-toggle, .web-search-toggle, .mcp-enable-on-save) > input:checked + i {
+  border-color: var(--light-accent);
+  background: var(--light-accent);
+}
+
+:root[data-theme='light'] :where(.host-agent-toggle, .subagent-toggle, .web-search-toggle, .mcp-enable-on-save) > i::after {
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgb(30 42 36 / 20%);
+}
+
+:root[data-theme='light'] .workspace-shell-modes > button.active,
+:root[data-theme='light'] .iteration-presets button.active,
+:root[data-theme='light'] .chat-image-formats label.active {
+  border-color: var(--light-accent-border);
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
+}
+
+:root[data-theme='light'] .workspace-shell-warning {
+  border-color: var(--light-warning-border);
+  background: var(--light-warning-soft);
+  color: var(--light-warning);
+}
+
+/* Audit and logs. */
+:root[data-theme='light'] :where(.search-box, .audit-session > .audit-table, .run-detail, .log-stream) {
+  border-color: var(--light-border);
+  background: var(--light-surface);
+}
+
+:root[data-theme='light'] .audit-session-summary:hover,
+:root[data-theme='light'] .audit-table details summary:hover,
+:root[data-theme='light'] .log-row:hover {
+  background: var(--light-subtle);
+}
+
+:root[data-theme='light'] :where(.audit-session-glyph, .log-component) {
+  background: var(--light-muted-surface);
+  color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] :where(.audit-session-name b, .audit-session-stats span b, .command, .log-event) {
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] :where(.audit-session-name span, .audit-session-stats span, .audit-row, .logs-meta, .log-head) {
+  color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] :where(.run-status.completed, .auto-approved) {
+  border-color: var(--light-accent-border);
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
+}
+
+:root[data-theme='light'] :where(.run-status.approval_required, .run-status.partial, .pending-count) {
+  border-color: var(--light-warning-border);
+  background: var(--light-warning-soft);
+  color: var(--light-warning);
+}
+
+:root[data-theme='light'] :where(.run-status.failed, .run-status.denied) {
+  border-color: var(--light-danger-border);
+  background: var(--light-danger-soft);
+  color: var(--light-danger);
+}
+
+/* Extensions, Skills, MCP, and function catalog. */
+:root[data-theme='light'] :where(
+  .skill-list,
+  .skill-editor,
+  .mcp-card > header,
+  .mcp-card > dl > div,
+  .mcp-tools > div,
+  .mcp-tools section,
+  .tool-function-list,
+  .tool-function-inspector,
+  .tool-parameter-list,
+  .mcp-server-mode-fields,
+  .web-search-grid
+) {
+  border-color: var(--light-border);
+  background: var(--light-surface);
+}
+
+:root[data-theme='light'] :where(
+  .extension-tabs button,
+  .skill-list > button,
+  .tool-function-list > button,
+  .tool-function-controls button,
+  .mcp-tools > summary
+) {
+  border-color: var(--light-border);
+  background: transparent;
+  color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] :where(.extension-tabs button, .skill-list > button, .tool-function-list > button):hover {
+  background: var(--light-subtle);
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] :where(.extension-tabs button.active, .skill-list > button.active, .tool-function-list > button.active) {
+  border-color: var(--light-accent-border);
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
+}
+
+:root[data-theme='light'] :where(.skill-card-icon, .mcp-card-icon, .tool-function-icon, .tool-catalog-mark) {
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
+}
+
+:root[data-theme='light'] :where(.mcp-card h3, .skill-editor h2, .tool-function-description h3, .tool-parameter-list b) {
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] :where(.mcp-card code, .mcp-card dt, .mcp-card dd, .skill-list small, .tool-function-meta, .tool-function-description p) {
+  color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] :where(.mcp-card-error, .skill-error, .tool-function-error) {
+  border-color: var(--light-danger-border);
+  background: var(--light-danger-soft);
+  color: var(--light-danger);
+}
+
+:root[data-theme='light'] .mcp-boundary-note {
+  border-color: var(--light-warning-border);
+  background: var(--light-warning-soft);
+  color: var(--light-warning);
+}
+
+/* Workspace and SFTP file management. */
+:root[data-theme='light'] :where(
+  .workspace-browser-panel,
+  .sftp-browser,
+  .ssh-workspace-terminal,
+  .workspace-settings-row,
+  .workspace-preview-dialog,
+  .text-file-input
+) {
+  border-color: var(--light-border);
+  background: var(--light-surface);
+}
+
+:root[data-theme='light'] :where(.chat-workspace-head b, .workspace-file-open span, .sftp-entry b, .workspace-settings-row code) {
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] :where(.chat-workspace-head small, .workspace-file-open small, .sftp-entry small, .workspace-path-row code) {
+  color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] :where(.workspace-file-row:hover, .sftp-row:hover) {
+  background: var(--light-subtle);
+}
+
+:root[data-theme='light'] :where(.workspace-file-open, .workspace-file-delete, .workspace-file-download, .workspace-file-reveal, .sftp-entry, .sftp-row > button) {
+  background: transparent;
+  color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] :where(.workspace-path-row > button, .workspace-path-row > label, .chat-upload-row button, .workspace-shell-sessions > button) {
+  border-color: var(--light-border-strong);
+  background: var(--light-subtle);
+  color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] :where(.chat-workspace-head > em, .workspace-shell-owner) {
+  border-color: var(--light-accent-border);
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
+}
+
+:root[data-theme='light'] .chat-workspace-head > em.read_only {
+  border-color: var(--light-warning-border);
+  background: var(--light-warning-soft);
+  color: var(--light-warning);
+}
+
+:root[data-theme='light'] :where(.workspace-browser-hint, .sftp-path, .sftp-actions) {
+  border-color: var(--light-border);
+  background: var(--light-subtle);
+  color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] :where(.workspace-drop-overlay, .sftp-drop) {
+  border-color: var(--light-accent);
+  background: rgb(239 248 243 / 96%);
+  color: var(--light-accent);
+}
+
+:root[data-theme='light'] :where(.chat-workspace-notice.success, .sftp-notice:not(.error)) {
+  border-color: var(--light-accent-border);
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
+}
+
+:root[data-theme='light'] :where(.chat-workspace-notice.error, .sftp-notice.error, .workspace-files-state.error) {
+  border-color: var(--light-danger-border);
+  background: var(--light-danger-soft);
+  color: var(--light-danger);
+}
+
+:root[data-theme='light'] .workspace-preview-dialog {
+  background: var(--light-surface);
+  box-shadow: var(--light-shadow-high);
+}
+
+:root[data-theme='light'] :where(.workspace-preview-dialog > header b, .text-file-input) {
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] .workspace-preview-dialog > pre {
+  background: #f5f6f6;
+  color: #26332d;
+}
+
+/* Connection popovers and SSH surfaces. */
+:root[data-theme='light'] :where(.ssh-tunnel-status, .ssh-shell-status) > summary {
+  border-color: var(--light-border);
+  background: var(--light-surface);
+  color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] :where(.ssh-tunnel-popover, .ssh-shell-popover) {
+  border-color: var(--light-border);
+  background: var(--light-surface);
+  box-shadow: var(--light-shadow-high);
+}
+
+:root[data-theme='light'] :where(.ssh-tunnel-popover > header, .ssh-shell-popover > header, .ssh-tunnel-route, .ssh-shell-empty, .ssh-tunnel-empty) {
+  border-color: var(--light-border);
+  background: var(--light-subtle);
+  color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] :where(.ssh-tunnel-meta b, .ssh-shell-popover b, .ssh-tunnel-route b) {
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] :where(.ssh-tunnel-meta span, .ssh-shell-popover small, .ssh-tunnel-route span) {
+  color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] .connection-dialog {
+  background: var(--light-surface);
+  box-shadow: var(--light-shadow-high);
+}
+
+:root[data-theme='light'] .sftp-overwrite-dialog {
+  border-color: var(--light-warning-border);
+  background: var(--light-surface);
+}
+
+:root[data-theme='light'] .sftp-overwrite-dialog > code {
+  border-color: var(--light-warning-border);
+  background: var(--light-warning-soft);
+  color: var(--light-warning);
+}
+
+:root[data-theme='light'] .ssh-terminal-tabs > div > button {
+  border-color: transparent;
+  background: transparent;
+  color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] .ssh-terminal-tabs > div > button.active {
+  border-color: var(--light-accent-border);
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
+}
+
+:root[data-theme='light'] .sftp-host {
+  color: var(--light-text-muted);
+}
+
+/* ANSI terminal canvases remain dark by design; their chrome is light. */
+:root[data-theme='light'] :where(.ssh-shell-terminal-screen, .ssh-terminal-stage > .ssh-shell-terminal-dialog .ssh-shell-terminal-screen) {
+  border-color: #26352f;
+  background: #07110e;
+  color: #d8e3dd;
+}
+
+:root[data-theme='light'] .ssh-shell-terminal-dialog {
+  border-color: var(--light-border-strong);
+  background: var(--light-surface);
+  box-shadow: var(--light-shadow-high);
+}
+
+:root[data-theme='light'] .ssh-shell-terminal-meta {
+  color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] .ssh-shell-terminal-error {
+  border-color: var(--light-danger-border);
+  background: var(--light-danger-soft);
+  color: var(--light-danger);
+}
+
+/* Semantic status colors. */
+:root[data-theme='light'] :where(.ready, .trusted, .auto-approved, .green) {
+  color: var(--light-accent);
+}
+
+:root[data-theme='light'] :where(.pending, .partial, .untrusted, .amber) {
+  color: var(--light-warning);
+}
+
+:root[data-theme='light'] :where(.failed, .denied, .error, .red) {
+  color: var(--light-danger);
+}
+
+/* Light scrollbars. */
+:root[data-theme='light'] * {
+  scrollbar-color: #b9c1bd #eef0ef;
+}
+
+:root[data-theme='light'] *::-webkit-scrollbar-track,
+:root[data-theme='light'] *::-webkit-scrollbar-corner {
+  background: #eef0ef;
+}
+
+:root[data-theme='light'] *::-webkit-scrollbar-thumb {
+  border-color: #eef0ef;
+  background: #b9c1bd;
+}
+
+:root[data-theme='light'] *::-webkit-scrollbar-thumb:hover {
+  background: #98a39d;
+}

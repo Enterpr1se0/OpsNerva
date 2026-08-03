@@ -23,6 +23,7 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 	einojsonschema "github.com/eino-contrib/jsonschema"
+	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -41,6 +42,7 @@ var (
 type mcpSecrets struct {
 	Env     map[string]string `json:"env,omitempty"`
 	Headers map[string]string `json:"headers,omitempty"`
+	OAuth   *mcpOAuthSession  `json:"oauth,omitempty"`
 }
 
 type mcpRuntimeState struct {
@@ -100,6 +102,7 @@ func (s *Service) InitializeMCPServers(ctx context.Context) error {
 }
 
 func (s *Service) CloseMCPServers() {
+	s.cancelAllMCPOAuthFlows()
 	s.mcpMu.Lock()
 	states := s.mcpRuntime
 	s.mcpRuntime = make(map[string]*mcpRuntimeState)
@@ -120,7 +123,29 @@ func (s *Service) SaveMCPServer(ctx context.Context, input domain.MCPServerInput
 	if err := validateMCPInput(input); err != nil {
 		return domain.MCPServer{}, err
 	}
+	if input.ID != "" {
+		s.cancelMCPOAuthFlow(input.ID)
+	}
 
+	s.mcpSecretsMu.Lock()
+	saved, err := s.storeMCPServerConfig(ctx, input)
+	s.mcpSecretsMu.Unlock()
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "unique constraint") {
+			return domain.MCPServer{}, fmt.Errorf("MCP server name already exists")
+		}
+		return domain.MCPServer{}, err
+	}
+	if saved.Enabled {
+		_ = s.ReconnectMCPServer(ctx, saved.ID)
+	} else {
+		s.disconnectMCPServer(saved.ID, "disabled")
+	}
+	s.audit(ctx, "", "mcp_server_saved", actor, map[string]any{"server_id": saved.ID, "name": saved.Name, "transport": saved.Transport, "enabled": saved.Enabled})
+	return s.GetMCPServer(ctx, saved.ID)
+}
+
+func (s *Service) storeMCPServerConfig(ctx context.Context, input domain.MCPServerInput) (domain.MCPServer, error) {
 	server := domain.MCPServer{
 		ID: input.ID, Name: input.Name, Transport: input.Transport, Command: input.Command,
 		Args: append([]string(nil), input.Args...), Cwd: input.Cwd, URL: input.URL, Enabled: input.Enabled,
@@ -136,6 +161,9 @@ func (s *Service) SaveMCPServer(ctx context.Context, input domain.MCPServerInput
 		secrets, err = s.decryptMCPSecrets(existing.SecretsCipher)
 		if err != nil {
 			return domain.MCPServer{}, fmt.Errorf("decrypt existing MCP secrets: %w", err)
+		}
+		if existing.Transport != input.Transport || existing.URL != input.URL {
+			secrets.OAuth = nil
 		}
 	}
 	if input.Env != nil {
@@ -158,19 +186,7 @@ func (s *Service) SaveMCPServer(ctx context.Context, input domain.MCPServerInput
 		return domain.MCPServer{}, err
 	}
 	saved, err := s.store.UpsertMCPServer(ctx, server)
-	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "unique constraint") {
-			return domain.MCPServer{}, fmt.Errorf("MCP server name already exists")
-		}
-		return domain.MCPServer{}, err
-	}
-	if saved.Enabled {
-		_ = s.ReconnectMCPServer(ctx, saved.ID)
-	} else {
-		s.disconnectMCPServer(saved.ID, "disabled")
-	}
-	s.audit(ctx, "", "mcp_server_saved", actor, map[string]any{"server_id": saved.ID, "name": saved.Name, "transport": saved.Transport, "enabled": saved.Enabled})
-	return s.GetMCPServer(ctx, saved.ID)
+	return saved, err
 }
 
 func (s *Service) ListMCPServers(ctx context.Context) ([]domain.MCPServer, error) {
@@ -203,6 +219,7 @@ func (s *Service) SetMCPServerEnabled(ctx context.Context, id string, enabled bo
 	if enabled {
 		_ = s.ReconnectMCPServer(ctx, id)
 	} else {
+		s.cancelMCPOAuthFlow(id)
 		s.disconnectMCPServer(id, "disabled")
 	}
 	eventType := "mcp_server_disabled"
@@ -218,6 +235,7 @@ func (s *Service) DeleteMCPServer(ctx context.Context, id, actor string) error {
 	if err != nil {
 		return err
 	}
+	s.cancelMCPOAuthFlow(id)
 	s.disconnectMCPServer(id, "disabled")
 	if err := s.store.DeleteMCPServer(ctx, id); err != nil {
 		return err
@@ -353,6 +371,18 @@ func (s *Service) connectMCPServer(ctx context.Context, server domain.MCPServer)
 	if err != nil {
 		return nil, nil, fmt.Errorf("decrypt MCP secrets: %w", err)
 	}
+	var oauthHandler auth.OAuthHandler
+	if server.Transport == domain.MCPTransportStreamableHTTP && secrets.OAuth != nil {
+		oauthClient := &http.Client{Timeout: mcpCallTimeout, Transport: http.DefaultTransport}
+		oauthHandler, err = s.restoredMCPOAuthHandler(server.ID, secrets.OAuth, oauthClient)
+		if err != nil {
+			return nil, nil, fmt.Errorf("restore MCP OAuth session: %w", err)
+		}
+	}
+	return s.connectMCPServerWithSecrets(ctx, server, secrets, oauthHandler)
+}
+
+func (s *Service) connectMCPServerWithSecrets(ctx context.Context, server domain.MCPServer, secrets mcpSecrets, oauthHandler auth.OAuthHandler) (*mcp.ClientSession, []mcpResolvedTool, error) {
 	var transport mcp.Transport
 	switch server.Transport {
 	case domain.MCPTransportStdio:
@@ -361,8 +391,8 @@ func (s *Service) connectMCPServer(ctx context.Context, server domain.MCPServer)
 		command.Env = append(os.Environ(), mapAsEnvironment(secrets.Env)...)
 		transport = &mcp.CommandTransport{Command: command}
 	case domain.MCPTransportStreamableHTTP:
-		client := &http.Client{Timeout: mcpCallTimeout, Transport: proxyx.HeaderRewriteTransport{Base: http.DefaultTransport, Headers: secrets.Headers}}
-		transport = &mcp.StreamableClientTransport{Endpoint: server.URL, HTTPClient: client, MaxRetries: 1, DisableStandaloneSSE: true}
+		client := mcpResourceHTTPClient(secrets.Headers, oauthHandler != nil)
+		return s.connectMCPServerWithTransport(ctx, server, client, oauthHandler)
 	default:
 		return nil, nil, fmt.Errorf("unsupported MCP transport %q", server.Transport)
 	}
@@ -377,6 +407,39 @@ func (s *Service) connectMCPServer(ctx context.Context, server domain.MCPServer)
 		return nil, nil, err
 	}
 	return session, resolved, nil
+}
+
+func (s *Service) connectMCPServerWithTransport(ctx context.Context, server domain.MCPServer, client *http.Client, oauthHandler auth.OAuthHandler) (*mcp.ClientSession, []mcpResolvedTool, error) {
+	transport := &mcp.StreamableClientTransport{
+		Endpoint: server.URL, HTTPClient: client, OAuthHandler: oauthHandler,
+		MaxRetries: 1, DisableStandaloneSSE: true,
+	}
+	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "opsnerva", Version: "0.1.0"}, nil)
+	session, err := mcpClient.Connect(ctx, transport, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	resolved, err := listMCPTools(ctx, session, server.ID, server.Name)
+	if err != nil {
+		_ = session.Close()
+		return nil, nil, err
+	}
+	return session, resolved, nil
+}
+
+func mcpResourceHTTPClient(headers map[string]string, oauthEnabled bool) *http.Client {
+	fixed := cloneStringMap(headers)
+	if oauthEnabled {
+		for name := range fixed {
+			if strings.EqualFold(name, "Authorization") {
+				delete(fixed, name)
+			}
+		}
+	}
+	return &http.Client{
+		Timeout:   mcpCallTimeout,
+		Transport: proxyx.HeaderRewriteTransport{Base: http.DefaultTransport, Headers: fixed},
+	}
 }
 
 func listMCPTools(ctx context.Context, session *mcp.ClientSession, serverID, serverName string) ([]mcpResolvedTool, error) {
@@ -431,6 +494,13 @@ toolPages:
 }
 
 func (s *Service) decorateMCPServer(server domain.MCPServer) domain.MCPServer {
+	if secrets, err := s.decryptMCPSecrets(server.SecretsCipher); err == nil && secrets.OAuth != nil {
+		server.OAuthConfigured = true
+		if !secrets.OAuth.Expiry.IsZero() {
+			expiresAt := secrets.OAuth.Expiry
+			server.OAuthExpiresAt = &expiresAt
+		}
+	}
 	s.mcpMu.RLock()
 	state := s.mcpRuntime[server.ID]
 	if state != nil {

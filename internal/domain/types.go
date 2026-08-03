@@ -322,24 +322,30 @@ type MCPTool struct {
 }
 
 type MCPServer struct {
-	ID            string       `json:"id"`
-	Name          string       `json:"name"`
-	Transport     MCPTransport `json:"transport"`
-	Command       string       `json:"command,omitempty"`
-	Args          []string     `json:"args,omitempty"`
-	Cwd           string       `json:"cwd,omitempty"`
-	URL           string       `json:"url,omitempty"`
-	EnvKeys       []string     `json:"env_keys,omitempty"`
-	HeaderKeys    []string     `json:"header_keys,omitempty"`
-	SecretsCipher string       `json:"-"`
-	Enabled       bool         `json:"enabled"`
-	Status        string       `json:"status"`
-	LastError     string       `json:"last_error,omitempty"`
-	ConnectedAt   *time.Time   `json:"connected_at,omitempty"`
-	ToolCount     int          `json:"tool_count"`
-	Tools         []MCPTool    `json:"tools,omitempty"`
-	CreatedAt     time.Time    `json:"created_at"`
-	UpdatedAt     time.Time    `json:"updated_at"`
+	ID              string       `json:"id"`
+	Name            string       `json:"name"`
+	Transport       MCPTransport `json:"transport"`
+	Command         string       `json:"command,omitempty"`
+	Args            []string     `json:"args,omitempty"`
+	Cwd             string       `json:"cwd,omitempty"`
+	URL             string       `json:"url,omitempty"`
+	EnvKeys         []string     `json:"env_keys,omitempty"`
+	HeaderKeys      []string     `json:"header_keys,omitempty"`
+	OAuthConfigured bool         `json:"oauth_configured"`
+	OAuthExpiresAt  *time.Time   `json:"oauth_expires_at,omitempty"`
+	SecretsCipher   string       `json:"-"`
+	Enabled         bool         `json:"enabled"`
+	Status          string       `json:"status"`
+	LastError       string       `json:"last_error,omitempty"`
+	ConnectedAt     *time.Time   `json:"connected_at,omitempty"`
+	ToolCount       int          `json:"tool_count"`
+	Tools           []MCPTool    `json:"tools,omitempty"`
+	CreatedAt       time.Time    `json:"created_at"`
+	UpdatedAt       time.Time    `json:"updated_at"`
+}
+
+type MCPOAuthStart struct {
+	AuthorizationURL string `json:"authorization_url"`
 }
 
 type MCPServerInput struct {
@@ -360,13 +366,6 @@ type MCPTestResult struct {
 	LatencyMS int64     `json:"latency_ms"`
 	ToolCount int       `json:"tool_count"`
 	Tools     []MCPTool `json:"tools"`
-}
-
-type WebSession struct {
-	TokenHash string    `json:"-"`
-	CSRFToken string    `json:"csrf_token"`
-	CreatedAt time.Time `json:"created_at"`
-	ExpiresAt time.Time `json:"expires_at"`
 }
 
 type ChatSession struct {

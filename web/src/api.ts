@@ -1,14 +1,8 @@
-import type { AgentEvent, Approval, ApprovalExecutionResult, AuthSession, ChatSession, ChatState, Health, Host, HostInput, LLMToolCatalog, ManagedSkill, MCPServer, MCPServerInput, MCPTestResult, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestResult, Proxy, ProxyInput, ProxyTestResult, Run, ServerLogResponse, SFTPFileList, SFTPMutationResult, SSHShell, SSHShellList, SSHShellSnapshot, SSHShellStartInput, SSHTunnel, SSHTunnelList, SSHTunnelStartInput, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchResponse, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceInput, WorkspaceUploadResult } from './types'
-
-let csrfToken = ''
-
-function rememberAuth(session: AuthSession | null) { csrfToken = session?.csrf_token || '' }
+import type { AgentEvent, Approval, ApprovalExecutionResult, ChatSession, ChatState, Health, Host, HostInput, LLMToolCatalog, ManagedSkill, MCPOAuthStart, MCPServer, MCPServerInput, MCPTestResult, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestResult, Proxy, ProxyInput, ProxyTestResult, Run, ServerLogResponse, SFTPFileList, SFTPMutationResult, SSHShell, SSHShellList, SSHShellSnapshot, SSHShellStartInput, SSHTunnel, SSHTunnelList, SSHTunnelStartInput, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchResponse, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceInput, WorkspaceUploadResult } from './types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-	const method=(init?.method||'GET').toUpperCase()
 	const multipart=typeof FormData!=='undefined'&&init?.body instanceof FormData
 	const headers:Record<string,string> = { ...(multipart?{}:{'Content-Type':'application/json'}), ...(init?.headers as Record<string,string> || {}) }
-	if(!['GET','HEAD','OPTIONS'].includes(method)&&csrfToken)headers['X-CSRF-Token']=csrfToken
   const response = await fetch(path, {
     ...init,
 	credentials:'same-origin',
@@ -27,12 +21,6 @@ async function requestList<T>(path: string): Promise<T[]> {
 }
 
 export const api = {
-	authStatus: () => request<{initialized:boolean}>('/api/v1/auth/status'),
-	authSession: async()=>{const session=await request<AuthSession>('/api/v1/auth/session');rememberAuth(session);return session},
-	initializePassword: async(password:string)=>{const session=await request<AuthSession>('/api/v1/auth/initialize',{method:'POST',body:JSON.stringify({password})});rememberAuth(session);return session},
-	login: async(password:string)=>{const session=await request<AuthSession>('/api/v1/auth/login',{method:'POST',body:JSON.stringify({password})});rememberAuth(session);return session},
-	logout: async()=>{await request<void>('/api/v1/auth/logout',{method:'POST',body:'{}'});rememberAuth(null)},
-	changePassword: async(currentPassword:string,newPassword:string)=>{const result=await request<{changed:boolean;login_required:boolean}>('/api/v1/auth/password',{method:'PUT',body:JSON.stringify({current_password:currentPassword,new_password:newPassword})});rememberAuth(null);return result},
   health: () => request<Health>('/api/v1/health'),
 	systemSettings: () => request<SystemSettings>('/api/v1/settings'),
 	capabilities: () => request<ToolCapabilities>('/api/v1/capabilities'),
@@ -52,6 +40,8 @@ export const api = {
 	setMCPServerEnabled: (id:string,enabled:boolean) => request<MCPServer>(`/api/v1/mcp-servers/${encodeURIComponent(id)}/${enabled?'enable':'disable'}`,{method:'POST',body:'{}'}),
 	retryMCPServer: (id:string) => request<MCPServer>(`/api/v1/mcp-servers/${encodeURIComponent(id)}/retry`,{method:'POST',body:'{}'}),
 	testMCPServer: (id:string) => request<MCPTestResult>(`/api/v1/mcp-servers/${encodeURIComponent(id)}/test`,{method:'POST',body:'{}'}),
+	startMCPOAuth: (id:string) => request<MCPOAuthStart>(`/api/v1/mcp-servers/${encodeURIComponent(id)}/oauth`,{method:'POST',body:'{}'}),
+	clearMCPOAuth: (id:string) => request<MCPServer>(`/api/v1/mcp-servers/${encodeURIComponent(id)}/oauth`,{method:'DELETE'}),
 	createWorkspace: (workspace:WorkspaceInput) => request<WorkspaceCapability>('/api/v1/workspaces',{method:'POST',body:JSON.stringify(workspace)}),
 	updateWorkspace: (id:string,workspace:WorkspaceInput) => request<WorkspaceCapability>(`/api/v1/workspaces/${encodeURIComponent(id)}`,{method:'PUT',body:JSON.stringify(workspace)}),
 	deleteWorkspace: (id:string) => request<void>(`/api/v1/workspaces/${encodeURIComponent(id)}`,{method:'DELETE'}),
@@ -216,7 +206,6 @@ export async function streamChat(sessionId: string, workspaceId:string, message:
   const response = await fetch('/api/v1/chat', {
     method: 'POST',
 	credentials:'same-origin',
-	headers: { 'X-CSRF-Token': csrfToken },
 	body,
     signal,
   })

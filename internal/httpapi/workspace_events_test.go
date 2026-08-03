@@ -38,7 +38,7 @@ func TestWorkspaceFileEventsStreamsExternalChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	server := httptest.NewServer(New(svc, nil, nil, Options{}).Handler())
+	server := httptest.NewServer(New(svc, nil, Options{}).Handler())
 	defer server.Close()
 	requestCtx, cancel := context.WithCancel(ctx)
 	defer cancel()

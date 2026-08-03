@@ -36,7 +36,7 @@ flowchart LR
 
 桌面版适用于 Windows 和 Linux。Tauri 会启动内置 Go sidecar，等待本地服务就绪后再显示主界面；再次启动只会聚焦已有窗口。后端仅监听随机的 `127.0.0.1` 端口。启用 MCP Server Mode 后，关闭窗口会隐藏到托盘，“轻量模式”会销毁窗口和 WebView，sidecar 与 MCP Endpoint 继续运行；通过托盘图标或菜单重新创建窗口，选择“退出”才会结束服务。未启用 MCP Server Mode 时关闭窗口会直接退出。
 
-首次启动会在安装目录创建 `config.yaml`、`data/` 和 `workspace/`。桌面壳打开统一的 Web 初始化页面，由用户创建管理员密码；之后可在配置页面修改密码。
+首次启动会在安装目录创建 `config.yaml`、`data/` 和 `workspace/`，然后直接进入 App。
 
 从源码构建需要 Go 1.26+、Node.js 22.13+ 和 Rust stable。Windows 生成 NSIS 安装包：
 
@@ -68,13 +68,13 @@ Docker 保持独立的 Web 服务部署方式，不包含 Tauri 或 Rust 运行�
 
 ```bash
 docker build -t opsnerva .
-docker run --rm -p 8080:8080 \
+docker run --rm -e OPS_AGENT_LISTEN=0.0.0.0 -p 127.0.0.1:8080:8080 \
   -v opsnerva-data:/app/data \
   -v opsnerva-workspace:/app/workspace \
   opsnerva
 ```
 
-浏览器打开 [http://127.0.0.1:8080](http://127.0.0.1:8080)。生产环境应使用 HTTPS 反向代理，并设置 `OPS_AGENT_SECURE_COOKIES=true`。
+浏览器打开 [http://127.0.0.1:8080](http://127.0.0.1:8080)。控制面不提供管理员登录，不应映射到非本机地址。
 
 ### 便携二进制
 
@@ -114,14 +114,13 @@ go build -buildvcs=false -trimpath -ldflags="-s -w" -o bin/ops-agent.exe ./cmd/o
 
 也可以直接双击 `ops-agent.exe`。首次运行会在 EXE 旁创建 `config.yaml`、启动服务并打开浏览器。构建会把 Web 前端嵌入可执行文件，运行时不需要单独复制 `web/dist`。
 
-### 首次登录
+### 首次启动
 
-1. Windows 快捷启动会自动打开页面；其他系统在服务所在电脑打开 [http://127.0.0.1:8080](http://127.0.0.1:8080)。
-2. 首次打开时创建并确认管理员密码；之后使用该密码登录。服务端只保存 Argon2id 哈希，不保存明文密码。
-3. 打开 **配置 → 模型提供商**，添加模型的 Base URL、Model ID 和 API Key。
-4. 先点击 **测试**，保存后点击 **使用此模型**。
-5. 如需管理远程主机，打开 **配置 → SSH 主机** 添加主机，然后扫描并核对 Host Key 指纹。
-6. 回到 **Agent**，新建会话即可开始使用。
+1. 启动 OpsNerva App。
+2. 打开 **配置 → 模型提供商**，添加模型的 Base URL、Model ID 和 API Key。
+3. 先点击 **测试**，保存后点击 **使用此模型**。
+4. 如需管理远程主机，打开 **配置 → SSH 主机** 添加主机，然后扫描并核对 Host Key 指纹。
+5. 回到 **Agent**，新建会话即可开始使用。
 
 快捷启动生成的 `config.yaml` 修改后需重启生效。数据、加密主密钥、日志和 SQLite 数据库默认写入安装目录的 `data/`，Workspace 文件写入同目录的 `workspace/`。配置中的相对路径均以 `config.yaml` 所在目录为基准。
 
@@ -134,7 +133,7 @@ cp configs/config.example.yaml bin/config.local.yaml
 
 ### 修改监听地址
 
-默认监听 `0.0.0.0:8080`。快捷启动可以修改 EXE 同目录的 `config.yaml`，也可以在启动时覆盖：
+默认监听 `127.0.0.1:8080`。快捷启动可以修改 EXE 同目录的 `config.yaml`，也可以在启动时覆盖：
 
 ```bash
 OPS_AGENT_LISTEN='127.0.0.1:9090' ./bin/ops-agent --config bin/config.local.yaml serve
@@ -147,7 +146,7 @@ $env:OPS_AGENT_LISTEN = '127.0.0.1:9090'
 .\bin\ops-agent.exe --config bin/config.local.yaml serve
 ```
 
-`0.0.0.0` 允许其他设备访问，`127.0.0.1` 仅允许本机访问。局域网或公网部署应配置 HTTPS 反向代理，并设置 `OPS_AGENT_SECURE_COOKIES=true`。
+控制面不提供管理员登录，应保持监听在本机地址。
 
 ### 使用环境变量配置模型
 
@@ -188,7 +187,7 @@ Agent 页面右侧的 Conversations 会列出最近会话，标题取首条用�
 
 ## Workspace
 
-服务在 `workspace_dir`（默认启动目录下的 `workspace/`）中托管全部 Workspace。首次初始化会创建 `default/read_write`，之后可在系统设置中按名称新增、修改权限或移除；每个 Workspace 固定使用 `<workspace_dir>/<名称>/`，无需填写或查看宿主机绝对路径。在系统设置中删除 Workspace 会先解除登记（Agent 立即失去访问权），再永久删除对应目录及其中全部文件，无法恢复；审计事件会记录目录路径与删除结果。每个 Agent 会话持久化绑定一个 Workspace；对话左侧的选择器负责首次绑定和后续切换，运行中的 Agent 禁止切换。模型没有 Workspace 列表工具，所有 `workspace_*` Tool 都由服务端读取当前会话绑定，Tool schema 不接受 `workspace_id`。文件面板可进入子目录、点击上传或拖入多个不超过 100 MiB 的文件、预览文本，并从文件列表或预览窗口把原文件下载到浏览器。服务端通过操作系统文件事件监听当前打开的目录，再以 SSE 通知 Web 静默刷新，因此 Web 上传、Agent Tool、Workspace Shell 和外部编辑器产生的变化使用同一条刷新链路；监听不会递归扫描整个项目。Web 删除会直接永久删除宿主机文件或目录，确认后无法恢复。这些操作不会自动改写提示词或触发 LLM。文本预览上限为 1 MiB，二进制文件只显示元数据和 SHA256，但仍可直接下载。Web 上传使用 CSRF、防路径穿越、敏感文件名拒绝、禁止覆盖、同目录临时文件、`fsync` 和原子落盘。
+服务在 `workspace_dir`（默认启动目录下的 `workspace/`）中托管全部 Workspace。首次初始化会创建 `default/read_write`，之后可在系统设置中按名称新增、修改权限或移除；每个 Workspace 固定使用 `<workspace_dir>/<名称>/`，无需填写或查看宿主机绝对路径。在系统设置中删除 Workspace 会先解除登记（Agent 立即失去访问权），再永久删除对应目录及其中全部文件，无法恢复；审计事件会记录目录路径与删除结果。每个 Agent 会话持久化绑定一个 Workspace；对话左侧的选择器负责首次绑定和后续切换，运行中的 Agent 禁止切换。模型没有 Workspace 列表工具，所有 `workspace_*` Tool 都由服务端读取当前会话绑定，Tool schema 不接受 `workspace_id`。文件面板可进入子目录、点击上传或拖入多个不超过 100 MiB 的文件、预览文本，并从文件列表或预览窗口把原文件下载到浏览器。服务端通过操作系统文件事件监听当前打开的目录，再以 SSE 通知 Web 静默刷新，因此 Web 上传、Agent Tool、Workspace Shell 和外部编辑器产生的变化使用同一条刷新链路；监听不会递归扫描整个项目。Web 删除会直接永久删除宿主机文件或目录，确认后无法恢复。这些操作不会自动改写提示词或触发 LLM。文本预览上限为 1 MiB，二进制文件只显示元数据和 SHA256，但仍可直接下载。Web 上传使用防路径穿越、敏感文件名拒绝、禁止覆盖、同目录临时文件、`fsync` 和原子落盘。
 
 `workspace_shell` 用于解压、构建、测试、打包和交互式调试。`action=run` 执行一次性脚本并一次返回完整输出；`start/input/output/list/interrupt/close` 管理持续 PTY。`input` 期间输出实时推送到 Web，服务端在输出静默后把完整响应交给 Agent；`output` 使用相同策略等待下一批输出。`top` 等持续刷新的程序返回首批稳定输出并继续运行。Agent 创建的 Workspace Shell 会进入右上角统一 Shell 列表并可直接打开观察；Workspace 文件栏中用户手动新建的终端只保留在当前 Workspace，不重复展示。交互 Sandbox 保留专用 PTY 的控制终端，因此 Bash 作业控制及 `vim`、`top` 等全屏程序可用。Web 终端接收原始 ANSI 事件，Agent Tool 结果使用跨输出块清理后的可读文本。系统设置提供 `Sandbox`、`Host Shell`、`Disabled` 三种模式；Linux 默认 Sandbox，Windows 默认 Host Shell，设置变化不会让已审批请求切换执行边界。Sandbox 仅支持 Linux，通过 `workspace_sandbox_path`（默认 `bwrap`，也可用 `OPS_AGENT_WORKSPACE_SANDBOX`）启动隔离的 user/mount/PID/network namespace，只挂载只读系统运行目录、独立 `/tmp` 和目标 Workspace，并禁用网络与嵌套 user namespace；缺少 Bubblewrap 或 namespace 权限时直接失败，不会降级执行。Workspace 的 `read_only/read_write` 决定沙箱挂载权限，`.env*`、`.ssh` 和系统隐藏文件等敏感路径会被遮蔽。交互会话持续到主动关闭、进程退出或服务停止，不设置 TTL。
 
@@ -296,9 +295,11 @@ MCP 与 Eino 复用同一个 Service、审批模式和 Audit Store；不存在�
 Web 的 **Extensions / MCP Servers** 还支持反向角色：让 OpsNerva 作为 MCP Client 连接外部工具服务。支持两种标准传输：
 
 - `stdio`：使用 command + 独立 args 数组直接启动子进程，不经过宿主 Shell；可配置绝对工作目录和加密环境变量。
-- `streamable_http`：连接绝对 HTTP(S) MCP endpoint，可配置加密 HTTP Header。
+- `streamable_http`：连接绝对 HTTP(S) MCP endpoint，支持加密 HTTP Header 和 OAuth 2.1。
 
-保存后的服务器可以 Test、Retry、Enable、Disable、Edit 或永久 Delete。启用时 OpsNerva 连接服务器、分页发现 `tools/list`，再以 `mcp__<server-hash>__<tool>` 名称注入主 Eino Agent；禁用会关闭 MCP Session，旧 Tool 句柄立即失效，并热重建模型函数列表。环境变量和 Header 使用 AES-256-GCM 加密，Web 只显示键名，不回显值。当前仅导入 MCP Tools，不导入 Resources、Prompts 或 Sampling。
+需要 OAuth 的服务在连接失败后点击“授权”。OpsNerva 使用授权服务器发现、动态客户端注册和 PKCE，系统浏览器回调成功后自动连接；客户端凭据、访问令牌和刷新令牌使用 AES-256-GCM 保存，过期访问令牌自动刷新。重新授权会替换旧会话，修改 Endpoint 会清除原会话。
+
+保存后的服务器可以 Test、Retry、Enable、Disable、Edit 或永久 Delete。启用时 OpsNerva 连接服务器、分页发现 `tools/list`，再以 `mcp__<server-hash>__<tool>` 名称注入主 Eino Agent；禁用会关闭 MCP Session，旧 Tool 句柄立即失效，并热重建模型函数列表。环境变量和 Header 同样加密，Web 只显示键名，不回显值。当前仅导入 MCP Tools，不导入 Resources、Prompts 或 Sampling。
 
 外部 MCP Tool 拥有对应 MCP Server 自身的执行权限，不会自动经过 OpsNerva 的审批模式。因此只应启用管理员信任的服务器；这与 OpsNerva 自己作为 MCP Server 时复用受控 SSH Service 的安全语义不同。
 
@@ -320,7 +321,7 @@ Web 的 **Extensions / MCP Servers** 还支持反向角色：让 OpsNerva 作为
 - Web 模型提供商的 API Key 同样采用 AES-256-GCM 加密保存，HTTP API 只暴露是否已配置密钥。
 - 主机 SSH/sudo 密码采用 AES-256-GCM 加密保存；HTTP 和 LLM 工具只暴露 `has_password`、`has_sudo_password` 能力标记。
 - 原始请求和 stdout/stderr 加密保存；数据库只额外保存脱敏视图用于检索和模型上下文。
-- HTTP 默认监听 `0.0.0.0:8080` 便于局域网测试。单管理员登录、CSRF 和登录限速已经启用；公网使用仍必须增加 TLS、防火墙和可信反向代理。
+- App API 默认只监听 `127.0.0.1:8080`，不提供管理员登录。不要将它暴露到局域网或公网。
 - 远程输出被标记为不可信数据，不能改变系统提示词、输入校验或审批结果。
 - 密码认证仍保持非交互、超时和单次提示限制；优先推荐 SSH 证书/密钥与最小化 `sudo -n`，托管密码用于兼容无法立即改造的目标机。
 
@@ -340,14 +341,11 @@ make check      # 测试并构建全部组件
 ./bin/ops-agent audit show RUN_ID
 ./bin/ops-agent audit show RUN_ID --raw
 
-# 忘记管理员密码时，在服务所在主机执行；命令完成后可清除该环境变量
-OPS_AGENT_ADMIN_PASSWORD='a-new-strong-password' ./bin/ops-agent admin reset-password
-
 ```
 
 ## 当前边界
 
-当前采用单管理员模式，不包含多租户 RBAC、Vault/SSH CA、远程 MCP OAuth 或 Kubernetes 原生 API。长任务与有限输出保存在 SQLite；重启时无法重新附着到旧 SSH 进程的任务会明确标记为 `interrupted`，而不是消失。
+当前是本地单用户 App，不包含多租户 RBAC、Vault/SSH CA 或 Kubernetes 原生 API。长任务与有限输出保存在 SQLite；重启时无法重新附着到旧 SSH 进程的任务会明确标记为 `interrupted`，而不是消失。
 
 ## License
 

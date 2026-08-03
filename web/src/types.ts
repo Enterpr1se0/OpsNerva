@@ -478,12 +478,6 @@ export interface WebSearchResponse {
   content_is_untrusted: boolean
 }
 
-export interface AuthSession {
-  authenticated: boolean
-  csrf_token: string
-  expires_at: string
-}
-
 export interface FileMetadata {
   path: string
   size?: number
@@ -606,6 +600,8 @@ export interface MCPServer {
   url?: string
   env_keys?: string[]
   header_keys?: string[]
+  oauth_configured: boolean
+  oauth_expires_at?: string
   enabled: boolean
   status: 'disabled' | 'disconnected' | 'connecting' | 'ready' | 'error'
   last_error?: string
@@ -614,6 +610,10 @@ export interface MCPServer {
   tools?: MCPTool[]
   created_at: string
   updated_at: string
+}
+
+export interface MCPOAuthStart {
+  authorization_url: string
 }
 
 export interface MCPServerInput {

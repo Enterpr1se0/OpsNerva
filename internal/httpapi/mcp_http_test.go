@@ -32,7 +32,7 @@ func TestMCPHTTPServerRequiresEnabledModeAndBearerToken(t *testing.T) {
 	cfg := config.Default()
 	svc := service.New(st, nil, encryptor, security.NewRedactor(), cfg.Limits, cfg)
 	t.Cleanup(func() { _ = svc.Shutdown(context.Background()) })
-	handler := New(svc, nil, nil, Options{Version: "test"}).Handler()
+	handler := New(svc, nil, Options{Version: "test"}).Handler()
 
 	request := func(token string) *httptest.ResponseRecorder {
 		body := bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"test","version":"1"}}}`)

@@ -14,7 +14,7 @@ Eino Tool、MCP Tool、HTTP 和 CLI 都是这个 Service 的适配器。模型�
 
 这里的 MCP Tool 分为两个方向。`ops-agent mcp` 通过 stdio、设置中的 MCP Server Mode 通过同一 HTTP 服务上的 `/mcp`，把受控 SSH Service 暴露给 MCP Client，因此完整复用输入校验、审批模式和审计，但不暴露 `ssh_history`；全局执行历史只允许 Web 管理端查看。只读工具通过 MCP annotations 明确标记；`ssh_shell` 使用独立 MCP surface，`ssh_tunnel` 复用已有转发状态。HTTP 传输采用无状态 Streamable HTTP；设置开关按请求即时生效，独立高熵 Bearer Token 仅在生成时返回，SQLite 只保存 SHA-256 摘要。管理员配置的外部 MCP Server 则属于独立信任域：它的工具在远端/子进程自身权限下执行，不自动继承 OpsNerva 的审批控制。Web 会明确提示该边界，只有启用状态为 ready 且未被 func 管理单独关闭的外部工具才进入主 Agent，审批 Agent 仍保持无 Tool。
 
-Web/API 位于单管理员认证边界之后。数据库尚无管理员凭据时，Web 首次初始化页允许用户创建密码，并以仅首次插入的方式保存 Argon2id 哈希；初始化完成后该接口永久拒绝再次写入。后续请求使用服务端 Session、HttpOnly/SameSite Cookie 和 CSRF Token。MCP HTTP 使用独立 Bearer Token，不接受浏览器 Cookie；MCP stdio 与 CLI 仍属于本机进程边界。
+App 控制面通过 loopback HTTP API 连接本地 Sidecar，不提供管理员登录。MCP HTTP 使用独立 Bearer Token；MCP stdio 与 CLI 仍属于本机进程边界。
 
 人工审批说明使用原有 `ApprovalAgent`；Auto 决策使用新增的 `AutoApprovalAgent`。两者都是 `MaxIterations=1`、无 Tool 的独立 Eino `ChatModelAgent`，各自拥有 Runner、Prompt、Service 接口、并发槽和可用状态，互不复用。`ApprovalAgent` 仅异步生成人工审批页的操作与风险说明，不参与自动决定。`AutoApprovalAgent` 接收由 Go context 绑定的当前用户请求、精确操作、目标能力、当前计划目标/步骤和请求摘要；Tool reason 与计划不能扩大用户授权。它结构化返回 `allow/reject/manual`。Auto 仅在完整 `allow` 时执行，明确 `reject` 时终止，`manual`、缺少当前用户请求、不可用、超时或格式无效时回退用户审批。
 
@@ -36,7 +36,7 @@ Skill Registry 位于控制面数据目录，每个 Skill 目录必须包含 `SK
 
 主 Agent 的 func 启用状态保存在 `agent_tool_settings`。未写入状态的 func 默认启用；管理员可在 Loaded functions 中逐项关闭或重新启用。每次修改都会写入审计并重建 Eino runner，关闭项仍保留在管理目录中，但不会传给 ChatModel，也不会注册到 ToolNode。
 
-外部 MCP 配置保存在 `mcp_servers`。command、args、cwd、URL 和秘密键名是可管理元数据，环境变量与 HTTP Header 的完整映射整体使用 AES-256-GCM 加密。启动时 Service 尝试连接所有 enabled 配置；单个服务器失败只记录 `error` 状态和结构化日志，不阻止控制面启动。
+外部 MCP 配置保存在 `mcp_servers`。command、args、cwd、URL 和秘密键名是可管理元数据；环境变量、HTTP Header、OAuth 动态客户端凭据及 Token 整体使用 AES-256-GCM 加密。Streamable HTTP OAuth 使用授权服务器发现、动态客户端注册、PKCE 和 refresh token；回调 state 与待完成流程只存在内存，修改 Endpoint 时删除原 OAuth 会话。启动时 Service 尝试连接所有 enabled 配置；单个服务器失败只记录 `error` 状态和结构化日志，不阻止控制面启动。
 
 stdio 通过 `exec.Command(command,args...)` 启动，不解析 Shell；Streamable HTTP 使用官方 MCP Go SDK transport。连接成功后分页执行 `tools/list`，把服务器 JSON Schema 转为 Eino ToolInfo，并生成不超过模型限制的稳定名称 `mcp__<server-id-hash>__<sanitized-tool-name>`。动态 wrapper 每次调用都重新检查服务器的 ready Session，因此 Disable/Delete/重连失败会立即阻止旧 Runner 中的残留句柄；随后 Runtime 热重载会从模型函数 Schema 中移除它。调用结果限制为 128 KiB，并记录不含参数或输出的 `mcp_tool_called` 审计事件。
 
