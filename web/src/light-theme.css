@@ -696,7 +696,7 @@
 }
 
 /* Configuration, forms, and cards. */
-:root[data-theme='light'] .configuration-tabs-row {
+:root[data-theme='light'] .section-tabs-row {
   background: color-mix(in srgb, var(--light-canvas) 94%, transparent);
 }
 
@@ -919,12 +919,6 @@
   border-color: var(--light-danger-border);
   background: var(--light-danger-soft);
   color: var(--light-danger);
-}
-
-:root[data-theme='light'] .mcp-boundary-note {
-  border-color: var(--light-warning-border);
-  background: var(--light-warning-soft);
-  color: var(--light-warning);
 }
 
 /* Workspace and SFTP file management. */

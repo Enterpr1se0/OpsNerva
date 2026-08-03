@@ -421,7 +421,7 @@ body {
   height: 100%;
 }
 
-:root[data-runtime='desktop'] .configuration-tabs-row {
+:root[data-runtime='desktop'] .section-tabs-row {
   top: 0;
 }
 
