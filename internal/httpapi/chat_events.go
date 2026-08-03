@@ -116,7 +116,7 @@ func (h *chatEventHub) delete(sessionID string) {
 
 func chatEventTerminal(eventType string) bool {
 	switch eventType {
-	case "done", "error", "interrupted":
+	case "done", "error", "model_error", "interrupted":
 		return true
 	default:
 		return false

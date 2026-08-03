@@ -234,6 +234,7 @@ export interface ServerLogResponse {
 export interface AgentEvent {
 	event_id?: number
   type: string
+	message_id?: string
   role?: string
   tool_name?: string
   tool_call_id?: string
@@ -264,12 +265,33 @@ export interface ChatSession {
 
 export interface ChatMessage {
 	id: string
-  role: 'user' | 'assistant' | 'tool' | 'reasoning'
+  role: 'user' | 'assistant' | 'assistant_progress' | 'tool' | 'reasoning'
   content: string
   tool_name?: string
+	tool_call_id?: string
+	run_id?: string
+	tool_status?: ChatToolCallStatus
   status: 'pending' | 'completed' | 'failed'
 	attachments?: ChatAttachment[]
   created_at: string
+}
+
+export type ChatToolCallStatus = 'running' | 'completed' | 'partial' | 'failed' | 'interrupted' | 'rejected' | 'expired' | 'unknown'
+
+export interface ChatToolCall {
+	session_id: string
+	user_message_id: string
+	message_id: string
+	tool_call_id: string
+	run_id?: string
+	tool_name: string
+	arguments_json: string
+	status: ChatToolCallStatus
+	result_json: string
+	error?: string
+	started_at: string
+	updated_at: string
+	completed_at?: string
 }
 
 export interface ChatAttachment {
@@ -299,6 +321,7 @@ export interface ChatState {
   active: boolean
 	workspace_id: string
   messages: ChatMessage[]
+	tool_calls: ChatToolCall[]
   plan?: AgentPlan | null
 }
 
@@ -400,6 +423,15 @@ export interface ModelTestResult {
   model: string
   response: string
   latency_ms: number
+}
+
+export interface ModelTestJob {
+  id: string
+  status: 'running' | 'completed' | 'failed'
+  result?: ModelTestResult
+  error?: string
+  created_at: string
+  finished_at?: string
 }
 
 export interface Health {

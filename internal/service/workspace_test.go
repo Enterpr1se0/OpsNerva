@@ -1261,6 +1261,50 @@ func TestWorkspacePowerShellScriptUsesUTF8AndCleansTemporaryDirectory(t *testing
 	}
 }
 
+func TestWorkspaceHostEnvironmentPreservesWindowsProfileDirectories(t *testing.T) {
+	hostValues := map[string]string{
+		"HOME":         `C:\Users\operator`,
+		"USERPROFILE":  `C:\Users\operator`,
+		"HOMEDRIVE":    "C:",
+		"HOMEPATH":     `\Users\operator`,
+		"APPDATA":      `C:\Users\operator\AppData\Roaming`,
+		"LOCALAPPDATA": `C:\Users\operator\AppData\Local`,
+		"PSModulePath": `C:\Program Files\WindowsPowerShell\Modules`,
+	}
+	for key, value := range hostValues {
+		t.Setenv(key, value)
+	}
+	environment := workspaceHostEnvironmentForPlatform("windows", `C:\OpsNerva\workspace\default`, map[string]string{
+		"userprofile": `C:\OpsNerva\workspace\default`,
+		"APPDATA":     `C:\OpsNerva\workspace\default\AppData`,
+		"CUSTOM":      "value",
+	})
+	values := make(map[string]string, len(environment))
+	for _, entry := range environment {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			t.Fatalf("invalid environment entry %q", entry)
+		}
+		values[key] = value
+	}
+	for key, expected := range hostValues {
+		if values[key] != expected {
+			t.Fatalf("Windows host environment %s = %q, want %q", key, values[key], expected)
+		}
+	}
+	if values["CUSTOM"] != "value" {
+		t.Fatalf("custom Workspace environment was lost: %#v", values)
+	}
+	for _, key := range []string{"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA"} {
+		if strings.Contains(strings.ToLower(values[key]), `opsnerva\workspace`) {
+			t.Fatalf("Windows profile variable %s points inside the Workspace: %q", key, values[key])
+		}
+	}
+	if _, ok := values["userprofile"]; ok {
+		t.Fatalf("case-insensitive USERPROFILE override was preserved: %#v", values)
+	}
+}
+
 func TestHostWorkspaceShellRejectsReadOnlyDisabledAndBackendSwitch(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash is not installed")

@@ -17,7 +17,7 @@ const zh = {
   shell: {
     pageTitles: { chat: '会话', ssh: 'SSH', config: '配置', extensions: '扩展', audit: '审计', logs: '日志' },
     nav: { agent: 'Agent', ssh: 'SSH', configuration: '配置', extensions: '扩展', audit: '审计', logs: '日志' },
-    lightTheme: '日间模式', darkTheme: '夜间模式',
+    theme: '主题', systemTheme: '跟随系统', lightTheme: '日间模式', darkTheme: '夜间模式',
     minimize: '最小化', maximize: '最大化',
     online: '服务正常', disconnected: '连接已断开', refresh: '刷新',
   },
@@ -141,7 +141,7 @@ const zh = {
     newConversation: '新建会话', noSaved: '没有会话',
     emptyTitle: '需要排查什么？',
     waitingModel: '等待模型响应', retryWaiting: '模型请求失败 · 第 {{attempt}}/{{max}} 次重试 · {{delay}} 秒后重试', retryingModel: '模型重试中 · 第 {{attempt}}/{{max}} 次', reconnecting: '正在重连 · 第 {{attempt}} 次 · {{delay}} 秒',
-    stopping: '正在停止 Agent', running: 'LLM 运行中', stop: '停止', stopTitle: '停止 Agent 运行',
+    stopping: '正在停止 Agent', running: 'LLM 运行中', toolsRunning: '工具执行中', stop: '停止', stopTitle: '停止 Agent 运行',
     hostsCount: '{{count}} 台主机：{{names}}', noHosts: 'Agent 无可用主机', switchHosts: '切换 Agent 主机', switchModel: '切换模型', workspaceSelected: 'Workspace：{{id}}', noWorkspace: '未选择 Workspace', noModel: '没有活动模型',
     configureModel: '请配置并启用模型提供商', loadingConversation: '正在加载会话...',
     busyPlaceholder: 'Agent 正在运行...', prompt: '输入消息...',
@@ -241,7 +241,7 @@ const zh = {
     debugHint: 'Debug 日志未启用。设置 OPS_AGENT_LOG_LEVEL=debug 后重启服务。',
     columns: { time: '时间', level: '级别', component: '组件', event: '事件 / 字段' }, general: '通用', emptyTitle: '没有匹配的服务日志',
   },
-  statusLabels: { pending: '待处理', completed: '已完成', skipped: '已跳过', partial: '部分成功', closed: '已关闭', expired: '已到期', failed: '失败', active: '进行中', running: '运行中', stopping: '停止中', stopped: '已停止', blocked: '已阻塞', in_progress: '执行中', ready: '就绪', error: '错误', connecting: '连接中', interrupted: '已中断', rejected: '已拒绝', approval_required: '待审批' },
+  statusLabels: { pending: '待处理', completed: '已完成', skipped: '已跳过', partial: '部分成功', closed: '已关闭', expired: '已到期', failed: '失败', unknown: '结果未知', active: '进行中', running: '运行中', stopping: '停止中', stopped: '已停止', blocked: '已阻塞', in_progress: '执行中', ready: '就绪', error: '错误', connecting: '连接中', interrupted: '已中断', rejected: '已拒绝', approval_required: '待审批' },
   toolCategories: { planning: '任务计划', execution: '命令执行', hosts: 'SSH 主机', tasks: '长任务', remote_files: '远程文件', workspace: 'Workspace', web: '网络搜索', history: '审计历史', approvals: '审批', skills: 'Skills', mcp: '外部 MCP' },
   toolGuards: { read_only: '只读', approval_required: '审批控制', agent_state: 'Agent 状态', audited_control: '审计控制', external_mcp: '外部 MCP' },
   toolNames: {

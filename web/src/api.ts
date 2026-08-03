@@ -1,4 +1,4 @@
-import type { AgentEvent, Approval, ApprovalExecutionResult, ChatSession, ChatState, Health, Host, HostInput, LLMToolCatalog, ManagedSkill, MCPOAuthStart, MCPServer, MCPServerInput, MCPTestResult, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestResult, Proxy, ProxyInput, ProxyTestResult, Run, ServerLogResponse, SFTPFileList, SFTPMutationResult, SSHShell, SSHShellList, SSHShellSnapshot, SSHShellStartInput, SSHTunnel, SSHTunnelList, SSHTunnelStartInput, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchResponse, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceInput, WorkspaceUploadResult } from './types'
+import type { AgentEvent, Approval, ApprovalExecutionResult, ChatSession, ChatState, Health, Host, HostInput, LLMToolCatalog, ManagedSkill, MCPOAuthStart, MCPServer, MCPServerInput, MCPTestResult, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestJob, ModelTestResult, Proxy, ProxyInput, ProxyTestResult, Run, ServerLogResponse, SFTPFileList, SFTPMutationResult, SSHShell, SSHShellList, SSHShellSnapshot, SSHShellStartInput, SSHTunnel, SSHTunnelList, SSHTunnelStartInput, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchResponse, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceInput, WorkspaceUploadResult } from './types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	const multipart=typeof FormData!=='undefined'&&init?.body instanceof FormData
@@ -18,6 +18,22 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 async function requestList<T>(path: string): Promise<T[]> {
   const value = await request<T[] | null>(path)
   return Array.isArray(value) ? value : []
+}
+
+async function waitForModelTest(job:ModelTestJob):Promise<ModelTestResult>{
+	let current=job
+	while(current.status==='running'){
+		await new Promise(resolve=>window.setTimeout(resolve,500))
+		current=await request<ModelTestJob>(`/api/v1/model-tests/${encodeURIComponent(current.id)}`)
+	}
+	if(current.status==='failed')throw new Error(current.error||'Model test failed')
+	if(!current.result)throw new Error('Model test returned no result')
+	return current.result
+}
+
+async function startModelTest(path:string,body:string):Promise<ModelTestResult>{
+	const job=await request<ModelTestJob>(path,{method:'POST',body})
+	return waitForModelTest(job)
 }
 
 export const api = {
@@ -60,11 +76,11 @@ export const api = {
 	testProxy: (id:string) => request<ProxyTestResult>(`/api/v1/proxies/${encodeURIComponent(id)}/test`,{method:'POST',body:'{}'}),
   modelProviders: () => requestList<ModelProvider>('/api/v1/model-providers'),
   discoverModels: (input: ModelDiscoveryInput) => request<ModelCatalog>('/api/v1/model-providers/discover', { method: 'POST', body: JSON.stringify(input) }),
-  testModelConfiguration: (input: ModelTestInput) => request<ModelTestResult>('/api/v1/model-providers/test', { method: 'POST', body: JSON.stringify(input) }),
+  testModelConfiguration: (input: ModelTestInput) => startModelTest('/api/v1/model-providers/test', JSON.stringify(input)),
   saveModelProvider: (provider: ModelProviderInput) => request<ModelProvider>('/api/v1/model-providers', { method: 'POST', body: JSON.stringify(provider) }),
   activateModelProvider: (id: string) => request<ModelProvider>(`/api/v1/model-providers/${id}/activate`, { method: 'POST', body: '{}' }),
   deleteModelProvider: (id: string) => request<void>(`/api/v1/model-providers/${id}`, { method: 'DELETE' }),
-  testModelProvider: (id: string) => request<ModelTestResult>(`/api/v1/model-providers/${id}/test`, { method: 'POST', body: '{}' }),
+  testModelProvider: (id: string) => startModelTest(`/api/v1/model-providers/${id}/test`, '{}'),
   hosts: () => requestList<Host>('/api/v1/hosts'),
   sshTunnels: () => request<SSHTunnelList>('/api/v1/ssh-tunnels'),
   startSSHTunnel: (input:SSHTunnelStartInput) => request<SSHTunnel>('/api/v1/ssh-tunnels', { method:'POST', body:JSON.stringify(input) }),
@@ -108,7 +124,7 @@ export const api = {
   chatSessions: () => requestList<ChatSession>('/api/v1/chat/sessions?limit=50'),
   chatState: (id: string) => request<ChatState>(`/api/v1/chat/${encodeURIComponent(id)}/state`),
 	setChatSessionWorkspace: (id:string,workspaceId:string) => request<ChatSession>(`/api/v1/chat/${encodeURIComponent(id)}/workspace`, { method:'PUT', body:JSON.stringify({workspace_id:workspaceId}) }),
-	cancelChatSession: (id: string) => request<{cancelled:boolean;rejected_approvals:number}>(`/api/v1/chat/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: '{}' }),
+	cancelChatSession: (id: string) => request<{cancelled:boolean;cancelled_tools:number;rejected_approvals:number}>(`/api/v1/chat/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: '{}' }),
   deleteChatSession: (id: string) => request<void>(`/api/v1/chat/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 }
 
@@ -159,11 +175,11 @@ async function consumeAgentEventStream(response:Response,onEvent:(event:AgentEve
 		!!event.content&&(event.type==='reasoning'||event.type==='tool_output'||(event.type==='message'&&event.role!=='tool'))
 	const sameContentStream=(left:AgentEvent,right:AgentEvent)=>
 		left.type===right.type&&left.role===right.role&&left.tool_name===right.tool_name&&
-		left.tool_call_id===right.tool_call_id&&left.segment_id===right.segment_id&&
+		left.message_id===right.message_id&&left.tool_call_id===right.tool_call_id&&left.segment_id===right.segment_id&&
 		left.session_id===right.session_id&&left.run_id===right.run_id&&left.stream===right.stream&&
 		left.status===right.status
 	const dispatch=(event:AgentEvent)=>{
-		if(event.type==='done'||event.type==='error'||event.type==='interrupted')terminalEventReceived=true
+		if(event.type==='done'||event.type==='error'||event.type==='model_error'||event.type==='interrupted')terminalEventReceived=true
 		if(!isContentDelta(event)){
 			flushPending()
 			onEvent(event)

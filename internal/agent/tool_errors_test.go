@@ -74,15 +74,15 @@ func (*shellCredentialPromptTestError) Error() string {
 }
 
 func TestToolCallActivityIsPublishedBeforeExecution(t *testing.T) {
-	var activity toolCallActivity
+	var activities []toolCallActivity
 	notified := false
 	executed := false
 	ctx := withToolActivityNotifier(context.Background(), func(value toolCallActivity) {
-		if executed {
+		if len(activities) == 0 && executed {
 			t.Fatal("tool activity was published after execution started")
 		}
 		notified = true
-		activity = value
+		activities = append(activities, value)
 	})
 	endpoint := normalizeToolCallErrors(func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
 		executed = true
@@ -95,8 +95,22 @@ func TestToolCallActivityIsPublishedBeforeExecution(t *testing.T) {
 	if _, err := endpoint(ctx, input); err != nil {
 		t.Fatal(err)
 	}
-	if activity.CallID != input.CallID || activity.Name != input.Name || activity.Arguments != input.Arguments {
-		t.Fatalf("published activity = %#v", activity)
+	if len(activities) != 2 || activities[0].Status != domain.ChatToolCallRunning || activities[1].Status != domain.ChatToolCallCompleted {
+		t.Fatalf("published activities = %#v", activities)
+	}
+	if activities[0].CallID != input.CallID || activities[0].Name != input.Name || activities[0].Arguments != input.Arguments {
+		t.Fatalf("published start activity = %#v", activities[0])
+	}
+}
+
+func TestCompletedToolActivityTreatsStartedResourcesAsTerminalCalls(t *testing.T) {
+	status, runID, _, _ := completedToolActivity(&compose.ToolOutput{Result: `{"status":"running","run_id":"run-background","task_id":"task-one"}`}, nil)
+	if status != domain.ChatToolCallCompleted || runID != "run-background" {
+		t.Fatalf("background start lifecycle = status %q, run %q", status, runID)
+	}
+	status, _, _, _ = completedToolActivity(&compose.ToolOutput{Result: `{"ok":false,"status":"unknown","code":"outcome_unknown"}`}, nil)
+	if status != domain.ChatToolCallUnknown {
+		t.Fatalf("unknown lifecycle status = %q", status)
 	}
 }
 

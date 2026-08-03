@@ -17,7 +17,7 @@ const en = {
   shell: {
     pageTitles: { chat: 'Chat', ssh: 'SSH', config: 'Configuration', extensions: 'Extensions', audit: 'Audit', logs: 'Logs' },
     nav: { agent: 'Agent', ssh: 'SSH', configuration: 'Configuration', extensions: 'Extensions', audit: 'Audit', logs: 'Logs' },
-    lightTheme: 'Light mode', darkTheme: 'Dark mode',
+    theme: 'Theme', systemTheme: 'Follow system', lightTheme: 'Light mode', darkTheme: 'Dark mode',
     minimize: 'Minimize', maximize: 'Maximize',
     online: 'Service online', disconnected: 'Disconnected', refresh: 'Refresh',
   },
@@ -140,7 +140,7 @@ const en = {
     newConversation: 'New conversation', noSaved: 'No conversations',
     emptyTitle: 'What should we investigate?',
     waitingModel: 'Waiting for model response', retryWaiting: 'Model request failed · retry {{attempt}}/{{max}} in {{delay}}s', retryingModel: 'Retrying model · attempt {{attempt}}/{{max}}', reconnecting: 'Reconnecting · attempt {{attempt}} · {{delay}}s',
-    stopping: 'Stopping Agent', running: 'LLM running', stop: 'Stop', stopTitle: 'Stop Agent run',
+    stopping: 'Stopping Agent', running: 'LLM running', toolsRunning: 'Tool running', stop: 'Stop', stopTitle: 'Stop Agent run',
     hostsCount: '{{count}} hosts: {{names}}', noHosts: 'No hosts available to Agent', switchHosts: 'Switch Agent hosts', switchModel: 'Switch model', workspaceSelected: 'Workspace: {{id}}', noWorkspace: 'No Workspace', noModel: 'No active model',
     configureModel: 'Configure and activate a model provider', loadingConversation: 'Loading conversation...',
     busyPlaceholder: 'Agent is running...', prompt: 'Message...',
@@ -240,7 +240,7 @@ const en = {
     debugHint: 'Debug logs are off. Set OPS_AGENT_LOG_LEVEL=debug and restart the service.',
     columns: { time: 'Time', level: 'Level', component: 'Component', event: 'Event / fields' }, general: 'general', emptyTitle: 'No matching server logs',
   },
-  statusLabels: { pending: 'pending', completed: 'completed', skipped: 'skipped', partial: 'partial', closed: 'closed', expired: 'expired', failed: 'failed', active: 'active', running: 'running', stopping: 'stopping', stopped: 'stopped', blocked: 'blocked', in_progress: 'in progress', ready: 'ready', error: 'error', connecting: 'connecting', interrupted: 'interrupted', rejected: 'rejected', approval_required: 'approval required' },
+  statusLabels: { pending: 'pending', completed: 'completed', skipped: 'skipped', partial: 'partial', closed: 'closed', expired: 'expired', failed: 'failed', unknown: 'result unknown', active: 'active', running: 'running', stopping: 'stopping', stopped: 'stopped', blocked: 'blocked', in_progress: 'in progress', ready: 'ready', error: 'error', connecting: 'connecting', interrupted: 'interrupted', rejected: 'rejected', approval_required: 'approval required' },
   toolCategories: { planning: 'Task planning', execution: 'Command execution', hosts: 'SSH hosts', tasks: 'Long tasks', remote_files: 'Remote files', workspace: 'Workspace', web: 'Web search', history: 'Audit history', approvals: 'Approvals', skills: 'Skills', mcp: 'External MCP' },
   toolGuards: { read_only: 'Read only', approval_required: 'Approval control', agent_state: 'Agent state', audited_control: 'Audited control', external_mcp: 'External MCP' },
   toolNames: {

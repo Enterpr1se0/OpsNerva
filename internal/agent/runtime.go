@@ -191,6 +191,7 @@ func (t *toolCallTracker) removeNamed(target capturedToolCall) {
 type Event struct {
 	EventID          uint64 `json:"event_id,omitempty"`
 	Type             string `json:"type"`
+	MessageID        string `json:"message_id,omitempty"`
 	Role             string `json:"role,omitempty"`
 	ToolName         string `json:"tool_name,omitempty"`
 	ToolCallID       string `json:"tool_call_id,omitempty"`
@@ -211,21 +212,27 @@ type Event struct {
 }
 
 type Runtime struct {
-	mu        sync.RWMutex
-	reloadMu  sync.Mutex
-	activeMu  sync.RWMutex
-	baseCtx   context.Context
-	runner    agentRunner
-	finalizer agentRunner
-	store     *store.Store
-	service   *service.Service
-	fallback  config.Model
-	status    Status
-	modelKind string
-	tools     []ToolDescriptor
-	toolsAt   string
-	active    map[string]context.CancelFunc
-	retryWait func(context.Context, time.Duration) error
+	mu         sync.RWMutex
+	reloadMu   sync.Mutex
+	activeMu   sync.RWMutex
+	baseCtx    context.Context
+	runner     agentRunner
+	finalizer  agentRunner
+	store      *store.Store
+	service    *service.Service
+	fallback   config.Model
+	status     Status
+	modelKind  string
+	tools      []ToolDescriptor
+	toolsAt    string
+	active     map[string]*activeAgentSession
+	toolScopes map[string]map[*toolExecutionScope]struct{}
+	retryWait  func(context.Context, time.Duration) error
+}
+
+type activeAgentSession struct {
+	modelCancel context.CancelFunc
+	tools       *toolExecutionScope
 }
 
 type Status struct {
@@ -255,7 +262,10 @@ type TestResult struct {
 }
 
 func New(ctx context.Context, cfg config.Model, svc *service.Service, st *store.Store) (*Runtime, error) {
-	runtime := &Runtime{baseCtx: ctx, store: st, service: svc, fallback: cfg, active: make(map[string]context.CancelFunc)}
+	runtime := &Runtime{
+		baseCtx: ctx, store: st, service: svc, fallback: cfg,
+		active: make(map[string]*activeAgentSession), toolScopes: make(map[string]map[*toolExecutionScope]struct{}),
+	}
 	if err := runtime.Reload(ctx); err != nil {
 		return nil, err
 	}
@@ -527,23 +537,43 @@ func (r *Runtime) beginSession(ctx context.Context, sessionID string) (context.C
 	r.activeMu.Lock()
 	defer r.activeMu.Unlock()
 	if r.active == nil {
-		r.active = make(map[string]context.CancelFunc)
+		r.active = make(map[string]*activeAgentSession)
 	}
 	if _, exists := r.active[sessionID]; exists {
 		return ctx, false
 	}
+	if r.toolScopes == nil {
+		r.toolScopes = make(map[string]map[*toolExecutionScope]struct{})
+	}
 	runCtx, cancel := context.WithCancel(ctx)
-	r.active[sessionID] = cancel
+	var scope *toolExecutionScope
+	scope = newToolExecutionScope(ctx, func() { r.removeToolScope(sessionID, scope) })
+	if r.toolScopes[sessionID] == nil {
+		r.toolScopes[sessionID] = make(map[*toolExecutionScope]struct{})
+	}
+	r.toolScopes[sessionID][scope] = struct{}{}
+	r.active[sessionID] = &activeAgentSession{modelCancel: cancel, tools: scope}
+	runCtx = withToolExecutionScope(runCtx, scope)
 	return runCtx, true
 }
 
 func (r *Runtime) endSession(sessionID string) {
 	r.activeMu.Lock()
-	cancel := r.active[sessionID]
+	active := r.active[sessionID]
 	delete(r.active, sessionID)
 	r.activeMu.Unlock()
-	if cancel != nil {
-		cancel()
+	if active != nil {
+		active.modelCancel()
+		active.tools.modelFinished()
+	}
+}
+
+func (r *Runtime) removeToolScope(sessionID string, scope *toolExecutionScope) {
+	r.activeMu.Lock()
+	defer r.activeMu.Unlock()
+	delete(r.toolScopes[sessionID], scope)
+	if len(r.toolScopes[sessionID]) == 0 {
+		delete(r.toolScopes, sessionID)
 	}
 }
 
@@ -552,12 +582,19 @@ func (r *Runtime) CancelSession(sessionID string) bool {
 		return false
 	}
 	r.activeMu.RLock()
-	cancel, active := r.active[sessionID]
-	if active {
-		cancel()
+	active := r.active[sessionID]
+	scopes := make([]*toolExecutionScope, 0, len(r.toolScopes[sessionID]))
+	for scope := range r.toolScopes[sessionID] {
+		scopes = append(scopes, scope)
 	}
 	r.activeMu.RUnlock()
-	return active
+	if active != nil {
+		active.modelCancel()
+	}
+	for _, scope := range scopes {
+		scope.cancelAll()
+	}
+	return active != nil || len(scopes) > 0
 }
 
 func (r *Runtime) TestProvider(ctx context.Context, cfg config.Model) (TestResult, error) {
@@ -679,6 +716,49 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 			emit(Event{Type: "interrupted", SessionID: sessionID, Content: interruptedRunMessage})
 		}
 	}()
+	activeAssistantMessages := make(map[string]struct{})
+	startAssistantMessage := func(messageID *string, role, toolName string) {
+		if *messageID == "" {
+			*messageID = ids.New("msg")
+		}
+		if _, exists := activeAssistantMessages[*messageID]; exists {
+			return
+		}
+		activeAssistantMessages[*messageID] = struct{}{}
+		emit(Event{Type: "message_start", MessageID: *messageID, Role: role, ToolName: toolName, SessionID: sessionID})
+	}
+	emitAssistantMessage := func(messageID *string, role, toolName, content string) {
+		if content == "" {
+			return
+		}
+		startAssistantMessage(messageID, role, toolName)
+		emit(Event{Type: "message", MessageID: *messageID, Role: role, ToolName: toolName, Content: content, SessionID: sessionID})
+	}
+	commitAssistantMessage := func(messageID, role string) {
+		if _, exists := activeAssistantMessages[messageID]; !exists {
+			return
+		}
+		delete(activeAssistantMessages, messageID)
+		emit(Event{Type: "message_commit", MessageID: messageID, Role: role, SessionID: sessionID})
+	}
+	resetAssistantMessage := func(messageID, role string) {
+		if _, exists := activeAssistantMessages[messageID]; !exists {
+			return
+		}
+		delete(activeAssistantMessages, messageID)
+		emit(Event{Type: "message_reset", MessageID: messageID, Role: role, SessionID: sessionID})
+	}
+	resetActiveAssistantMessages := func(role string) {
+		for messageID := range activeAssistantMessages {
+			resetAssistantMessage(messageID, role)
+		}
+	}
+	defer func() {
+		if queryErr == nil {
+			return
+		}
+		resetActiveAssistantMessages(string(schema.Assistant))
+	}()
 	if pruned, pruneErr := r.store.PruneChatTurnsExcludedFromContext(ctx, sessionID); pruneErr != nil {
 		return "", fmt.Errorf("prune messages excluded from Agent context: %w", pruneErr)
 	} else if pruned > 0 {
@@ -760,8 +840,38 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 			}
 		}
 	}()
+	defer func() {
+		if queryErr == nil {
+			return
+		}
+		statusCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		calls, err := r.store.ListChatToolCalls(statusCtx, sessionID)
+		if err != nil {
+			logger.ErrorContext(statusCtx, "load unfinished tool calls failed", "message_id", userMessageID, "error", err)
+			return
+		}
+		activeIDs := map[string]struct{}{}
+		if scope, _ := ctx.Value(toolExecutionScopeContextKey{}).(*toolExecutionScope); scope != nil {
+			activeIDs = scope.activeToolCallIDs()
+		}
+		for _, call := range calls {
+			if call.UserMessageID != userMessageID || call.Status != domain.ChatToolCallRunning {
+				continue
+			}
+			if _, active := activeIDs[call.ToolCallID]; active {
+				continue
+			}
+			terminalStatus := domain.ChatToolCallUnknown
+			if errors.Is(queryErr, context.Canceled) {
+				terminalStatus = domain.ChatToolCallInterrupted
+			}
+			if _, err := r.store.FinishChatToolCall(statusCtx, sessionID, call.ToolCallID, call.RunID, terminalStatus, "", ""); err != nil {
+				logger.ErrorContext(statusCtx, "settle unconfirmed tool call failed", "tool_call_id", call.ToolCallID, "status", terminalStatus, "error", err)
+			}
+		}
+	}()
 	emit(Event{Type: "session", SessionID: sessionID})
-	var activeTool atomic.Pointer[toolCallActivity]
 	if r.service != nil {
 		executionEvents, unsubscribe := r.service.SubscribeExecutionEvents(sessionID)
 		outputCtx, cancelOutput := context.WithCancel(ctx)
@@ -774,16 +884,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 				case <-outputCtx.Done():
 					return
 				case event := <-executionEvents:
-					activity := activeTool.Load()
 					toolCallID, toolName := event.ToolCallID, event.ToolName
-					if activity != nil {
-						if toolCallID == "" {
-							toolCallID = activity.CallID
-						}
-						if toolName == "" {
-							toolName = activity.Name
-						}
-					}
 					status := event.Status
 					if status == "running" {
 						status = "in_progress"
@@ -804,6 +905,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 		}()
 	}
 
+	answerMessageID := ""
 	for attempt := 1; attempt <= emptyResponseMaxAttempts; attempt++ {
 		modelAttempts = attempt
 		var attemptActivity atomic.Bool
@@ -826,7 +928,6 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 		})
 		runCtx = withToolActivityNotifier(runCtx, func(activity toolCallActivity) {
 			markActivity()
-			activeTool.Store(&activity)
 			arguments := activity.Arguments
 			if strings.TrimSpace(arguments) == "" {
 				arguments = "{}"
@@ -837,11 +938,28 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 			if strings.HasPrefix(activity.Name, "workspace_") {
 				captured.Workspace = workspaceState.ID
 			}
-			content := r.enrichToolContent(ctx, `{"status":"in_progress"}`, captured)
-			emit(Event{
-				Type: "tool", ToolName: activity.Name, ToolCallID: activity.CallID,
-				Content: content, SessionID: sessionID, Status: "in_progress",
-			})
+			persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if activity.Status == domain.ChatToolCallRunning {
+				content := r.enrichToolContent(ctx, `{"status":"in_progress"}`, captured)
+				_, persistErr := r.store.StartChatToolCall(persistCtx, domain.ChatToolCall{
+					SessionID: sessionID, UserMessageID: userMessageID, ToolCallID: activity.CallID,
+					ToolName: activity.Name, ArgumentsJSON: arguments, ResultJSON: content,
+				})
+				if persistErr != nil {
+					logger.ErrorContext(persistCtx, "persist running tool call failed", "tool_call_id", activity.CallID, "error", persistErr)
+				}
+				emit(Event{
+					Type: "tool", ToolName: activity.Name, ToolCallID: activity.CallID,
+					Content: content, SessionID: sessionID, Status: "in_progress",
+				})
+				return
+			}
+			if _, persistErr := r.store.FinishChatToolCall(persistCtx, sessionID, activity.CallID, activity.RunID,
+				activity.Status, activity.Result, activity.Error); persistErr != nil && !errors.Is(persistErr, store.ErrNotFound) {
+				logger.ErrorContext(persistCtx, "persist terminal tool call failed", "tool_call_id", activity.CallID,
+					"run_id", activity.RunID, "status", activity.Status, "error", persistErr)
+			}
 		})
 		runCtx = service.WithApprovalNotifier(runCtx, func(result domain.ExecResult) {
 			markActivity()
@@ -853,6 +971,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 
 		iter := runner.Run(runCtx, messages, adk.WithCheckPointID(sessionID))
 		answerCandidate := ""
+		answerMessageID = ""
 		interrupted := false
 		events := 0
 		outputEvents := 0
@@ -878,6 +997,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 				markActivity()
 				if event.Action.Interrupted != nil {
 					interrupted = true
+					resetActiveAssistantMessages(string(schema.Assistant))
 					emit(Event{Type: "interrupted", SessionID: sessionID, Content: fmt.Sprintf("%v", event.Action.Interrupted)})
 					continue
 				}
@@ -890,17 +1010,22 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 			role := string(variant.Role)
 			if variant.Role == schema.Assistant {
 				assistantOutputs++
+				resetAssistantMessage(answerMessageID, string(schema.Assistant))
 				answerCandidate = ""
+				answerMessageID = ""
 			}
 			if variant.Role == schema.Tool {
 				markActivity()
+				resetAssistantMessage(answerMessageID, string(schema.Assistant))
 				answerCandidate = ""
+				answerMessageID = ""
 			}
 			if variant.IsStreaming && variant.MessageStream != nil {
 				stream := variant.MessageStream
 				var assistantContent strings.Builder
 				var assistantGuard assistantOutputGuard
 				assistantStreamVisible := false
+				assistantMessageID := ""
 				assistantHasToolCalls := false
 				var toolResult strings.Builder
 				var reasoning strings.Builder
@@ -921,7 +1046,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 							break
 						}
 						if assistantStreamVisible {
-							emit(Event{Type: "message_reset", Role: role, SessionID: sessionID})
+							resetAssistantMessage(assistantMessageID, role)
 						}
 						stream.Close()
 						return "", recvErr
@@ -966,7 +1091,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 					if variant.Role == schema.Assistant {
 						assistantContent.WriteString(message.Content)
 						if content := assistantGuard.Write(message.Content); content != "" {
-							emit(Event{Type: "message", Role: role, ToolName: variant.ToolName, Content: content, SessionID: sessionID})
+							emitAssistantMessage(&assistantMessageID, role, variant.ToolName, content)
 							assistantStreamVisible = true
 						}
 						continue
@@ -976,13 +1101,13 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 				stream.Close()
 				if retryingStream {
 					if assistantStreamVisible {
-						emit(Event{Type: "message_reset", Role: role, SessionID: sessionID})
+						resetAssistantMessage(assistantMessageID, role)
 					}
 					continue
 				}
 				if variant.Role == schema.Assistant {
 					if content := assistantGuard.Finish(); content != "" {
-						emit(Event{Type: "message", Role: role, ToolName: variant.ToolName, Content: content, SessionID: sessionID})
+						emitAssistantMessage(&assistantMessageID, role, variant.ToolName, content)
 						assistantStreamVisible = true
 					}
 					if len(assistantChunks) > 0 {
@@ -994,13 +1119,29 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 					}
 					if assistantHasToolCalls {
 						assistantToolCallOutputs++
-						if assistantStreamVisible {
-							emit(Event{Type: "message_reset", Role: role, SessionID: sessionID})
+						progress := assistantContent.String()
+						if assistantGuard.blocked || containsInternalContextMarker(progress) {
+							if assistantStreamVisible {
+								resetAssistantMessage(assistantMessageID, role)
+							}
+						} else if strings.TrimSpace(progress) != "" {
+							if assistantMessageID == "" {
+								return "", fmt.Errorf("assistant progress has no message lifecycle")
+							}
+							if err := r.store.AppendChatMessageWithID(ctx, assistantMessageID, sessionID, domain.ChatMessageRoleAssistantProgress, progress); err != nil {
+								return "", err
+							}
+							if assistantStreamVisible {
+								commitAssistantMessage(assistantMessageID, role)
+							}
+						} else if assistantStreamVisible {
+							resetAssistantMessage(assistantMessageID, role)
 						}
 					} else if assistantContent.Len() > 0 {
 						answerCandidate = assistantContent.String()
+						answerMessageID = assistantMessageID
 						if assistantGuard.blocked && assistantStreamVisible {
-							emit(Event{Type: "message_reset", Role: role, SessionID: sessionID})
+							resetAssistantMessage(assistantMessageID, role)
 						}
 					} else {
 						assistantEmptyOutputs++
@@ -1020,7 +1161,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 					}
 					content := r.enrichToolContent(ctx, toolResult.String(), captured)
 					finalAnswerContext.ToolResults = append(finalAnswerContext.ToolResults, finalAnswerToolResult{ToolName: toolName, Content: content})
-					if err := r.store.AppendChatMessage(ctx, sessionID, "tool", content, toolName); err != nil {
+					if err := r.persistChatToolResult(ctx, sessionID, userMessageID, toolCallID, toolName, content, captured); err != nil {
 						return "", err
 					}
 					emit(Event{Type: "tool", ToolName: toolName, ToolCallID: toolCallID, Content: content, SessionID: sessionID})
@@ -1039,9 +1180,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 					if assistantHasToolCalls {
 						markActivity()
 						assistantToolCallOutputs++
-					} else if variant.Message.Content != "" {
-						answerCandidate = variant.Message.Content
-					} else {
+					} else if variant.Message.Content == "" {
 						assistantEmptyOutputs++
 					}
 				}
@@ -1073,15 +1212,30 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 					}
 					displayContent = r.enrichToolContent(ctx, variant.Message.Content, captured)
 					finalAnswerContext.ToolResults = append(finalAnswerContext.ToolResults, finalAnswerToolResult{ToolName: toolName, Content: displayContent})
-					if err := r.store.AppendChatMessage(ctx, sessionID, "tool", displayContent, toolName); err != nil {
+					if err := r.persistChatToolResult(ctx, sessionID, userMessageID, toolCallID, toolName, displayContent, captured); err != nil {
 						return "", err
 					}
 					emit(Event{Type: "tool", ToolName: toolName, ToolCallID: toolCallID, Content: displayContent, SessionID: sessionID})
 					continue
 				}
-				if variant.Role != schema.Assistant || !assistantHasToolCalls && !containsInternalContextMarker(displayContent) {
-					emit(Event{Type: "message", Role: role, ToolName: toolName, Content: displayContent, SessionID: sessionID})
+				if variant.Role == schema.Assistant {
+					if containsInternalContextMarker(displayContent) {
+						continue
+					}
+					messageID := ""
+					emitAssistantMessage(&messageID, role, toolName, displayContent)
+					if assistantHasToolCalls {
+						if err := r.store.AppendChatMessageWithID(ctx, messageID, sessionID, domain.ChatMessageRoleAssistantProgress, displayContent); err != nil {
+							return "", err
+						}
+						commitAssistantMessage(messageID, role)
+					} else {
+						answerCandidate = displayContent
+						answerMessageID = messageID
+					}
+					continue
 				}
+				emit(Event{Type: "message", Role: role, ToolName: toolName, Content: displayContent, SessionID: sessionID})
 			}
 		}
 
@@ -1091,7 +1245,9 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 		internalContextLeak := containsInternalContextMarker(answerCandidate)
 		if internalContextLeak {
 			logger.WarnContext(ctx, "blocked model response containing internal context", "candidate_bytes", len(answerCandidate))
+			resetAssistantMessage(answerMessageID, string(schema.Assistant))
 			answerCandidate = ""
+			answerMessageID = ""
 		}
 		answer = answerCandidate
 		iterationAttrs := []any{
@@ -1128,8 +1284,9 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 				return "", fmt.Errorf("%w after agent activity; safe final answer generation failed: %v", ErrEmptyResponse, finalErr)
 			}
 			answer = finalAnswer
+			answerMessageID = ""
 			turnCompleted = true
-			emit(Event{Type: "message", Role: string(schema.Assistant), Content: answer, SessionID: sessionID})
+			emitAssistantMessage(&answerMessageID, string(schema.Assistant), "", answer)
 			logger.InfoContext(ctx, "safe final answer generated", "reason", reason, "answer_bytes", len(answer))
 			break
 		}
@@ -1155,12 +1312,39 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 	}
 
 	if answer != "" {
-		if err := r.store.AppendChatMessage(ctx, sessionID, "assistant", answer); err != nil {
+		if answerMessageID == "" {
+			return answer, fmt.Errorf("assistant answer has no message lifecycle")
+		}
+		if err := r.store.AppendChatMessageWithID(ctx, answerMessageID, sessionID, "assistant", answer); err != nil {
 			return answer, err
 		}
+		commitAssistantMessage(answerMessageID, string(schema.Assistant))
 	}
 	emit(Event{Type: "done", SessionID: sessionID, Content: answer})
 	return answer, nil
+}
+
+func (r *Runtime) persistChatToolResult(ctx context.Context, sessionID, userMessageID, toolCallID, toolName, content string, captured *capturedToolCall) error {
+	if strings.TrimSpace(toolCallID) == "" {
+		return r.store.AppendChatMessage(ctx, sessionID, "tool", content, toolName)
+	}
+	status, runID, _, errorText := completedToolActivity(&compose.ToolOutput{Result: content}, nil)
+	_, err := r.store.FinishChatToolCall(ctx, sessionID, toolCallID, runID, status, content, errorText)
+	if !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	arguments := "{}"
+	if captured != nil && strings.TrimSpace(captured.Arguments) != "" {
+		arguments = captured.Arguments
+	}
+	if _, err := r.store.StartChatToolCall(ctx, domain.ChatToolCall{
+		SessionID: sessionID, UserMessageID: userMessageID, ToolCallID: toolCallID,
+		ToolName: toolName, ArgumentsJSON: arguments,
+	}); err != nil {
+		return err
+	}
+	_, err = r.store.FinishChatToolCall(ctx, sessionID, toolCallID, runID, status, content, errorText)
+	return err
 }
 
 func (r *Runtime) waitForModelRetry(ctx context.Context, delay time.Duration) error {

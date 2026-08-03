@@ -110,6 +110,11 @@ func (s *Store) InterruptActiveTasks(ctx context.Context) error {
 	return err
 }
 
+func (s *Store) FailPendingChatMessages(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE chat_messages SET status='failed' WHERE role='user' AND status='pending'`)
+	return err
+}
+
 func (s *Store) AgentToolStates(ctx context.Context) (map[string]bool, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT name,enabled FROM agent_tool_settings`)
 	if err != nil {
@@ -314,6 +319,25 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_messages(session_id, created_at);
+CREATE TABLE IF NOT EXISTS chat_tool_calls (
+  session_id TEXT NOT NULL,
+  user_message_id TEXT NOT NULL,
+  message_id TEXT NOT NULL UNIQUE,
+  tool_call_id TEXT NOT NULL,
+  run_id TEXT NOT NULL DEFAULT '',
+  tool_name TEXT NOT NULL,
+  arguments_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL,
+  result_json TEXT NOT NULL DEFAULT '',
+  error TEXT NOT NULL DEFAULT '',
+  started_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT,
+  PRIMARY KEY(session_id,tool_call_id),
+  FOREIGN KEY(message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_tool_calls_run ON chat_tool_calls(run_id) WHERE run_id<>'';
+CREATE INDEX IF NOT EXISTS idx_chat_tool_calls_session_status ON chat_tool_calls(session_id,status,started_at);
 CREATE TABLE IF NOT EXISTS chat_attachments (
   id TEXT PRIMARY KEY,
   message_id TEXT NOT NULL,
@@ -1405,6 +1429,15 @@ func (s *Store) AppendChatMessage(ctx context.Context, sessionID, role, content 
 	return err
 }
 
+// AppendChatMessageWithID lets a streamed message keep its lifecycle ID after persistence.
+func (s *Store) AppendChatMessageWithID(ctx context.Context, id, sessionID, role, content string, toolName ...string) error {
+	name := ""
+	if len(toolName) > 0 {
+		name = toolName[0]
+	}
+	return s.appendChatMessageWithAttachmentsID(ctx, id, sessionID, role, content, "completed", name, nil)
+}
+
 func (s *Store) AppendPendingChatMessage(ctx context.Context, sessionID, role, content string, toolName ...string) (string, error) {
 	return s.appendChatMessage(ctx, sessionID, role, content, "pending", toolName...)
 }
@@ -1424,21 +1457,31 @@ func (s *Store) appendChatMessage(ctx context.Context, sessionID, role, content,
 
 func (s *Store) appendChatMessageWithAttachments(ctx context.Context, sessionID, role, content, status, toolName string, attachments []domain.ChatAttachment) (string, error) {
 	id := ids.New("msg")
+	if err := s.appendChatMessageWithAttachmentsID(ctx, id, sessionID, role, content, status, toolName, attachments); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+func (s *Store) appendChatMessageWithAttachmentsID(ctx context.Context, id, sessionID, role, content, status, toolName string, attachments []domain.ChatAttachment) error {
+	if strings.TrimSpace(id) == "" {
+		return fmt.Errorf("chat message id is required")
+	}
 	now := formatTime(time.Now().UTC())
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO chat_sessions(session_id,workspace_id,created_at,updated_at) VALUES(?,?,?,?)`, sessionID, "", now, now); err != nil {
-		return "", err
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO chat_messages(id,session_id,role,content,tool_name,status,created_at)
 VALUES(?,?,?,?,?,?,?)`, id, sessionID, role, content, toolName, status, now); err != nil {
-		return "", err
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE chat_sessions SET updated_at=? WHERE session_id=?`, now, sessionID); err != nil {
-		return "", err
+		return err
 	}
 	for _, attachment := range attachments {
 		attachmentID := attachment.ID
@@ -1447,13 +1490,13 @@ VALUES(?,?,?,?,?,?,?)`, id, sessionID, role, content, toolName, status, now); er
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO chat_attachments(id,message_id,name,mime_type,size_bytes,data,created_at)
 VALUES(?,?,?,?,?,?,?)`, attachmentID, id, attachment.Name, attachment.MIMEType, len(attachment.Data), attachment.Data, now); err != nil {
-			return "", err
+			return err
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return "", err
+		return err
 	}
-	return id, nil
+	return nil
 }
 
 func (s *Store) SetChatMessageStatus(ctx context.Context, id, status string) error {
@@ -1471,8 +1514,8 @@ func (s *Store) SetChatMessageStatus(ctx context.Context, id, status string) err
 }
 
 // PruneChatTurnsExcludedFromContext removes failed user turns that have no
-// assistant response or Tool result. Reasoning and the transient interruption
-// marker are not model context, so they are removed with the user message.
+// visible assistant output or Tool result. Reasoning and the transient
+// interruption marker are removed with the user message.
 func (s *Store) PruneChatTurnsExcludedFromContext(ctx context.Context, sessionID string) (int, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1492,8 +1535,8 @@ AND NOT EXISTS (
     AND turn_message.rowid<COALESCE((SELECT min(next_user.rowid) FROM chat_messages AS next_user
       WHERE next_user.session_id=users.session_id AND next_user.role='user' AND next_user.rowid>users.rowid),9223372036854775807)
     AND (
-      turn_message.role='tool'
-      OR (turn_message.role='assistant' AND trim(turn_message.content)<>'' AND trim(turn_message.content)<>?)
+		turn_message.role='tool'
+		OR (turn_message.role IN ('assistant','assistant_progress') AND trim(turn_message.content)<>'' AND trim(turn_message.content)<>?)
     )
 )`, sessionID, sessionID, domain.AgentInterruptedMessage)
 	if err != nil {
@@ -1768,6 +1811,9 @@ ORDER BY created_at`, sessionID)
 	if err := s.loadChatAttachments(ctx, result, true); err != nil {
 		return nil, err
 	}
+	if err := s.loadChatToolMessageState(ctx, result); err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 
@@ -1806,6 +1852,9 @@ ORDER BY created_at`
 		return nil, err
 	}
 	if err := s.loadChatAttachments(ctx, result, false); err != nil {
+		return nil, err
+	}
+	if err := s.loadChatToolMessageState(ctx, result); err != nil {
 		return nil, err
 	}
 	return result, nil
@@ -1958,6 +2007,9 @@ WHERE run_id IN (SELECT id FROM runs WHERE session_id=?)
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM chat_messages WHERE session_id=?`, sessionID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM chat_tool_calls WHERE session_id=?`, sessionID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM checkpoints WHERE id=?`, sessionID); err != nil {

@@ -145,7 +145,7 @@
   box-shadow: inset 3px 0 var(--light-accent);
 }
 
-:root[data-theme='light'] :where(.icon-button, .language-switch) {
+:root[data-theme='light'] :where(.icon-button, .language-switch, .theme-switch) {
   border: 1px solid var(--light-border);
   background: var(--light-surface);
   color: var(--light-text-secondary);
@@ -157,12 +157,12 @@
   color: var(--light-text);
 }
 
-:root[data-theme='light'] .language-switch button {
+:root[data-theme='light'] :where(.language-switch, .theme-switch) button {
   background: transparent;
   color: var(--light-text-muted);
 }
 
-:root[data-theme='light'] .language-switch button.active {
+:root[data-theme='light'] :where(.language-switch, .theme-switch) button.active {
   background: var(--light-accent-soft);
   color: var(--light-accent);
   box-shadow: inset 0 0 0 1px var(--light-accent-border);

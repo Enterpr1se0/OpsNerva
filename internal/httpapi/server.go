@@ -42,6 +42,7 @@ type Server struct {
 	service    *service.Service
 	agent      *agent.Runtime
 	chatEvents *chatEventHub
+	modelTests *modelTestJobs
 	mux        *http.ServeMux
 	mcpHTTP    http.Handler
 	options    Options
@@ -62,7 +63,7 @@ func New(svc *service.Service, agentRuntime *agent.Runtime, options Options) *Se
 	}
 	s := &Server{
 		service: svc, agent: agentRuntime, mux: http.NewServeMux(),
-		mcpHTTP: mcpserver.New(svc, options.Version).HTTPHandler(), chatEvents: newChatEventHub(), options: options,
+		mcpHTTP: mcpserver.New(svc, options.Version).HTTPHandler(), chatEvents: newChatEventHub(), modelTests: newModelTestJobs(), options: options,
 	}
 	s.routes()
 	return s
@@ -83,6 +84,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/model-providers", s.saveModelProvider)
 	s.mux.HandleFunc("POST /api/v1/model-providers/discover", s.discoverModels)
 	s.mux.HandleFunc("POST /api/v1/model-providers/test", s.testModelConfiguration)
+	s.mux.HandleFunc("GET /api/v1/model-tests/{id}", s.getModelTest)
 	s.mux.HandleFunc("DELETE /api/v1/model-providers/{id}", s.deleteModelProvider)
 	s.mux.HandleFunc("POST /api/v1/model-providers/{id}/activate", s.activateModelProvider)
 	s.mux.HandleFunc("POST /api/v1/model-providers/{id}/test", s.testModelProvider)
@@ -1162,12 +1164,8 @@ func (s *Server) testModelConfiguration(w http.ResponseWriter, r *http.Request) 
 		writeError(w, err)
 		return
 	}
-	result, err := s.agent.TestProvider(r.Context(), cfg)
-	if err != nil {
-		writeErrorStatus(w, err, http.StatusBadGateway)
-		return
-	}
-	writeJSON(w, http.StatusOK, result)
+	job := s.modelTests.start(context.WithoutCancel(r.Context()), cfg, modelTestIdentity{}, s.agent.TestProvider)
+	writeJSON(w, http.StatusAccepted, job)
 }
 
 func (s *Server) activateModelProvider(w http.ResponseWriter, r *http.Request) {
@@ -1216,15 +1214,21 @@ func (s *Server) testModelProvider(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	result, err := s.agent.TestProvider(r.Context(), cfg)
-	if err != nil {
-		writeErrorStatus(w, err, http.StatusBadGateway)
+	job := s.modelTests.start(context.WithoutCancel(r.Context()), cfg, modelTestIdentity{ProviderID: provider.ID, Name: provider.Name}, s.agent.TestProvider)
+	writeJSON(w, http.StatusAccepted, job)
+}
+
+func (s *Server) getModelTest(w http.ResponseWriter, r *http.Request) {
+	if s.modelTests == nil {
+		writeErrorStatus(w, store.ErrNotFound, http.StatusNotFound)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"provider_id": provider.ID, "name": provider.Name, "model": result.Model,
-		"response": result.Response, "latency_ms": result.LatencyMS,
-	})
+	job, ok := s.modelTests.get(r.PathValue("id"))
+	if !ok {
+		writeErrorStatus(w, store.ErrNotFound, http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, job)
 }
 
 func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) {
@@ -1544,7 +1548,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		}
 		_, err := s.agent.QueryWithAttachments(queryCtx, sessionID, message, attachments, publish)
 		if err != nil && !errors.Is(err, context.Canceled) {
-			event := agent.Event{Type: "error", Error: err.Error(), SessionID: sessionID}
+			event := agent.Event{Type: "model_error", Error: err.Error(), SessionID: sessionID}
 			if started {
 				publish(event)
 			} else {
@@ -1743,6 +1747,11 @@ func (s *Server) chatState(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	toolCalls, err := s.service.ListChatToolCalls(r.Context(), sessionID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	var plan *domain.AgentPlan
 	currentPlan, planErr := s.service.GetAgentPlan(r.Context(), sessionID)
 	if planErr == nil {
@@ -1752,7 +1761,7 @@ func (s *Server) chatState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	active := s.agent != nil && s.agent.IsSessionActive(sessionID)
-	writeJSON(w, http.StatusOK, map[string]any{"active": active, "workspace_id": session.WorkspaceID, "messages": messages, "plan": plan})
+	writeJSON(w, http.StatusOK, map[string]any{"active": active, "workspace_id": session.WorkspaceID, "messages": messages, "tool_calls": toolCalls, "plan": plan})
 }
 
 func (s *Server) chatSessions(w http.ResponseWriter, r *http.Request) {
@@ -1781,16 +1790,22 @@ func (s *Server) cancelChatSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cancelled := s.agent.CancelSession(sessionID)
+	cancelledTools := 0
 	rejectedApprovals := 0
 	if s.service != nil {
 		var err error
+		cancelledTools, err = s.service.CancelSessionToolExecutions(r.Context(), sessionID)
+		if err != nil {
+			writeError(w, fmt.Errorf("cancel Agent session tools: %w", err))
+			return
+		}
 		rejectedApprovals, err = s.service.RejectPendingApprovalsForSession(r.Context(), sessionID, "Agent run stopped by the operator", actor(r))
 		if err != nil {
 			writeError(w, fmt.Errorf("cancel Agent session approvals: %w", err))
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"cancelled": cancelled, "rejected_approvals": rejectedApprovals})
+	writeJSON(w, http.StatusOK, map[string]any{"cancelled": cancelled || cancelledTools > 0, "cancelled_tools": cancelledTools, "rejected_approvals": rejectedApprovals})
 }
 
 func (s *Server) setChatSessionWorkspace(w http.ResponseWriter, r *http.Request) {

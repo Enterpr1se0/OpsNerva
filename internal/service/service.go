@@ -155,8 +155,43 @@ func (s *Service) RecoverInterruptedTasks(ctx context.Context) error {
 	if err := s.store.InterruptActiveSSHShells(ctx); err != nil {
 		return err
 	}
+	if err := s.store.FailPendingChatMessages(ctx); err != nil {
+		return err
+	}
+	if err := s.recoverChatToolCalls(ctx); err != nil {
+		return err
+	}
 	_, err := s.store.PruneChatTurnsExcludedFromContext(ctx, "")
 	return err
+}
+
+func (s *Service) recoverChatToolCalls(ctx context.Context) error {
+	calls, err := s.store.ListRunningChatToolCalls(ctx)
+	if err != nil {
+		return err
+	}
+	for _, call := range calls {
+		status := domain.ChatToolCallUnknown
+		content := ""
+		if call.RunID != "" {
+			run, runErr := s.store.GetRun(ctx, call.RunID)
+			if runErr == nil && run.Status == "approval_required" {
+				continue
+			}
+			if runErr == nil {
+				if terminal := persistedToolExecutionStatus(run.Status); terminal != "" {
+					status = terminal
+					if encoded, marshalErr := json.Marshal(execResultFromRun(run, "", "")); marshalErr == nil {
+						content = string(encoded)
+					}
+				}
+			}
+		}
+		if _, err := s.store.FinishChatToolCall(ctx, call.SessionID, call.ToolCallID, call.RunID, status, content, ""); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) Store() *store.Store { return s.store }
@@ -275,6 +310,10 @@ func (s *Service) ListChatMessages(ctx context.Context, sessionID string, limit 
 	return s.store.ListChatMessages(ctx, sessionID, limit)
 }
 
+func (s *Service) ListChatToolCalls(ctx context.Context, sessionID string) ([]domain.ChatToolCall, error) {
+	return s.store.ListChatToolCalls(ctx, strings.TrimSpace(sessionID))
+}
+
 func (s *Service) GetChatAttachment(ctx context.Context, sessionID, attachmentID string) (domain.ChatAttachment, error) {
 	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(attachmentID) == "" {
 		return domain.ChatAttachment{}, store.ErrNotFound
@@ -283,6 +322,15 @@ func (s *Service) GetChatAttachment(ctx context.Context, sessionID, attachmentID
 }
 
 func (s *Service) DeleteChatSession(ctx context.Context, sessionID string) error {
+	if calls, err := s.store.ListChatToolCalls(ctx, sessionID); err != nil {
+		return err
+	} else {
+		for _, call := range calls {
+			if call.Status == domain.ChatToolCallRunning {
+				return fmt.Errorf("conversation %q has a running function tool; stop it before deleting the conversation", sessionID)
+			}
+		}
+	}
 	if s.hasActiveSSHShellForSession(sessionID) {
 		return fmt.Errorf("conversation %q has an active terminal; close it before deleting the conversation", sessionID)
 	}
@@ -1235,7 +1283,7 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 			return domain.ExecResult{}, err
 		}
 		if owner, ok := executionOwnerFromContext(ctx); ok {
-			s.bindExecutionOwner(run.ID, owner)
+			s.bindExecutionOwner(ctx, run.ID, sessionID, owner)
 		}
 		approval := domain.Approval{
 			ID: ids.New("approval"), RunID: run.ID, HostID: host.ID, RequestJSON: requestRedacted, RequestCipher: requestCipher,
@@ -1263,7 +1311,7 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 		return domain.ExecResult{}, err
 	}
 	if owner, ok := executionOwnerFromContext(ctx); ok {
-		s.bindExecutionOwner(run.ID, owner)
+		s.bindExecutionOwner(ctx, run.ID, sessionID, owner)
 	}
 	if commandExplanation != nil && commandExplanation.Status == "completed" && commandExplanation.Decision == domain.ApprovalAgentAllow {
 		s.audit(ctx, run.ID, "auto_approval_agent_granted", "auto-approval-agent", map[string]any{
@@ -1666,6 +1714,7 @@ func (s *Service) finishApprovedExecutionError(approved approvedExecution, cause
 		observability.FromContext(ctx).ErrorContext(ctx, "persist approved execution failure failed", "run_id", run.ID, "error", err)
 		return
 	}
+	s.publishExecutionEvent(ExecutionEvent{SessionID: run.SessionID, RunID: run.ID, Status: run.Status})
 	s.audit(ctx, run.ID, "command_completed", approved.actor, map[string]any{"status": run.Status, "error": run.Error})
 	observability.FromContext(ctx).ErrorContext(ctx, "approved execution stopped before completion", "run_id", run.ID, "status", run.Status, "error", run.Error)
 }
@@ -1690,7 +1739,7 @@ func (s *Service) Reject(ctx context.Context, approvalID, reason, actor string) 
 	if err := s.store.UpdateRun(ctx, run); err != nil {
 		return err
 	}
-	s.clearExecutionOwner(run.ID)
+	s.publishExecutionEvent(ExecutionEvent{SessionID: run.SessionID, RunID: run.ID, Status: run.Status})
 	s.audit(ctx, run.ID, "approval_rejected", actor, map[string]any{"approval_id": approval.ID, "reason": reason})
 	logger.InfoContext(ctx, "approval rejected", "run_id", run.ID, "session_id", approval.SessionID)
 	return nil

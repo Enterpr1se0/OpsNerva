@@ -24,6 +24,10 @@ type toolCallActivity struct {
 	CallID    string
 	Name      string
 	Arguments string
+	Status    string
+	RunID     string
+	Result    string
+	Error     string
 }
 
 type toolInputValidationError struct {
@@ -50,15 +54,25 @@ func withToolActivityNotifier(ctx context.Context, notify func(toolCallActivity)
 	return context.WithValue(ctx, toolActivityContextKey{}, notify)
 }
 
-func notifyToolActivity(ctx context.Context, input *compose.ToolInput) {
-	if ctx == nil || input == nil {
+func notifyToolActivity(ctx context.Context, activity toolCallActivity) {
+	if ctx == nil {
 		return
 	}
 	notify, ok := ctx.Value(toolActivityContextKey{}).(func(toolCallActivity))
 	if !ok || notify == nil {
 		return
 	}
-	notify(toolCallActivity{CallID: input.CallID, Name: input.Name, Arguments: input.Arguments})
+	notify(activity)
+}
+
+func notifyToolStarted(ctx context.Context, input *compose.ToolInput) {
+	if input == nil {
+		return
+	}
+	notifyToolActivity(ctx, toolCallActivity{
+		CallID: input.CallID, Name: input.Name, Arguments: input.Arguments,
+		Status: domain.ChatToolCallRunning,
+	})
 }
 
 type planToolResult struct {
@@ -217,8 +231,21 @@ func normalizeToolCallErrors(next compose.InvokableToolEndpoint) compose.Invokab
 	return func(ctx context.Context, input *compose.ToolInput) (output *compose.ToolOutput, err error) {
 		started := time.Now()
 		logger := observability.FromContext(ctx).With("component", "agent", "tool_name", input.Name, "tool_call_id", input.CallID)
-		notifyToolActivity(ctx, input)
+		ctx, release := scopedToolContext(ctx, input.CallID)
+		defer release()
+		notifyToolStarted(ctx, input)
 		ctx = service.WithExecutionOwner(ctx, input.CallID, input.Name, input.Arguments)
+		defer func() {
+			activityErr := err
+			if errors.Is(activityErr, context.Canceled) && errors.Is(context.Cause(ctx), context.DeadlineExceeded) {
+				activityErr = context.DeadlineExceeded
+			}
+			status, runID, result, errorText := completedToolActivity(output, activityErr)
+			notifyToolActivity(ctx, toolCallActivity{
+				CallID: input.CallID, Name: input.Name, Arguments: input.Arguments,
+				Status: status, RunID: runID, Result: result, Error: errorText,
+			})
+		}()
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				if ctx.Err() != nil {
@@ -248,6 +275,70 @@ func normalizeToolCallErrors(next compose.InvokableToolEndpoint) compose.Invokab
 		logStructuredToolFailure(ctx, logger, output, time.Since(started))
 		return output, nil
 	}
+}
+
+func completedToolActivity(output *compose.ToolOutput, err error) (status, runID, result, errorText string) {
+	status = domain.ChatToolCallCompleted
+	if output != nil {
+		result = output.Result
+	}
+	if err != nil {
+		errorText = err.Error()
+		switch {
+		case errors.Is(err, context.DeadlineExceeded):
+			status = domain.ChatToolCallExpired
+		case errors.Is(err, context.Canceled):
+			status = domain.ChatToolCallInterrupted
+		default:
+			status = domain.ChatToolCallFailed
+		}
+		return status, "", result, errorText
+	}
+	var payload map[string]any
+	if json.Unmarshal([]byte(result), &payload) != nil {
+		return status, "", result, ""
+	}
+	runID = stringField(payload, "run_id")
+	resultStatus := stringField(payload, "status")
+	code := stringField(payload, "code")
+	for _, key := range []string{"result", "task"} {
+		if nested, ok := payload[key].(map[string]any); ok {
+			if runID == "" {
+				runID = stringField(nested, "run_id")
+			}
+			if resultStatus == "" {
+				resultStatus = stringField(nested, "status")
+			}
+			if code == "" {
+				code = stringField(nested, "code")
+			}
+		}
+	}
+	switch resultStatus {
+	case domain.ChatToolCallPartial:
+		status = domain.ChatToolCallPartial
+	case domain.ChatToolCallFailed:
+		status = domain.ChatToolCallFailed
+	case domain.ChatToolCallInterrupted, "cancelled":
+		status = domain.ChatToolCallInterrupted
+	case domain.ChatToolCallRejected, "denied":
+		status = domain.ChatToolCallRejected
+	case domain.ChatToolCallExpired, "timeout":
+		status = domain.ChatToolCallExpired
+	case domain.ChatToolCallUnknown:
+		status = domain.ChatToolCallUnknown
+	}
+	if code == "outcome_unknown" {
+		status = domain.ChatToolCallUnknown
+	} else if okValue, exists := payload["ok"].(bool); exists && !okValue && status == domain.ChatToolCallCompleted {
+		status = domain.ChatToolCallFailed
+	}
+	return status, runID, result, ""
+}
+
+func stringField(payload map[string]any, key string) string {
+	value, _ := payload[key].(string)
+	return strings.TrimSpace(value)
 }
 
 func logStructuredToolFailure(ctx context.Context, logger interface {

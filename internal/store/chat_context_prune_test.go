@@ -52,6 +52,17 @@ func TestPruneChatTurnsExcludedFromContext(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	progressID, err := st.AppendPendingChatMessage(ctx, sessionID, "user", "keep visible progress")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetChatMessageStatus(ctx, progressID, "failed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AppendChatMessage(ctx, sessionID, domain.ChatMessageRoleAssistantProgress, "visible tool preamble"); err != nil {
+		t.Fatal(err)
+	}
+
 	answerID, err := st.AppendPendingChatMessage(ctx, sessionID, "user", "keep assistant response")
 	if err != nil {
 		t.Fatal(err)
@@ -74,9 +85,10 @@ func TestPruneChatTurnsExcludedFromContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 4 ||
+	if len(messages) != 6 ||
 		messages[0].Content != "keep tool results" || messages[1].Role != "tool" ||
-		messages[2].Content != "keep assistant response" || messages[3].Content != "useful partial answer" {
+		messages[2].Content != "keep visible progress" || messages[3].Role != domain.ChatMessageRoleAssistantProgress ||
+		messages[4].Content != "keep assistant response" || messages[5].Content != "useful partial answer" {
 		t.Fatalf("remaining messages = %#v", messages)
 	}
 	if _, err := st.GetChatAttachment(ctx, sessionID, "image-dropped"); !errors.Is(err, ErrNotFound) {

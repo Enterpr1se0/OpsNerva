@@ -38,6 +38,54 @@ type blockingAgentRunner struct {
 
 type toolActivityAgentRunner struct{}
 
+type modelFailureWithRunningToolRunner struct {
+	started  chan struct{}
+	release  chan struct{}
+	finished chan error
+}
+
+type assistantLifecycleReplay struct {
+	content      map[string]string
+	committedIDs []string
+	resetIDs     []string
+	active       map[string]bool
+}
+
+func replayAssistantLifecycle(t *testing.T, events []Event) assistantLifecycleReplay {
+	t.Helper()
+	result := assistantLifecycleReplay{content: make(map[string]string), active: make(map[string]bool)}
+	for _, event := range events {
+		if event.Role != string(schema.Assistant) {
+			continue
+		}
+		switch event.Type {
+		case "message_start":
+			if event.MessageID == "" || result.active[event.MessageID] {
+				t.Fatalf("invalid assistant message start: %#v", event)
+			}
+			result.active[event.MessageID] = true
+		case "message":
+			if event.MessageID == "" || !result.active[event.MessageID] {
+				t.Fatalf("assistant delta without active lifecycle: %#v", event)
+			}
+			result.content[event.MessageID] += event.Content
+		case "message_commit":
+			if event.MessageID == "" || !result.active[event.MessageID] {
+				t.Fatalf("assistant commit without active lifecycle: %#v", event)
+			}
+			delete(result.active, event.MessageID)
+			result.committedIDs = append(result.committedIDs, event.MessageID)
+		case "message_reset":
+			if event.MessageID == "" || !result.active[event.MessageID] {
+				t.Fatalf("assistant reset without active lifecycle: %#v", event)
+			}
+			delete(result.active, event.MessageID)
+			result.resetIDs = append(result.resetIDs, event.MessageID)
+		}
+	}
+	return result
+}
+
 func (*toolActivityAgentRunner) Run(ctx context.Context, _ []*schema.Message, _ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
 	iterator, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 	go func() {
@@ -46,12 +94,35 @@ func (*toolActivityAgentRunner) Run(ctx context.Context, _ []*schema.Message, _ 
 			Function: schema.FunctionCall{Name: "ssh_exec", Arguments: `{"host_id":"host-live","program":"uptime","reason":"inspect uptime"}`},
 		}
 		generator.Send(adk.EventFromMessage(schema.AssistantMessage("", []schema.ToolCall{call}), nil, schema.Assistant, ""))
-		notifyToolActivity(ctx, &compose.ToolInput{CallID: call.ID, Name: call.Function.Name, Arguments: call.Function.Arguments})
+		notifyToolStarted(ctx, &compose.ToolInput{CallID: call.ID, Name: call.Function.Name, Arguments: call.Function.Arguments})
 		generator.Send(adk.EventFromMessage(
 			schema.ToolMessage(`{"status":"completed","stdout":"up 1 day"}`, call.ID, schema.WithToolName(call.Function.Name)),
 			nil, schema.Tool, call.Function.Name,
 		))
 		generator.Send(adk.EventFromMessage(schema.AssistantMessage("Host is available.", nil), nil, schema.Assistant, ""))
+		generator.Close()
+	}()
+	return iterator
+}
+
+func (r *modelFailureWithRunningToolRunner) Run(ctx context.Context, _ []*schema.Message, _ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+	iterator, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	endpoint := normalizeToolCallErrors(func(toolCtx context.Context, _ *compose.ToolInput) (*compose.ToolOutput, error) {
+		close(r.started)
+		select {
+		case <-r.release:
+			return &compose.ToolOutput{Result: `{"status":"completed","stdout":"finished"}`}, nil
+		case <-toolCtx.Done():
+			return nil, toolCtx.Err()
+		}
+	})
+	go func() {
+		_, err := endpoint(ctx, &compose.ToolInput{CallID: "call-detached", Name: "ssh_exec", Arguments: `{"host_id":"host-one","program":"sleep"}`})
+		r.finished <- err
+	}()
+	go func() {
+		<-r.started
+		generator.Send(&adk.AgentEvent{Err: errors.New("model request failed")})
 		generator.Close()
 	}()
 	return iterator
@@ -751,7 +822,11 @@ func TestQueryUsesNoToolFinalizerAfterToolActivityWithoutFinalAnswer(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 3 || messages[0].Status != "completed" || messages[1].Role != "tool" || messages[2].Role != "assistant" || messages[2].Content != answer {
+	lifecycle := replayAssistantLifecycle(t, emitted)
+	if len(lifecycle.committedIDs) != 1 || len(lifecycle.resetIDs) != 0 || len(lifecycle.active) != 0 || lifecycle.content[lifecycle.committedIDs[0]] != answer {
+		t.Fatalf("assistant lifecycle = %#v, events = %#v", lifecycle, emitted)
+	}
+	if len(messages) != 3 || messages[0].Status != "completed" || messages[1].Role != "tool" || messages[2].Role != "assistant" || messages[2].Content != answer || messages[2].ID != lifecycle.committedIDs[0] {
 		t.Fatalf("stored messages = %#v", messages)
 	}
 	messageEvents, doneEvents := 0, 0
@@ -800,22 +875,14 @@ func TestQueryBlocksPersistedToolResultLeakAndUsesFinalizer(t *testing.T) {
 	if answer != "终端已创建。" {
 		t.Fatalf("answer = %q", answer)
 	}
-	visible := ""
-	resetEvents := 0
 	for _, event := range emitted {
 		if containsInternalContextMarker(event.Content) || strings.Contains(event.Content, "private-shell-output") {
 			t.Fatalf("internal context reached the event stream: %#v", emitted)
 		}
-		if event.Type == "message" && event.Role == string(schema.Assistant) {
-			visible += event.Content
-		}
-		if event.Type == "message_reset" && event.Role == string(schema.Assistant) {
-			visible = ""
-			resetEvents++
-		}
 	}
-	if resetEvents != 1 || visible != answer {
-		t.Fatalf("visible answer = %q, resets = %d, events = %#v", visible, resetEvents, emitted)
+	lifecycle := replayAssistantLifecycle(t, emitted)
+	if len(lifecycle.resetIDs) != 1 || len(lifecycle.committedIDs) != 1 || len(lifecycle.active) != 0 || lifecycle.content[lifecycle.committedIDs[0]] != answer {
+		t.Fatalf("assistant lifecycle = %#v, events = %#v", lifecycle, emitted)
 	}
 	runnerCalls, _ := runner.snapshot()
 	finalizerCalls, _ := finalizer.snapshot()
@@ -826,7 +893,7 @@ func TestQueryBlocksPersistedToolResultLeakAndUsesFinalizer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 3 || messages[0].Status != "completed" || messages[1].Role != "tool" || messages[2].Role != "assistant" || messages[2].Content != answer {
+	if len(messages) != 3 || messages[0].Status != "completed" || messages[1].Role != "tool" || messages[2].Role != "assistant" || messages[2].Content != answer || messages[2].ID != lifecycle.committedIDs[0] {
 		t.Fatalf("stored messages = %#v", messages)
 	}
 }
@@ -863,7 +930,7 @@ func TestQueryReportsFinalizerFailureWithoutRerunningTools(t *testing.T) {
 	}
 }
 
-func TestQueryPersistsOnlyTerminalAssistantOutput(t *testing.T) {
+func TestQueryPersistsToolCallPreambleForDisplay(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
 	if err != nil {
@@ -896,8 +963,17 @@ func TestQueryPersistsOnlyTerminalAssistantOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 3 || messages[0].Status != "completed" || messages[1].Role != "tool" || messages[2].Role != "assistant" || messages[2].Content != answer {
+	if len(messages) != 4 || messages[0].Status != "completed" ||
+		messages[1].Role != domain.ChatMessageRoleAssistantProgress || messages[1].Content != "I will inspect the host." ||
+		messages[2].Role != "tool" || messages[3].Role != "assistant" || messages[3].Content != answer {
 		t.Fatalf("stored messages = %#v", messages)
+	}
+	contextMessages, err := st.ListChatContextMessages(ctx, "session_terminal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contextMessages) != 3 || contextMessages[0].Role != "user" || contextMessages[1].Role != "tool" || contextMessages[2].Role != "assistant" {
+		t.Fatalf("model context included display-only progress: %#v", contextMessages)
 	}
 }
 
@@ -951,6 +1027,103 @@ func TestQueryStreamsToolLifecycleWithStableCallID(t *testing.T) {
 	}
 }
 
+func TestModelFailureDoesNotCancelRunningToolAndPersistsItsTerminalResult(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	runner := &modelFailureWithRunningToolRunner{
+		started: make(chan struct{}), release: make(chan struct{}), finished: make(chan error, 1),
+	}
+	runtime := &Runtime{runner: runner, store: st}
+	if _, err := runtime.Query(ctx, "session_model_failure_tool", "run it", nil); err == nil || !strings.Contains(err.Error(), "model request failed") {
+		t.Fatalf("query error = %v", err)
+	}
+	call, err := st.GetChatToolCall(ctx, "session_model_failure_tool", "call-detached")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if call.Status != domain.ChatToolCallRunning {
+		t.Fatalf("tool call after model failure = %#v", call)
+	}
+	close(runner.release)
+	select {
+	case err := <-runner.finished:
+		if err != nil {
+			t.Fatalf("tool inherited model cancellation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("tool did not finish")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		call, err = st.GetChatToolCall(ctx, "session_model_failure_tool", "call-detached")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if call.Status == domain.ChatToolCallCompleted {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("terminal tool result was not persisted: %#v", call)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	history, err := st.ListChatContextMessages(ctx, "session_model_failure_tool")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 2 || history[0].Role != "user" || history[0].Status != "failed" || history[1].Role != "tool" || !strings.Contains(history[1].Content, "finished") {
+		t.Fatalf("persisted failed-turn context = %#v", history)
+	}
+}
+
+func TestUserCanStopToolAfterModelPhaseHasFailed(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	runner := &modelFailureWithRunningToolRunner{
+		started: make(chan struct{}), release: make(chan struct{}), finished: make(chan error, 1),
+	}
+	runtime := &Runtime{runner: runner, store: st}
+	if _, err := runtime.Query(ctx, "session_stop_orphan_tool", "run it", nil); err == nil {
+		t.Fatal("model failure was not returned")
+	}
+	if runtime.IsSessionActive("session_stop_orphan_tool") {
+		t.Fatal("model phase remained active")
+	}
+	if !runtime.CancelSession("session_stop_orphan_tool") {
+		t.Fatal("running tool was not available to explicit stop")
+	}
+	select {
+	case err := <-runner.finished:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("stopped tool error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("explicit stop did not cancel the tool")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		call, err := st.GetChatToolCall(ctx, "session_stop_orphan_tool", "call-detached")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if call.Status == domain.ChatToolCallInterrupted {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("stopped tool terminal status = %#v", call)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestQueryRejectsReasoningOnlyTerminalOutputAfterToolActivity(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
@@ -990,8 +1163,17 @@ func TestQueryRejectsReasoningOnlyTerminalOutputAfterToolActivity(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 3 || messages[0].Role != "user" || messages[0].Status != "failed" || messages[1].Role != "tool" || messages[2].Role != "reasoning" {
+	if len(messages) != 4 || messages[0].Role != "user" || messages[0].Status != "failed" ||
+		messages[1].Role != domain.ChatMessageRoleAssistantProgress || messages[1].Content != "I will inspect the host." ||
+		messages[2].Role != "tool" || messages[3].Role != "reasoning" {
 		t.Fatalf("stored messages = %#v", messages)
+	}
+	contextMessages, err := st.ListChatContextMessages(ctx, "session_reasoning_only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contextMessages) != 2 || contextMessages[0].Role != "user" || contextMessages[1].Role != "tool" {
+		t.Fatalf("model context included display-only progress: %#v", contextMessages)
 	}
 	for _, event := range emitted {
 		if event.Type == "done" {
@@ -1000,7 +1182,7 @@ func TestQueryRejectsReasoningOnlyTerminalOutputAfterToolActivity(t *testing.T) 
 	}
 }
 
-func TestQueryStreamingPersistsOnlyTerminalAssistantOutput(t *testing.T) {
+func TestQueryStreamingPersistsToolCallPreambleForDisplay(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
 	if err != nil {
@@ -1041,28 +1223,26 @@ func TestQueryStreamingPersistsOnlyTerminalAssistantOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 4 || messages[0].Status != "completed" || messages[1].Role != "tool" || messages[2].Role != "reasoning" || messages[3].Role != "assistant" || messages[3].Content != answer {
+	if len(messages) != 5 || messages[0].Status != "completed" ||
+		messages[1].Role != domain.ChatMessageRoleAssistantProgress || messages[1].Content != "I will inspect." ||
+		messages[2].Role != "tool" || messages[3].Role != "reasoning" || messages[4].Role != "assistant" || messages[4].Content != answer {
 		t.Fatalf("stored messages = %#v", messages)
 	}
 	var assistantEvents []Event
-	visible := ""
-	resetEvents := 0
 	for _, event := range emitted {
 		if event.Type == "message" && event.Role == string(schema.Assistant) {
 			assistantEvents = append(assistantEvents, event)
-			visible += event.Content
-		}
-		if event.Type == "message_reset" && event.Role == string(schema.Assistant) {
-			visible = ""
-			resetEvents++
 		}
 	}
-	if len(assistantEvents) != 4 || resetEvents != 1 || visible != answer {
-		t.Fatalf("assistant message events = %#v, resets = %d, visible = %q", assistantEvents, resetEvents, visible)
+	lifecycle := replayAssistantLifecycle(t, emitted)
+	if len(assistantEvents) != 4 || len(lifecycle.resetIDs) != 0 || len(lifecycle.committedIDs) != 2 || len(lifecycle.active) != 0 ||
+		lifecycle.content[lifecycle.committedIDs[0]] != "I will inspect." || lifecycle.content[lifecycle.committedIDs[1]] != answer ||
+		messages[1].ID != lifecycle.committedIDs[0] || messages[4].ID != lifecycle.committedIDs[1] {
+		t.Fatalf("assistant message events = %#v, lifecycle = %#v, stored messages = %#v", assistantEvents, lifecycle, messages)
 	}
 }
 
-func TestQueryDoesNotEmitNonStreamingToolCallPreamble(t *testing.T) {
+func TestQueryCommitsNonStreamingToolCallPreamble(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
 	if err != nil {
@@ -1093,8 +1273,50 @@ func TestQueryDoesNotEmitNonStreamingToolCallPreamble(t *testing.T) {
 			assistantEvents = append(assistantEvents, event)
 		}
 	}
-	if answer != "Host memory is stable." || len(assistantEvents) != 1 || assistantEvents[0].Content != answer {
-		t.Fatalf("answer = %q, assistant message events = %#v", answer, assistantEvents)
+	lifecycle := replayAssistantLifecycle(t, emitted)
+	messages, err := st.ListChatMessages(ctx, "session_nonstream_terminal", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "Host memory is stable." || len(assistantEvents) != 2 || assistantEvents[0].Content != "I will inspect." || assistantEvents[1].Content != answer ||
+		len(lifecycle.committedIDs) != 2 || len(lifecycle.resetIDs) != 0 || len(lifecycle.active) != 0 ||
+		lifecycle.content[lifecycle.committedIDs[0]] != "I will inspect." || lifecycle.content[lifecycle.committedIDs[1]] != answer ||
+		len(messages) != 4 || messages[1].ID != lifecycle.committedIDs[0] || messages[3].ID != lifecycle.committedIDs[1] {
+		t.Fatalf("answer = %q, assistant message events = %#v, lifecycle = %#v, stored messages = %#v", answer, assistantEvents, lifecycle, messages)
+	}
+}
+
+func TestQueryResetsSupersededAssistantMessageLifecycle(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{{
+		adk.EventFromMessage(schema.AssistantMessage("superseded draft", nil), nil, schema.Assistant, ""),
+		adk.EventFromMessage(schema.AssistantMessage("final answer", nil), nil, schema.Assistant, ""),
+	}}}
+	runtime := &Runtime{runner: runner, store: st}
+	var emitted []Event
+
+	answer, err := runtime.Query(ctx, "session_superseded", "continue", func(event Event) {
+		emitted = append(emitted, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycle := replayAssistantLifecycle(t, emitted)
+	if answer != "final answer" || len(lifecycle.resetIDs) != 1 || len(lifecycle.committedIDs) != 1 || len(lifecycle.active) != 0 ||
+		lifecycle.content[lifecycle.resetIDs[0]] != "superseded draft" || lifecycle.content[lifecycle.committedIDs[0]] != answer {
+		t.Fatalf("answer = %q, lifecycle = %#v, events = %#v", answer, lifecycle, emitted)
+	}
+	messages, err := st.ListChatMessages(ctx, "session_superseded", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 || messages[1].ID != lifecycle.committedIDs[0] || messages[1].Content != answer {
+		t.Fatalf("stored messages = %#v", messages)
 	}
 }
 

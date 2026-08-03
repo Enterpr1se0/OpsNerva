@@ -1782,8 +1782,11 @@ func createWorkspacePowerShellScript(script string) (string, func() error, error
 }
 
 func workspaceHostEnvironment(workspaceRoot string, input map[string]string) []string {
+	return workspaceHostEnvironmentForPlatform(runtime.GOOS, workspaceRoot, input)
+}
+
+func workspaceHostEnvironmentForPlatform(goos, workspaceRoot string, input map[string]string) []string {
 	values := map[string]string{
-		"HOME":             workspaceRoot,
 		"PATH":             os.Getenv("PATH"),
 		"TERM":             "xterm-256color",
 		"COLORTERM":        "truecolor",
@@ -1792,18 +1795,29 @@ func workspaceHostEnvironment(workspaceRoot string, input map[string]string) []s
 		"PYTHONUTF8":       "1",
 		"PYTHONIOENCODING": "utf-8",
 	}
-	if runtime.GOOS == "windows" {
-		values["USERPROFILE"] = workspaceRoot
-		for _, key := range []string{"SystemRoot", "WINDIR", "ComSpec", "PATHEXT", "TEMP", "TMP"} {
-			if value := os.Getenv(key); value != "" {
-				values[key] = value
-			}
-		}
-	} else {
+	if goos != "windows" {
+		values["HOME"] = workspaceRoot
 		values["TMPDIR"] = os.TempDir()
 	}
 	for key, value := range input {
 		values[key] = value
+	}
+	if goos == "windows" {
+		// Keep Windows profile directories outside the Workspace. PowerShell and
+		// child processes create AppData and Microsoft trees under USERPROFILE.
+		for _, key := range []string{
+			"HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "PSModulePath",
+			"SystemRoot", "WINDIR", "ComSpec", "PATHEXT", "TEMP", "TMP",
+		} {
+			for existing := range values {
+				if strings.EqualFold(existing, key) {
+					delete(values, existing)
+				}
+			}
+			if value := os.Getenv(key); value != "" {
+				values[key] = value
+			}
+		}
 	}
 	keys := make([]string, 0, len(values))
 	for key := range values {

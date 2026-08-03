@@ -59,6 +59,37 @@ func TestChatEventHubStartsFreshSequenceForNextTurn(t *testing.T) {
 	}
 }
 
+func TestModelErrorTerminatesTheModelEventStream(t *testing.T) {
+	hub := newChatEventHub()
+	hub.publish("session_test", agent.Event{Type: "session"})
+	hub.publish("session_test", agent.Event{Type: "tool", ToolCallID: "call-live", Status: "in_progress"})
+	hub.publish("session_test", agent.Event{Type: "model_error", Error: "provider unavailable"})
+	replay, _, done, unsubscribe := hub.subscribe("session_test", 0)
+	defer unsubscribe()
+	if !done || len(replay) != 3 || replay[2].Type != "model_error" {
+		t.Fatalf("model error stream = replay %#v, done %t", replay, done)
+	}
+}
+
+func TestChatEventHubReplaysMessageLifecycleWithStableID(t *testing.T) {
+	hub := newChatEventHub()
+	messageID := "msg_lifecycle"
+	hub.publish("session_test", agent.Event{Type: "message_start", MessageID: messageID, Role: "assistant"})
+	hub.publish("session_test", agent.Event{Type: "message", MessageID: messageID, Role: "assistant", Content: "ready"})
+	hub.publish("session_test", agent.Event{Type: "message_commit", MessageID: messageID, Role: "assistant"})
+
+	replay, _, done, unsubscribe := hub.subscribe("session_test", 0)
+	defer unsubscribe()
+	if done || len(replay) != 3 {
+		t.Fatalf("replay = %#v, done = %t", replay, done)
+	}
+	for index, event := range replay {
+		if event.EventID != uint64(index+1) || event.MessageID != messageID {
+			t.Fatalf("lifecycle replay[%d] = %#v", index, event)
+		}
+	}
+}
+
 func TestChatEventsStreamReturnsReplayWithSSEEventIDs(t *testing.T) {
 	hub := newChatEventHub()
 	hub.publish("session_test", agent.Event{Type: "session"})

@@ -1,9 +1,14 @@
 package service
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"sync"
 
 	"eino-ops-agent/internal/domain"
+	"eino-ops-agent/internal/observability"
+	"eino-ops-agent/internal/store"
 )
 
 type ExecutionEvent struct {
@@ -86,6 +91,17 @@ func (s *Service) publishExecutionEvent(event ExecutionEvent) {
 	if event.SessionID == "" || event.RunID == "" {
 		return
 	}
+	call, callErr := s.store.GetChatToolCallByRun(context.Background(), event.RunID)
+	if callErr == nil {
+		if event.ToolCallID == "" || event.ToolName == "" {
+			if event.ToolCallID == "" {
+				event.ToolCallID = call.ToolCallID
+			}
+			if event.ToolName == "" {
+				event.ToolName = call.ToolName
+			}
+		}
+	}
 	event.Sequence = s.executionEventSequence.Add(1)
 	s.executionEventMu.RLock()
 	if owner, ok := s.executionOwners[event.RunID]; ok {
@@ -101,6 +117,17 @@ func (s *Service) publishExecutionEvent(event ExecutionEvent) {
 		subscribers = append(subscribers, subscriber)
 	}
 	s.executionEventMu.RUnlock()
+	if status := persistedToolExecutionStatus(event.Status); status != "" && (callErr != nil || !detachedToolInvocation(call)) {
+		content := ""
+		if run, err := s.store.GetRun(context.Background(), event.RunID); err == nil {
+			if encoded, err := json.Marshal(execResultFromRun(run, "", "")); err == nil {
+				content = string(encoded)
+			}
+		}
+		if _, err := s.store.UpdateChatToolCallByRun(context.Background(), event.RunID, status, content, ""); err != nil && !errors.Is(err, store.ErrNotFound) {
+			observability.FromContext(context.Background()).ErrorContext(context.Background(), "persist execution tool status failed", "run_id", event.RunID, "tool_call_id", event.ToolCallID, "status", status, "error", err)
+		}
+	}
 
 	var shutdown <-chan struct{}
 	if s.executionCtx != nil {
@@ -124,9 +151,21 @@ func (s *Service) publishExecutionEvent(event ExecutionEvent) {
 	}
 }
 
-func (s *Service) bindExecutionOwner(runID string, owner executionOwner) {
+func detachedToolInvocation(call domain.ChatToolCall) bool {
+	var arguments struct {
+		Background bool `json:"background"`
+	}
+	return json.Unmarshal([]byte(call.ArgumentsJSON), &arguments) == nil && arguments.Background
+}
+
+func (s *Service) bindExecutionOwner(ctx context.Context, runID, sessionID string, owner executionOwner) {
 	if runID == "" || (owner.ToolCallID == "" && owner.ToolName == "") {
 		return
+	}
+	if sessionID != "" && owner.ToolCallID != "" {
+		if err := s.store.BindChatToolCallRun(ctx, sessionID, owner.ToolCallID, runID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			observability.FromContext(ctx).ErrorContext(ctx, "persist execution owner failed", "run_id", runID, "tool_call_id", owner.ToolCallID, "error", err)
+		}
 	}
 	s.executionEventMu.Lock()
 	if s.executionOwners == nil {
@@ -136,6 +175,25 @@ func (s *Service) bindExecutionOwner(runID string, owner executionOwner) {
 	s.executionEventMu.Unlock()
 }
 
+func persistedToolExecutionStatus(status string) string {
+	switch status {
+	case "completed":
+		return domain.ChatToolCallCompleted
+	case "partial":
+		return domain.ChatToolCallPartial
+	case "failed":
+		return domain.ChatToolCallFailed
+	case "interrupted", "cancelled":
+		return domain.ChatToolCallInterrupted
+	case "rejected", "denied":
+		return domain.ChatToolCallRejected
+	case "expired", "timeout":
+		return domain.ChatToolCallExpired
+	default:
+		return ""
+	}
+}
+
 func (s *Service) clearExecutionOwner(runID string) {
 	if runID == "" {
 		return
@@ -143,6 +201,41 @@ func (s *Service) clearExecutionOwner(runID string) {
 	s.executionEventMu.Lock()
 	delete(s.executionOwners, runID)
 	s.executionEventMu.Unlock()
+}
+
+// CancelSessionToolExecutions stops only active, turn-scoped executions.
+// Background tasks and already-started shells or tunnels have their own
+// lifecycle and are not owned by the model turn after their start call ends.
+func (s *Service) CancelSessionToolExecutions(ctx context.Context, sessionID string) (int, error) {
+	s.executionMu.Lock()
+	runIDs := make([]string, 0, len(s.executionCancels))
+	for runID := range s.executionCancels {
+		runIDs = append(runIDs, runID)
+	}
+	s.executionMu.Unlock()
+	cancelled := 0
+	for _, runID := range runIDs {
+		run, err := s.store.GetRun(ctx, runID)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return cancelled, err
+		}
+		if run.SessionID != sessionID {
+			continue
+		}
+		var arguments struct {
+			Background bool `json:"background"`
+		}
+		if json.Unmarshal([]byte(run.ToolArgumentsJSON), &arguments) == nil && arguments.Background {
+			continue
+		}
+		if s.cancelApprovedExecution(runID) {
+			cancelled++
+		}
+	}
+	return cancelled, nil
 }
 
 func terminalExecutionStatus(status string) bool {

@@ -382,9 +382,41 @@ type ChatMessage struct {
 	Role        string           `json:"role"`
 	Content     string           `json:"content"`
 	ToolName    string           `json:"tool_name,omitempty"`
+	ToolCallID  string           `json:"tool_call_id,omitempty"`
+	RunID       string           `json:"run_id,omitempty"`
+	ToolStatus  string           `json:"tool_status,omitempty"`
 	Status      string           `json:"status"`
 	Attachments []ChatAttachment `json:"attachments,omitempty"`
 	CreatedAt   time.Time        `json:"created_at"`
+}
+
+const ChatMessageRoleAssistantProgress = "assistant_progress"
+
+const (
+	ChatToolCallRunning     = "running"
+	ChatToolCallCompleted   = "completed"
+	ChatToolCallPartial     = "partial"
+	ChatToolCallFailed      = "failed"
+	ChatToolCallInterrupted = "interrupted"
+	ChatToolCallRejected    = "rejected"
+	ChatToolCallExpired     = "expired"
+	ChatToolCallUnknown     = "unknown"
+)
+
+type ChatToolCall struct {
+	SessionID     string    `json:"session_id"`
+	UserMessageID string    `json:"user_message_id"`
+	MessageID     string    `json:"message_id"`
+	ToolCallID    string    `json:"tool_call_id"`
+	RunID         string    `json:"run_id,omitempty"`
+	ToolName      string    `json:"tool_name"`
+	ArgumentsJSON string    `json:"arguments_json"`
+	Status        string    `json:"status"`
+	ResultJSON    string    `json:"result_json"`
+	Error         string    `json:"error,omitempty"`
+	StartedAt     time.Time `json:"started_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+	CompletedAt   time.Time `json:"completed_at,omitempty,omitzero"`
 }
 
 type ChatAttachment struct {
