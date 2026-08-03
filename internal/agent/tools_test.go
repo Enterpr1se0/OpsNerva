@@ -245,11 +245,11 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 			schema := string(descriptor.InputSchema)
 			if descriptor.Guard != "approval_required" || !strings.Contains(schema, `"action"`) ||
 				!strings.Contains(schema, `"shell_id"`) || !strings.Contains(schema, `"input"`) ||
-				!strings.Contains(schema, `"submit"`) || strings.Contains(schema, `"wait_seconds"`) ||
-				!strings.Contains(schema, `"reason"`) || strings.Contains(schema, `"after_sequence"`) ||
-				strings.Contains(schema, `"coalesce"`) ||
+				!strings.Contains(schema, `"submit"`) || !strings.Contains(schema, `"wait_seconds"`) ||
+				!strings.Contains(schema, `"max_output_bytes"`) || !strings.Contains(schema, `"reason"`) ||
+				!strings.Contains(schema, `"after_sequence"`) || strings.Contains(schema, `"coalesce"`) ||
 				strings.Contains(schema, `"ttl_seconds"`) || strings.Contains(schema, `"extend_seconds"`) ||
-				!strings.Contains(descriptor.Description, "automatically waits") || strings.Contains(descriptor.Description, "status refreshes") {
+				!strings.Contains(descriptor.Description, "next_sequence") || strings.Contains(descriptor.Description, "status refreshes") {
 				t.Fatalf("ssh_shell metadata does not reflect its runtime schema: %#v", descriptor)
 			}
 		}
@@ -268,9 +268,9 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 			schema := string(descriptor.InputSchema)
 			if descriptor.Guard != "approval_required" || !strings.Contains(schema, `"action"`) ||
 				!strings.Contains(schema, `"shell_id"`) || !strings.Contains(schema, `"input"`) ||
-				!strings.Contains(schema, `"submit"`) || strings.Contains(schema, `"wait_seconds"`) ||
-				strings.Contains(schema, `"after_sequence"`) || strings.Contains(schema, `"coalesce"`) ||
-				strings.Contains(schema, `"ttl_seconds"`) || !strings.Contains(descriptor.Description, "automatically waits") ||
+				!strings.Contains(schema, `"submit"`) || !strings.Contains(schema, `"wait_seconds"`) ||
+				!strings.Contains(schema, `"max_output_bytes"`) || !strings.Contains(schema, `"after_sequence"`) || strings.Contains(schema, `"coalesce"`) ||
+				strings.Contains(schema, `"ttl_seconds"`) || !strings.Contains(descriptor.Description, "next_sequence") ||
 				strings.Contains(descriptor.Description, "status refreshes") {
 				t.Fatalf("workspace_shell metadata does not expose interactive actions: %#v", descriptor)
 			}
@@ -308,7 +308,7 @@ func TestSSHShellActionValidationReportsExactFields(t *testing.T) {
 
 	valid := SSHShellInput{Action: "output", ShellID: "shell-1", Reason: "read new output"}
 	if err := validateSSHShellActionFields(valid, "output",
-		[]string{"action", "shell_id", "reason"},
+		[]string{"action", "shell_id", "after_sequence", "wait_seconds", "max_output_bytes", "reason"},
 		nil,
 	); err != nil {
 		t.Fatalf("valid output fields were rejected: %v", err)
@@ -369,14 +369,61 @@ func TestModelShellOutputWithoutInputKeepsIncrementalOutput(t *testing.T) {
 	}
 }
 
-func TestModelShellResultDoesNotExposeEventCursor(t *testing.T) {
-	encoded, err := json.Marshal(shellToolResult{ShellID: "shell-1", Status: "running", Output: "done\n"})
+func TestModelShellChunksPreserveStreamsAndRemoveInputEcho(t *testing.T) {
+	events := []domain.SSHShellEvent{
+		{Sequence: 7, Stream: "input", Source: "agent", Content: "check\r"},
+		{Sequence: 8, Stream: "stdout", Content: "check\r\nready\r\n"},
+		{Sequence: 9, Stream: "stderr", Content: "warning\r\n"},
+	}
+	chunks := modelShellChunks(events, true)
+	if len(chunks) != 2 || chunks[0].Sequence != 8 || chunks[0].Stream != "stdout" || chunks[0].Content != "ready\n" || chunks[1].Sequence != 9 || chunks[1].Stream != "stderr" || chunks[1].Content != "warning\n" {
+		t.Fatalf("model shell chunks = %#v", chunks)
+	}
+}
+
+func TestModelShellChunksExplicitReplayKeepsEarlierResponses(t *testing.T) {
+	events := []domain.SSHShellEvent{
+		{Sequence: 1, Stream: "input", Source: "agent", Content: "first\r"},
+		{Sequence: 2, Stream: "stdout", Content: "first response\r\n"},
+		{Sequence: 3, Stream: "input", Source: "agent", Content: "second\r"},
+		{Sequence: 4, Stream: "stdout", Content: "second response\r\n"},
+	}
+	chunks := modelShellChunks(events, false)
+	if len(chunks) != 1 || chunks[0].Content != "first response\nsecond response\n" || chunks[0].FirstSequence != 2 || chunks[0].Sequence != 4 {
+		t.Fatalf("explicit replay chunks = %#v", chunks)
+	}
+}
+
+func TestShellToolOutputPolicyDefaultsAndValidatesBounds(t *testing.T) {
+	wait, maxBytes, err := shellToolOutputPolicy(nil, nil)
+	if err != nil || wait != 5*time.Second || maxBytes != 128<<10 {
+		t.Fatalf("default shell output policy = %s, %d, %v", wait, maxBytes, err)
+	}
+	zero, minimum := 0, 4<<10
+	wait, maxBytes, err = shellToolOutputPolicy(&zero, &minimum)
+	if err != nil || wait != 0 || maxBytes != minimum {
+		t.Fatalf("explicit shell output policy = %s, %d, %v", wait, maxBytes, err)
+	}
+	invalidWait, invalidMax := 31, (4<<20)+1
+	if _, _, err := shellToolOutputPolicy(&invalidWait, nil); err == nil {
+		t.Fatal("out-of-range shell wait was accepted")
+	}
+	if _, _, err := shellToolOutputPolicy(nil, &invalidMax); err == nil {
+		t.Fatal("out-of-range shell output size was accepted")
+	}
+}
+
+func TestModelShellResultExposesIncrementalChunksAndCursor(t *testing.T) {
+	encoded, err := json.Marshal(shellToolResult{
+		ShellID: "shell-1", Status: "running", NextSequence: 9, HasMore: true,
+		Chunks: []shellToolOutputChunk{{Sequence: 9, Stream: "stderr", Content: "failed\n"}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	result := string(encoded)
-	if strings.Contains(result, "sequence") || strings.Contains(result, "events") || strings.Contains(result, "recent_output") {
-		t.Fatalf("model shell result exposes transport details: %s", result)
+	if !strings.Contains(result, `"next_sequence":9`) || !strings.Contains(result, `"stream":"stderr"`) || !strings.Contains(result, `"has_more":true`) || strings.Contains(result, "recent_output") {
+		t.Fatalf("model shell result is missing incremental output details: %s", result)
 	}
 }
 

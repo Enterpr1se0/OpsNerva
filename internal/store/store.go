@@ -395,6 +395,7 @@ CREATE TABLE IF NOT EXISTS ssh_shell_sessions (
   cols INTEGER NOT NULL,
   rows INTEGER NOT NULL,
   last_sequence INTEGER NOT NULL DEFAULT 0,
+  response_sequence INTEGER NOT NULL DEFAULT 0,
   recent_output TEXT NOT NULL DEFAULT '',
   exit_code INTEGER,
   termination_reason TEXT NOT NULL DEFAULT '',
@@ -410,6 +411,7 @@ CREATE TABLE IF NOT EXISTS ssh_shell_events (
   stream TEXT NOT NULL,
   source TEXT NOT NULL DEFAULT '',
   content_redacted TEXT NOT NULL DEFAULT '',
+  content_readable TEXT,
   sensitive INTEGER NOT NULL DEFAULT 0,
   input_bytes INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT '',
@@ -511,9 +513,44 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return err
 	}
+	if err := s.ensureColumn(ctx, "ssh_shell_events", "content_readable", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "ssh_shell_sessions", "response_sequence", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO system_settings(
 id,agent_max_iterations,workspace_shell_mode,updated_at) VALUES(1,?,?,?)`,
 		domain.DefaultAgentMaxIterations, domain.DefaultWorkspaceShellMode(runtime.GOOS), formatTime(time.Now().UTC()))
+	return err
+}
+
+func (s *Store) ensureColumn(ctx context.Context, table, column, definition string) error {
+	rows, err := s.db.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == column {
+			found = true
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	_, err = s.db.ExecContext(ctx, "ALTER TABLE "+table+" ADD COLUMN "+column+" "+definition)
 	return err
 }
 

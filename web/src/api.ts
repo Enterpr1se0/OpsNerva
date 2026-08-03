@@ -43,6 +43,7 @@ export const api = {
 	llmTools: () => request<LLMToolCatalog>('/api/v1/agent/tools'),
 	setLLMToolEnabled: (name:string,enabled:boolean) => request<LLMToolCatalog>(`/api/v1/agent/tools/${encodeURIComponent(name)}/${enabled?'enable':'disable'}`,{method:'POST',body:'{}'}),
 	skills: () => requestList<ManagedSkill>('/api/v1/skills'),
+	reloadSkills: () => request<LLMToolCatalog>('/api/v1/skills/reload',{method:'POST',body:'{}'}),
 	skill: (name:string) => request<ManagedSkill>(`/api/v1/skills/${encodeURIComponent(name)}`),
 	uploadSkill: (name:string,file:File) => {const body=new FormData();body.set('name',name);body.set('file',file);return request<ManagedSkill[]>('/api/v1/skills',{method:'POST',body})},
 	saveSkill: (name:string,content:string) => request<ManagedSkill>(`/api/v1/skills/${encodeURIComponent(name)}`,{method:'PUT',body:JSON.stringify({content})}),

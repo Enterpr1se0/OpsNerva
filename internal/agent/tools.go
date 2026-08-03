@@ -163,14 +163,17 @@ type SSHTunnelInput struct {
 }
 
 type SSHShellInput struct {
-	Action   string `json:"action" jsonschema:"shell operation: start, input, output, list, interrupt, or close"`
-	HostID   string `json:"host_id,omitempty" jsonschema:"start only: registered SSH host identifier"`
-	ShellID  string `json:"shell_id,omitempty" jsonschema:"input, output, interrupt, and close only: interactive shell identifier"`
-	Input    string `json:"input,omitempty" jsonschema:"input only: exact non-secret bytes to send"`
-	Submit   bool   `json:"submit,omitempty" jsonschema:"input only: append a carriage return when input has no newline"`
-	Cwd      string `json:"cwd,omitempty" jsonschema:"start only: absolute remote working directory"`
-	Elevated bool   `json:"elevated,omitempty" jsonschema:"start only: open the approved shell through managed sudo"`
-	Reason   string `json:"reason,omitempty" jsonschema:"optional concise audit note for any action; start requires it"`
+	Action         string  `json:"action" jsonschema:"shell operation: start, input, output, list, interrupt, or close"`
+	HostID         string  `json:"host_id,omitempty" jsonschema:"start only: registered SSH host identifier"`
+	ShellID        string  `json:"shell_id,omitempty" jsonschema:"input, output, interrupt, and close only: interactive shell identifier"`
+	Input          string  `json:"input,omitempty" jsonschema:"input only: exact non-secret bytes to send"`
+	Submit         bool    `json:"submit,omitempty" jsonschema:"input only: append a carriage return when input has no newline"`
+	Cwd            string  `json:"cwd,omitempty" jsonschema:"start only: absolute remote working directory"`
+	Elevated       bool    `json:"elevated,omitempty" jsonschema:"start only: open the approved shell through managed sudo"`
+	AfterSequence  *uint64 `json:"after_sequence,omitempty" jsonschema:"output only: return events after this next_sequence; omit to continue from the server cursor; use 0 to replay from the beginning"`
+	WaitSeconds    *int    `json:"wait_seconds,omitempty" jsonschema:"input and output only: wait 0-30 seconds for output; omitted defaults to 5"`
+	MaxOutputBytes *int    `json:"max_output_bytes,omitempty" jsonschema:"input and output only: maximum readable output bytes returned in this page from 4096 to 4194304; omitted defaults to 131072"`
+	Reason         string  `json:"reason,omitempty" jsonschema:"optional concise audit note for any action; start requires it"`
 }
 
 func sshShellProvidedFields(input SSHShellInput) []string {
@@ -192,6 +195,15 @@ func sshShellProvidedFields(input SSHShellInput) []string {
 	}
 	if input.Elevated {
 		fields = append(fields, "elevated")
+	}
+	if input.AfterSequence != nil {
+		fields = append(fields, "after_sequence")
+	}
+	if input.WaitSeconds != nil {
+		fields = append(fields, "wait_seconds")
+	}
+	if input.MaxOutputBytes != nil {
+		fields = append(fields, "max_output_bytes")
 	}
 	if input.Reason != "" {
 		fields = append(fields, "reason")
@@ -333,6 +345,9 @@ type WorkspaceShellInput struct {
 	Cwd            string            `json:"cwd,omitempty" jsonschema:"run and start only: clean directory relative to the Workspace root; omitted always means the Workspace root"`
 	Env            map[string]string `json:"env,omitempty" jsonschema:"run and start only: non-secret environment variables"`
 	TimeoutSeconds int               `json:"timeout_seconds,omitempty" jsonschema:"run only: timeout from 1 to 600 seconds"`
+	AfterSequence  *uint64           `json:"after_sequence,omitempty" jsonschema:"output only: return events after this next_sequence; omit to continue from the server cursor; use 0 to replay from the beginning"`
+	WaitSeconds    *int              `json:"wait_seconds,omitempty" jsonschema:"input and output only: wait 0-30 seconds for output; omitted defaults to 5"`
+	MaxOutputBytes *int              `json:"max_output_bytes,omitempty" jsonschema:"input and output only: maximum readable output bytes returned in this page from 4096 to 4194304; omitted defaults to 131072"`
 	Reason         string            `json:"reason,omitempty" jsonschema:"optional concise audit note; run and start require it"`
 }
 
@@ -358,6 +373,15 @@ func workspaceShellProvidedFields(input WorkspaceShellInput) []string {
 	}
 	if input.TimeoutSeconds != 0 {
 		fields = append(fields, "timeout_seconds")
+	}
+	if input.AfterSequence != nil {
+		fields = append(fields, "after_sequence")
+	}
+	if input.WaitSeconds != nil {
+		fields = append(fields, "wait_seconds")
+	}
+	if input.MaxOutputBytes != nil {
+		fields = append(fields, "max_output_bytes")
 	}
 	if input.Reason != "" {
 		fields = append(fields, "reason")
@@ -540,6 +564,26 @@ type TaskInput struct {
 }
 
 const maxToolOutputViewBytes = 4 << 20
+
+const defaultShellToolOutputBytes = 128 << 10
+
+func shellToolOutputPolicy(waitSeconds, maxOutputBytes *int) (time.Duration, int, error) {
+	wait := 5
+	if waitSeconds != nil {
+		wait = *waitSeconds
+	}
+	if wait < 0 || wait > 30 {
+		return 0, 0, fmt.Errorf("wait_seconds must be between 0 and 30")
+	}
+	maxBytes := defaultShellToolOutputBytes
+	if maxOutputBytes != nil {
+		maxBytes = *maxOutputBytes
+	}
+	if maxBytes < 4<<10 || maxBytes > maxToolOutputViewBytes {
+		return 0, 0, fmt.Errorf("max_output_bytes must be between 4096 and %d", maxToolOutputViewBytes)
+	}
+	return time.Duration(wait) * time.Second, maxBytes, nil
+}
 
 func normalizedOutputView(maxBytes int, view string) (string, error) {
 	view = strings.ToLower(strings.TrimSpace(view))
@@ -1010,30 +1054,97 @@ func readableShellSnapshot(ctx context.Context, svc *service.Service, snapshot d
 	return snapshot
 }
 
-// shellToolResult is the model-facing view of an interactive shell response.
-// Event sequence numbers remain an internal transport detail used by the Web
-// terminal and service; the model only needs the output from its latest input.
-type shellToolResult struct {
-	ShellID           string `json:"shell_id"`
-	HostID            string `json:"host_id,omitempty"`
-	HostName          string `json:"host_name,omitempty"`
-	WorkspaceID       string `json:"workspace_id,omitempty"`
-	Status            string `json:"status"`
-	Output            string `json:"output,omitempty"`
-	ExitCode          *int   `json:"exit_code,omitempty"`
-	TerminationReason string `json:"termination_reason,omitempty"`
-	Error             string `json:"error,omitempty"`
+type shellToolOutputChunk struct {
+	FirstSequence uint64 `json:"first_sequence,omitempty"`
+	Sequence      uint64 `json:"sequence"`
+	Stream        string `json:"stream"`
+	Content       string `json:"content"`
 }
 
-func modelShellResult(ctx context.Context, svc *service.Service, snapshot domain.SSHShellSnapshot, after uint64) shellToolResult {
-	readable := readableShellSnapshot(ctx, svc, snapshot, after)
+// shellToolResult is the model-facing incremental view of an interactive shell.
+type shellToolResult struct {
+	ShellID             string                 `json:"shell_id"`
+	HostID              string                 `json:"host_id,omitempty"`
+	HostName            string                 `json:"host_name,omitempty"`
+	WorkspaceID         string                 `json:"workspace_id,omitempty"`
+	Status              string                 `json:"status"`
+	Chunks              []shellToolOutputChunk `json:"chunks,omitempty"`
+	NextSequence        uint64                 `json:"next_sequence"`
+	OutputBytes         int                    `json:"output_bytes,omitempty"`
+	HasMore             bool                   `json:"has_more,omitempty"`
+	WaitDeadlineReached bool                   `json:"wait_deadline_reached,omitempty"`
+	ExitCode            *int                   `json:"exit_code,omitempty"`
+	TerminationReason   string                 `json:"termination_reason,omitempty"`
+	Error               string                 `json:"error,omitempty"`
+}
+
+func modelShellResult(ctx context.Context, svc *service.Service, page domain.SSHShellOutputPage, after uint64, stripInputEcho bool) shellToolResult {
+	readable := readableShellSnapshot(ctx, svc, page.Snapshot, after)
 	shell := readable.Shell
+	chunks := modelShellChunks(readable.Events, stripInputEcho)
+	outputBytes := 0
+	for _, chunk := range chunks {
+		outputBytes += len(chunk.Content)
+	}
 	return shellToolResult{
 		ShellID: shell.ID, HostID: shell.HostID, HostName: shell.HostName,
 		WorkspaceID: shell.WorkspaceID, Status: shell.Status,
-		Output: modelShellOutput(readable.Events), ExitCode: shell.ExitCode,
+		Chunks: chunks, NextSequence: readable.NextSequence, OutputBytes: outputBytes,
+		HasMore: page.HasMore, WaitDeadlineReached: page.WaitDeadlineReached, ExitCode: shell.ExitCode,
 		TerminationReason: shell.TerminationReason, Error: shell.Error,
 	}
+}
+
+func modelShellChunks(events []domain.SSHShellEvent, stripInputEcho bool) []shellToolOutputChunk {
+	start := 0
+	input := ""
+	if stripInputEcho {
+		for index, event := range events {
+			if event.Stream == "input" && event.Source == "agent" {
+				start = index + 1
+				input = event.Content
+			}
+		}
+	}
+	chunks := make([]shellToolOutputChunk, 0)
+	for _, event := range events[start:] {
+		if (event.Stream != "stdout" && event.Stream != "stderr") || event.Content == "" {
+			continue
+		}
+		content := normalizeShellNewlines(event.Content)
+		if len(chunks) > 0 && chunks[len(chunks)-1].Stream == event.Stream {
+			chunks[len(chunks)-1].Content += content
+			chunks[len(chunks)-1].Sequence = event.Sequence
+			continue
+		}
+		chunks = append(chunks, shellToolOutputChunk{
+			FirstSequence: event.Sequence, Sequence: event.Sequence, Stream: event.Stream, Content: content,
+		})
+	}
+	var combined strings.Builder
+	for _, chunk := range chunks {
+		combined.WriteString(chunk.Content)
+	}
+	cleaned := cleanModelShellResponse(combined.String(), input)
+	removeBytes := combined.Len() - len(cleaned)
+	for removeBytes > 0 && len(chunks) > 0 {
+		if removeBytes >= len(chunks[0].Content) {
+			removeBytes -= len(chunks[0].Content)
+			chunks = chunks[1:]
+			continue
+		}
+		chunks[0].Content = chunks[0].Content[removeBytes:]
+		removeBytes = 0
+	}
+	for len(chunks) > 0 && chunks[0].Content == "" {
+		chunks = chunks[1:]
+	}
+	for index := range chunks {
+		if chunks[index].FirstSequence == chunks[index].Sequence {
+			chunks[index].FirstSequence = 0
+		}
+	}
+	return chunks
 }
 
 func modelShellOutput(events []domain.SSHShellEvent) string {
@@ -1132,7 +1243,7 @@ func RunSSHShellTool(ctx context.Context, svc *service.Service, input SSHShellIn
 		result, err := svc.StartSSHShell(ctx, input.HostID, input.Cwd, input.Elevated, 120, 32, input.Reason, actor)
 		return CompactExecToolResult(result, err)
 	case "input":
-		allowed := []string{"action", "shell_id", "input", "submit", "reason"}
+		allowed := []string{"action", "shell_id", "input", "submit", "wait_seconds", "max_output_bytes", "reason"}
 		example := map[string]any{"action": "input", "shell_id": "shell_xxx", "input": "whoami", "submit": true}
 		if err := validateSSHShellActionFields(input, action, allowed, example); err != nil {
 			return normalizeValueToolResult(ctx, "ssh_shell", domain.SSHShellSnapshot{}, err)
@@ -1147,11 +1258,15 @@ func RunSSHShellTool(ctx context.Context, svc *service.Service, input SSHShellIn
 		if len(shellInput) > 64<<10 || len(input.Reason) > 500 {
 			return normalizeValueToolResult(ctx, "ssh_shell", domain.SSHShellSnapshot{}, invalidSSHShellValue(input, action, "input must not exceed 65536 bytes and reason must not exceed 500 bytes", allowed, example))
 		}
-		result, err := svc.WriteSSHShell(ctx, input.ShellID, sessionID, shellInput, input.Reason, actor)
-		return normalizeValueToolResult(ctx, "ssh_shell", modelShellResult(ctx, svc, result, shellSnapshotAfter(result)), err)
+		maxWait, maxBytes, policyErr := shellToolOutputPolicy(input.WaitSeconds, input.MaxOutputBytes)
+		if policyErr != nil {
+			return normalizeValueToolResult(ctx, "ssh_shell", domain.SSHShellSnapshot{}, invalidSSHShellValue(input, action, policyErr.Error(), allowed, example))
+		}
+		page, err := svc.WriteSSHShellPage(ctx, input.ShellID, sessionID, shellInput, maxWait, maxBytes, input.Reason, actor)
+		return normalizeValueToolResult(ctx, "ssh_shell", modelShellResult(ctx, svc, page, shellSnapshotAfter(page.Snapshot), true), err)
 	case "output":
-		allowed := []string{"action", "shell_id", "reason"}
-		example := map[string]any{"action": "output", "shell_id": "shell_xxx"}
+		allowed := []string{"action", "shell_id", "after_sequence", "wait_seconds", "max_output_bytes", "reason"}
+		example := map[string]any{"action": "output", "shell_id": "shell_xxx", "wait_seconds": 10}
 		if err := validateSSHShellActionFields(input, action, allowed, example); err != nil {
 			return normalizeValueToolResult(ctx, "ssh_shell", domain.SSHShellSnapshot{}, err)
 		}
@@ -1161,8 +1276,12 @@ func RunSSHShellTool(ctx context.Context, svc *service.Service, input SSHShellIn
 		if len(input.Reason) > 500 {
 			return normalizeValueToolResult(ctx, "ssh_shell", domain.SSHShellSnapshot{}, invalidSSHShellValue(input, action, "reason must not exceed 500 bytes", allowed, example))
 		}
-		result, err := svc.WaitSSHShellOutput(ctx, input.ShellID, sessionID, input.Reason, actor)
-		return normalizeValueToolResult(ctx, "ssh_shell", modelShellResult(ctx, svc, result, shellSnapshotAfter(result)), err)
+		maxWait, maxBytes, policyErr := shellToolOutputPolicy(input.WaitSeconds, input.MaxOutputBytes)
+		if policyErr != nil {
+			return normalizeValueToolResult(ctx, "ssh_shell", domain.SSHShellSnapshot{}, invalidSSHShellValue(input, action, policyErr.Error(), allowed, example))
+		}
+		page, err := svc.QuerySSHShellOutput(ctx, input.ShellID, sessionID, input.AfterSequence, maxWait, maxBytes, input.Reason, actor)
+		return normalizeValueToolResult(ctx, "ssh_shell", modelShellResult(ctx, svc, page, shellSnapshotAfter(page.Snapshot), false), err)
 	case "list":
 		allowed := []string{"action", "reason"}
 		example := map[string]any{"action": "list"}
@@ -1247,7 +1366,7 @@ func RunWorkspaceShellTool(ctx context.Context, svc *service.Service, input Work
 		result, err := svc.StartWorkspaceShell(ctx, workspace.ID, input.Cwd, input.Env, 120, 32, input.Reason, actor)
 		return CompactExecToolResult(result, err)
 	case "input":
-		allowed := []string{"action", "shell_id", "input", "submit", "reason"}
+		allowed := []string{"action", "shell_id", "input", "submit", "wait_seconds", "max_output_bytes", "reason"}
 		example := map[string]any{"action": "input", "shell_id": "shell_xxx", "input": "go test ./...", "submit": true}
 		if err := validateWorkspaceShellActionFields(input, action, allowed, example); err != nil {
 			return normalizeValueToolResult(ctx, "workspace_shell", domain.SSHShellSnapshot{}, err)
@@ -1262,19 +1381,30 @@ func RunWorkspaceShellTool(ctx context.Context, svc *service.Service, input Work
 		if len(shellInput) > 64<<10 || len(input.Reason) > 500 {
 			return normalizeValueToolResult(ctx, "workspace_shell", domain.SSHShellSnapshot{}, invalidWorkspaceShellValue(input, action, "input must not exceed 65536 bytes and reason must not exceed 500 bytes", allowed, example))
 		}
-		result, err := svc.WriteWorkspaceShell(ctx, input.ShellID, sessionID, workspace.ID, shellInput, input.Reason, actor)
-		return normalizeValueToolResult(ctx, "workspace_shell", modelShellResult(ctx, svc, result, shellSnapshotAfter(result)), err)
+		maxWait, maxBytes, policyErr := shellToolOutputPolicy(input.WaitSeconds, input.MaxOutputBytes)
+		if policyErr != nil {
+			return normalizeValueToolResult(ctx, "workspace_shell", domain.SSHShellSnapshot{}, invalidWorkspaceShellValue(input, action, policyErr.Error(), allowed, example))
+		}
+		page, err := svc.WriteWorkspaceShellPage(ctx, input.ShellID, sessionID, workspace.ID, shellInput, maxWait, maxBytes, input.Reason, actor)
+		return normalizeValueToolResult(ctx, "workspace_shell", modelShellResult(ctx, svc, page, shellSnapshotAfter(page.Snapshot), true), err)
 	case "output":
-		allowed := []string{"action", "shell_id", "reason"}
-		example := map[string]any{"action": "output", "shell_id": "shell_xxx"}
+		allowed := []string{"action", "shell_id", "after_sequence", "wait_seconds", "max_output_bytes", "reason"}
+		example := map[string]any{"action": "output", "shell_id": "shell_xxx", "wait_seconds": 10}
 		if err := validateWorkspaceShellActionFields(input, action, allowed, example); err != nil {
 			return normalizeValueToolResult(ctx, "workspace_shell", domain.SSHShellSnapshot{}, err)
 		}
 		if strings.TrimSpace(input.ShellID) == "" {
 			return normalizeValueToolResult(ctx, "workspace_shell", domain.SSHShellSnapshot{}, invalidWorkspaceShellValue(input, action, "action=output requires shell_id", allowed, example))
 		}
-		result, err := svc.WaitWorkspaceShellOutput(ctx, input.ShellID, sessionID, workspace.ID, input.Reason, actor)
-		return normalizeValueToolResult(ctx, "workspace_shell", modelShellResult(ctx, svc, result, shellSnapshotAfter(result)), err)
+		if len(input.Reason) > 500 {
+			return normalizeValueToolResult(ctx, "workspace_shell", domain.SSHShellSnapshot{}, invalidWorkspaceShellValue(input, action, "reason must not exceed 500 bytes", allowed, example))
+		}
+		maxWait, maxBytes, policyErr := shellToolOutputPolicy(input.WaitSeconds, input.MaxOutputBytes)
+		if policyErr != nil {
+			return normalizeValueToolResult(ctx, "workspace_shell", domain.SSHShellSnapshot{}, invalidWorkspaceShellValue(input, action, policyErr.Error(), allowed, example))
+		}
+		page, err := svc.QueryWorkspaceShellOutput(ctx, input.ShellID, sessionID, workspace.ID, input.AfterSequence, maxWait, maxBytes, input.Reason, actor)
+		return normalizeValueToolResult(ctx, "workspace_shell", modelShellResult(ctx, svc, page, shellSnapshotAfter(page.Snapshot), false), err)
 	case "list":
 		allowed := []string{"action", "reason"}
 		example := map[string]any{"action": "list"}
@@ -1495,7 +1625,7 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_shell", "Manage an approved interactive PTY only when a real terminal prompt is required. start opens a shell that remains active until closed or disconnected; input sends raw non-secret bytes and returns the automatically collected response, and submit=true adds Enter; output automatically waits for more of the latest response; list finds this conversation's active shells; interrupt sends Ctrl+C; close ends it. Continuous programs such as top return an initial output batch while the shell keeps running. Never send credentials—the operator uses the private Web terminal.", func(ctx context.Context, input SSHShellInput) (any, error) {
+	if err := appendTool(toolutils.InferTool("ssh_shell", "Manage an approved interactive PTY only when a real terminal prompt is required. input sends non-secret bytes and returns a bounded output page; output waits for or continues readable stdout/stderr chunks using next_sequence. list finds this conversation's active shells; interrupt sends Ctrl+C; close ends it. Never send credentials—the operator uses the private Web terminal.", func(ctx context.Context, input SSHShellInput) (any, error) {
 		return RunSSHShellTool(ctx, svc, input, "eino-agent")
 	})); err != nil {
 		return nil, err
@@ -1583,7 +1713,7 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("workspace_shell", "Run a script or manage an interactive PTY in the Workspace bound to this conversation. Omitted cwd always means the Workspace root. Bash and PowerShell execution use an explicit UTF-8 environment. Use run when complete output can be returned once; use start, input, output, list, interrupt, and close for interactive programs. input returns the automatically collected response; output automatically waits for more of the latest response. Continuous programs such as top return an initial output batch while the shell keeps running. The configured Sandbox or Host backend and approval mode always apply.", func(ctx context.Context, input WorkspaceShellInput) (any, error) {
+	if err := appendTool(toolutils.InferTool("workspace_shell", "Run a script or manage an interactive PTY in the conversation-bound Workspace. Omitted cwd means the Workspace root. Use run for one-shot work. Interactive input returns a bounded output page; output waits for or continues readable stdout/stderr chunks using next_sequence. The configured Sandbox or Host backend and approval mode apply.", func(ctx context.Context, input WorkspaceShellInput) (any, error) {
 		return RunWorkspaceShellTool(ctx, svc, input, "eino-agent")
 	})); err != nil {
 		return nil, err

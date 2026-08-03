@@ -132,10 +132,117 @@ func TestAgentShellOutputStreamsBeforeTheToolResult(t *testing.T) {
 	}
 }
 
-func TestSSHShellUsageUsesAutomaticResponseCollection(t *testing.T) {
+func TestSSHShellUsageDescribesIncrementalOutput(t *testing.T) {
 	usage := sshShellUsage()
-	if usage == nil || !strings.Contains(usage.Input, "automatically collected") || !strings.Contains(usage.Output, "automatically waits") || strings.Contains(usage.Input+usage.Output, "wait_seconds") {
-		t.Fatalf("shell usage still exposes manual response timing: %#v", usage)
+	if usage == nil || !strings.Contains(usage.Input, "bounded output page") || !strings.Contains(usage.Output, "next_sequence") || !strings.Contains(usage.Output, "after_sequence") {
+		t.Fatalf("shell usage does not describe incremental output: %#v", usage)
+	}
+}
+
+func TestShellOutputPagePaginatesReadableStreamsWithoutLoss(t *testing.T) {
+	svc, _, host := newTestService(t)
+	const sessionID = "session-shell-pages"
+	ctx := WithSessionID(context.Background(), sessionID)
+	if _, err := svc.PrepareChatSession(ctx, sessionID, "", "test"); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := svc.StartSSHShell(ctx, host.ID, "", false, 80, 24, "test paged shell output", "eino-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "approved", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shell, err := svc.store.GetSSHShell(context.Background(), approved.Shell.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := shell.LastSequence
+	svc.shellMu.RLock()
+	session := svc.shells[shell.ID].session.(*fakeShellSession)
+	svc.shellMu.RUnlock()
+	session.callback("stdout", []byte("alpha"))
+	session.callback("stderr", []byte("warn"))
+	session.callback("stdout", []byte("omega"))
+
+	first, err := svc.QuerySSHShellOutput(context.Background(), shell.ID, sessionID, &after, 0, 6, "", "eino-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	readableFirst, err := svc.ReadableSSHShellSnapshot(context.Background(), first.Snapshot, after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.HasMore || len(readableFirst.Events) != 1 || readableFirst.Events[0].Stream != "stdout" || readableFirst.Events[0].Content != "alpha" {
+		t.Fatalf("first output page = %#v", first)
+	}
+
+	secondAfter := first.Snapshot.NextSequence
+	second, err := svc.QuerySSHShellOutput(context.Background(), shell.ID, sessionID, &secondAfter, 0, 6, "", "eino-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	readableSecond, err := svc.ReadableSSHShellSnapshot(context.Background(), second.Snapshot, secondAfter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.HasMore || len(readableSecond.Events) != 1 || readableSecond.Events[0].Stream != "stderr" || readableSecond.Events[0].Content != "warn" {
+		t.Fatalf("second output page = %#v", second)
+	}
+
+	thirdAfter := second.Snapshot.NextSequence
+	third, err := svc.QuerySSHShellOutput(context.Background(), shell.ID, sessionID, &thirdAfter, 0, 6, "", "eino-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	readableThird, err := svc.ReadableSSHShellSnapshot(context.Background(), third.Snapshot, thirdAfter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.HasMore || len(readableThird.Events) != 1 || readableThird.Events[0].Content != "omega" {
+		t.Fatalf("third output page = %#v", third)
+	}
+	stored, err := svc.store.GetSSHShell(context.Background(), shell.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.ResponseSequence != third.Snapshot.NextSequence {
+		t.Fatalf("persisted response sequence = %d, want %d", stored.ResponseSequence, third.Snapshot.NextSequence)
+	}
+	cursor, err := svc.sshShellResponseCursor(context.Background(), shell.ID, sessionID)
+	if err != nil || cursor != third.Snapshot.NextSequence {
+		t.Fatalf("restored response cursor = %d, %v", cursor, err)
+	}
+}
+
+func TestShellOutputPageReportsWaitDeadline(t *testing.T) {
+	svc, _, host := newTestService(t)
+	const sessionID = "session-shell-wait-deadline"
+	ctx := WithSessionID(context.Background(), sessionID)
+	if _, err := svc.PrepareChatSession(ctx, sessionID, "", "test"); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := svc.StartSSHShell(ctx, host.ID, "", false, 80, 24, "test shell wait deadline", "eino-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "approved", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shell, err := svc.store.GetSSHShell(context.Background(), approved.Shell.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := shell.LastSequence
+	started := time.Now()
+	page, err := svc.QuerySSHShellOutput(context.Background(), shell.ID, sessionID, &after, 40*time.Millisecond, 1024, "", "eino-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !page.WaitDeadlineReached || len(page.Snapshot.Events) != 0 || time.Since(started) < 30*time.Millisecond {
+		t.Fatalf("wait deadline page = %#v after %s", page, time.Since(started))
 	}
 }
 

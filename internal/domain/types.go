@@ -635,6 +635,7 @@ type SSHShell struct {
 	Cols              int       `json:"cols"`
 	Rows              int       `json:"rows"`
 	LastSequence      uint64    `json:"last_sequence"`
+	ResponseSequence  uint64    `json:"-"`
 	ExitCode          *int      `json:"exit_code,omitempty"`
 	TerminationReason string    `json:"termination_reason,omitempty"`
 	Error             string    `json:"error,omitempty"`
@@ -643,16 +644,17 @@ type SSHShell struct {
 }
 
 type SSHShellEvent struct {
-	ShellID       string    `json:"shell_id"`
-	FirstSequence uint64    `json:"first_sequence,omitempty"`
-	Sequence      uint64    `json:"sequence"`
-	Stream        string    `json:"stream"`
-	Source        string    `json:"source,omitempty"`
-	Content       string    `json:"content,omitempty"`
-	Sensitive     bool      `json:"sensitive,omitempty"`
-	InputBytes    int       `json:"input_bytes,omitempty"`
-	Status        string    `json:"status,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
+	ShellID         string    `json:"shell_id"`
+	FirstSequence   uint64    `json:"first_sequence,omitempty"`
+	Sequence        uint64    `json:"sequence"`
+	Stream          string    `json:"stream"`
+	Source          string    `json:"source,omitempty"`
+	Content         string    `json:"content,omitempty"`
+	ReadableContent *string   `json:"-"`
+	Sensitive       bool      `json:"sensitive,omitempty"`
+	InputBytes      int       `json:"input_bytes,omitempty"`
+	Status          string    `json:"status,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
 }
 
 type SSHShellSnapshot struct {
@@ -660,6 +662,12 @@ type SSHShellSnapshot struct {
 	Events       []SSHShellEvent `json:"events"`
 	RecentOutput string          `json:"recent_output,omitempty"`
 	NextSequence uint64          `json:"next_sequence"`
+}
+
+type SSHShellOutputPage struct {
+	Snapshot            SSHShellSnapshot
+	HasMore             bool
+	WaitDeadlineReached bool
 }
 
 type SSHShellList struct {

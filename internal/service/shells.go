@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"eino-ops-agent/internal/domain"
 	"eino-ops-agent/internal/ids"
@@ -18,13 +19,14 @@ import (
 )
 
 const (
-	maxActiveSSHShells        = 8
-	maxActiveSSHShellsPerHost = 2
-	maxSSHShellInputBytes     = 64 << 10
-	maxSSHShellReasonBytes    = 500
-	maxSSHShellRecentBytes    = 16 << 10
-	shellResponseQuietPeriod  = 400 * time.Millisecond
-	shellResponseMaxWait      = 5 * time.Second
+	maxActiveSSHShells          = 8
+	maxActiveSSHShellsPerHost   = 2
+	maxSSHShellInputBytes       = 64 << 10
+	maxSSHShellReasonBytes      = 500
+	maxSSHShellRecentBytes      = 16 << 10
+	maxSSHShellOutputEventBytes = 4 << 10
+	shellResponseQuietPeriod    = 400 * time.Millisecond
+	shellResponseMaxWait        = 5 * time.Second
 )
 
 type sshShellState struct {
@@ -74,24 +76,32 @@ func (s *Service) ListSSHShells(ctx context.Context, sessionID string, activeOnl
 }
 
 func (s *Service) GetSSHShellSnapshot(ctx context.Context, id, expectedSessionID string, after uint64, wait time.Duration, coalesce bool, reason, actor string) (domain.SSHShellSnapshot, error) {
+	snapshot, _, err := s.getSSHShellSnapshotPage(ctx, id, expectedSessionID, after, wait, 0, coalesce, reason, actor)
+	return snapshot, err
+}
+
+func (s *Service) getSSHShellSnapshotPage(ctx context.Context, id, expectedSessionID string, after uint64, wait time.Duration, maxOutputBytes int, coalesce bool, reason, actor string) (domain.SSHShellSnapshot, bool, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return domain.SSHShellSnapshot{}, fmt.Errorf("shell_id is required")
+		return domain.SSHShellSnapshot{}, false, fmt.Errorf("shell_id is required")
 	}
 	shell, err := s.store.GetSSHShell(ctx, id)
 	if err != nil {
-		return domain.SSHShellSnapshot{}, err
+		return domain.SSHShellSnapshot{}, false, err
 	}
 	if expectedSessionID != "" && shell.SessionID != expectedSessionID {
-		return domain.SSHShellSnapshot{}, store.ErrNotFound
+		return domain.SSHShellSnapshot{}, false, store.ErrNotFound
 	}
-	events, err := s.store.ListSSHShellEvents(ctx, id, after)
+	if after > shell.LastSequence {
+		return domain.SSHShellSnapshot{}, false, fmt.Errorf("invalid after_sequence: must not exceed the shell's last sequence")
+	}
+	events, hasMore, err := s.store.ListSSHShellEventsPage(ctx, id, after, maxOutputBytes)
 	if err != nil {
-		return domain.SSHShellSnapshot{}, err
+		return domain.SSHShellSnapshot{}, false, err
 	}
 	if len(events) == 0 && wait > 0 && shellStatusActive(shell.Status) {
-		if wait > 10*time.Second {
-			wait = 10 * time.Second
+		if wait > 30*time.Second {
+			wait = 30 * time.Second
 		}
 		var notify <-chan struct{}
 		s.shellMu.RLock()
@@ -107,42 +117,47 @@ func (s *Service) GetSSHShellSnapshot(ctx context.Context, id, expectedSessionID
 			defer timer.Stop()
 			select {
 			case <-ctx.Done():
-				return domain.SSHShellSnapshot{}, ctx.Err()
+				return domain.SSHShellSnapshot{}, false, ctx.Err()
 			case <-timer.C:
 			case <-notify:
 			}
 			shell, err = s.store.GetSSHShell(ctx, id)
 			if err != nil {
-				return domain.SSHShellSnapshot{}, err
+				return domain.SSHShellSnapshot{}, false, err
 			}
-			events, err = s.store.ListSSHShellEvents(ctx, id, after)
+			events, hasMore, err = s.store.ListSSHShellEventsPage(ctx, id, after, maxOutputBytes)
 			if err != nil {
-				return domain.SSHShellSnapshot{}, err
+				return domain.SSHShellSnapshot{}, false, err
 			}
 		}
 	}
 	recent, err := s.store.GetSSHShellRecentOutput(ctx, id)
 	if err != nil {
-		return domain.SSHShellSnapshot{}, err
+		return domain.SSHShellSnapshot{}, false, err
 	}
 	if coalesce {
 		events = coalesceSSHShellEvents(events)
 	}
 	if reason = strings.TrimSpace(reason); reason != "" {
 		if len(reason) > maxSSHShellReasonBytes {
-			return domain.SSHShellSnapshot{}, fmt.Errorf("reason must not exceed %d bytes", maxSSHShellReasonBytes)
+			return domain.SSHShellSnapshot{}, false, fmt.Errorf("reason must not exceed %d bytes", maxSSHShellReasonBytes)
 		}
 		s.audit(context.WithoutCancel(ctx), shell.RunID, interactiveShellComponent(shell.Kind)+"_output", actor, map[string]any{
 			"shell_id": shell.ID, "after_sequence": after, "coalesce": coalesce, "reason": s.redactor.Redact(reason),
 		})
 	}
 	nextSequence := shell.LastSequence
-	if len(events) > 0 && events[len(events)-1].Sequence > nextSequence {
+	if maxOutputBytes > 0 {
+		nextSequence = after
+		if len(events) > 0 {
+			nextSequence = events[len(events)-1].Sequence
+		}
+	} else if len(events) > 0 && events[len(events)-1].Sequence > nextSequence {
 		nextSequence = events[len(events)-1].Sequence
 	}
 	return domain.SSHShellSnapshot{
 		Shell: shell, Events: events, RecentOutput: recent, NextSequence: nextSequence,
-	}, nil
+	}, hasMore, nil
 }
 
 // ReadableSSHShellSnapshot removes terminal control sequences for a model-facing
@@ -151,6 +166,26 @@ func (s *Service) GetSSHShellSnapshot(ctx context.Context, id, expectedSessionID
 // sequence. Web terminal snapshots continue to use the untouched raw events.
 func (s *Service) ReadableSSHShellSnapshot(ctx context.Context, snapshot domain.SSHShellSnapshot, after uint64) (domain.SSHShellSnapshot, error) {
 	if snapshot.Shell.ID == "" {
+		return snapshot, nil
+	}
+	needsReplay := false
+	for index := range snapshot.Events {
+		event := &snapshot.Events[index]
+		if event.Stream != "stdout" && event.Stream != "stderr" {
+			continue
+		}
+		if event.ReadableContent == nil {
+			needsReplay = true
+			break
+		}
+	}
+	if !needsReplay {
+		for index := range snapshot.Events {
+			event := &snapshot.Events[index]
+			if (event.Stream == "stdout" || event.Stream == "stderr") && event.ReadableContent != nil {
+				event.Content = *event.ReadableContent
+			}
+		}
 		return snapshot, nil
 	}
 	previous, err := s.store.ListSSHShellEvents(ctx, snapshot.Shell.ID, 0)
@@ -175,34 +210,50 @@ func (s *Service) ReadableSSHShellSnapshot(ctx context.Context, snapshot domain.
 }
 
 func (s *Service) WriteSSHShell(ctx context.Context, id, expectedSessionID, input, reason, actor string) (domain.SSHShellSnapshot, error) {
+	page, err := s.WriteSSHShellPage(ctx, id, expectedSessionID, input, shellResponseMaxWait, 0, reason, actor)
+	return page.Snapshot, err
+}
+
+func (s *Service) WriteSSHShellPage(ctx context.Context, id, expectedSessionID, input string, maxWait time.Duration, maxOutputBytes int, reason, actor string) (domain.SSHShellOutputPage, error) {
 	_, before, err := s.liveSSHShell(id, expectedSessionID)
 	if err != nil {
-		return domain.SSHShellSnapshot{}, err
+		return domain.SSHShellOutputPage{}, err
 	}
 	if err := s.SendSSHShellInput(ctx, id, expectedSessionID, input, reason, actor); err != nil {
-		return domain.SSHShellSnapshot{}, err
+		return domain.SSHShellOutputPage{}, err
 	}
-	snapshot, err := s.collectSSHShellResponse(ctx, id, expectedSessionID, before, "", "")
+	page, err := s.collectSSHShellResponsePageWithPolicy(ctx, id, expectedSessionID, before, maxWait, shellResponseQuietPeriod, maxOutputBytes, "", "")
 	if err == nil && (actor == "eino-agent" || actor == "mcp-client") {
-		s.markSSHShellResponseRead(id, expectedSessionID, snapshot.NextSequence)
+		s.markSSHShellResponseRead(id, expectedSessionID, page.Snapshot.NextSequence)
 	}
-	return snapshot, err
+	return page, err
 }
 
 // WaitSSHShellOutput waits for the next response batch using the same server-side
 // policy as input. A quiet terminal returns quickly; continuously refreshing
 // programs return after the hard deadline and keep running in the PTY.
 func (s *Service) WaitSSHShellOutput(ctx context.Context, id, expectedSessionID, reason, actor string) (domain.SSHShellSnapshot, error) {
-	after, err := s.sshShellResponseCursor(ctx, id, expectedSessionID)
+	page, err := s.QuerySSHShellOutput(ctx, id, expectedSessionID, nil, shellResponseMaxWait, 0, reason, actor)
+	return page.Snapshot, err
+}
+
+func (s *Service) QuerySSHShellOutput(ctx context.Context, id, expectedSessionID string, afterSequence *uint64, maxWait time.Duration, maxOutputBytes int, reason, actor string) (domain.SSHShellOutputPage, error) {
+	var after uint64
+	var err error
+	if afterSequence == nil {
+		after, err = s.sshShellResponseCursor(ctx, id, expectedSessionID)
+	} else {
+		after = *afterSequence
+	}
 	if err != nil {
-		return domain.SSHShellSnapshot{}, err
+		return domain.SSHShellOutputPage{}, err
 	}
 	s.setSSHShellOutputOwner(ctx, id, expectedSessionID, actor)
-	snapshot, err := s.collectSSHShellResponse(ctx, id, expectedSessionID, after, reason, actor)
+	page, err := s.collectSSHShellResponsePageWithPolicy(ctx, id, expectedSessionID, after, maxWait, shellResponseQuietPeriod, maxOutputBytes, reason, actor)
 	if err == nil && (actor == "eino-agent" || actor == "mcp-client") {
-		s.markSSHShellResponseRead(id, expectedSessionID, snapshot.NextSequence)
+		s.markSSHShellResponseRead(id, expectedSessionID, page.Snapshot.NextSequence)
 	}
-	return snapshot, err
+	return page, err
 }
 
 func (s *Service) sshShellResponseCursor(ctx context.Context, id, expectedSessionID string) (uint64, error) {
@@ -213,15 +264,12 @@ func (s *Service) sshShellResponseCursor(ctx context.Context, id, expectedSessio
 	if expectedSessionID != "" && shell.SessionID != expectedSessionID {
 		return 0, store.ErrNotFound
 	}
-	cursor := uint64(0)
-	events, err := s.store.ListSSHShellEvents(ctx, shell.ID, 0)
+	cursor, err := s.store.LastSSHShellAgentInputSequence(ctx, shell.ID)
 	if err != nil {
 		return 0, err
 	}
-	for _, event := range events {
-		if event.Stream == "input" && event.Source == "agent" {
-			cursor = event.Sequence
-		}
+	if shell.ResponseSequence > cursor {
+		cursor = shell.ResponseSequence
 	}
 	s.shellMu.RLock()
 	state := s.shells[shell.ID]
@@ -237,8 +285,13 @@ func (s *Service) sshShellResponseCursor(ctx context.Context, id, expectedSessio
 }
 
 func (s *Service) markSSHShellResponseRead(id, expectedSessionID string, sequence uint64) {
+	id = strings.TrimSpace(id)
+	if err := s.store.AdvanceSSHShellResponseSequence(context.Background(), id, expectedSessionID, sequence); err != nil {
+		observability.FromContext(context.Background()).ErrorContext(context.Background(), "persist SSH shell response cursor failed",
+			"component", "ssh_shell", "shell_id", id, "sequence", sequence, "error", err)
+	}
 	s.shellMu.RLock()
-	state := s.shells[strings.TrimSpace(id)]
+	state := s.shells[id]
 	s.shellMu.RUnlock()
 	if state == nil {
 		return
@@ -274,34 +327,48 @@ func (s *Service) collectSSHShellResponse(ctx context.Context, id, expectedSessi
 }
 
 func (s *Service) collectSSHShellResponseWithPolicy(ctx context.Context, id, expectedSessionID string, after uint64, maxWait, quietPeriod time.Duration, reason, actor string) (domain.SSHShellSnapshot, error) {
+	page, err := s.collectSSHShellResponsePageWithPolicy(ctx, id, expectedSessionID, after, maxWait, quietPeriod, 0, reason, actor)
+	return page.Snapshot, err
+}
+
+func (s *Service) collectSSHShellResponsePageWithPolicy(ctx context.Context, id, expectedSessionID string, after uint64, maxWait, quietPeriod time.Duration, maxOutputBytes int, reason, actor string) (domain.SSHShellOutputPage, error) {
 	deadline := time.Now().Add(maxWait)
 	cursor := after
 	hadOutput := false
+	waitDeadlineReached := false
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
+			waitDeadlineReached = maxWait > 0
 			break
 		}
 		wait := remaining
+		waitingUntilDeadline := true
 		if hadOutput && wait > quietPeriod {
 			wait = quietPeriod
+			waitingUntilDeadline = false
 		}
-		next, err := s.GetSSHShellSnapshot(ctx, id, expectedSessionID, cursor, wait, false, "", "")
+		next, hasMore, err := s.getSSHShellSnapshotPage(ctx, id, expectedSessionID, cursor, wait, maxOutputBytes, false, "", "")
 		if err != nil {
-			return domain.SSHShellSnapshot{}, err
+			return domain.SSHShellOutputPage{}, err
 		}
 		if len(next.Events) == 0 {
+			waitDeadlineReached = waitingUntilDeadline && shellStatusActive(next.Shell.Status)
 			break
 		}
 		cursor = next.NextSequence
 		if shellSnapshotHasOutput(next) {
 			hadOutput = true
 		}
-		if !shellStatusActive(next.Shell.Status) {
+		if hasMore || !shellStatusActive(next.Shell.Status) {
 			break
 		}
 	}
-	return s.GetSSHShellSnapshot(ctx, id, expectedSessionID, after, 0, false, reason, actor)
+	snapshot, hasMore, err := s.getSSHShellSnapshotPage(ctx, id, expectedSessionID, after, 0, maxOutputBytes, false, reason, actor)
+	if err != nil {
+		return domain.SSHShellOutputPage{}, err
+	}
+	return domain.SSHShellOutputPage{Snapshot: snapshot, HasMore: hasMore, WaitDeadlineReached: waitDeadlineReached}, nil
 }
 
 func shellSnapshotHasOutput(snapshot domain.SSHShellSnapshot) bool {
@@ -737,8 +804,7 @@ func (s *Service) appendSSHShellOutput(state *sshShellState, stream string, data
 	content := redactKnownSecrets(s.redactor.Redact(combined[:safeEnd]), state.secrets)
 	readable := ""
 	if content != "" {
-		readable = updateSSHShellOutputState(state, content)
-		s.appendSSHShellEventLocked(state, stream, content, "running")
+		readable = s.appendSSHShellOutputEventsLocked(state, stream, content)
 	}
 	state.eventMu.Unlock()
 	if readable == "" {
@@ -808,10 +874,33 @@ func (s *Service) flushSSHShellPendingLocked(state *sshShellState) {
 		content := redactKnownSecrets(s.redactor.Redact(state.pending[stream]), state.secrets)
 		state.pending[stream] = ""
 		if content != "" {
-			updateSSHShellOutputState(state, content)
-			s.appendSSHShellEventLocked(state, stream, content, "running")
+			s.appendSSHShellOutputEventsLocked(state, stream, content)
 		}
 	}
+}
+
+func (s *Service) appendSSHShellOutputEventsLocked(state *sshShellState, stream, content string) string {
+	var combined strings.Builder
+	for content != "" {
+		end := len(content)
+		if end > maxSSHShellOutputEventBytes {
+			end = maxSSHShellOutputEventBytes
+			for end > 0 && !utf8.RuneStart(content[end]) {
+				end--
+			}
+			if end == 0 {
+				end = maxSSHShellOutputEventBytes
+			}
+		}
+		part := content[:end]
+		content = content[end:]
+		readable := updateSSHShellOutputState(state, part)
+		combined.WriteString(readable)
+		s.appendSSHShellEventValueLocked(state, domain.SSHShellEvent{
+			Stream: stream, Content: part, ReadableContent: &readable, Status: "running",
+		})
+	}
+	return combined.String()
 }
 
 func (s *Service) liveSSHShell(id, expectedSessionID string) (*sshShellState, uint64, error) {
@@ -1037,8 +1126,8 @@ func marshalSSHShell(shell domain.SSHShell) ([]byte, error) {
 
 func sshShellUsage() *domain.SSHShellUsage {
 	return &domain.SSHShellUsage{
-		Input:  "action=input sends raw bytes and returns the automatically collected response; submit=true appends a carriage return",
-		Output: "action=output automatically waits for and reads the next response batch",
+		Input:  "action=input sends raw bytes and returns a bounded output page; submit=true appends a carriage return",
+		Output: "action=output waits for a bounded output page; pass next_sequence as after_sequence to continue",
 		Close:  "call action=close when finished; the shell remains active until it is closed or disconnected",
 	}
 }

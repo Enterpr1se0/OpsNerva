@@ -98,6 +98,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/agent/tools/{name}/disable", s.disableAgentTool)
 	s.mux.HandleFunc("GET /api/v1/skills", s.listSkills)
 	s.mux.HandleFunc("POST /api/v1/skills", s.uploadSkill)
+	s.mux.HandleFunc("POST /api/v1/skills/reload", s.reloadSkills)
 	s.mux.HandleFunc("GET /api/v1/skills/{name}", s.getSkill)
 	s.mux.HandleFunc("PUT /api/v1/skills/{name}", s.saveSkill)
 	s.mux.HandleFunc("DELETE /api/v1/skills/{name}", s.deleteSkill)
@@ -274,6 +275,18 @@ func (s *Server) setAgentToolEnabled(w http.ResponseWriter, r *http.Request, ena
 func (s *Server) listSkills(w http.ResponseWriter, _ *http.Request) {
 	result, err := s.service.ListSkills()
 	respond(w, result, err)
+}
+
+func (s *Server) reloadSkills(w http.ResponseWriter, r *http.Request) {
+	if s.agent == nil {
+		writeErrorStatus(w, agent.ErrUnavailable, http.StatusServiceUnavailable)
+		return
+	}
+	if err := s.agent.Reload(r.Context()); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.agent.ToolCatalog())
 }
 
 func (s *Server) getSkill(w http.ResponseWriter, r *http.Request) {

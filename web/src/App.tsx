@@ -308,6 +308,7 @@ function App() {
   const [openConnectionPanel,setOpenConnectionPanel]=useState<'tunnel'|'shell'|null>(null)
 	const [notifications,setNotifications]=useState<AppNotification[]>([])
 	const [agentStreaming,setAgentStreaming]=useState(false)
+	const connectionRefreshRef=useRef<Promise<void>|null>(null)
 	const dismissNotification=useCallback((id:string)=>setNotifications(current=>current.filter(item=>item.id!==id)),[])
 	const notify=useCallback<NotificationSink>((message,tone='success')=>{
 		const normalized=message.trim()
@@ -321,15 +322,25 @@ function App() {
 		})
 	},[])
 	const reportError=useCallback((message:string)=>notify(message,'error'),[notify])
+	const refreshConnections=useCallback(()=>{
+		if(connectionRefreshRef.current)return connectionRefreshRef.current
+		const task=Promise.allSettled([api.sshTunnels(),api.sshShells()]).then(([tunnels,shells])=>{
+			if(tunnels.status==='fulfilled')setSSHTunnels(tunnels.value.tunnels||[])
+			if(shells.status==='fulfilled')setSSHShells(shells.value.shells||[])
+		})
+		connectionRefreshRef.current=task
+		void task.finally(()=>{if(connectionRefreshRef.current===task)connectionRefreshRef.current=null})
+		return task
+	},[])
 
   const refresh = useCallback(async () => {
     try {
-	  const [nextHealth, nextHosts, nextProviders, nextProxies, nextSettings, nextCapabilities, nextToolCatalog, nextSkills, nextMCPServers, nextApprovals, nextRuns, nextSSHTunnels, nextSSHShells] = await Promise.all([
-		api.health(), api.hosts(), api.modelProviders(), api.proxies(), api.systemSettings(), api.capabilities(), api.llmTools(), api.skills(), api.mcpServers(), api.approvals(), api.runs(), api.sshTunnels(), api.sshShells(),
+	  const [nextHealth, nextHosts, nextProviders, nextProxies, nextSettings, nextCapabilities, nextToolCatalog, nextSkills, nextMCPServers, nextApprovals, nextRuns] = await Promise.all([
+		api.health(), api.hosts(), api.modelProviders(), api.proxies(), api.systemSettings(), api.capabilities(), api.llmTools(), api.skills(), api.mcpServers(), api.approvals(), api.runs(), refreshConnections(),
       ])
-	  setHealth(nextHealth); setHosts(nextHosts); setProviders(nextProviders); setProxies(nextProxies);setSettings(nextSettings);setCapabilities(nextCapabilities);setToolCatalog(nextToolCatalog);setSkills(nextSkills);setMCPServers(nextMCPServers); setApprovals(nextApprovals); setRuns(nextRuns);setSSHTunnels(nextSSHTunnels.tunnels||[]);setSSHShells(nextSSHShells.shells||[])
+	  setHealth(nextHealth); setHosts(nextHosts); setProviders(nextProviders); setProxies(nextProxies);setSettings(nextSettings);setCapabilities(nextCapabilities);setToolCatalog(nextToolCatalog);setSkills(nextSkills);setMCPServers(nextMCPServers); setApprovals(nextApprovals); setRuns(nextRuns)
 	} catch (err) { notify(errorText(err),'error') }
-  }, [notify])
+  }, [notify,refreshConnections])
 	const refreshApprovals=useCallback(async(decidedID?:string)=>{
 		if(decidedID)setApprovals(current=>current.filter(item=>item.id!==decidedID))
 		try{setApprovals(await api.approvals())}
@@ -375,6 +386,10 @@ function App() {
 		return()=>{window.removeEventListener('focus',sync);window.removeEventListener('blur',sync)}
 	},[])
 	useEffect(() => { void refresh() }, [refresh])
+	useEffect(()=>{
+		const timer=window.setInterval(()=>{if(document.visibilityState==='visible')void refreshConnections()},2000)
+		return()=>window.clearInterval(timer)
+	},[refreshConnections])
 	useEffect(() => {
 		if(agentStreaming)return
 		const timer=window.setInterval(()=>{if(document.visibilityState==='visible')void refresh()},10000)
@@ -463,7 +478,7 @@ function App() {
 			<ChatPage visible={page==='chat'} onActivate={()=>navigate('chat')}
 				hosts={hosts} providers={providers} approvals={approvals} runs={runs} workspaceShells={sshShells.filter(shell=>shell.kind==='workspace')}
 				capabilities={capabilities} settings={settings} imageTypes={settings?.chat_image_allowed_types||defaultChatImageTypes}
-				agentAvailable={!!health?.agent_available} modelName={health?.model?.model} refresh={refresh}
+				agentAvailable={!!health?.agent_available} modelName={health?.model?.model} refresh={refresh} refreshConnections={refreshConnections}
 				refreshApprovals={refreshApprovals} onCreateWorkspaceShell={createWorkspaceShell} onOpenWorkspaceShell={setSelectedShell} onWorkspaceShellStarted={observeAgentWorkspaceShell} onSettingsChanged={setSettings}
 				onHostChanged={host=>setHosts(current=>current.map(item=>item.id===host.id?host:item))}
 				onModelChanged={provider=>{setProviders(current=>current.map(item=>({...item,active:item.id===provider.id})));void api.health().then(setHealth).catch(err=>reportError(errorText(err)))}}
@@ -589,7 +604,7 @@ function ComposerModelSelector({providers,fallbackModel,disabled,onChanged,onErr
 		finally{setBusy('')}
 	}
 	return <details className="composer-selector composer-model" open={open} onToggle={event=>setOpen(event.currentTarget.open)}>
-		<summary title={t('chat.switchModel')} aria-label={t('chat.switchModel')} onClick={event=>{if(disabled)event.preventDefault()}}><Cpu size={13}/><span>{label}</span><ChevronRight size={11}/></summary>
+		<summary title={t('chat.switchModel')} aria-label={t('chat.switchModel')}><Cpu size={13}/><span>{label}</span><ChevronRight size={11}/></summary>
 		<div className="composer-selector-menu composer-model-menu">
 			{providers.map(provider=><button type="button" className={provider.active?'active':''} disabled={disabled||!!busy} onClick={()=>void activate(provider)} key={provider.id}><span><b>{provider.name}</b><small>{provider.model}</small></span>{busy===provider.id?<LoaderCircle className="spin" size={13}/>:provider.active?<Check size={13}/>:null}</button>)}
 			{!providers.length&&<span className="composer-selector-empty">{t('chat.noModel')}</span>}
@@ -1301,6 +1316,7 @@ function SkillsPage({skills,refresh}:{skills:ManagedSkill[];refresh:()=>Promise<
 	const [loading,setLoading]=useState(false)
 	const [saving,setSaving]=useState(false)
 	const [uploading,setUploading]=useState(false)
+	const [reloading,setReloading]=useState(false)
 	const [uploadOpen,setUploadOpen]=useState(false)
 	const [uploadName,setUploadName]=useState('')
 	const [uploadFile,setUploadFile]=useState<File|null>(null)
@@ -1318,9 +1334,10 @@ function SkillsPage({skills,refresh}:{skills:ManagedSkill[];refresh:()=>Promise<
 	const save=async()=>{if(!selected)return;setSaving(true);setError('');try{const result=await api.saveSkill(selected.name,draft);setSelected(result);setDraft(result.content||'');await refresh();notify(t('skills.saved',{name:result.name}))}catch(err){setError(errorText(err))}finally{setSaving(false)}}
 	const permanentlyDelete=async()=>{if(!deleteName)return;setDeleting(true);setError('');try{await api.deleteSkill(deleteName);setDeleteName('');setSelectedName('');setSelected(null);setDraft('');await refresh();notify(t('skills.deleted',{name:deleteName}))}catch(err){setError(errorText(err))}finally{setDeleting(false)}}
 	const toggleEnabled=async()=>{if(!selected)return;setToggling(true);setError('');try{const result=await api.setSkillEnabled(selected.name,!selected.enabled);setSelected(result);setDraft(result.content||draft);await refresh();notify(t(result.enabled?'skills.toggledEnabled':'skills.toggledDisabled',{name:result.name}))}catch(err){setError(errorText(err))}finally{setToggling(false)}}
+	const reload=async()=>{setReloading(true);setError('');try{await api.reloadSkills();await refresh();notify(t('skills.reloaded'))}catch(err){setError(errorText(err))}finally{setReloading(false)}}
 
 	return <div className="skills-page page-stack">
-			<div className="page-actions"><div/><button className="primary" onClick={()=>{setUploadOpen(value=>!value);setError('')}}><UploadCloud size={15}/>{uploadOpen?t('skills.closeUpload'):t('skills.uploadSkill')}</button></div>
+			<div className="page-actions"><div/><div className="skill-page-actions"><button onClick={()=>void reload()} disabled={reloading}><RefreshCw className={reloading?'spin':''} size={15}/>{reloading?t('common.refreshing'):t('skills.reload')}</button><button className="primary" onClick={()=>{setUploadOpen(value=>!value);setError('')}}><UploadCloud size={15}/>{uploadOpen?t('skills.closeUpload'):t('skills.uploadSkill')}</button></div></div>
 		{error&&<div className="skill-error"><ShieldAlert size={15}/>{error}<button onClick={()=>setError('')}><X size={14}/></button></div>}
 		{uploadOpen&&<form className="skill-upload-panel panel" onSubmit={upload}><div><div className="skill-upload-icon"><UploadCloud size={20}/></div><span><b>{t('skills.uploadPackage')}</b><small>{t('skills.packageHelp')}</small></span></div>{markdownUpload&&<label><span>{t('skills.skillName')}</span><input value={uploadName} onChange={event=>setUploadName(event.target.value)} pattern="[A-Za-z0-9][A-Za-z0-9_.-]{0,63}" required/></label>}<label className="skill-file-picker"><FileText size={15}/><span><b>{uploadFile?.name||t('skills.choosePackage')}</b><small>{uploadFile?formatFileSize(uploadFile.size):t('skills.maxPackage')}</small></span><input type="file" accept=".md,.markdown,.zip,.7z,text/markdown,application/zip,application/x-7z-compressed" onChange={event=>selectFile(event.target.files?.[0]||null)} required/></label><button className="primary" disabled={uploading||!uploadFile||(markdownUpload&&!uploadName.trim())}>{uploading?<LoaderCircle className="spin" size={14}/>:<UploadCloud size={14}/>} {uploading?t('common.uploading'):t('skills.uploadActivate')}</button></form>}
 		<section className="skill-registry-summary panel"><div><BookOpen size={19}/><span><b>{t('skills.summary',{enabled:skills.filter(skill=>skill.enabled).length,total:skills.length})}</b></span></div><label><Search size={14}/><input value={query} onChange={event=>setQuery(event.target.value)} placeholder={t('skills.search')}/></label></section>
@@ -1518,7 +1535,7 @@ function Nav({ active, icon, label, count, warn, onClick }: {active:boolean;icon
   return <button className={`nav-item ${active ? 'active' : ''}`} onClick={onClick} title={label} aria-label={label} aria-current={active?'page':undefined}>{icon}<span>{label}</span>{count !== undefined && <em className={warn ? 'warn' : ''}>{count}</em>}</button>
 }
 
-function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, workspaceShells, capabilities, settings, imageTypes, agentAvailable, modelName, refresh, refreshApprovals, onCreateWorkspaceShell, onOpenWorkspaceShell, onWorkspaceShellStarted, onSettingsChanged, onHostChanged, onModelChanged, sidebarTarget, onSessionDeleted, onError, onStreamingChange }: {visible:boolean;onActivate:()=>void;hosts:Host[];providers:ModelProvider[];approvals:Approval[];runs:Run[];workspaceShells:SSHShell[];capabilities:ToolCapabilities;settings:SystemSettings|null;imageTypes:string[];agentAvailable:boolean;modelName?:string;refresh:()=>Promise<void>;refreshApprovals:(decidedID?:string)=>Promise<void>;onCreateWorkspaceShell:(workspaceID:string)=>Promise<void>;onOpenWorkspaceShell:(shell:SSHShell)=>void;onWorkspaceShellStarted:(shell:SSHShell)=>void;onSettingsChanged:(settings:SystemSettings)=>void;onHostChanged:(host:Host)=>void;onModelChanged:(provider:ModelProvider)=>void;sidebarTarget:HTMLDivElement|null;onSessionDeleted:(sessionID:string)=>void;onError:(message:string)=>void;onStreamingChange:(streaming:boolean)=>void}) {
+function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, workspaceShells, capabilities, settings, imageTypes, agentAvailable, modelName, refresh, refreshConnections, refreshApprovals, onCreateWorkspaceShell, onOpenWorkspaceShell, onWorkspaceShellStarted, onSettingsChanged, onHostChanged, onModelChanged, sidebarTarget, onSessionDeleted, onError, onStreamingChange }: {visible:boolean;onActivate:()=>void;hosts:Host[];providers:ModelProvider[];approvals:Approval[];runs:Run[];workspaceShells:SSHShell[];capabilities:ToolCapabilities;settings:SystemSettings|null;imageTypes:string[];agentAvailable:boolean;modelName?:string;refresh:()=>Promise<void>;refreshConnections:()=>Promise<void>;refreshApprovals:(decidedID?:string)=>Promise<void>;onCreateWorkspaceShell:(workspaceID:string)=>Promise<void>;onOpenWorkspaceShell:(shell:SSHShell)=>void;onWorkspaceShellStarted:(shell:SSHShell)=>void;onSettingsChanged:(settings:SystemSettings)=>void;onHostChanged:(host:Host)=>void;onModelChanged:(provider:ModelProvider)=>void;sidebarTarget:HTMLDivElement|null;onSessionDeleted:(sessionID:string)=>void;onError:(message:string)=>void;onStreamingChange:(streaming:boolean)=>void}) {
 	const {t,i18n:instance}=useTranslation()
   const [entries, setEntries] = useState<ChatEntry[]>([])
 	  const [message, setMessage] = useState('')
@@ -1737,6 +1754,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			})
 		}
 		if(frame.type==='tool'&&frame.content){
+			if(frame.status!=='in_progress'&&['ssh_shell','workspace_shell','ssh_tunnel'].includes(frame.tool_name||''))void refreshConnections()
 			if(frame.tool_name==='workspace_shell'){
 				const shell=workspaceShellStartedByTool(frame.content)
 				if(shell)onWorkspaceShellStarted(shell)
@@ -1771,7 +1789,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			setEntries(old=>[...old.map(item=>updateUser(deactivateReasoning(item),'failed')),{id:clientId(),kind:'assistant',content:frame.content||t('chat.stopped'),lifecycle:'committed'}])
 		}
 		if(frame.type==='model_error'||frame.type==='error')setEntries(old=>[...old.map(item=>updateUser(item,'failed')),{id:clientId(),kind:'error',content:frame.error||t('chat.agentError')}])
-	},[onWorkspaceShellStarted,refresh,refreshApprovals,t])
+	},[onWorkspaceShellStarted,refresh,refreshApprovals,refreshConnections,t])
 
 	useEffect(()=>{
 		if(!sessionId||running||!detachedRunning)return
@@ -2211,7 +2229,12 @@ function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run
 	const shellOperation=shellTool&&shellAction!=='run'
 	const shellID=textValue(toolArguments?.shell_id)||textValue(shellPayload?.id)
 	const shellEvents=[...recordArray(payload.events),...recordArray(resultPayload?.events)]
-	const shellOutput=textValue(payload.output)||textValue(resultPayload?.output)||textValue(payload.recent_output)||textValue(resultPayload?.recent_output)||shellEvents
+	const shellChunks=[...recordArray(payload.chunks),...recordArray(resultPayload?.chunks)]
+	const shellChunkStdout=shellChunks.filter(chunk=>textValue(chunk.stream)==='stdout').map(chunk=>textValue(chunk.content)).join('')
+	const shellChunkStderr=shellChunks.filter(chunk=>textValue(chunk.stream)==='stderr').map(chunk=>textValue(chunk.content)).join('')
+	const shellChunkOutput=shellChunks.map(chunk=>textValue(chunk.content)).join('')
+	const shellHasMore=payload.has_more===true||resultPayload?.has_more===true
+	const shellOutput=shellChunkOutput||textValue(payload.output)||textValue(resultPayload?.output)||textValue(payload.recent_output)||textValue(resultPayload?.recent_output)||shellEvents
 		.filter(event=>['stdout','stderr'].includes(textValue(event.stream)))
 		.map(event=>textValue(event.content))
 		.join('')||entry.liveStdout||''
@@ -2224,12 +2247,13 @@ function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run
 		:shellAction==='input'
 			?shellInputDisplay
 			:shellAction==='output'
-				?latestOutput(shellOutput,1)||shellID
+				?`${latestOutput(shellOutput,1)||shellID}${shellHasMore?` · ${t('tool.moreOutput')}`:''}`
 				:shellAction==='list'
 					?String(numberValue(payload.count)||numberValue(resultPayload?.count))
 					:shellID):''
 	const shellPrimaryContent=shellAction==='input'?shellInputDisplay:shellAction==='output'?shellOutput:shellSummary
-	const shellPrimaryAction=shellOperation&&(shellAction==='input'||shellAction==='output')
+	const shellPrimaryAction=shellOperation&&shellAction==='input'
+	const shellOutputAction=shellOperation&&shellAction==='output'
 	const fileSearchMode=unifiedFileRead&&(requestMode==='remote_search'||requestMode==='workspace_search')
 	const fileReadMode=unifiedFileRead&&(requestMode==='remote_read'||requestMode==='workspace_read')
 	const structuredFileOperation=fileReadMode||fileSearchMode
@@ -2270,9 +2294,9 @@ function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run
 	const operation=filePath||(script?t('tool.bashScript'):program||eventToolLabel||t('tool.result'))
   const args=request&&Array.isArray(request.args)?request.args.map(value=>String(value)):[]
   const env=request?jsonRecord(request.env):undefined
-	const rawStdout=shellOperation&&(shellAction==='input'||shellAction==='output')?shellOutput:textValue(payload.stdout)||textValue(resultPayload?.stdout)||entry.liveStdout||run?.stdout_redacted||''
+	const rawStdout=shellOperation&&(shellAction==='input'||shellAction==='output')?(shellChunks.length?shellChunkStdout:shellOutput):textValue(payload.stdout)||textValue(resultPayload?.stdout)||entry.liveStdout||run?.stdout_redacted||''
 	const stdout=change?cleanFileChangeOutput(rawStdout):rawStdout
-	  const stderr=textValue(payload.stderr)||textValue(resultPayload?.stderr)||entry.liveStderr||run?.stderr_redacted||run?.error||''
+	  const stderr=(shellOperation&&shellChunks.length?shellChunkStderr:'')||textValue(payload.stderr)||textValue(resultPayload?.stderr)||entry.liveStderr||run?.stderr_redacted||run?.error||''
 	const outputView=textValue(payload.output_view)||textValue(resultPayload?.output_view)
 	const stdoutOmitted=numberValue(payload.stdout_omitted_bytes)||numberValue(resultPayload?.stdout_omitted_bytes)
 	const stderrOmitted=numberValue(payload.stderr_omitted_bytes)||numberValue(resultPayload?.stderr_omitted_bytes)
@@ -2315,9 +2339,10 @@ function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run
 	const exitCode=typeof payload.exit_code==='number'?payload.exit_code:typeof resultExitCode==='number'?resultExitCode:run?.exit_code??'—'
 	const autoApproved=payload.auto_approved===true||resultPayload?.auto_approved===true||runAutoApproved(run)
 	  return <details className={`tool-event tool-event-rich ${status}`} open={expanded}>
-		<summary onClick={event=>{event.preventDefault();onDisclosure(event.currentTarget);setExpanded(value=>!value)}}><div className="tool-summary-icon"><TerminalSquare size={15}/></div><div className="tool-summary-copy"><div className="tool-summary-operation"><b>{eventToolLabel||entry.tool||t('common.functions')}:</b><code title={commandSummary}>{commandSummary}</code></div>{targets.length>0&&<div className="tool-summary-targets">{targets.map((target,index)=><span className={`tool-target-chip ${target.kind}`} title={`${target.label}: ${[target.name,target.id].filter(Boolean).join(' · ')}`} key={`${target.kind}_${target.id||target.name}_${index}`}>{target.kind==='host'?<Server size={11}/>:target.kind==='workspace'?<FolderOpen size={11}/>:<ListChecks size={11}/>}<em>{target.label}</em>{target.name&&<b>{target.name}</b>}{target.id&&<code>{target.id}</code>}</span>)}</div>}</div><div className="tool-summary-statuses">{autoApproved&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}<span className={`tool-status ${status}`}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight size={14}/>{stdoutPreview&&<div className="tool-summary-preview"><span>{shellAction==='output'?shellActionLabel:t('tool.latestStdout',{count:Math.min(3,stdoutPreview.split('\n').length)})}</span><pre>{stdoutPreview}</pre></div>}</summary>
+		<summary onClick={event=>{event.preventDefault();onDisclosure(event.currentTarget);setExpanded(value=>!value)}}><div className="tool-summary-icon"><TerminalSquare size={15}/></div><div className="tool-summary-copy"><div className="tool-summary-operation"><b>{eventToolLabel||entry.tool||t('common.functions')}:</b><code title={commandSummary}>{commandSummary}</code></div>{targets.length>0&&<div className="tool-summary-targets">{targets.map((target,index)=><span className={`tool-target-chip ${target.kind}`} title={`${target.label}: ${[target.name,target.id].filter(Boolean).join(' · ')}`} key={`${target.kind}_${target.id||target.name}_${index}`}>{target.kind==='host'?<Server size={11}/>:target.kind==='workspace'?<FolderOpen size={11}/>:<ListChecks size={11}/>}<em>{target.label}</em>{target.name&&<b>{target.name}</b>}{target.id&&<code>{target.id}</code>}</span>)}</div>}</div><div className="tool-summary-statuses">{autoApproved&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}<span className={`tool-status ${status}`}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight size={14}/>{stdoutPreview&&<div className="tool-summary-preview"><span>{shellAction==='output'?shellActionLabel:'STDOUT'}</span><pre>{stdoutPreview}</pre></div>}</summary>
     <div className="tool-event-body">
 	  {shellPrimaryAction&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellPrimaryContent||'—'}/><pre>{shellPrimaryContent||'—'}</pre></div></section>}
+	  {shellOutputAction&&!shellChunks.length&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellOutput||'—'}/><pre>{shellOutput||'—'}</pre></div></section>}
       {(shellOperation||entry.tool==='ssh_exec'||entry.tool==='ssh_run_script')&&toolArguments&&<CompactTable title={t('tool.actualParameters')} columns={[t('tool.parameter'),t('tool.value')]} rows={Object.entries(toolArguments).map(([key,value])=>[key,value])}/>}
       {request?<div className="tool-execution-layout">
         <section className="tool-command-pane">
@@ -2329,16 +2354,16 @@ function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run
 		  {env&&Object.keys(env).length>0&&<CompactTable title={t('tool.environment')} columns={[t('tool.key'),t('tool.value')]} rows={Object.entries(env).map(([key,value])=>[key,String(value)])}/>}
         </section>
         <aside className="tool-context-pane">
-			  <dl className="tool-context-grid"><div><dt>{workspaceUpload||sshTransfer?t('tool.targetHost'):workspaceID?t('common.workspace'):t('tool.targetHost')}</dt><dd>{workspaceUpload||sshTransfer?[destinationHost.name,hostID].filter(Boolean).join(' · '):workspaceID||[destinationHost.name,hostID].filter(Boolean).join(' · ')||'—'}</dd></div><div><dt>{tunnelOperation?t('tunnels.remoteEndpoint'):workspaceTransfer||sshTransfer?t('tool.sourceFile'):filePath?t('tool.filePath'):t('tool.workingDirectory')}</dt><dd>{tunnelOperation?`${tunnelRemoteHost}:${tunnelRemotePort}`:workspaceUpload?`${workspaceID}:${relativePath}`:workspaceDownload?`${hostName}:${remotePath}`:sshTransfer?`${[sourceHost.name,sourceHost.id].filter(Boolean).join(' · ')}:${sourcePath}`:filePath||textValue(request.cwd)||t('tool.defaultDirectory')}</dd></div><div><dt>{t('tool.permission')}</dt><dd>{workspaceShellBackend==='host'?t('tool.hostAuthority'):workspaceShellBackend==='sandbox'?t('tool.sandbox'):request.elevated===true?t('tool.managedSudo'):t('tool.normalUser')}</dd></div><div><dt>{t('common.status')}</dt><dd>{t(`statusLabels.${status}`,{defaultValue:status})}{waitDeadlineReached?` · ${t('tool.waitDeadline')}`:''}</dd></div><div><dt>{t('tool.exitCode')}</dt><dd>{exitCode}</dd></div><div><dt>{t('tool.duration')}</dt><dd>{formatDuration(payload.duration??resultPayload?.duration,run)}</dd></div><div><dt>{t('tool.runId')}</dt><dd>{runID||'—'}</dd></div></dl>
+		  <dl className="tool-context-grid"><div><dt>{workspaceUpload||sshTransfer?t('tool.targetHost'):workspaceID?t('common.workspace'):t('tool.targetHost')}</dt><dd>{workspaceUpload||sshTransfer?[destinationHost.name,hostID].filter(Boolean).join(' · '):workspaceID||[destinationHost.name,hostID].filter(Boolean).join(' · ')||'—'}</dd></div><div><dt>{tunnelOperation?t('tunnels.remoteEndpoint'):workspaceTransfer||sshTransfer?t('tool.sourceFile'):filePath?t('tool.filePath'):t('tool.workingDirectory')}</dt><dd>{tunnelOperation?`${tunnelRemoteHost}:${tunnelRemotePort}`:workspaceUpload?`${workspaceID}:${relativePath}`:workspaceDownload?`${hostName}:${remotePath}`:sshTransfer?`${[sourceHost.name,sourceHost.id].filter(Boolean).join(' · ')}:${sourcePath}`:filePath||textValue(request.cwd)||t('tool.defaultDirectory')}</dd></div><div><dt>{t('tool.permission')}</dt><dd>{workspaceShellBackend==='host'?t('tool.hostAuthority'):workspaceShellBackend==='sandbox'?t('tool.sandbox'):request.elevated===true?t('tool.managedSudo'):t('tool.normalUser')}</dd></div><div><dt>{t('common.status')}</dt><dd>{t(`statusLabels.${status}`,{defaultValue:status})}{waitDeadlineReached?` · ${t('tool.waitDeadline')}`:''}{shellHasMore?` · ${t('tool.moreOutput')}`:''}</dd></div><div><dt>{t('tool.exitCode')}</dt><dd>{exitCode}</dd></div><div><dt>{t('tool.duration')}</dt><dd>{formatDuration(payload.duration??resultPayload?.duration,run)}</dd></div><div><dt>{t('tool.runId')}</dt><dd>{runID||'—'}</dd></div></dl>
 		  {textValue(request.reason)&&<div className="tool-reason"><span>{t('tool.reason')}</span><p>{textValue(request.reason)}</p></div>}
         </aside>
-      </div>:!shellPrimaryAction&&<GenericToolResult payload={payload}/>}
+      </div>:!shellPrimaryAction&&!shellOutputAction&&<GenericToolResult payload={payload}/>}
 	  {file&&<FileMetadataPanel file={file}/>}
 	  {fileSearchMode&&searchResult&&<div className={`file-search-result ${searchFound?'found':'empty'}`}><Search size={15}/><div><b>{t(searchFound?'tool.searchMatched':'tool.searchNoMatches')}</b><span>{searchMatchModeLabel} · {searchPattern}</span></div></div>}
 	  {(textValue(payload.message)||textValue(payload.next_action))&&<div className={`tool-guidance ${payload.ok===false||['failed','denied','interrupted'].includes(status)?'error':''}`}><ShieldAlert size={15}/><div><b>{textValue(payload.code)||t('tool.result')}</b>{textValue(payload.message)&&<p>{textValue(payload.message)}</p>}{textValue(payload.next_action)&&<small>{t('common.next')} · {textValue(payload.next_action)}</small>}</div></div>}
 	  {instruction&&<div className="tool-instruction"><ShieldAlert size={15}/><div><b>{t('tool.operatorInstruction')}</b><p>{instruction}</p></div></div>}
 	  {sshTransfer&&transferTotal>0&&<div className="file-transfer-progress" role="progressbar" aria-valuemin={0} aria-valuemax={transferTotal} aria-valuenow={transferred}><div><span>{t('tool.transferProgress')}</span><b>{formatFileSize(transferred)} / {formatFileSize(transferTotal)}</b></div><i><em style={{width:`${transferPercent}%`}}/></i></div>}
-	      {((stdout&&shellAction!=='output')||stderr)&&<div className="tool-output-grid">{stdout&&shellAction!=='output'&&<ToolOutputPanel kind="stdout" label={outputLabel('STDOUT',stdoutOmitted)} content={stdout} live={status==='in_progress'}/>} {stderr&&<ToolOutputPanel kind="stderr" label={outputLabel(t('tool.stderrResult'),stderrOmitted)} content={stderr} live={status==='in_progress'}/>}</div>}
+	  {shellOperation&&shellChunks.length>0?<ShellOutputChunks chunks={shellChunks} live={status==='in_progress'}/>:((stdout&&(!shellOutputAction||shellChunks.length>0))||stderr)&&<div className="tool-output-grid">{stdout&&(!shellOutputAction||shellChunks.length>0)&&<ToolOutputPanel kind="stdout" label={outputLabel('STDOUT',stdoutOmitted)} content={stdout} live={status==='in_progress'}/>} {stderr&&<ToolOutputPanel kind="stderr" label={outputLabel(t('tool.stderrResult'),stderrOmitted)} content={stderr} live={status==='in_progress'}/>}</div>}
 	  <details className="tool-raw"><summary>{t('tool.rawJson')}</summary><CopyablePre>{JSON.stringify(rawPayload,null,2)}</CopyablePre></details>
     </div>
   </details>
@@ -2352,6 +2377,14 @@ function ToolOutputPanel({kind,label,content,live}:{kind:'stdout'|'stderr';label
 		if(live&&output&&stickToBottom.current)output.scrollTop=output.scrollHeight
 	},[content,live])
 	return <div className={`tool-output ${kind} ${live?'live':''}`}><span>{label}</span><CopyButton value={content}/><pre ref={outputRef} onScroll={event=>{const output=event.currentTarget;stickToBottom.current=output.scrollHeight-output.scrollTop-output.clientHeight<32}}>{content}</pre></div>
+}
+
+function ShellOutputChunks({chunks,live}:{chunks:JsonRecord[];live:boolean}){
+	const {t}=useTranslation()
+	return <div className="shell-output-chunks">{chunks.map((chunk,index)=>{
+		const stream=textValue(chunk.stream)==='stderr'?'stderr':'stdout'
+		return <ToolOutputPanel key={`${numberValue(chunk.first_sequence)||numberValue(chunk.sequence)}_${index}`} kind={stream} label={stream==='stderr'?t('tool.stderrResult'):'STDOUT'} content={textValue(chunk.content)} live={live}/>
+	})}</div>
 }
 
 function FileMetadataPanel({file}:{file:JsonRecord}){

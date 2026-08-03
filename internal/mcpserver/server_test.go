@@ -55,7 +55,8 @@ func TestServerExposesMergedBackgroundTaskTools(t *testing.T) {
 			if marshalErr != nil {
 				t.Fatal(marshalErr)
 			}
-			shellFound = strings.Contains(string(schemaJSON), `"action"`) && strings.Contains(string(schemaJSON), `"shell_id"`) && !strings.Contains(string(schemaJSON), `"wait_seconds"`)
+			schema := string(schemaJSON)
+			shellFound = strings.Contains(schema, `"action"`) && strings.Contains(schema, `"shell_id"`) && strings.Contains(schema, `"wait_seconds"`) && strings.Contains(schema, `"after_sequence"`) && strings.Contains(schema, `"max_output_bytes"`)
 		}
 		if registered.Name == "ssh_tunnel" {
 			schemaJSON, marshalErr := json.Marshal(registered.InputSchema)
