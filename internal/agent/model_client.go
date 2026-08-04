@@ -17,8 +17,9 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/cloudwego/eino-ext/components/model/claude"
-	"github.com/cloudwego/eino-ext/components/model/openai"
+	modelopenai "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/schema"
 )
 
 // The Anthropic API rejects requests without max_tokens, so the value cannot
@@ -59,8 +60,8 @@ func newChatModel(ctx context.Context, cfg config.Model, timeout time.Duration, 
 		}
 		return claude.NewChatModel(ctx, claudeCfg)
 	}
-	openaiCfg := &openai.ChatModelConfig{
-		APIKey: cfg.APIKey, BaseURL: cfg.BaseURL, Model: cfg.Name, ReasoningEffort: openai.ReasoningEffortLevel(cfg.ReasoningEffort), Timeout: timeout, HTTPClient: httpClient,
+	openaiCfg := &modelopenai.ChatModelConfig{
+		APIKey: cfg.APIKey, BaseURL: cfg.BaseURL, Model: cfg.Name, ReasoningEffort: modelopenai.ReasoningEffortLevel(cfg.ReasoningEffort), Timeout: timeout, HTTPClient: httpClient,
 	}
 	if maxTokens > 0 {
 		name := strings.ToLower(strings.TrimSpace(cfg.Name))
@@ -70,7 +71,116 @@ func newChatModel(ctx context.Context, cfg config.Model, timeout time.Duration, 
 			openaiCfg.MaxTokens = &maxTokens
 		}
 	}
-	return openai.NewChatModel(ctx, openaiCfg)
+	chatModel, err := modelopenai.NewChatModel(ctx, openaiCfg)
+	if err != nil {
+		return nil, err
+	}
+	return &reasoningContentCompatModel{inner: chatModel, force: cfg.ReasoningEffort != ""}, nil
+}
+
+// reasoningContentCompatModel keeps the multi-step thinking tool protocol
+// intact for OpenAI-compatible providers. Some of them require an explicit
+// reasoning_content field even when the model returned an empty value.
+type reasoningContentCompatModel struct {
+	inner model.ToolCallingChatModel
+	force bool
+}
+
+func (*reasoningContentCompatModel) GetType() string {
+	return "OpenAI"
+}
+
+func (*reasoningContentCompatModel) IsCallbacksEnabled() bool {
+	return true
+}
+
+func (m *reasoningContentCompatModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	return m.inner.Generate(ctx, input, m.options(input, opts)...)
+}
+
+func (m *reasoningContentCompatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	return m.inner.Stream(ctx, input, m.options(input, opts)...)
+}
+
+func (m *reasoningContentCompatModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	inner, err := m.inner.WithTools(tools)
+	if err != nil {
+		return nil, err
+	}
+	return &reasoningContentCompatModel{inner: inner, force: m.force}, nil
+}
+
+func (m *reasoningContentCompatModel) options(input []*schema.Message, opts []model.Option) []model.Option {
+	if !shouldPreserveReasoningContent(input, m.force) {
+		return opts
+	}
+	result := make([]model.Option, 0, len(opts)+1)
+	result = append(result, opts...)
+	result = append(result, modelopenai.WithRequestPayloadModifier(preserveReasoningContentPayload))
+	return result
+}
+
+func shouldPreserveReasoningContent(messages []*schema.Message, force bool) bool {
+	thinking := force
+	hasToolCalls := false
+	for _, message := range messages {
+		if message == nil {
+			continue
+		}
+		if message.ReasoningContent != "" {
+			thinking = true
+		}
+		if message.Role == schema.Assistant && len(message.ToolCalls) > 0 {
+			hasToolCalls = true
+		}
+	}
+	return thinking && hasToolCalls
+}
+
+func preserveReasoningContentPayload(ctx context.Context, messages []*schema.Message, rawBody []byte) ([]byte, error) {
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(rawBody, &payload); err != nil {
+		return nil, fmt.Errorf("decode chat completion payload: %w", err)
+	}
+	var wireMessages []map[string]json.RawMessage
+	if err := json.Unmarshal(payload["messages"], &wireMessages); err != nil {
+		return nil, fmt.Errorf("decode chat completion messages: %w", err)
+	}
+	if len(wireMessages) != len(messages) {
+		return nil, fmt.Errorf("chat completion message count changed during serialization: got %d, want %d", len(wireMessages), len(messages))
+	}
+
+	patched := 0
+	for index, message := range messages {
+		if message == nil || message.Role != schema.Assistant || len(message.ToolCalls) == 0 {
+			continue
+		}
+		reasoningContent, err := json.Marshal(message.ReasoningContent)
+		if err != nil {
+			return nil, fmt.Errorf("encode assistant reasoning content: %w", err)
+		}
+		current, exists := wireMessages[index]["reasoning_content"]
+		if exists && string(current) == string(reasoningContent) {
+			continue
+		}
+		wireMessages[index]["reasoning_content"] = reasoningContent
+		patched++
+	}
+	if patched == 0 {
+		return rawBody, nil
+	}
+
+	encodedMessages, err := json.Marshal(wireMessages)
+	if err != nil {
+		return nil, fmt.Errorf("encode chat completion messages: %w", err)
+	}
+	payload["messages"] = encodedMessages
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("encode chat completion payload: %w", err)
+	}
+	observability.FromContext(ctx).DebugContext(ctx, "preserved reasoning content in tool-call history", "messages", patched)
+	return encoded, nil
 }
 
 // resolveAnthropicMaxTokens lets the upstream decide the output budget: the
