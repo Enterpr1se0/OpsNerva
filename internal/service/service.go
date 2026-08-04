@@ -2129,6 +2129,9 @@ func validateExecutionRequest(host domain.Host, req domain.ExecRequest) error {
 		if req.Mode == domain.ExecWorkspaceRead && (req.MaxBytes < 0 || req.TailLines < 0 || (req.OffsetBytes != 0 && req.TailLines != 0)) {
 			return fmt.Errorf("invalid Workspace file read range")
 		}
+		if req.Mode == domain.ExecWorkspaceEdit && (req.RelativePath == "" || req.Change == nil || req.TextEdit == nil) {
+			return fmt.Errorf("workspace file edit requires a path, generated change, and text edit")
+		}
 		return nil
 	}
 	switch req.Mode {
@@ -2148,6 +2151,10 @@ func validateExecutionRequest(host domain.Host, req domain.ExecRequest) error {
 		}
 		if err := validateFileSearchInput(req.SearchPattern, req.SearchMatchMode, req.ContextLines); err != nil {
 			return fmt.Errorf("invalid remote file search: %w", err)
+		}
+	case domain.ExecRemoteEdit:
+		if req.RemotePath == "" || req.Change == nil || req.TextEdit == nil {
+			return fmt.Errorf("remote file edit requires a path, generated change, and text edit")
 		}
 	case domain.ExecWorkspaceDownload:
 		if req.WorkspaceID == "" || req.RelativePath == "" {
@@ -2194,7 +2201,7 @@ func validateRequestLimits(req domain.ExecRequest, limits config.Limits, redacto
 	if req.Mode == domain.ExecSSHTunnelStart {
 		if req.Program != "" || len(req.Args) != 0 || req.Script != "" || req.Cwd != "" || len(req.Env) != 0 ||
 			req.RemotePath != "" || req.SourceHostID != "" || req.SourcePath != "" || req.WorkspaceID != "" ||
-			req.RelativePath != "" || req.Change != nil {
+			req.RelativePath != "" || req.Change != nil || req.TextEdit != nil {
 			return fmt.Errorf("SSH tunnel requests cannot include command, file, transfer, or Workspace fields")
 		}
 	} else if req.TunnelRemoteHost != "" || req.TunnelRemotePort != 0 || req.TunnelLocalPort != 0 {
@@ -2203,13 +2210,13 @@ func validateRequestLimits(req domain.ExecRequest, limits config.Limits, redacto
 	if req.Mode == domain.ExecSSHShellStart {
 		if req.Program != "" || len(req.Args) != 0 || req.Script != "" || len(req.Env) != 0 ||
 			req.RemotePath != "" || req.SourceHostID != "" || req.SourcePath != "" || req.WorkspaceID != "" ||
-			req.RelativePath != "" || req.Change != nil || req.TunnelRemoteHost != "" ||
+			req.RelativePath != "" || req.Change != nil || req.TextEdit != nil || req.TunnelRemoteHost != "" ||
 			req.TunnelRemotePort != 0 || req.TunnelLocalPort != 0 {
 			return fmt.Errorf("SSH shell requests cannot include command, file, transfer, Workspace, environment, or tunnel fields")
 		}
 	} else if req.Mode == domain.ExecWorkspaceShellStart {
 		if req.Program != "" || len(req.Args) != 0 || req.Script != "" || req.RemotePath != "" ||
-			req.SourceHostID != "" || req.SourcePath != "" || req.RelativePath != "" || req.Change != nil ||
+			req.SourceHostID != "" || req.SourcePath != "" || req.RelativePath != "" || req.Change != nil || req.TextEdit != nil ||
 			req.TunnelRemoteHost != "" || req.TunnelRemotePort != 0 || req.TunnelLocalPort != 0 || req.Elevated {
 			return fmt.Errorf("Workspace shell start requests cannot include command, remote file, transfer, change, tunnel, or elevated fields")
 		}
@@ -2229,7 +2236,14 @@ func validateRequestLimits(req domain.ExecRequest, limits config.Limits, redacto
 	if req.Change != nil {
 		changeTooLarge = len(req.Change.Diff) > 2<<20
 	}
-	if len(req.Program) > 512 || len(req.Args) > 128 || len(req.Env) > 64 || len(req.Script) > 1<<20 || changeTooLarge {
+	textEditTooLarge := false
+	if req.TextEdit != nil {
+		textEditTooLarge = len(req.TextEdit.OldText)+len(req.TextEdit.NewText) > 1<<20
+		if req.Mode != domain.ExecRemoteEdit && req.Mode != domain.ExecWorkspaceEdit {
+			return fmt.Errorf("text_edit is only valid for file edit requests")
+		}
+	}
+	if len(req.Program) > 512 || len(req.Args) > 128 || len(req.Env) > 64 || len(req.Script) > 1<<20 || changeTooLarge || textEditTooLarge {
 		return fmt.Errorf("execution request exceeds program, argument, environment, or 1 MiB content limits")
 	}
 	for _, argument := range req.Args {

@@ -37,6 +37,11 @@ CREATE TABLE model_providers (
   api_key_cipher TEXT NOT NULL DEFAULT '', proxy_id TEXT NOT NULL DEFAULT '',
   user_agent TEXT NOT NULL DEFAULT '', active INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE chat_messages (
+  id TEXT PRIMARY KEY, session_id TEXT NOT NULL, role TEXT NOT NULL,
+  content TEXT NOT NULL, tool_name TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'completed', created_at TEXT NOT NULL
 );`)
 	if closeErr := db.Close(); err == nil {
 		err = closeErr
@@ -54,6 +59,7 @@ CREATE TABLE model_providers (
 		"ssh_shell_sessions": "response_sequence",
 		"ssh_shell_events":   "content_readable",
 		"model_providers":    "reasoning_effort",
+		"chat_messages":      "model_extra_json",
 	} {
 		rows, err := st.db.QueryContext(context.Background(), "PRAGMA table_info("+table+")")
 		if err != nil {

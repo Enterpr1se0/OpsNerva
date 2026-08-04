@@ -48,7 +48,8 @@ func TestServerExposesMergedBackgroundTaskTools(t *testing.T) {
 			if marshalErr != nil {
 				t.Fatal(marshalErr)
 			}
-			fileEditFound = strings.Contains(string(schemaJSON), `"validator_id"`) && !strings.Contains(string(schemaJSON), `"validator"`)
+			schema := string(schemaJSON)
+			fileEditFound = strings.Contains(schema, `"old_text"`) && strings.Contains(schema, `"new_text"`) && strings.Contains(schema, `"validator_id"`) && !strings.Contains(schema, `"diff"`) && !strings.Contains(schema, `"validator"`)
 		}
 		if registered.Name == "ssh_shell" {
 			schemaJSON, marshalErr := json.Marshal(registered.InputSchema)

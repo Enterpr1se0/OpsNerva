@@ -116,3 +116,78 @@ func TestPreserveReasoningContentPayloadRestoresEveryToolCallMessage(t *testing.
 		t.Fatalf("second reasoning_content = %s", payload.Messages[2]["reasoning_content"])
 	}
 }
+
+func TestAnthropicHistorySendsPersistedThinkingSignature(t *testing.T) {
+	requests := make(chan []struct {
+		Role    string `json:"role"`
+		Content []struct {
+			Type      string `json:"type"`
+			Thinking  string `json:"thinking"`
+			Signature string `json:"signature"`
+		} `json:"content"`
+	}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content []struct {
+					Type      string `json:"type"`
+					Thinking  string `json:"thinking"`
+					Signature string `json:"signature"`
+				} `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		requests <- payload.Messages
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"msg_fixture","type":"message","role":"assistant","model":"claude-fixture","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer server.Close()
+
+	chatModel, err := newChatModel(context.Background(), config.Model{
+		APIKey: "fixture-key", Kind: "anthropic", BaseURL: server.URL, Name: "claude-fixture",
+	}, 5*time.Second, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thinking := schema.AssistantMessage("", nil)
+	thinking.ReasoningContent = "I checked the prior result."
+	thinking.Extra = map[string]any{
+		claudeThinkingExtraKey:  thinking.ReasoningContent,
+		claudeSignatureExtraKey: "signed-thinking",
+	}
+	if _, err := chatModel.Generate(context.Background(), []*schema.Message{
+		schema.UserMessage("check"), thinking, schema.AssistantMessage("healthy", nil), schema.UserMessage("continue"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	messages := <-requests
+	if len(messages) != 4 || messages[1].Role != "assistant" || len(messages[1].Content) != 1 {
+		t.Fatalf("Anthropic messages = %#v", messages)
+	}
+	block := messages[1].Content[0]
+	if block.Type != "thinking" || block.Thinking != thinking.ReasoningContent || block.Signature != "signed-thinking" {
+		t.Fatalf("Anthropic thinking block = %#v", block)
+	}
+}
+
+func TestStreamedAnthropicThinkingMetadataCanBePersisted(t *testing.T) {
+	chunks := []*schema.Message{
+		{Role: schema.Assistant, ReasoningContent: "check ", Extra: map[string]any{claudeThinkingExtraKey: "check "}},
+		{Role: schema.Assistant, ReasoningContent: "state", Extra: map[string]any{claudeThinkingExtraKey: "state"}},
+		{Role: schema.Assistant, Extra: map[string]any{claudeSignatureExtraKey: "signed-thinking"}},
+	}
+	merged, err := schema.ConcatMessages(chunks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extra := persistedReasoningModelExtra(merged)
+	if extra[claudeThinkingExtraKey] != "check state" || extra[claudeSignatureExtraKey] != "signed-thinking" {
+		t.Fatalf("persisted streamed thinking metadata = %#v", extra)
+	}
+}

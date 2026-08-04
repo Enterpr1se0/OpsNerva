@@ -16,7 +16,6 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -938,7 +937,7 @@ func (s *Service) SearchWorkspace(ctx context.Context, workspaceID, relativePath
 	return result, err
 }
 
-func (s *Service) EditWorkspaceFile(ctx context.Context, workspaceID, relativePath, diff, validatorID, reason, actor string) (domain.ExecResult, error) {
+func (s *Service) EditWorkspaceFile(ctx context.Context, workspaceID, relativePath, oldText, newText, validatorID, reason, actor string) (domain.ExecResult, error) {
 	workspace, ok := s.workspaceByID(workspaceID)
 	if !ok {
 		return domain.ExecResult{}, fmt.Errorf("workspace %q not found", workspaceID)
@@ -946,7 +945,8 @@ func (s *Service) EditWorkspaceFile(ctx context.Context, workspaceID, relativePa
 	if workspace.Access != "read_write" {
 		return domain.ExecResult{}, fmt.Errorf("workspace %q is read_only", workspaceID)
 	}
-	if len(diff) > 1<<20 || strings.Contains(diff, "[REDACTED]") || s.redactor.Redact(diff) != diff {
+	editContent := oldText + "\n" + newText
+	if len(editContent) > 1<<20 || strings.Contains(editContent, "[REDACTED]") || s.redactor.Redact(editContent) != editContent {
 		return domain.ExecResult{}, fmt.Errorf("workspace edit is too large or contains sensitive content")
 	}
 	reason = strings.TrimSpace(reason)
@@ -956,7 +956,7 @@ func (s *Service) EditWorkspaceFile(ctx context.Context, workspaceID, relativePa
 	if _, err := s.workspaceValidator(validatorID, workspace, relativePath); err != nil {
 		return domain.ExecResult{}, err
 	}
-	change, err := buildEditChange(relativePath, diff)
+	edit, change, err := buildTextEdit(relativePath, oldText, newText)
 	if err != nil {
 		return domain.ExecResult{}, err
 	}
@@ -966,7 +966,7 @@ func (s *Service) EditWorkspaceFile(ctx context.Context, workspaceID, relativePa
 	}
 	result, submitErr := s.Submit(ctx, domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecWorkspaceEdit, WorkspaceID: workspaceID, RelativePath: relativePath,
-		Change: &change, Validator: validatorID, Reason: reason,
+		Change: &change, TextEdit: &edit, Validator: validatorID, Reason: reason,
 	}, actor)
 	result.Change = &change
 	if result.Stdout != "" {
@@ -2174,7 +2174,12 @@ func (s *Service) editWorkspaceFile(ctx context.Context, workspace config.Worksp
 	if req.Change == nil {
 		return sshx.RawResult{}, fmt.Errorf("workspace file change is missing")
 	}
-	change := *req.Change
+	if req.TextEdit == nil {
+		return sshx.RawResult{}, fmt.Errorf("workspace text edit is missing")
+	}
+	if err := validateTextEditChange(req.RelativePath, *req.TextEdit, *req.Change); err != nil {
+		return sshx.RawResult{}, err
+	}
 	info, statErr := os.Stat(path)
 	existed := statErr == nil
 	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
@@ -2195,7 +2200,7 @@ func (s *Service) editWorkspaceFile(ctx context.Context, workspace config.Worksp
 	if err != nil {
 		return sshx.RawResult{ExitCode: 1, Stderr: []byte(err.Error()), Duration: time.Since(started)}, err
 	}
-	updated, err := applyUnifiedPatch(normalizedOriginal, change.Diff)
+	updated, err := applyTextEdit(normalizedOriginal, *req.TextEdit)
 	if err != nil {
 		return sshx.RawResult{ExitCode: 1, Stderr: []byte(err.Error()), Duration: time.Since(started)}, err
 	}
@@ -2304,90 +2309,41 @@ func writeSyncedFile(path string, content []byte, mode os.FileMode) error {
 	return nil
 }
 
-var hunkHeader = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
-
-func applyUnifiedPatch(original, patchContent string) (string, error) {
+func applyTextEdit(original string, edit domain.TextEdit) (string, error) {
 	originalTrailingNewline := strings.HasSuffix(original, "\n")
 	var originalLines []string
 	if original != "" {
 		originalLines = strings.Split(strings.TrimSuffix(original, "\n"), "\n")
 	}
-	patchLines := strings.Split(patchContent, "\n")
-	result := make([]string, 0, len(originalLines))
-	originalIndex := 0
-	seenHunk := false
-	for index := 0; index < len(patchLines); {
-		match := hunkHeader.FindStringSubmatch(patchLines[index])
-		if match == nil {
-			index++
-			continue
-		}
-		seenHunk = true
-		oldStart, _ := strconv.Atoi(match[1])
-		oldCount := patchHunkCount(match[2])
-		newCount := patchHunkCount(match[4])
-		targetIndex := oldStart - 1
-		if oldStart == 0 && oldCount == 0 {
-			targetIndex = 0
-		}
-		if targetIndex < originalIndex || targetIndex > len(originalLines) {
-			return "", fmt.Errorf("patch hunk has an invalid original line")
-		}
-		result = append(result, originalLines[originalIndex:targetIndex]...)
-		originalIndex = targetIndex
-		oldConsumed, newProduced := 0, 0
-		index++
-		for index < len(patchLines) && !strings.HasPrefix(patchLines[index], "@@ ") {
-			line := patchLines[index]
-			if line == "\\ No newline at end of file" || (line == "" && index == len(patchLines)-1) {
-				index++
-				continue
+	oldLines := strings.Split(edit.OldText, "\n")
+	var newLines []string
+	if edit.NewText != "" {
+		newLines = strings.Split(edit.NewText, "\n")
+	}
+	matches := make([]int, 0, 2)
+	for start := 0; start+len(oldLines) <= len(originalLines); start++ {
+		matched := true
+		for offset := range oldLines {
+			if originalLines[start+offset] != oldLines[offset] {
+				matched = false
+				break
 			}
-			if len(line) == 0 {
-				return "", fmt.Errorf("invalid empty patch line")
-			}
-			switch line[0] {
-			case ' ':
-				if originalIndex >= len(originalLines) || originalLines[originalIndex] != line[1:] {
-					return "", fmt.Errorf("patch context does not match current file")
-				}
-				result = append(result, originalLines[originalIndex])
-				originalIndex++
-				oldConsumed++
-				newProduced++
-			case '-':
-				if originalIndex >= len(originalLines) || originalLines[originalIndex] != line[1:] {
-					return "", fmt.Errorf("patch deletion does not match current file")
-				}
-				originalIndex++
-				oldConsumed++
-			case '+':
-				result = append(result, line[1:])
-				newProduced++
-			default:
-				return "", fmt.Errorf("invalid unified diff line")
-			}
-			index++
 		}
-		if oldConsumed != oldCount || newProduced != newCount {
-			return "", fmt.Errorf("patch hunk line counts do not match its header")
+		if matched {
+			matches = append(matches, start)
 		}
 	}
-	if !seenHunk {
-		return "", fmt.Errorf("patch contains no unified diff hunks")
+	if len(matches) != 1 {
+		return "", fmt.Errorf("file edit conflict: old_text matched %d blocks; read the current file and retry with a unique block", len(matches))
 	}
-	result = append(result, originalLines[originalIndex:]...)
+	start := matches[0]
+	result := make([]string, 0, len(originalLines)-len(oldLines)+len(newLines))
+	result = append(result, originalLines[:start]...)
+	result = append(result, newLines...)
+	result = append(result, originalLines[start+len(oldLines):]...)
 	updated := strings.Join(result, "\n")
-	if originalTrailingNewline {
+	if originalTrailingNewline && len(result) > 0 {
 		updated += "\n"
 	}
 	return updated, nil
-}
-
-func patchHunkCount(value string) int {
-	if value == "" {
-		return 1
-	}
-	count, _ := strconv.Atoi(value)
-	return count
 }

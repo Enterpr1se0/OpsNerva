@@ -595,6 +595,32 @@
   color: var(--light-accent);
 }
 
+:root[data-theme='light'] .tool-live-progress {
+  color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] .tool-live-progress > i {
+  background: var(--light-muted-surface);
+}
+
+:root[data-theme='light'] .tool-live-progress > i > em {
+  background: var(--light-accent);
+}
+
+:root[data-theme='light'] .tool-live-progress > time {
+  color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] .tool-summary-preview.stderr {
+  border-color: var(--light-danger-border);
+  border-left-color: var(--light-danger);
+  background: var(--light-danger-soft);
+}
+
+:root[data-theme='light'] .tool-event summary .tool-summary-preview.stderr :where(span, pre) {
+  color: var(--light-danger);
+}
+
 :root[data-theme='light'] .session-plan-steps {
   background: rgb(255 255 255 / 97%);
   box-shadow: var(--light-shadow);

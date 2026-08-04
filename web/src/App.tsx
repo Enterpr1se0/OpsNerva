@@ -21,7 +21,7 @@ import type { AgentEvent, AgentPlan, Approval, ApprovalExecutionResult, Approval
 type Page = 'chat' | 'ssh' | 'config' | 'extensions' | 'audit' | 'logs'
 type ChatEntryImage = {id:string;name:string;mimeType:string;sizeBytes:number;url:string}
 type PendingChatImage = {id:string;file:File;url:string}
-type ChatEntry = { id: string; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; tool?: string; toolCallId?:string; runId?:string; transient?:boolean; liveStdout?:string; liveStderr?:string; transferredBytes?:number; transferTotalBytes?:number; images?:ChatEntryImage[]; active?: boolean; lifecycle?:'streaming'|'committed'; status?: 'pending' | 'completed' | 'failed' }
+type ChatEntry = { id: string; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; tool?: string; toolCallId?:string; runId?:string; transient?:boolean; startedAt?:number; liveStdout?:string; liveStderr?:string; liveOutput?:string; liveOutputStream?:'stdout'|'stderr'; transferredBytes?:number; transferTotalBytes?:number; images?:ChatEntryImage[]; active?: boolean; lifecycle?:'streaming'|'committed'; status?: 'pending' | 'completed' | 'failed' }
 type ModelRetryState = {attempt:number;max:number;readyAt:number}
 type ActiveChatStream = { id: string; sessionId: string; controller: AbortController }
 type ConnectionRetryState = {attempt:number;readyAt:number}
@@ -30,7 +30,7 @@ function historyEntries(messages:ChatMessage[],sessionID:string):ChatEntry[]{
 	return messages.map((item,index)=>{
 		const kind=item.role==='assistant_progress'?'assistant':item.role
 		const toolStatus=item.tool_status||(kind==='tool'?toolContentStatus(item.content):'')
-		return{id:item.tool_call_id?`tool_${item.tool_call_id}`:item.id||`history_${index}_${item.created_at}`,kind,content:item.content,tool:item.tool_name,toolCallId:item.tool_call_id,runId:item.run_id,transient:kind==='tool'&&!settledToolStatus(toolStatus),status:item.status,lifecycle:item.role==='assistant'||item.role==='assistant_progress'?'committed':undefined,images:item.attachments?.map(image=>({id:image.id,name:image.name,mimeType:image.mime_type,sizeBytes:image.size_bytes,url:chatAttachmentURL(sessionID,image.id)}))}
+		return{id:item.tool_call_id?`tool_${item.tool_call_id}`:item.id||`history_${index}_${item.created_at}`,kind,content:item.content,tool:item.tool_name,toolCallId:item.tool_call_id,runId:item.run_id,transient:kind==='tool'&&!settledToolStatus(toolStatus),startedAt:kind==='tool'?Date.parse(item.created_at):undefined,status:item.status,lifecycle:item.role==='assistant'||item.role==='assistant_progress'?'committed':undefined,images:item.attachments?.map(image=>({id:image.id,name:image.name,mimeType:image.mime_type,sizeBytes:image.size_bytes,url:chatAttachmentURL(sessionID,image.id)}))}
 	})
 }
 
@@ -131,7 +131,7 @@ function mergePersistedToolEntries(messages:ChatMessage[],sessionID:string,curre
 		matched.add(item.toolCallId)
 		if(item.content===next.content&&item.runId===next.runId&&item.tool===next.tool&&item.transient===next.transient)return item
 		changed=true
-		return{...item,...next,liveStdout:item.liveStdout,liveStderr:item.liveStderr,transferredBytes:item.transferredBytes,transferTotalBytes:item.transferTotalBytes}
+		return{...item,...next,startedAt:next.startedAt||item.startedAt,liveStdout:item.liveStdout,liveStderr:item.liveStderr,liveOutput:item.liveOutput,liveOutputStream:item.liveOutputStream,transferredBytes:item.transferredBytes,transferTotalBytes:item.transferTotalBytes}
 	})
 	const missing=persisted.filter(item=>!matched.has(item.toolCallId!))
 	return changed||missing.length?[...merged,...missing]:current
@@ -174,6 +174,8 @@ function appendToolOutput(entries:ChatEntry[],frame:AgentEvent){
 		if(!item.transient&&status==='in_progress'&&settledToolStatus(currentStatus))return item
 		const content=toolContentWithStatus(item.content,status,runID)
 		const chunk=frame.content||''
+		const outputStream=frame.stream==='stdout'||frame.stream==='stderr'?frame.stream:undefined
+		const liveOutput=outputStream&&chunk?`${item.liveOutput||''}${chunk}`.slice(-16_384):item.liveOutput
 		return {
 			...item,
 			content,
@@ -182,6 +184,8 @@ function appendToolOutput(entries:ChatEntry[],frame:AgentEvent){
 			runId:runID||item.runId,
 			liveStdout:frame.stream==='stdout'?(item.liveStdout||'')+chunk:item.liveStdout,
 			liveStderr:frame.stream==='stderr'?(item.liveStderr||'')+chunk:item.liveStderr,
+			liveOutput,
+			liveOutputStream:outputStream&&chunk?outputStream:item.liveOutputStream,
 			transferredBytes:frame.stream==='progress'&&typeof frame.transferred_bytes==='number'?frame.transferred_bytes:item.transferredBytes,
 			transferTotalBytes:frame.stream==='progress'&&typeof frame.total_bytes==='number'?frame.total_bytes:item.transferTotalBytes,
 			transient:status==='in_progress'||status==='approval_required',
@@ -528,12 +532,41 @@ function ThemeSwitch({preference,onChange}:{preference:ThemePreference;onChange:
 	</div>
 }
 
+function useAutoCollapseDetails(open:boolean,onClose:()=>void){
+	const detailsRef=useRef<HTMLDetailsElement>(null)
+	const closeRef=useRef(onClose)
+	closeRef.current=onClose
+	useEffect(()=>{
+		if(!open)return
+		const outside=(event:Event)=>{
+			const target=event.target
+			if(target instanceof Node&&!detailsRef.current?.contains(target))closeRef.current()
+		}
+		const escape=(event:KeyboardEvent)=>{
+			if(event.key!=='Escape')return
+			event.preventDefault()
+			closeRef.current()
+			detailsRef.current?.querySelector<HTMLElement>('summary')?.focus()
+		}
+		document.addEventListener('pointerdown',outside,true)
+		document.addEventListener('focusin',outside,true)
+		document.addEventListener('keydown',escape,true)
+		return()=>{
+			document.removeEventListener('pointerdown',outside,true)
+			document.removeEventListener('focusin',outside,true)
+			document.removeEventListener('keydown',escape,true)
+		}
+	},[open])
+	return detailsRef
+}
+
 function ApprovalModeStatus({settings,onChanged,onError}:{settings:SystemSettings|null;onChanged:(settings:SystemSettings)=>void;onError:(message:string)=>void}){
 	const {t}=useTranslation()
 	const mode=settings?.approval_mode??'manual'
 	const [open,setOpen]=useState(false)
 	const [busy,setBusy]=useState(false)
 	const [confirmFullAccess,setConfirmFullAccess]=useState(false)
+	const detailsRef=useAutoCollapseDetails(open,()=>setOpen(false))
 	const apply=async(next:ApprovalMode)=>{
 		if(!settings||next===mode){setOpen(false);return}
 		setBusy(true)
@@ -549,7 +582,7 @@ function ApprovalModeStatus({settings,onChanged,onError}:{settings:SystemSetting
 		void apply(next)
 	}
 	return <>
-		<details className={`approval-mode-status ${mode}`} open={open} onToggle={event=>setOpen(event.currentTarget.open)}>
+		<details ref={detailsRef} className={`approval-mode-status ${mode}`} open={open} onToggle={event=>setOpen(event.currentTarget.open)}>
 			<summary title={t('settings.approvalMode')} onClick={event=>{if(busy)event.preventDefault()}}>{busy?<LoaderCircle className="spin" size={13}/>:<ShieldCheck size={13}/>}<span>{t(`settings.approvalMode_${mode}`)}</span><ChevronRight size={12}/></summary>
 			<div className="approval-mode-menu">
 				{(['manual','auto','full_access'] as ApprovalMode[]).map(value=><button type="button" className={value===mode?'active':''} disabled={busy||!settings} onClick={()=>select(value)} key={value}><span>{t(`settings.approvalMode_${value}`)}</span>{value===mode&&<Check size={13}/>}</button>)}
@@ -571,6 +604,7 @@ function ComposerHostSelector({hosts,disabled,onChanged,onError}:{hosts:Host[];d
 	const {t}=useTranslation()
 	const [open,setOpen]=useState(false)
 	const [busy,setBusy]=useState('')
+	const detailsRef=useAutoCollapseDetails(open,()=>setOpen(false))
 	const activeHosts=hosts.filter(host=>host.agent_enabled)
 	const names=activeHosts.map(host=>host.name).join(', ')
 	const label=activeHosts.length?t('chat.hostsCount',{count:activeHosts.length,names}):t('chat.noHosts')
@@ -581,7 +615,7 @@ function ComposerHostSelector({hosts,disabled,onChanged,onError}:{hosts:Host[];d
 		catch(err){onError(errorText(err))}
 		finally{setBusy('')}
 	}
-	return <details className="composer-selector composer-hosts" open={open} onToggle={event=>setOpen(event.currentTarget.open)}>
+	return <details ref={detailsRef} className="composer-selector composer-hosts" open={open} onToggle={event=>setOpen(event.currentTarget.open)}>
 		<summary title={t('chat.switchHosts')} aria-label={t('chat.switchHosts')} onClick={event=>{if(disabled)event.preventDefault()}}><Server size={13}/><span>{label}</span><ChevronRight size={11}/></summary>
 		<div className="composer-selector-menu composer-host-menu">
 			{hosts.map(host=><button type="button" className={host.agent_enabled?'active':''} disabled={disabled||!!busy} onClick={()=>void toggle(host)} key={host.id}><span><Server size={13}/><b>{host.name}</b></span>{busy===host.id?<LoaderCircle className="spin" size={13}/>:<em>{t(host.agent_enabled?'common.disable':'common.enable')}</em>}</button>)}
@@ -594,6 +628,7 @@ function ComposerModelSelector({providers,fallbackModel,disabled,onChanged,onErr
 	const {t}=useTranslation()
 	const [open,setOpen]=useState(false)
 	const [busy,setBusy]=useState('')
+	const detailsRef=useAutoCollapseDetails(open,()=>setOpen(false))
 	const active=providers.find(provider=>provider.active)
 	const label=active?.model||fallbackModel||t('chat.noModel')
 	const activate=async(provider:ModelProvider)=>{
@@ -603,7 +638,7 @@ function ComposerModelSelector({providers,fallbackModel,disabled,onChanged,onErr
 		catch(err){onError(errorText(err))}
 		finally{setBusy('')}
 	}
-	return <details className="composer-selector composer-model" open={open} onToggle={event=>setOpen(event.currentTarget.open)}>
+	return <details ref={detailsRef} className="composer-selector composer-model" open={open} onToggle={event=>setOpen(event.currentTarget.open)}>
 		<summary title={t('chat.switchModel')} aria-label={t('chat.switchModel')}><Cpu size={13}/><span>{label}</span><ChevronRight size={11}/></summary>
 		<div className="composer-selector-menu composer-model-menu">
 			{providers.map(provider=><button type="button" className={provider.active?'active':''} disabled={disabled||!!busy} onClick={()=>void activate(provider)} key={provider.id}><span><b>{provider.name}</b><small>{provider.model}</small></span>{busy===provider.id?<LoaderCircle className="spin" size={13}/>:provider.active?<Check size={13}/>:null}</button>)}
@@ -618,6 +653,7 @@ function ComposerReasoningSelector({providers,disabled,onChanged,onError}:{provi
 	const {t}=useTranslation()
 	const [open,setOpen]=useState(false)
 	const [busy,setBusy]=useState(false)
+	const detailsRef=useAutoCollapseDetails(open,()=>setOpen(false))
 	const active=providers.find(provider=>provider.active)
 	const current=active?.reasoning_effort||''
 	const apply=async(reasoningEffort:ModelReasoningEffort)=>{
@@ -633,7 +669,7 @@ function ComposerReasoningSelector({providers,disabled,onChanged,onError}:{provi
 		}catch(err){onError(errorText(err))}
 		finally{setBusy(false)}
 	}
-	return <details className="composer-selector composer-reasoning" open={open} onToggle={event=>setOpen(event.currentTarget.open)}>
+	return <details ref={detailsRef} className="composer-selector composer-reasoning" open={open} onToggle={event=>setOpen(event.currentTarget.open)}>
 		<summary title={t('models.reasoningEffort')} aria-label={t('models.reasoningEffort')}>{busy?<LoaderCircle className="spin" size={13}/>:<BrainCircuit size={13}/>}<span>{current||'default'}</span><ChevronRight size={11}/></summary>
 		<div className="composer-selector-menu composer-reasoning-menu">
 			{reasoningEfforts.map(value=><button type="button" className={value===current?'active':''} disabled={!active||disabled||busy} onClick={()=>void apply(value)} key={value||'default'}><span><b>{value||'default'}</b></span>{value===current&&<Check size={13}/>}</button>)}
@@ -645,8 +681,9 @@ function SSHTunnelStatus({tunnels,hosts,open,onOpenChange,onStop,onCreated}:{tun
 	const {t,i18n:instance}=useTranslation()
 	const [stopping,setStopping]=useState('')
 	const [creating,setCreating]=useState(false)
+	const detailsRef=useAutoCollapseDetails(open,()=>onOpenChange(false))
 	return <>
-		<details className="ssh-tunnel-status" open={open} onToggle={event=>onOpenChange(event.currentTarget.open)}>
+		<details ref={detailsRef} className="ssh-tunnel-status" open={open} onToggle={event=>onOpenChange(event.currentTarget.open)}>
 			<summary title={t('tunnels.title')}><Cable size={14}/><span>{t('tunnels.short')}</span><em>{tunnels.length}</em></summary>
 			<div className="ssh-tunnel-popover">
 				<header><span><Cable size={15}/><b>{t('tunnels.title')}</b></span><button type="button" disabled={!hosts.length} onClick={()=>{onOpenChange(false);setCreating(true)}}><Plus size={13}/>{t('tunnels.create')}</button></header>
@@ -700,8 +737,9 @@ function SSHTunnelCreateDialog({hosts,onCancel,onCreated}:{hosts:Host[];onCancel
 function SSHShellStatus({shells,hosts,open,onOpenChange,onOpen,onCreated}:{shells:SSHShell[];hosts:Host[];open:boolean;onOpenChange:(open:boolean)=>void;onOpen:(shell:SSHShell)=>void;onCreated:(shell:SSHShell)=>void}){
 	const {t}=useTranslation()
 	const [creating,setCreating]=useState(false)
+	const detailsRef=useAutoCollapseDetails(open,()=>onOpenChange(false))
 	return <>
-		<details className="ssh-shell-status" open={open} onToggle={event=>onOpenChange(event.currentTarget.open)}>
+		<details ref={detailsRef} className="ssh-shell-status" open={open} onToggle={event=>onOpenChange(event.currentTarget.open)}>
 			<summary title={t('sshShell.title')}><TerminalSquare size={14}/><span>{t('sshShell.short')}</span><em>{shells.length}</em></summary>
 			<div className="ssh-shell-popover">
 				<header><span><TerminalSquare size={15}/><b>{t('sshShell.title')}</b></span><button type="button" disabled={!hosts.length} onClick={()=>{onOpenChange(false);setCreating(true)}}><Plus size={13}/>{t('sshShell.create')}</button></header>
@@ -1799,7 +1837,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 					if(transient&&!current.transient&&settledToolStatus(toolContentStatus(current.content)))return old
 					return old.map((item,itemIndex)=>itemIndex===index?{...item,content:frame.content!,tool:frame.tool_name||item.tool,toolCallId:callID||item.toolCallId,runId:runID||item.runId,liveStdout:transient?item.liveStdout:undefined,liveStderr:transient?item.liveStderr:undefined,transient}:item)
 				}
-				const entry:ChatEntry={id:callID?`tool_${callID}`:clientId(),kind:'tool',content:frame.content!,tool:frame.tool_name,toolCallId:callID||undefined,runId:runID||undefined,transient}
+				const entry:ChatEntry={id:callID?`tool_${callID}`:clientId(),kind:'tool',content:frame.content!,tool:frame.tool_name,toolCallId:callID||undefined,runId:runID||undefined,transient,startedAt:Date.now()}
 				return[...old.map(deactivateReasoning),entry]
 			})
 			if(frame.tool_name?.startsWith('ops_plan_')){const nextPlan=planFromToolContent(frame.content);if(nextPlan)setPlan(nextPlan)}
@@ -2229,7 +2267,9 @@ function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run
 	const run=runs.find(item=>item.id===runID)
 	const display=jsonRecord(payload._display)
 	const toolArguments=jsonRecord(display?.arguments)
-	const request=jsonRecord(display?.request)||requestFromRun(run)
+	const displayRequest=jsonRecord(display?.request)||requestFromRun(run)
+	const executionTool=!!entry.tool&&['ssh_exec','ssh_run_script','ssh_tunnel','ssh_shell','ssh_file_read','ssh_file_list','ssh_file_edit','ssh_file_transfer','workspace_file_list','workspace_file_read','workspace_file_edit','workspace_file_delete','workspace_file_upload','workspace_file_download','workspace_shell'].includes(entry.tool)
+	const request=executionTool?displayRequest:undefined
 	const shellPayload=jsonRecord(payload.shell)||jsonRecord(resultPayload?.shell)
 	const destinationHostID=textValue(display?.host_id)||run?.host_id||textValue(request?.host_id)||textValue(toolArguments?.host_id)||textValue(toolArguments?.destination_host_id)||textValue(shellPayload?.host_id)||textValue(payload.host_id)||textValue(resultPayload?.host_id)
 	const destinationHost=hostIdentity(hosts,destinationHostID)
@@ -2320,7 +2360,8 @@ function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run
 	const transferSummary=tunnelRoute||shellSummary||(workspaceUpload?`${workspaceID}:${relativePath} → ${hostName}:${remotePath}`:workspaceDownload?`${hostName}:${remotePath} → ${workspaceID}:${relativePath}`:sshTransfer?`${sourceHostName}:${sourcePath} → ${hostName}:${remotePath}`:'')
   const planSteps=Array.isArray(payload.steps)?payload.steps.map(jsonRecord).filter((step):step is JsonRecord=>!!step):[]
   const planSummary=textValue(payload.goal)||textValue(planSteps.find(step=>textValue(step.status)==='in_progress'||textValue(step.status)==='blocked')?.title)
-	const operation=filePath||(script?t('tool.bashScript'):program||eventToolLabel||t('tool.result'))
+	const genericArgumentSummary=executionTool?'':toolArgumentSummary(entry.tool,toolArguments)
+	const operation=filePath||(script?t('tool.bashScript'):program||genericArgumentSummary||eventToolLabel||t('tool.result'))
   const args=request&&Array.isArray(request.args)?request.args.map(value=>String(value)):[]
   const env=request?jsonRecord(request.env):undefined
 	const rawStdout=shellOperation&&(shellAction==='input'||shellAction==='output')?(shellChunks.length?shellChunkStdout:shellOutput):textValue(payload.stdout)||textValue(resultPayload?.stdout)||entry.liveStdout||run?.stdout_redacted||''
@@ -2334,8 +2375,10 @@ function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run
 	const transferred=Math.min(entry.transferredBytes||0,transferTotal)
 	const transferPercent=transferTotal>0?Math.min(100,Math.round(transferred/transferTotal*100)):0
 	const outputLabel=(label:string,omitted:number)=>omitted>0?`${label} · ${outputView.toUpperCase()} · ${t('tool.outputOmitted',{count:omitted})}`:label
-  const stdoutPreview=latestOutput(stdout)
-	const commandSummary=transferSummary||(fileSearchMode?`${fileTarget} · ${searchMatchModeLabel} pattern=${JSON.stringify(searchPattern)}`:filePath)||program||(script?compactScript(script):'')||planSummary||operation
+		const previewStream=status==='in_progress'&&entry.liveOutput?entry.liveOutputStream:stdout?'stdout':stderr?'stderr':undefined
+		const previewContent=status==='in_progress'&&entry.liveOutput?entry.liveOutput:previewStream==='stderr'?stderr:stdout
+	  const outputPreview=latestOutput(previewContent)
+		const commandSummary=transferSummary||(fileSearchMode?`${fileTarget} · ${searchMatchModeLabel} pattern=${JSON.stringify(searchPattern)}`:filePath)||program||(script?compactScript(script):'')||planSummary||genericArgumentSummary||operation
 	const historyRuns=[...recordArray(payload.runs),...recordArray(resultPayload?.runs)]
 	const historyHostIDs=[...new Set(historyRuns.map(item=>textValue(item.host_id)).filter(Boolean))]
 	const listedHosts=[...recordArray(payload.hosts),...recordArray(resultPayload?.hosts)]
@@ -2363,16 +2406,28 @@ function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run
 	}
   const instruction=textValue(payload.operator_instruction)||textValue(taskPayload?.operator_instruction)||textValue(resultPayload?.operator_instruction)
   const rawPayload={...payload};delete rawPayload._display
-  const [expanded,setExpanded]=useState(false)
-	const resultExitCode=resultPayload?.exit_code
+	  const [expanded,setExpanded]=useState(false)
+		const firstSeenAt=useRef(Date.now())
+		const persistedStartedAt=run?.started_at?Date.parse(run.started_at):entry.startedAt
+		const startedAt=Number.isFinite(persistedStartedAt)?persistedStartedAt!:firstSeenAt.current
+		const [now,setNow]=useState(Date.now())
+		useEffect(()=>{
+			if(status!=='in_progress')return
+			setNow(Date.now())
+			const timer=window.setInterval(()=>setNow(Date.now()),1000)
+			return()=>window.clearInterval(timer)
+		},[status])
+		const elapsed=formatLiveDuration(Math.max(0,Math.floor((now-startedAt)/1000)))
+		const resultExitCode=resultPayload?.exit_code
 	const exitCode=typeof payload.exit_code==='number'?payload.exit_code:typeof resultExitCode==='number'?resultExitCode:run?.exit_code??'—'
 	const autoApproved=payload.auto_approved===true||resultPayload?.auto_approved===true||runAutoApproved(run)
-	  return <details className={`tool-event tool-event-rich ${status}`} open={expanded}>
-		<summary onClick={event=>{event.preventDefault();onDisclosure(event.currentTarget);setExpanded(value=>!value)}}><div className="tool-summary-icon"><TerminalSquare size={15}/></div><div className="tool-summary-copy"><div className="tool-summary-operation"><b>{eventToolLabel||entry.tool||t('common.functions')}:</b><code title={commandSummary}>{commandSummary}</code></div>{targets.length>0&&<div className="tool-summary-targets">{targets.map((target,index)=><span className={`tool-target-chip ${target.kind}`} title={`${target.label}: ${[target.name,target.id].filter(Boolean).join(' · ')}`} key={`${target.kind}_${target.id||target.name}_${index}`}>{target.kind==='host'?<Server size={11}/>:target.kind==='workspace'?<FolderOpen size={11}/>:<ListChecks size={11}/>}<em>{target.label}</em>{target.name&&<b>{target.name}</b>}{target.id&&<code>{target.id}</code>}</span>)}</div>}</div><div className="tool-summary-statuses">{autoApproved&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}<span className={`tool-status ${status}`}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight size={14}/>{stdoutPreview&&<div className="tool-summary-preview"><span>{shellAction==='output'?shellActionLabel:'STDOUT'}</span><pre>{stdoutPreview}</pre></div>}</summary>
+		  return <details className={`tool-event tool-event-rich ${status}`} open={expanded}>
+			<summary onClick={event=>{event.preventDefault();onDisclosure(event.currentTarget);setExpanded(value=>!value)}}><div className="tool-summary-icon"><TerminalSquare size={15}/></div><div className="tool-summary-copy"><div className="tool-summary-operation"><b>{eventToolLabel||entry.tool||t('common.functions')}:</b><code title={commandSummary}>{commandSummary}</code></div>{targets.length>0&&<div className="tool-summary-targets">{targets.map((target,index)=><span className={`tool-target-chip tool-target-${target.kind}`} title={`${target.label}: ${[target.name,target.id].filter(Boolean).join(' · ')}`} key={`${target.kind}_${target.id||target.name}_${index}`}>{target.kind==='host'?<Server size={11}/>:target.kind==='workspace'?<FolderOpen size={11}/>:<ListChecks size={11}/>}<em>{target.label}</em>{target.name&&<b>{target.name}</b>}{target.id&&<code>{target.id}</code>}</span>)}</div>}</div><div className="tool-summary-statuses">{autoApproved&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}<span className={`tool-status ${status}`}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight size={14}/>{status==='in_progress'&&<div className={`tool-live-progress ${transferTotal>0?'determinate':''}`} role="progressbar" aria-valuemin={transferTotal>0?0:undefined} aria-valuemax={transferTotal>0?transferTotal:undefined} aria-valuenow={transferTotal>0?transferred:undefined}><i><em style={transferTotal>0?{width:`${transferPercent}%`}:undefined}/></i><span>{transferTotal>0?`${formatFileSize(transferred)} / ${formatFileSize(transferTotal)}`:entry.liveOutputStream?.toUpperCase()||''}</span><time>{elapsed}</time></div>}{outputPreview&&<div className={`tool-summary-preview ${previewStream==='stderr'?'stderr':''}`}><span>{shellAction==='output'?shellActionLabel:(previewStream||'stdout').toUpperCase()}</span><pre>{outputPreview}</pre></div>}</summary>
     <div className="tool-event-body">
-	  {shellPrimaryAction&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellPrimaryContent||'—'}/><pre>{shellPrimaryContent||'—'}</pre></div></section>}
-	  {shellOutputAction&&!shellChunks.length&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellOutput||'—'}/><pre>{shellOutput||'—'}</pre></div></section>}
-      {(shellOperation||entry.tool==='ssh_exec'||entry.tool==='ssh_run_script')&&toolArguments&&<CompactTable title={t('tool.actualParameters')} columns={[t('tool.parameter'),t('tool.value')]} rows={Object.entries(toolArguments).map(([key,value])=>[key,value])}/>}
+		  {shellPrimaryAction&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellPrimaryContent||'—'}/><pre>{shellPrimaryContent||'—'}</pre></div></section>}
+		  {shellOutputAction&&!shellChunks.length&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellOutput||'—'}/><pre>{shellOutput||'—'}</pre></div></section>}
+	      {(shellOperation||entry.tool==='ssh_exec'||entry.tool==='ssh_run_script')&&toolArguments&&<CompactTable title={t('tool.actualParameters')} columns={[t('tool.parameter'),t('tool.value')]} rows={Object.entries(toolArguments).map(([key,value])=>[key,value])}/>}
+		  {!executionTool&&toolArguments&&Object.keys(toolArguments).length>0&&<CompactTable title={t('tool.actualParameters')} columns={[t('tool.parameter'),t('tool.value')]} rows={Object.entries(toolArguments).map(([key,value])=>[key,safeToolArgument(value,key)])}/>}
       {request?<div className="tool-execution-layout">
         <section className="tool-command-pane">
 		  <div className="tool-command-head"><span>{shellOperation?t('sshShell.interactive'):tunnelOperation?t('tunnels.forwarding'):structuredFileOperation?t(fileSearchMode?'tool.searchOperation':'tool.readOperation'):filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}{request.elevated===true&&<em><ShieldAlert size={12}/>sudo / root</em>}</div>
@@ -2432,6 +2487,32 @@ function displayValue(value:unknown):string{
   const record=jsonRecord(value)
   if(record)return Object.entries(record).map(([key,item])=>`${key}=${displayValue(item)}`).join(' · ')
   return String(value)
+}
+
+function safeToolArgument(value:unknown,key=''):unknown{
+	if(/(?:api[_-]?key|private[_-]?key|authorization|cookie|credential|passphrase|password|secret|token)/i.test(key))return'********'
+	if(Array.isArray(value))return value.map(item=>safeToolArgument(item))
+	const record=jsonRecord(value)
+	if(record)return Object.fromEntries(Object.entries(record).map(([childKey,item])=>[childKey,safeToolArgument(item,childKey)]))
+	return value
+}
+
+function toolArgumentSummary(toolName:string|undefined,argumentsValue:JsonRecord|undefined){
+	if(!argumentsValue)return''
+	const preferred=toolName==='web_extract'?['urls']:toolName==='skill'?['name','path']:toolName==='ssh_history'?['run_id','query']:['query','action','url','uri','path','name','run_id','task_id']
+	for(const key of preferred){
+		const value=safeToolArgument(argumentsValue[key],key)
+		if(value===undefined||value===null||value==='')continue
+		const displayed=displayValue(value)
+		return Array.from(displayed).length>180?`${Array.from(displayed).slice(0,180).join('')}…`:displayed
+	}
+	return''
+}
+
+function formatLiveDuration(seconds:number){
+	if(seconds<60)return`${seconds}s`
+	const minutes=Math.floor(seconds/60)
+	return`${minutes}m ${String(seconds%60).padStart(2,'0')}s`
 }
 
 function GenericToolResult({payload}:{payload:JsonRecord}){

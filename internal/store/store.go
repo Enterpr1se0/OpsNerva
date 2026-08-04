@@ -314,6 +314,7 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   session_id TEXT NOT NULL,
   role TEXT NOT NULL,
   content TEXT NOT NULL,
+	  model_extra_json TEXT NOT NULL DEFAULT '{}',
 	  tool_name TEXT NOT NULL DEFAULT '',
 	  status TEXT NOT NULL DEFAULT 'completed',
   created_at TEXT NOT NULL
@@ -521,6 +522,9 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
 		return err
 	}
 	if err := s.ensureColumn(ctx, "model_providers", "reasoning_effort", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "chat_messages", "model_extra_json", "TEXT NOT NULL DEFAULT '{}'"); err != nil {
 		return err
 	}
 	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO system_settings(
@@ -1470,13 +1474,20 @@ func (s *Store) AppendChatMessage(ctx context.Context, sessionID, role, content 
 	return err
 }
 
+// AppendChatReasoning persists provider metadata that must be replayed with
+// reasoning content, such as an Anthropic thinking signature.
+func (s *Store) AppendChatReasoning(ctx context.Context, sessionID, content string, modelExtra map[string]any) error {
+	_, err := s.appendChatMessageWithAttachments(ctx, sessionID, "reasoning", content, "completed", "", nil, modelExtra)
+	return err
+}
+
 // AppendChatMessageWithID lets a streamed message keep its lifecycle ID after persistence.
 func (s *Store) AppendChatMessageWithID(ctx context.Context, id, sessionID, role, content string, toolName ...string) error {
 	name := ""
 	if len(toolName) > 0 {
 		name = toolName[0]
 	}
-	return s.appendChatMessageWithAttachmentsID(ctx, id, sessionID, role, content, "completed", name, nil)
+	return s.appendChatMessageWithAttachmentsID(ctx, id, sessionID, role, content, "completed", name, nil, nil)
 }
 
 func (s *Store) AppendPendingChatMessage(ctx context.Context, sessionID, role, content string, toolName ...string) (string, error) {
@@ -1485,7 +1496,7 @@ func (s *Store) AppendPendingChatMessage(ctx context.Context, sessionID, role, c
 
 func (s *Store) AppendPendingChatMessageWithAttachments(ctx context.Context, sessionID, role, content string, attachments []domain.ChatAttachment) (string, error) {
 	name := ""
-	return s.appendChatMessageWithAttachments(ctx, sessionID, role, content, "pending", name, attachments)
+	return s.appendChatMessageWithAttachments(ctx, sessionID, role, content, "pending", name, attachments, nil)
 }
 
 func (s *Store) appendChatMessage(ctx context.Context, sessionID, role, content, status string, toolName ...string) (string, error) {
@@ -1493,20 +1504,24 @@ func (s *Store) appendChatMessage(ctx context.Context, sessionID, role, content,
 	if len(toolName) > 0 {
 		name = toolName[0]
 	}
-	return s.appendChatMessageWithAttachments(ctx, sessionID, role, content, status, name, nil)
+	return s.appendChatMessageWithAttachments(ctx, sessionID, role, content, status, name, nil, nil)
 }
 
-func (s *Store) appendChatMessageWithAttachments(ctx context.Context, sessionID, role, content, status, toolName string, attachments []domain.ChatAttachment) (string, error) {
+func (s *Store) appendChatMessageWithAttachments(ctx context.Context, sessionID, role, content, status, toolName string, attachments []domain.ChatAttachment, modelExtra map[string]any) (string, error) {
 	id := ids.New("msg")
-	if err := s.appendChatMessageWithAttachmentsID(ctx, id, sessionID, role, content, status, toolName, attachments); err != nil {
+	if err := s.appendChatMessageWithAttachmentsID(ctx, id, sessionID, role, content, status, toolName, attachments, modelExtra); err != nil {
 		return "", err
 	}
 	return id, nil
 }
 
-func (s *Store) appendChatMessageWithAttachmentsID(ctx context.Context, id, sessionID, role, content, status, toolName string, attachments []domain.ChatAttachment) error {
+func (s *Store) appendChatMessageWithAttachmentsID(ctx context.Context, id, sessionID, role, content, status, toolName string, attachments []domain.ChatAttachment, modelExtra map[string]any) error {
 	if strings.TrimSpace(id) == "" {
 		return fmt.Errorf("chat message id is required")
+	}
+	modelExtraJSON, err := json.Marshal(modelExtra)
+	if err != nil {
+		return fmt.Errorf("encode chat message model metadata: %w", err)
 	}
 	now := formatTime(time.Now().UTC())
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -1517,8 +1532,8 @@ func (s *Store) appendChatMessageWithAttachmentsID(ctx context.Context, id, sess
 	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO chat_sessions(session_id,workspace_id,created_at,updated_at) VALUES(?,?,?,?)`, sessionID, "", now, now); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO chat_messages(id,session_id,role,content,tool_name,status,created_at)
-VALUES(?,?,?,?,?,?,?)`, id, sessionID, role, content, toolName, status, now); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO chat_messages(id,session_id,role,content,model_extra_json,tool_name,status,created_at)
+VALUES(?,?,?,?,?,?,?,?)`, id, sessionID, role, content, string(modelExtraJSON), toolName, status, now); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE chat_sessions SET updated_at=? WHERE session_id=?`, now, sessionID); err != nil {
@@ -1822,12 +1837,11 @@ func (s *Store) ListChatModelMessages(ctx context.Context, sessionID string, lim
 	return s.listChatMessages(ctx, sessionID, limit, true)
 }
 
-// ListChatContextMessages returns the persisted, provider-relevant transcript.
-// Reasoning is deliberately excluded, while tool results and failed turns are
-// retained so the next model run can recover operational state.
+// ListChatContextMessages returns the complete persisted transcript used to
+// rebuild prior model turns, including reasoning and visible tool preambles.
 func (s *Store) ListChatContextMessages(ctx context.Context, sessionID string) ([]domain.ChatMessage, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,role,content,tool_name,status,created_at FROM chat_messages
-WHERE session_id=? AND role IN ('user','assistant','tool') AND status IN ('completed','failed')
+	rows, err := s.db.QueryContext(ctx, `SELECT id,role,content,model_extra_json,tool_name,status,created_at FROM chat_messages
+WHERE session_id=? AND role IN ('user','assistant','assistant_progress','tool','reasoning') AND status IN ('completed','failed')
 ORDER BY created_at`, sessionID)
 	if err != nil {
 		return nil, err
@@ -1836,9 +1850,12 @@ ORDER BY created_at`, sessionID)
 	result := make([]domain.ChatMessage, 0)
 	for rows.Next() {
 		var message domain.ChatMessage
-		var created string
-		if err := rows.Scan(&message.ID, &message.Role, &message.Content, &message.ToolName, &message.Status, &created); err != nil {
+		var created, modelExtraJSON string
+		if err := rows.Scan(&message.ID, &message.Role, &message.Content, &modelExtraJSON, &message.ToolName, &message.Status, &created); err != nil {
 			return nil, err
+		}
+		if err := json.Unmarshal([]byte(modelExtraJSON), &message.ModelExtra); err != nil {
+			return nil, fmt.Errorf("decode chat message model metadata: %w", err)
 		}
 		message.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 		result = append(result, message)
@@ -1863,11 +1880,11 @@ func (s *Store) listChatMessages(ctx context.Context, sessionID string, limit in
 	if modelOnly {
 		filter = " AND role IN ('user','assistant') AND status='completed'"
 	}
-	query := `SELECT id,role,content,tool_name,status,created_at FROM chat_messages WHERE session_id=?` + filter + ` ORDER BY created_at`
+	query := `SELECT id,role,content,model_extra_json,tool_name,status,created_at FROM chat_messages WHERE session_id=?` + filter + ` ORDER BY created_at`
 	args := []any{sessionID}
 	if limit > 0 {
-		query = `SELECT id,role,content,tool_name,status,created_at FROM (
-SELECT id,role,content,tool_name,status,created_at FROM chat_messages WHERE session_id=?` + filter + ` ORDER BY created_at DESC LIMIT ?)
+		query = `SELECT id,role,content,model_extra_json,tool_name,status,created_at FROM (
+SELECT id,role,content,model_extra_json,tool_name,status,created_at FROM chat_messages WHERE session_id=?` + filter + ` ORDER BY created_at DESC LIMIT ?)
 ORDER BY created_at`
 		args = append(args, limit)
 	}
@@ -1879,9 +1896,12 @@ ORDER BY created_at`
 	result := make([]domain.ChatMessage, 0)
 	for rows.Next() {
 		var message domain.ChatMessage
-		var created string
-		if err := rows.Scan(&message.ID, &message.Role, &message.Content, &message.ToolName, &message.Status, &created); err != nil {
+		var created, modelExtraJSON string
+		if err := rows.Scan(&message.ID, &message.Role, &message.Content, &modelExtraJSON, &message.ToolName, &message.Status, &created); err != nil {
 			return nil, err
+		}
+		if err := json.Unmarshal([]byte(modelExtraJSON), &message.ModelExtra); err != nil {
+			return nil, fmt.Errorf("decode chat message model metadata: %w", err)
 		}
 		message.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 		result = append(result, message)

@@ -73,12 +73,11 @@ func TestDecorateFileReadPageReportsNextOffset(t *testing.T) {
 	}
 }
 
-func TestRemoteFileEditApprovesDeclarativeDiffAndBuildsScriptAfterApproval(t *testing.T) {
+func TestRemoteFileEditBuildsReviewedDiffAndScriptAfterApproval(t *testing.T) {
 	svc, transport, host := newTestService(t)
 	svc.validators["nginx"] = config.Validator{ID: "nginx", Scope: "remote", Program: "nginx", Args: []string{"-t", "-c", "{{path}}"}, TimeoutSeconds: 15, PathPatterns: []string{"/etc/nginx/**"}}
 	transport.stdout = []byte(fileValidationMarker + "\n" + fileAfterMarker + "\n" + strings.Repeat("a", 64) + "  /etc/nginx/nginx.conf\n")
-	diff := "@@ -1 +1 @@\n-events {}\n+events { worker_connections 1024; }\n"
-	pending, err := svc.EditRemoteFile(context.Background(), host.ID, "/etc/nginx/nginx.conf", diff, "nginx", false, "update nginx", "eino-agent")
+	pending, err := svc.EditRemoteFile(context.Background(), host.ID, "/etc/nginx/nginx.conf", "events {}", "events { worker_connections 1024; }", "nginx", false, "update nginx", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +92,7 @@ func TestRemoteFileEditApprovesDeclarativeDiffAndBuildsScriptAfterApproval(t *te
 	if err := json.Unmarshal([]byte(run.RequestJSON), &approved); err != nil {
 		t.Fatal(err)
 	}
-	if approved.Mode != domain.ExecRemoteEdit || approved.Script != "" || approved.Change == nil || approved.Change.Diff == "" || approved.ExpectedSHA256 != "" {
+	if approved.Mode != domain.ExecRemoteEdit || approved.Script != "" || approved.Change == nil || approved.Change.Diff == "" || approved.TextEdit == nil || approved.TextEdit.OldText != "events {}" || approved.ExpectedSHA256 != "" {
 		t.Fatalf("approval persisted execution internals or removed fields: %#v", approved)
 	}
 	if _, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed", "operator"); err != nil {
@@ -103,7 +102,7 @@ func TestRemoteFileEditApprovesDeclarativeDiffAndBuildsScriptAfterApproval(t *te
 		t.Fatalf("edit executed %d remote calls", len(transport.calls))
 	}
 	script := transport.calls[0].Script
-	for _, required := range []string{"patch --batch --forward", "nginx", "sync -f", "mv -f", fileAfterMarker, "-events {}", "+events { worker_connections 1024; }"} {
+	for _, required := range []string{"awk ", "patch --batch --forward --fuzz=0", "nginx", "sync -f", "mv -f", fileAfterMarker, "-events {}", "+events { worker_connections 1024; }"} {
 		if !strings.Contains(script, required) {
 			t.Fatalf("edit script missing %q:\n%s", required, script)
 		}
@@ -198,11 +197,11 @@ func TestRemoteFileSearchReturnsStructuredNoMatchResult(t *testing.T) {
 }
 
 func TestFileEditHeredocMarkerCannotTerminateFromDiff(t *testing.T) {
-	change, err := buildEditChange("/etc/app.conf", "@@ -1 +1 @@\n-old\n+__OPS_FILE_EDIT_known__\n")
+	edit, change, err := buildTextEdit("/etc/app.conf", "old", "__OPS_FILE_EDIT_known__")
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := buildRemoteFileChangeScript("/etc/app.conf", "/etc/.app.tmp", change, "")
+	script := buildRemoteFileChangeScript("/etc/app.conf", "/etc/.app.tmp", change, edit, "")
 	if strings.Contains(script, "<<'__OPS_FILE_EDIT_known__'") {
 		t.Fatal("edit reused a delimiter controlled by diff content")
 	}
@@ -216,16 +215,16 @@ func TestFileEditHeredocMarkerCannotTerminateFromDiff(t *testing.T) {
 	}
 }
 
-func TestRemoteFileEditRejectsSecretsAndMalformedDiffs(t *testing.T) {
+func TestRemoteFileEditRejectsSecretsAndInvalidReplacements(t *testing.T) {
 	svc, transport, host := newTestService(t)
-	for _, diff := range []string{
-		"@@ -1 +1 @@\n-password=old\n+password=super-secret\n",
-		"@@ -1 +1 @@\n-token=old\n+token=[REDACTED]\n",
-		"not a unified diff",
-		"@@ -1,2 +1 @@\n-old\n+new\n",
+	for _, testCase := range []struct{ oldText, newText string }{
+		{oldText: "password=old", newText: "password=super-secret"},
+		{oldText: "token=old", newText: "token=[REDACTED]"},
+		{oldText: "", newText: "new"},
+		{oldText: "same", newText: "same"},
 	} {
-		if _, err := svc.EditRemoteFile(context.Background(), host.ID, "/etc/app.conf", diff, "", false, "change", "test"); err == nil {
-			t.Fatalf("invalid diff was accepted: %q", diff)
+		if _, err := svc.EditRemoteFile(context.Background(), host.ID, "/etc/app.conf", testCase.oldText, testCase.newText, "", false, "change", "test"); err == nil {
+			t.Fatalf("invalid replacement was accepted: %#v", testCase)
 		}
 	}
 	if len(transport.calls) != 0 {
@@ -233,13 +232,20 @@ func TestRemoteFileEditRejectsSecretsAndMalformedDiffs(t *testing.T) {
 	}
 }
 
-func TestBuildEditChangeNormalizesHeadersAndCountsLines(t *testing.T) {
-	change, err := buildEditChange("app.conf", "\ufeff--- old\r\n+++ new\r\n@@ -1,2 +1,3 @@\r\n a\r\n-b\r\n+c\r\n+d\r\n")
+func TestBuildTextEditNormalizesInputAndBuildsMinimalDiff(t *testing.T) {
+	edit, change, err := buildTextEdit("app.conf", "\ufeffa\r\nb\r\n", "a\r\nc\r\nd\r\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if change.Additions != 2 || change.Deletions != 1 || !strings.HasPrefix(change.Diff, "--- app.conf\n+++ app.conf\n") || strings.ContainsAny(change.Diff, "\ufeff\r") {
-		t.Fatalf("unexpected normalized change: %#v", change)
+	if edit.OldText != "a\nb" || edit.NewText != "a\nc\nd" || change.Additions != 2 || change.Deletions != 1 || !strings.Contains(change.Diff, "@@ -1,2 +1,3 @@\n a\n-b\n+c\n+d\n") || strings.ContainsAny(change.Diff, "\ufeff\r") {
+		t.Fatalf("unexpected normalized edit=%#v change=%#v", edit, change)
+	}
+	if err := validateTextEditChange("app.conf", edit, change); err != nil {
+		t.Fatalf("generated edit failed consistency check: %v", err)
+	}
+	change.Diff = strings.Replace(change.Diff, "+c", "+other", 1)
+	if err := validateTextEditChange("app.conf", edit, change); err == nil {
+		t.Fatal("mismatched approval diff was accepted")
 	}
 }
 
@@ -249,21 +255,21 @@ func TestRemoteFileChangeScriptsApplyWithoutPersistentBackups(t *testing.T) {
 	}
 	directory := t.TempDir()
 	target := filepath.Join(directory, "app.conf")
-	if err := os.WriteFile(target, []byte("enabled=false\n"), 0o640); err != nil {
+	if err := os.WriteFile(target, []byte("header\n状态=关闭\nfooter\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	change, err := buildEditChange(target, "@@ -1 +1 @@\n-enabled=false\n+enabled=true\n")
+	edit, change, err := buildTextEdit(target, "状态=关闭", "状态=开启")
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := buildRemoteFileChangeScript(target, filepath.Join(directory, ".edit.tmp"), change, "")
+	script := buildRemoteFileChangeScript(target, filepath.Join(directory, ".edit.tmp"), change, edit, "")
 	command := exec.Command("bash", "-se")
 	command.Stdin = strings.NewReader(script)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("edit script failed: %v\n%s\n%s", err, output, script)
 	}
 	content, err := os.ReadFile(target)
-	if err != nil || string(content) != "enabled=true\n" {
+	if err != nil || string(content) != "header\n状态=开启\nfooter\n" {
 		t.Fatalf("edited content=%q err=%v", content, err)
 	}
 	entries, err := os.ReadDir(directory)
@@ -274,5 +280,31 @@ func TestRemoteFileChangeScriptsApplyWithoutPersistentBackups(t *testing.T) {
 		if strings.HasSuffix(entry.Name(), ".bak") || strings.HasSuffix(entry.Name(), ".orig") || strings.HasSuffix(entry.Name(), ".tmp") {
 			t.Fatalf("file change left a backup or temporary file: %s", entry.Name())
 		}
+	}
+}
+
+func TestRemoteFileChangeRejectsAmbiguousOldText(t *testing.T) {
+	if _, err := exec.LookPath("patch"); err != nil {
+		t.Skip("patch is unavailable")
+	}
+	directory := t.TempDir()
+	target := filepath.Join(directory, "app.conf")
+	if err := os.WriteFile(target, []byte("enabled=false\nenabled=false\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	edit, change, err := buildTextEdit(target, "enabled=false", "enabled=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := buildRemoteFileChangeScript(target, filepath.Join(directory, ".edit.tmp"), change, edit, "")
+	command := exec.Command("bash", "-se")
+	command.Stdin = strings.NewReader(script)
+	output, err := command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "matched 2 blocks") {
+		t.Fatalf("ambiguous edit output=%q err=%v", output, err)
+	}
+	content, readErr := os.ReadFile(target)
+	if readErr != nil || string(content) != "enabled=false\nenabled=false\n" {
+		t.Fatalf("ambiguous edit touched target: content=%q err=%v", content, readErr)
 	}
 }

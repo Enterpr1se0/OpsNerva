@@ -199,7 +199,7 @@ Agent 向远端发送 Workspace 文件使用 `workspace_file_upload`；从远端
 
 SSH 主机间迁移单个普通文件使用 `ssh_file_transfer`。OpsNerva 分别连接源主机和目标主机，通过内置 SFTP 在内存中中继数据，因此两台主机无需彼此可达，也不会调用远端 `scp`。调用前先用 `ssh_file_read(metadata_only=true)` 获取源文件 SHA256。目标不存在时省略 `expected_destination_sha256` 即可创建；目标存在时提供其当前 SHA256，服务只替换该精确版本。两端连接配置、路径、版本和超时进入同一个受控请求。目标端先写同目录临时文件，源 SHA256 匹配后再原子改名；版本冲突、取消或超时不会留下半文件。传输中的字节进度会实时显示在 Tool 卡片。
 
-文件编辑 Tool 把变更作为一等数据展示：审批和执行结果都显示完整 unified diff、行号以及新增/删除统计。写入前会移除 UTF-8 BOM 并把 CRLF 归一化为 LF，避免 Windows 文本导致 diff 上下文意外失配；UTF-16 文件需先转换为 UTF-8。`ssh_file_edit` 与 `workspace_file_edit` 只修改现有文件，不提供专用的新建文件 Tool。远程事务脚本只在批准后由执行层生成，不进入审批内容。编辑不再绑定 SHA256、不保存备份，也不提供自动恢复 Tool。可选的 `validator_id` 只能填写 `validators` 配置中对应 scope 的 ID，不能填写 `grep -q ...` 等命令行；Agent Tool 描述和当前 Workspace 上下文会列出可用 ID，没有可用 ID 时必须省略。validator 仅对临时文件执行，失败时目标文件不会被修改。执行类 Tool 结果只返回状态、有效输出和必要标识；错误额外返回 `code/message/retryable` 与可用的结构化校验信息，不再重复审计、耗时、风险和通用下一步字段。不存在资源、参数错误、超时和远端失败不会用普通运行错误中断 Eino ToolNode。
+文件编辑 Tool 只要求模型提交从最新读取结果复制的连续完整行 `old_text` 及其替换内容 `new_text`。Service 规范化 UTF-8 BOM 与 CRLF，要求原文只匹配一次，并生成最小 unified diff 供审批和结果展示；找不到或匹配多处时拒绝写入。UTF-16 文件需先转换为 UTF-8。`ssh_file_edit` 与 `workspace_file_edit` 只修改现有文件，不提供专用的新建文件 Tool。远程事务脚本只在批准后由执行层生成，不进入审批内容。编辑不绑定 SHA256、不保存备份，也不提供自动恢复 Tool。可选的 `validator_id` 只能填写 `validators` 配置中对应 scope 的 ID，不能填写命令行；Agent Tool 描述和当前 Workspace 上下文会列出可用 ID，没有可用 ID 时必须省略。validator 仅对临时文件执行，失败时目标文件不会被修改。执行类 Tool 结果只返回状态、有效输出和必要标识；错误额外返回 `code/message/retryable` 与可用的结构化校验信息，不再重复审计、耗时、风险和通用下一步字段。不存在资源、参数错误、超时和远端失败不会用普通运行错误中断 Eino ToolNode。
 
 ## 日志
 

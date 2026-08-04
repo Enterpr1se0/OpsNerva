@@ -287,8 +287,7 @@ func TestWorkspaceReadPatchAndTraversalProtection(t *testing.T) {
 	if read.Status != "completed" || read.Stdout != "port=8080\n" || read.File == nil || read.File.SHA256 == "" {
 		t.Fatalf("unexpected workspace read: %#v", read)
 	}
-	patch := "--- app.conf\n+++ app.conf\n@@ -1,1 +1,1 @@\n-port=8080\n+port=9090\n"
-	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", patch, "", "change port", "eino-agent")
+	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", "port=8080", "port=9090", "", "change port", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -424,8 +423,7 @@ func TestWorkspacePatchUsesCurrentContextWithoutSHABinding(t *testing.T) {
 	svc, root := newWorkspaceService(t, "read_write")
 	path := filepath.Join(root, "app.conf")
 	_ = os.WriteFile(path, []byte("a\n"), 0o600)
-	patch := "--- app.conf\n+++ app.conf\n@@ -1 +1 @@\n-a\n+b\n"
-	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", patch, "", "change", "eino-agent")
+	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", "a", "b", "", "change", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,8 +443,7 @@ func TestWorkspaceFileEditPreservesMode(t *testing.T) {
 	if err := os.WriteFile(existingPath, []byte("enabled=false\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	patch := "@@ -1 +1 @@\n-enabled=false\n+enabled=true\n"
-	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", patch, "", "enable app", "eino-agent")
+	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", "enabled=false", "enabled=true", "", "enable app", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -470,8 +467,7 @@ func TestWorkspaceFileEditNormalizesUTF8BOMAndCRLF(t *testing.T) {
 	if err := os.WriteFile(path, original, 0o640); err != nil {
 		t.Fatal(err)
 	}
-	patch := "\ufeff--- windows.conf\r\n+++ windows.conf\r\n@@ -1,2 +1,2 @@\r\n-enabled=false\r\n+enabled=true\r\n name=demo\r\n"
-	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "windows.conf", patch, "", "normalize Windows text", "eino-agent")
+	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "windows.conf", "\ufeffenabled=false\r\nname=demo\r\n", "enabled=true\r\nname=demo\r\n", "", "normalize Windows text", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -484,12 +480,12 @@ func TestWorkspaceFileEditNormalizesUTF8BOMAndCRLF(t *testing.T) {
 	}
 }
 
-func TestWorkspaceFileEditRejectsMalformedDiffAndMissingTarget(t *testing.T) {
+func TestWorkspaceFileEditRejectsInvalidReplacementAndMissingTarget(t *testing.T) {
 	svc, _ := newWorkspaceService(t, "read_write")
-	if _, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", "not a diff", "", "change", "test"); err == nil || !strings.Contains(err.Error(), "unified diff") {
-		t.Fatalf("malformed diff was accepted: %v", err)
+	if _, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", "same", "same", "", "change", "test"); err == nil || !strings.Contains(err.Error(), "different") {
+		t.Fatalf("no-op replacement was accepted: %v", err)
 	}
-	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "missing.conf", "@@ -1 +1 @@\n-old\n+new\n", "", "change", "eino-agent")
+	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "missing.conf", "old", "new", "", "change", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -498,16 +494,20 @@ func TestWorkspaceFileEditRejectsMalformedDiffAndMissingTarget(t *testing.T) {
 	}
 }
 
-func TestApplyUnifiedPatchRejectsMismatchedContext(t *testing.T) {
-	if _, err := applyUnifiedPatch("a\n", "@@ -1 +1 @@\n-wrong\n+b\n"); err == nil {
-		t.Fatal("mismatched patch context was accepted")
+func TestApplyTextEditRequiresOneExactBlock(t *testing.T) {
+	if _, err := applyTextEdit("a\n", domain.TextEdit{OldText: "wrong", NewText: "b"}); err == nil || !strings.Contains(err.Error(), "matched 0") {
+		t.Fatalf("missing old_text was accepted: %v", err)
 	}
-	if _, err := applyUnifiedPatch("a\n", "@@ -1,2 +1,1 @@\n-a\n+b\n"); err == nil || !strings.Contains(err.Error(), "line counts") {
-		t.Fatalf("mismatched hunk counts were accepted: %v", err)
+	if _, err := applyTextEdit("a\na\n", domain.TextEdit{OldText: "a", NewText: "b"}); err == nil || !strings.Contains(err.Error(), "matched 2") {
+		t.Fatalf("ambiguous old_text was accepted: %v", err)
 	}
-	updated, err := applyUnifiedPatch("", "@@ -0,0 +1,1 @@\n+first\n")
-	if err != nil || updated != "first" {
-		t.Fatalf("empty file insertion failed: updated=%q err=%v", updated, err)
+	updated, err := applyTextEdit("prefix\na\nsuffix\n", domain.TextEdit{OldText: "a", NewText: "b"})
+	if err != nil || updated != "prefix\nb\nsuffix\n" {
+		t.Fatalf("unique relocated edit failed: updated=%q err=%v", updated, err)
+	}
+	deleted, err := applyTextEdit("a\nb\n", domain.TextEdit{OldText: "a", NewText: ""})
+	if err != nil || deleted != "b\n" {
+		t.Fatalf("line deletion failed: updated=%q err=%v", deleted, err)
 	}
 }
 
@@ -570,8 +570,7 @@ func TestWorkspacePreValidationFailureDoesNotTouchOriginal(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc.validators["fixture"] = config.Validator{ID: "fixture", Scope: "workspace", Program: validator, Args: []string{"{{path}}"}, TimeoutSeconds: 5, PathPatterns: []string{filepath.Join(root, "**")}}
-	patch := "@@ -1 +1 @@\n-port=8080\n+port=9090\n"
-	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", patch, "fixture", "change port", "eino-agent")
+	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", "port=8080", "port=9090", "fixture", "change port", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}

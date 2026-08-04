@@ -466,7 +466,7 @@ func TestRuntimeReloadAppliesCompleteSystemPromptToExistingConversation(t *testi
 
 func TestHostPlatformSystemPromptDistinguishesLocalAndRemoteHosts(t *testing.T) {
 	got := hostPlatformSystemPrompt("custom instructions", "windows", "amd64")
-	for _, want := range []string{"custom instructions", "service host platform: windows/amd64", "local Workspace tools", "not to registered SSH hosts"} {
+	for _, want := range []string{"custom instructions", "service host platform: windows/amd64", "local Workspace tools", "not registered SSH hosts"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("host platform prompt is missing %q: %s", want, got)
 		}
@@ -693,7 +693,7 @@ func TestQueryInjectsPersistedPlanBeforeCurrentUser(t *testing.T) {
 		t.Fatalf("model inputs = %#v", inputs)
 	}
 	planMessage, userMessage := inputs[0][0], inputs[0][1]
-	if planMessage.Role != schema.System || !strings.Contains(planMessage.Content, "Repair the API") || !strings.Contains(planMessage.Content, `"status":"in_progress"`) || !strings.Contains(planMessage.Content, "untrusted data") {
+	if planMessage.Role != schema.System || !strings.Contains(planMessage.Content, "Repair the API") || !strings.Contains(planMessage.Content, `"status":"in_progress"`) || !strings.Contains(planMessage.Content, "text untrusted") {
 		t.Fatalf("plan context = %#v", planMessage)
 	}
 	if strings.Contains(planMessage.Content, "session_plan_context") {
@@ -985,8 +985,10 @@ func TestQueryPersistsToolCallPreambleForDisplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(contextMessages) != 3 || contextMessages[0].Role != "user" || contextMessages[1].Role != "tool" || contextMessages[2].Role != "assistant" {
-		t.Fatalf("model context included display-only progress: %#v", contextMessages)
+	if len(contextMessages) != 4 || contextMessages[0].Role != "user" ||
+		contextMessages[1].Role != domain.ChatMessageRoleAssistantProgress ||
+		contextMessages[2].Role != "tool" || contextMessages[3].Role != "assistant" {
+		t.Fatalf("model context omitted tool preamble: %#v", contextMessages)
 	}
 }
 
@@ -1253,8 +1255,10 @@ func TestQueryRejectsReasoningOnlyTerminalOutputAfterToolActivity(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(contextMessages) != 2 || contextMessages[0].Role != "user" || contextMessages[1].Role != "tool" {
-		t.Fatalf("model context included display-only progress: %#v", contextMessages)
+	if len(contextMessages) != 4 || contextMessages[0].Role != "user" ||
+		contextMessages[1].Role != domain.ChatMessageRoleAssistantProgress ||
+		contextMessages[2].Role != "tool" || contextMessages[3].Role != "reasoning" {
+		t.Fatalf("model context omitted persisted model output: %#v", contextMessages)
 	}
 	for _, event := range emitted {
 		if event.Type == "done" {
@@ -1430,11 +1434,81 @@ func TestNextQueryReceivesToolResultsFromFailedTurn(t *testing.T) {
 	if inputs[1][0].Role != schema.User || inputs[1][0].Content != "inspect disk" {
 		t.Fatalf("failed turn user context = %#v", inputs[1][0])
 	}
-	if inputs[1][1].Role != schema.Assistant || !strings.Contains(inputs[1][1].Content, "Persisted operational tool results") || !strings.Contains(inputs[1][1].Content, "disk is healthy") {
+	if inputs[1][1].Role != schema.Assistant || !strings.Contains(inputs[1][1].Content, persistedToolResultsHeader) || !strings.Contains(inputs[1][1].Content, "disk is healthy") {
 		t.Fatalf("failed turn tool context = %#v", inputs[1][1])
 	}
 	if inputs[1][2].Role != schema.User || inputs[1][2].Content != "continue" {
 		t.Fatalf("current query context = %#v", inputs[1][2])
+	}
+}
+
+func TestNextQueryReceivesPureAssistantReplyAndReasoning(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	first := schema.AssistantMessage("The deployment uses port 8080.", nil)
+	first.ReasoningContent = "The user asked me to remember the configured port."
+	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{
+		{adk.EventFromMessage(first, nil, schema.Assistant, "")},
+		{adk.EventFromMessage(schema.AssistantMessage("It is still 8080.", nil), nil, schema.Assistant, "")},
+	}}
+	runtime := &Runtime{runner: runner, store: st}
+	if _, err := runtime.Query(ctx, "session_plain_context", "Use port 8080", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Query(ctx, "session_plain_context", "Which port?", nil); err != nil {
+		t.Fatal(err)
+	}
+	_, inputs := runner.snapshot()
+	if len(inputs) != 2 || len(inputs[1]) != 3 {
+		t.Fatalf("second model input = %#v", inputs)
+	}
+	assistant := inputs[1][1]
+	if assistant.Role != schema.Assistant || assistant.Content != first.Content || assistant.ReasoningContent != first.ReasoningContent {
+		t.Fatalf("persisted pure assistant context = %#v", assistant)
+	}
+}
+
+func TestNextQueryRestoresAnthropicThinkingMetadata(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	first := schema.AssistantMessage("The service is healthy.", nil)
+	first.ReasoningContent = "I checked the service state."
+	first.Extra = map[string]any{
+		claudeThinkingExtraKey:  first.ReasoningContent,
+		claudeSignatureExtraKey: "signed-thinking",
+	}
+	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{
+		{adk.EventFromMessage(first, nil, schema.Assistant, "")},
+		{adk.EventFromMessage(schema.AssistantMessage("It remains healthy.", nil), nil, schema.Assistant, "")},
+	}}
+	runtime := &Runtime{runner: runner, store: st, modelKind: "anthropic"}
+	if _, err := runtime.Query(ctx, "session_anthropic_context", "Check the service", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Query(ctx, "session_anthropic_context", "What was the result?", nil); err != nil {
+		t.Fatal(err)
+	}
+	_, inputs := runner.snapshot()
+	if len(inputs) != 2 || len(inputs[1]) != 4 {
+		t.Fatalf("second model input = %#v", inputs)
+	}
+	thinking := inputs[1][1]
+	if thinking.Role != schema.Assistant || thinking.Content != "" || thinking.ReasoningContent != first.ReasoningContent {
+		t.Fatalf("restored Anthropic thinking = %#v", thinking)
+	}
+	if thinking.Extra[claudeThinkingExtraKey] != first.ReasoningContent || thinking.Extra[claudeSignatureExtraKey] != "signed-thinking" {
+		t.Fatalf("restored Anthropic metadata = %#v", thinking.Extra)
+	}
+	if inputs[1][2].Role != schema.Assistant || inputs[1][2].Content != first.Content {
+		t.Fatalf("restored assistant reply = %#v", inputs[1][2])
 	}
 }
 
@@ -1490,21 +1564,81 @@ func TestBuildModelContextPreservesCompleteToolResults(t *testing.T) {
 	}
 }
 
-func TestBuildModelContextUsesFinalAnswerInsteadOfRepeatingCompletedToolResults(t *testing.T) {
+func TestBuildModelContextPreservesFinalAnswerAndCompletedToolResults(t *testing.T) {
 	history := []domain.ChatMessage{
 		{Role: "user", Content: "inspect host", Status: "completed"},
 		{Role: "tool", ToolName: "ssh_exec", Content: `{"status":"completed","stdout":"complete output"}`, Status: "completed"},
 		{Role: "assistant", Content: "The host is healthy.", Status: "completed"},
 	}
 	messages, stats := buildModelContext(history, "continue")
-	if len(messages) != 3 || messages[1].Role != schema.Assistant || messages[1].Content != "The host is healthy." {
+	if len(messages) != 3 || messages[1].Role != schema.Assistant || !strings.Contains(messages[1].Content, "The host is healthy.") {
 		t.Fatalf("model messages = %#v", messages)
 	}
-	if strings.Contains(messages[1].Content, "complete output") || containsInternalContextMarker(messages[1].Content) {
-		t.Fatalf("completed Tool results were repeated in Assistant context: %q", messages[1].Content)
+	if !strings.Contains(messages[1].Content, "complete output") || !containsInternalContextMarker(messages[1].Content) {
+		t.Fatalf("completed Tool results were omitted from Assistant context: %q", messages[1].Content)
 	}
-	if stats.ToolResults != 0 {
+	if stats.ToolResults != 1 {
 		t.Fatalf("context stats = %#v", stats)
+	}
+}
+
+func TestBuildModelContextPreservesToolReasoningAndVisibleReplies(t *testing.T) {
+	history := []domain.ChatMessage{
+		{Role: "user", Content: "inspect host", Status: "completed"},
+		{Role: "reasoning", Content: "I should inspect memory before answering.", Status: "completed"},
+		{Role: domain.ChatMessageRoleAssistantProgress, Content: "I will inspect memory.", Status: "completed"},
+		{Role: "tool", ToolName: "ssh_exec", Content: `{"status":"completed","stdout":"memory is stable"}`, Status: "completed"},
+		{Role: "reasoning", Content: "The result confirms memory is healthy.", Status: "completed"},
+		{Role: "assistant", Content: "Memory is healthy.", Status: "completed"},
+	}
+	messages, stats := buildModelContext(history, "continue")
+	if len(messages) != 3 {
+		t.Fatalf("model messages = %#v", messages)
+	}
+	assistant := messages[1]
+	for _, expected := range []string{"I will inspect memory.", "memory is stable", "Memory is healthy."} {
+		if !strings.Contains(assistant.Content, expected) {
+			t.Fatalf("assistant context omitted %q: %#v", expected, assistant)
+		}
+	}
+	for _, expected := range []string{"I should inspect memory before answering.", "The result confirms memory is healthy."} {
+		if !strings.Contains(assistant.ReasoningContent, expected) {
+			t.Fatalf("reasoning context omitted %q: %#v", expected, assistant)
+		}
+	}
+	if stats.ToolResults != 1 || stats.Bytes < len(assistant.Content)+len(assistant.ReasoningContent) {
+		t.Fatalf("context stats = %#v", stats)
+	}
+}
+
+func TestBuildAnthropicContextPreservesEverySignedToolReasoningSegment(t *testing.T) {
+	history := []domain.ChatMessage{
+		{Role: "user", Content: "inspect host", Status: "completed"},
+		{Role: "reasoning", Content: "First inspection.", ModelExtra: map[string]any{
+			claudeThinkingExtraKey: "First inspection.", claudeSignatureExtraKey: "signature-one",
+		}, Status: "completed"},
+		{Role: domain.ChatMessageRoleAssistantProgress, Content: "Checking memory.", Status: "completed"},
+		{Role: "tool", ToolName: "ssh_exec", Content: `{"status":"completed","stdout":"stable"}`, Status: "completed"},
+		{Role: "reasoning", Content: "Interpret result.", ModelExtra: map[string]any{
+			claudeThinkingExtraKey: "Interpret result.", claudeSignatureExtraKey: "signature-two",
+		}, Status: "completed"},
+		{Role: "assistant", Content: "Memory is healthy.", Status: "completed"},
+	}
+	messages, _ := buildMultimodalModelContextForProvider(history, domain.ChatMessage{Role: "user", Content: "continue"}, "anthropic")
+	if len(messages) != 5 {
+		t.Fatalf("Anthropic model messages = %#v", messages)
+	}
+	for index, expected := range []struct {
+		content   string
+		signature string
+	}{{"First inspection.", "signature-one"}, {"Interpret result.", "signature-two"}} {
+		message := messages[index+1]
+		if message.ReasoningContent != expected.content || message.Extra[claudeSignatureExtraKey] != expected.signature {
+			t.Fatalf("Anthropic reasoning message %d = %#v", index, message)
+		}
+	}
+	if !strings.Contains(messages[3].Content, "Checking memory.") || !strings.Contains(messages[3].Content, "stable") || !strings.Contains(messages[3].Content, "Memory is healthy.") {
+		t.Fatalf("Anthropic assistant context = %#v", messages[3])
 	}
 }
 

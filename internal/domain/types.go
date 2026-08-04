@@ -384,6 +384,7 @@ type ChatMessage struct {
 	ID          string           `json:"id"`
 	Role        string           `json:"role"`
 	Content     string           `json:"content"`
+	ModelExtra  map[string]any   `json:"-"`
 	ToolName    string           `json:"tool_name,omitempty"`
 	ToolCallID  string           `json:"tool_call_id,omitempty"`
 	RunID       string           `json:"run_id,omitempty"`
@@ -484,6 +485,7 @@ type ExecRequest struct {
 	Script                    string              `json:"script,omitempty" jsonschema:"bash script content for script mode"`
 	Background                bool                `json:"background,omitempty" jsonschema:"run as a cancellable background task"`
 	Change                    *FileChange         `json:"change,omitempty"`
+	TextEdit                  *TextEdit           `json:"text_edit,omitempty"`
 	Cwd                       string              `json:"cwd,omitempty" jsonschema:"absolute remote working directory, or a clean workspace-relative directory for workspace_shell"`
 	Env                       map[string]string   `json:"env,omitempty" jsonschema:"non-secret environment values"`
 	Elevated                  bool                `json:"elevated,omitempty" jsonschema:"request root through the host sudo policy; never pass sudo or a password as a program or argument"`
@@ -726,6 +728,11 @@ type FileChange struct {
 	Diff      string `json:"diff"`
 	Additions int    `json:"additions"`
 	Deletions int    `json:"deletions"`
+}
+
+type TextEdit struct {
+	OldText string `json:"old_text"`
+	NewText string `json:"new_text"`
 }
 
 type CommandReviewInput struct {

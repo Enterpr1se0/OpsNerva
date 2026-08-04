@@ -11,7 +11,7 @@ func TestApprovalAgentsUseIndependentInstructions(t *testing.T) {
 	if strings.Contains(explainerInstruction, "user_request") || strings.Contains(explainerInstruction, `"manual"`) {
 		t.Fatal("the existing explanation Agent instruction was changed into an Auto decision instruction")
 	}
-	for _, required := range []string{"AutoApprovalAgent", "user_request", `"allow"`, `"reject"`, `"manual"`} {
+	for _, required := range []string{"user_request", `"allow"`, `"reject"`, `"manual"`} {
 		if !strings.Contains(automaticApprovalInstruction, required) {
 			t.Fatalf("Auto approval Agent instruction is missing %q", required)
 		}

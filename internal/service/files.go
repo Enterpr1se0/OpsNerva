@@ -198,28 +198,29 @@ func decorateFileSearchResult(result *domain.ExecResult, pattern string, matchMo
 	}
 }
 
-func (s *Service) EditRemoteFile(ctx context.Context, hostID, path, diff, validatorID string, elevated bool, reason, actor string) (domain.ExecResult, error) {
+func (s *Service) EditRemoteFile(ctx context.Context, hostID, path, oldText, newText, validatorID string, elevated bool, reason, actor string) (domain.ExecResult, error) {
 	if err := validateRemoteFilePath(path); err != nil {
 		return domain.ExecResult{}, err
 	}
-	if len(diff) > 1<<20 {
+	if len(oldText)+len(newText) > 1<<20 {
 		return domain.ExecResult{}, fmt.Errorf("file edit exceeds 1 MiB")
 	}
 	if strings.TrimSpace(reason) == "" {
 		return domain.ExecResult{}, fmt.Errorf("reason is required")
 	}
-	if strings.Contains(diff, "[REDACTED]") || s.redactor.Redact(diff) != diff {
+	editContent := oldText + "\n" + newText
+	if strings.Contains(editContent, "[REDACTED]") || s.redactor.Redact(editContent) != editContent {
 		return domain.ExecResult{}, fmt.Errorf("file edit contains a secret or redaction placeholder; use a change that does not expose or overwrite secret values")
 	}
 	if _, err := s.validatorCommandFor(validatorID, "remote", path, path); err != nil {
 		return domain.ExecResult{}, err
 	}
-	change, err := buildEditChange(path, diff)
+	edit, change, err := buildTextEdit(path, oldText, newText)
 	if err != nil {
 		return domain.ExecResult{}, err
 	}
 	result, submitErr := s.Submit(ctx, domain.ExecRequest{
-		HostID: hostID, Mode: domain.ExecRemoteEdit, Change: &change, Elevated: elevated, Reason: reason,
+		HostID: hostID, Mode: domain.ExecRemoteEdit, Change: &change, TextEdit: &edit, Elevated: elevated, Reason: reason,
 		RemotePath: path, Validator: validatorID,
 	}, actor)
 	result.Change = &change
@@ -230,12 +231,21 @@ func (s *Service) EditRemoteFile(ctx context.Context, hostID, path, diff, valida
 	if result.ExitCode == 74 {
 		return result, fmt.Errorf("validation failed; the target file was not changed")
 	}
+	if result.ExitCode == 75 {
+		return result, fmt.Errorf("file edit conflict: old_text no longer matches exactly one block in the current file")
+	}
 	return result, submitErr
 }
 
 func (s *Service) prepareRemoteFileChange(req domain.ExecRequest) (domain.ExecRequest, error) {
 	if req.Change == nil {
 		return req, fmt.Errorf("remote file change is missing")
+	}
+	if req.TextEdit == nil {
+		return req, fmt.Errorf("remote text edit is missing")
+	}
+	if err := validateTextEditChange(req.RemotePath, *req.TextEdit, *req.Change); err != nil {
+		return req, err
 	}
 	suffix := time.Now().UTC().Format("20060102T150405Z") + "-" + ids.New("file")
 	tempPath := posixpath.Join(posixpath.Dir(req.RemotePath), ".opsnerva-"+posixpath.Base(req.RemotePath)+"-"+suffix+".tmp")
@@ -245,11 +255,11 @@ func (s *Service) prepareRemoteFileChange(req domain.ExecRequest) (domain.ExecRe
 	}
 	prepared := req
 	prepared.Mode = domain.ExecScript
-	prepared.Script = buildRemoteFileChangeScript(req.RemotePath, tempPath, *req.Change, validatorCommand)
+	prepared.Script = buildRemoteFileChangeScript(req.RemotePath, tempPath, *req.Change, *req.TextEdit, validatorCommand)
 	return prepared, nil
 }
 
-func buildRemoteFileChangeScript(path, tempPath string, change domain.FileChange, validatorCommand string) string {
+func buildRemoteFileChangeScript(path, tempPath string, change domain.FileChange, edit domain.TextEdit, validatorCommand string) string {
 	pathQ, tempQ := shellQuote(path), shellQuote(tempPath)
 	normalizedPath := tempPath + ".normalized"
 	normalizedQ := shellQuote(normalizedPath)
@@ -268,7 +278,8 @@ func buildRemoteFileChangeScript(path, tempPath string, change domain.FileChange
 		"fi",
 		"sed $'s/\\r$//' -- " + normalizedQ + " > " + tempQ,
 		"unlink -- " + normalizedQ,
-		"patch --batch --forward --no-backup-if-mismatch " + tempQ + " <<'" + marker + "'",
+		"awk " + shellQuote(remoteTextEditMatchProgram(edit.OldText)) + " " + tempQ,
+		"patch --batch --forward --fuzz=0 --no-backup-if-mismatch " + tempQ + " <<'" + marker + "'",
 		change.Diff,
 		marker,
 	}
@@ -281,75 +292,124 @@ func buildRemoteFileChangeScript(path, tempPath string, change domain.FileChange
 	return strings.Join(lines, "\n")
 }
 
-func buildEditChange(path, diff string) (domain.FileChange, error) {
-	diff = strings.TrimPrefix(diff, "\ufeff")
-	diff = strings.ReplaceAll(diff, "\r\n", "\n")
-	if strings.ContainsAny(diff, "\x00\r") {
-		return domain.FileChange{}, fmt.Errorf("unified diff contains unsupported control characters")
+func buildTextEdit(path, oldText, newText string) (domain.TextEdit, domain.FileChange, error) {
+	oldText, err := normalizeTextEditBlock(oldText, false)
+	if err != nil {
+		return domain.TextEdit{}, domain.FileChange{}, fmt.Errorf("invalid old_text: %w", err)
 	}
-	lines := strings.Split(diff, "\n")
-	hunks := make([]string, 0, len(lines))
-	seenHunk := false
-	oldExpected, newExpected := 0, 0
-	oldSeen, newSeen := 0, 0
-	additions, deletions := 0, 0
-	finishHunk := func() error {
-		if seenHunk && (oldSeen != oldExpected || newSeen != newExpected) {
-			return fmt.Errorf("unified diff hunk line counts do not match its header")
-		}
-		return nil
+	newText, err = normalizeTextEditBlock(newText, true)
+	if err != nil {
+		return domain.TextEdit{}, domain.FileChange{}, fmt.Errorf("invalid new_text: %w", err)
 	}
-	for index, line := range lines {
-		if match := hunkHeader.FindStringSubmatch(line); match != nil {
-			if err := finishHunk(); err != nil {
-				return domain.FileChange{}, err
-			}
-			seenHunk = true
-			oldExpected = patchHunkCount(match[2])
-			newExpected = patchHunkCount(match[4])
-			oldSeen, newSeen = 0, 0
-			hunks = append(hunks, line)
-			continue
-		}
-		if !seenHunk {
-			if line == "" || strings.HasPrefix(line, "--- ") || strings.HasPrefix(line, "+++ ") {
-				continue
-			}
-			return domain.FileChange{}, fmt.Errorf("unified diff contains unsupported data before its first hunk")
-		}
-		if line == "" && index == len(lines)-1 {
-			continue
-		}
-		if line == "\\ No newline at end of file" {
-			hunks = append(hunks, line)
-			continue
-		}
-		if line == "" {
-			return domain.FileChange{}, fmt.Errorf("unified diff contains an unprefixed empty line")
-		}
-		switch line[0] {
-		case ' ':
-			oldSeen++
-			newSeen++
-		case '-':
-			oldSeen++
-			deletions++
-		case '+':
-			newSeen++
-			additions++
-		default:
-			return domain.FileChange{}, fmt.Errorf("invalid unified diff line")
-		}
-		hunks = append(hunks, line)
+	if oldText == newText {
+		return domain.TextEdit{}, domain.FileChange{}, fmt.Errorf("old_text and new_text must be different")
 	}
-	if !seenHunk {
-		return domain.FileChange{}, fmt.Errorf("unified diff contains no hunks")
+
+	oldLines := strings.Split(oldText, "\n")
+	var newLines []string
+	if newText != "" {
+		newLines = strings.Split(newText, "\n")
 	}
-	if err := finishHunk(); err != nil {
-		return domain.FileChange{}, err
+	prefix := 0
+	for prefix < len(oldLines) && prefix < len(newLines) && oldLines[prefix] == newLines[prefix] {
+		prefix++
 	}
-	normalized := "--- " + path + "\n+++ " + path + "\n" + strings.Join(hunks, "\n") + "\n"
-	return domain.FileChange{Diff: normalized, Additions: additions, Deletions: deletions}, nil
+	suffix := 0
+	for suffix < len(oldLines)-prefix && suffix < len(newLines)-prefix && oldLines[len(oldLines)-1-suffix] == newLines[len(newLines)-1-suffix] {
+		suffix++
+	}
+	oldChanged := oldLines[prefix : len(oldLines)-suffix]
+	newChanged := newLines[prefix : len(newLines)-suffix]
+	body := make([]string, 0, len(oldLines)+len(newChanged))
+	for _, line := range oldLines[:prefix] {
+		body = append(body, " "+line)
+	}
+	for _, line := range oldChanged {
+		body = append(body, "-"+line)
+	}
+	for _, line := range newChanged {
+		body = append(body, "+"+line)
+	}
+	if suffix > 0 {
+		for _, line := range oldLines[len(oldLines)-suffix:] {
+			body = append(body, " "+line)
+		}
+	}
+	header := "@@ -" + formatPatchRange(1, len(oldLines)) + " +" + formatPatchRange(1, len(newLines)) + " @@"
+	diff := "--- " + path + "\n+++ " + path + "\n" + header + "\n" + strings.Join(body, "\n") + "\n"
+	return domain.TextEdit{OldText: oldText, NewText: newText}, domain.FileChange{
+		Diff: diff, Additions: len(newChanged), Deletions: len(oldChanged),
+	}, nil
+}
+
+func validateTextEditChange(path string, edit domain.TextEdit, change domain.FileChange) error {
+	normalizedEdit, expectedChange, err := buildTextEdit(path, edit.OldText, edit.NewText)
+	if err != nil {
+		return fmt.Errorf("invalid persisted text edit: %w", err)
+	}
+	if normalizedEdit != edit || expectedChange != change {
+		return fmt.Errorf("file edit approval data does not match the generated change")
+	}
+	return nil
+}
+
+func normalizeTextEditBlock(value string, allowEmpty bool) (string, error) {
+	value = strings.TrimPrefix(value, "\ufeff")
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	if strings.ContainsAny(value, "\x00\r") {
+		return "", fmt.Errorf("contains unsupported control characters")
+	}
+	value = strings.TrimSuffix(value, "\n")
+	if value == "" && !allowEmpty {
+		return "", fmt.Errorf("must contain at least one complete line")
+	}
+	return value, nil
+}
+
+func formatPatchRange(start, count int) string {
+	if count == 1 {
+		return strconv.Itoa(start)
+	}
+	return strconv.Itoa(start) + "," + strconv.Itoa(count)
+}
+
+func remoteTextEditMatchProgram(oldText string) string {
+	oldLines := strings.Split(oldText, "\n")
+	program := []string{"BEGIN {", "  expected_count = " + strconv.Itoa(len(oldLines))}
+	for index, line := range oldLines {
+		program = append(program, "  expected["+strconv.Itoa(index+1)+"] = "+awkByteString(line))
+	}
+	program = append(program,
+		"}",
+		"{",
+		"  window[(NR - 1) % expected_count] = $0",
+		"  if (NR >= expected_count) {",
+		"    matched = 1",
+		"    for (offset = 1; offset <= expected_count; offset++) {",
+		"      slot = (NR - expected_count + offset - 1) % expected_count",
+		"      if (window[slot] != expected[offset]) { matched = 0; break }",
+		"    }",
+		"    if (matched) { matches++ }",
+		"  }",
+		"}",
+		"END {",
+		"  if (matches != 1) {",
+		"    printf \"file edit conflict: old_text matched %d blocks; read the current file and retry with a unique block\\n\", matches > \"/dev/stderr\"",
+		"    exit 75",
+		"  }",
+		"}",
+	)
+	return strings.Join(program, "\n")
+}
+
+func awkByteString(value string) string {
+	var encoded strings.Builder
+	encoded.WriteByte('"')
+	for index := 0; index < len(value); index++ {
+		fmt.Fprintf(&encoded, "\\%03o", value[index])
+	}
+	encoded.WriteByte('"')
+	return encoded.String()
 }
 
 func fileEditHeredocMarker(content string) string {

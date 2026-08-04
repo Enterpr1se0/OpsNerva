@@ -20,60 +20,60 @@ type Server struct {
 func New(svc *service.Service, version string) *Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: "opsnerva", Version: version}, nil)
 
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_host_inspect", Description: "Read-only inspection of a registered SSH host.", Annotations: readOnlyAnnotations("Inspect SSH host")},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_host_inspect", Description: "Inspect one SSH host's OS, user, and uptime.", Annotations: readOnlyAnnotations("Inspect SSH host")},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.HostInput) (*mcp.CallToolResult, sshx.HostInfo, error) {
 			output, err := svc.ProbeHost(ctx, input.HostID, "mcp-client")
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_host_list", Description: "List registered host IDs, names, authentication types, and managed sudo modes without connection details or credentials.", Annotations: readOnlyAnnotations("List SSH hosts")},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_host_list", Description: "List SSH host IDs and capabilities; excludes connection data and secrets.", Annotations: readOnlyAnnotations("List SSH hosts")},
 		func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, agent.HostListOutput, error) {
 			hosts, err := svc.ListHostCapabilities(ctx)
 			return nil, agent.HostListOutput{Hosts: hosts}, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_exec", Description: "Execute one remote program with separate arguments under the configured approval mode and audit controls. Set background=true for cancellable background execution; it defaults to false.", Annotations: changeAnnotations("Execute SSH program", true)},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_exec", Description: "Run one remote executable with separate arguments; use background for long work.", Annotations: changeAnnotations("Execute SSH program", true)},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.ExecInput) (*mcp.CallToolResult, agent.ExecToolResult, error) {
 			output, err := agent.RunExecutionTool(ctx, svc, execRequest(input), "mcp-client")
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_run_script", Description: "Analyze and run a Bash script under the configured approval mode. Set background=true for cancellable background execution; it defaults to false.", Annotations: changeAnnotations("Run SSH script", true)},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_run_script", Description: "Run a remote Bash script; use background for long work.", Annotations: changeAnnotations("Run SSH script", true)},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.ScriptInput) (*mcp.CallToolResult, agent.ExecToolResult, error) {
 			output, err := agent.RunExecutionTool(ctx, svc, scriptRequest(input), "mcp-client")
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_task", Description: "Read or cancel one background SSH task with action=status or action=cancel.", Annotations: changeAnnotations("Manage SSH task", false)},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_task", Description: "Wait for, read, or cancel a background SSH task.", Annotations: changeAnnotations("Manage SSH task", false)},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.TaskInput) (*mcp.CallToolResult, agent.ExecToolResult, error) {
 			output, err := agent.RunTaskTool(ctx, svc, input, "mcp-client")
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_read", Description: "Read one remote file or search it under the configured approval mode. Content reads default to a 131072-byte page; follow file.next_offset while file.has_more, or set full_content=true only for a reasonably sized file. Search requires pattern plus match_mode=literal|regex, returns every matching line, and reports no matches as search.found=false.", InputSchema: fileSearchInputSchema[agent.FileReadInput](), Annotations: readOnlyAnnotations("Read SSH file")},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_read", Description: "Read, page, tail, inspect metadata, or search one remote file.", InputSchema: fileSearchInputSchema[agent.FileReadInput](), Annotations: readOnlyAnnotations("Read SSH file")},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.FileReadInput) (*mcp.CallToolResult, agent.ExecToolResult, error) {
 			output, err := agent.RunFileReadTool(ctx, svc, input, "mcp-client")
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_list", Description: "List a remote directory without changing it.", Annotations: readOnlyAnnotations("List SSH files")},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_list", Description: "List a remote directory.", Annotations: readOnlyAnnotations("List SSH files")},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.FileListInput) (*mcp.CallToolResult, agent.ExecToolResult, error) {
 			output, err := svc.ListFiles(ctx, input.HostID, input.Path, "mcp-client")
 			compact, err := agent.CompactExecToolResult(output, err)
 			return nil, compact, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_edit", Description: "Apply one reviewed unified diff to an existing remote file. validator_id accepts only a configured ID, never a command line; omit it unless an exact ID is known.", Annotations: changeAnnotations("Edit SSH file", true)},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_edit", Description: "Replace an exact unique line block in an existing remote file; read it first.", Annotations: changeAnnotations("Edit SSH file", true)},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.FileEditInput) (*mcp.CallToolResult, agent.ExecToolResult, error) {
-			output, err := svc.EditRemoteFile(ctx, input.HostID, input.Path, input.Diff, input.ValidatorID, input.Elevated, input.Reason, "mcp-client")
+			output, err := svc.EditRemoteFile(ctx, input.HostID, input.Path, input.OldText, input.NewText, input.ValidatorID, input.Elevated, input.Reason, "mcp-client")
 			compact, err := agent.CompactExecToolResult(output, err)
 			return nil, compact, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_transfer", Description: "Transfer one SHA256-bound regular file between registered SSH hosts. Omit expected_destination_sha256 to require a new destination; provide it to replace that exact version.", Annotations: changeAnnotations("Transfer SSH file", true)},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_transfer", Description: "Transfer one SHA256-bound file between SSH hosts.", Annotations: changeAnnotations("Transfer SSH file", true)},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.SSHFileTransferInput) (*mcp.CallToolResult, agent.ExecToolResult, error) {
 			output, err := svc.TransferFileBetweenHosts(ctx, input.SourceHostID, input.SourcePath, input.ExpectedSHA256, input.DestinationHostID, input.DestinationPath, input.ExpectedDestinationSHA256, input.TimeoutSeconds, input.Reason, "mcp-client")
 			compact, err := agent.CompactExecToolResult(output, err)
 			return nil, compact, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_tunnel", Description: "Start, list, or stop local SSH port forwarding through registered hosts. Configured proxies and jump hosts are reused automatically.", Annotations: changeAnnotations("Manage SSH tunnel", false)},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_tunnel", Description: "Start, list, or stop local SSH port forwarding.", Annotations: changeAnnotations("Manage SSH tunnel", false)},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.SSHTunnelInput) (*mcp.CallToolResult, any, error) {
 			output, err := agent.RunSSHTunnelTool(ctx, svc, input, "mcp-client")
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_shell", Description: "Start, input, incrementally read output, list, interrupt, or close an approved interactive SSH PTY. input and output delay wait_seconds before reading bounded stdout/stderr chunks; continue with next_sequence. Never send credentials through input.", Annotations: changeAnnotations("Manage SSH shell", true)},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_shell", Description: "Manage an SSH PTY; wait_seconds delays reads; continue from next_sequence. Never send secrets.", Annotations: changeAnnotations("Manage SSH shell", true)},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.SSHShellInput) (*mcp.CallToolResult, any, error) {
 			ctx = service.WithMCPClientSession(ctx)
 			output, err := agent.RunSSHShellTool(ctx, svc, input, "mcp-client")

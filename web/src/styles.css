@@ -91,16 +91,18 @@
 .tool-event summary .tool-summary-copy b{flex:0 0 auto;font:700 var(--text-control) 'Manrope Variable',system-ui,sans-serif;color:#b9d1c6;white-space:nowrap}
 .tool-summary-copy code{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;color:#81a295;font:var(--text-caption)/1.45 DM Mono,'Noto Sans SC Variable',monospace;white-space:nowrap}
 .tool-summary-targets{display:flex;align-items:center;flex-wrap:wrap;gap:5px;margin-top:6px}
-.tool-event summary .tool-target-chip{display:inline-flex;align-items:center;gap:5px;margin-left:0;padding:3px 6px;border:1px solid #2c5946;border-radius:5px;background:#0d241b;color:#7fd9a6;font:var(--text-micro) DM Mono,'Noto Sans SC Variable',monospace;white-space:nowrap}
-.tool-event summary .tool-target-chip.workspace{max-width:220px;gap:4px;padding:2px 5px;border-color:#36526b;background:#0d1b27;color:#88b9e2}
-.tool-event summary .tool-target-chip.scope{border-color:#4b4930;background:#201d0e;color:#d1bd71}
+.tool-event summary .tool-target-chip{display:inline-flex;align-items:center;min-width:0;gap:5px;margin:0;padding:3px 6px;border:1px solid #2c5946;border-radius:5px;background:#0d241b;color:#7fd9a6;font:var(--text-micro) DM Mono,'Noto Sans SC Variable',monospace;white-space:nowrap}
+.tool-event summary .tool-target-chip.tool-target-workspace{max-width:220px;gap:4px;padding:2px 5px;border-color:#36526b;background:#0d1b27;color:#88b9e2}
+.tool-event summary .tool-target-chip.tool-target-scope{border-color:#4b4930;background:#201d0e;color:#d1bd71}
 .tool-event summary .tool-target-chip>svg{flex:0 0 auto}
 .tool-event summary .tool-target-chip>em{color:#5f8977;font-style:normal}
-.tool-event summary .tool-target-chip.workspace>em{color:#67859f}.tool-event summary .tool-target-chip.scope>em{color:#928554}
+.tool-event summary .tool-target-chip.tool-target-workspace>em{color:#67859f}.tool-event summary .tool-target-chip.tool-target-scope>em{color:#928554}
 .tool-event summary .tool-target-chip>b{min-width:0;overflow:hidden;text-overflow:ellipsis;color:#c1e6d3;font:600 var(--text-caption) 'Manrope Variable','Noto Sans SC Variable',sans-serif;white-space:nowrap}
-.tool-event summary .tool-target-chip.workspace>b{flex:1 1 auto;color:#bcd9f0;font-size:var(--text-caption)}.tool-event summary .tool-target-chip.scope>b{color:#e2d79d}
+.tool-event summary .tool-target-chip.tool-target-workspace>b{flex:1 1 auto;color:#bcd9f0;font-size:var(--text-caption)}.tool-event summary .tool-target-chip.tool-target-scope>b{color:#e2d79d}
 .tool-event summary .tool-target-chip>code{flex:0 0 auto;padding-left:5px;border-left:1px solid #2b4d3f;color:#70a88f;font:var(--text-micro) DM Mono,'Noto Sans SC Variable',monospace;white-space:nowrap}
+.tool-live-progress{grid-column:2/-1;display:grid;grid-template-columns:minmax(80px,1fr) auto auto;align-items:center;gap:8px;min-width:0;margin-top:1px;color:#66857a;font:var(--text-micro) DM Mono,'Noto Sans SC Variable',monospace;pointer-events:none}.tool-live-progress>i{height:3px;overflow:hidden;border-radius:3px;background:#18342a}.tool-live-progress>i>em{display:block;width:34%;height:100%;border-radius:inherit;background:#58c99a;animation:tool-progress-slide 1.35s ease-in-out infinite}.tool-live-progress.determinate>i>em{animation:none;transition:width .2s ease}.tool-live-progress>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.tool-live-progress>time{color:#83a398;font:inherit;font-variant-numeric:tabular-nums}@keyframes tool-progress-slide{0%{transform:translateX(-110%)}50%{transform:translateX(195%)}100%{transform:translateX(-110%)}}
 .tool-summary-preview{grid-column:2/-1;min-width:0;margin-top:1px;padding:7px 9px;border:1px solid #192f26;border-left:2px solid #315847;border-radius:5px;background:#06100d;pointer-events:none}
+.tool-summary-preview.stderr{border-color:#432727;border-left-color:#8d4545;background:#150b0b}.tool-event summary .tool-summary-preview.stderr>span{color:#9e6666}.tool-event summary .tool-summary-preview.stderr pre{color:#d69595}
 .tool-event summary .tool-summary-preview>span{display:block;margin:0 0 4px;color:#4f6b60;font:600 var(--text-micro) DM Mono,'Noto Sans SC Variable',monospace;letter-spacing:.7px}
 .tool-event .tool-summary-preview pre{max-height:52px;margin:0;padding:0;border:0;overflow:hidden;color:#8ba298;font:var(--text-caption)/1.55 DM Mono,'Noto Sans SC Variable',monospace;white-space:pre;word-break:normal;text-overflow:clip}
 .tool-event-rich[open] .tool-summary-preview{display:none}

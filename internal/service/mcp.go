@@ -476,12 +476,12 @@ toolPages:
 			}
 			description := strings.TrimSpace(candidate.Description)
 			if description == "" {
-				description = "External MCP tool " + candidate.Name
+				description = candidate.Name
 			}
-			if len(description) > 2000 {
-				description = strings.ToValidUTF8(description[:2000], "�") + "…"
+			if len(description) > 1000 {
+				description = strings.ToValidUTF8(description[:1000], "�") + "…"
 			}
-			description = fmt.Sprintf("MCP server %q: %s", serverName, description)
+			description = fmt.Sprintf("%s: %s", serverName, description)
 			result = append(result, mcpResolvedTool{Name: candidate.Name, ExposedName: exposed, Description: description, Schema: inputSchema})
 		}
 		if response.NextCursor == "" {
