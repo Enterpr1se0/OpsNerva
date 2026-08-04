@@ -148,9 +148,20 @@ func TestSSHTunnelForwardsLocalTraffic(t *testing.T) {
 	if string(reply) != string(payload) {
 		t.Fatalf("unexpected forwarded reply %q", reply)
 	}
-	current := svc.ListSSHTunnels()
-	if current.Count != 1 || current.Tunnels[0].TotalConnections != 1 || current.Tunnels[0].BytesSent < int64(len(payload)) || current.Tunnels[0].BytesReceived < int64(len(payload)) {
-		t.Fatalf("unexpected tunnel counters: %#v", current)
+	var current domain.SSHTunnelList
+	deadline := time.Now().Add(time.Second)
+	for {
+		current = svc.ListSSHTunnels()
+		if current.Count == 1 && len(current.Tunnels) == 1 &&
+			current.Tunnels[0].TotalConnections == 1 &&
+			current.Tunnels[0].BytesSent >= int64(len(payload)) &&
+			current.Tunnels[0].BytesReceived >= int64(len(payload)) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("unexpected tunnel counters: %#v", current)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if _, err := svc.StopSSHTunnel(context.Background(), approved.Tunnel.ID, "operator"); err != nil {
 		t.Fatal(err)
