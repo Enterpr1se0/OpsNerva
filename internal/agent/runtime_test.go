@@ -372,14 +372,7 @@ func TestRuntimeReloadAppliesCompleteSystemPromptToExistingConversation(t *testi
 		Content string `json:"content"`
 	}
 	requests := make(chan []wireMessage, 3)
-	var catalogRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
-			catalogRequests.Add(1)
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"data":[{"id":"fixture-model","context_length":200000}]}`))
-			return
-		}
 		var request struct {
 			Messages []wireMessage `json:"messages"`
 		}
@@ -407,7 +400,7 @@ func TestRuntimeReloadAppliesCompleteSystemPromptToExistingConversation(t *testi
 		t.Fatal(err)
 	}
 	cfg := config.Default()
-	cfg.Model = config.Model{APIKey: "fixture-key", BaseURL: server.URL + "/v1", Name: "fixture-model"}
+	cfg.Model = config.Model{APIKey: "fixture-key", BaseURL: server.URL + "/v1", Name: "fixture-model", ContextWindow: 200000}
 	svc := service.New(st, nil, encryptor, security.NewRedactor(), cfg.Limits, cfg)
 	firstPrompt := "first complete system prompt"
 	if _, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{
@@ -419,15 +412,8 @@ func TestRuntimeReloadAppliesCompleteSystemPromptToExistingConversation(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(time.Second)
-	for runtime.Status().ContextWindow != 200000 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
 	if runtime.Status().ContextWindow != 200000 {
-		t.Fatalf("detected context window = %d", runtime.Status().ContextWindow)
-	}
-	if catalogRequests.Load() != 1 {
-		t.Fatalf("model catalog requests = %d", catalogRequests.Load())
+		t.Fatalf("configured context window = %d", runtime.Status().ContextWindow)
 	}
 	if _, err := runtime.Query(ctx, "same_session", "first turn", nil); err != nil {
 		t.Fatal(err)
@@ -462,8 +448,8 @@ func TestRuntimeReloadAppliesCompleteSystemPromptToExistingConversation(t *testi
 	if err := runtime.Reload(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if runtime.Status().ContextWindow != 160000 || catalogRequests.Load() != 1 {
-		t.Fatalf("manual context window = %d, catalog requests = %d", runtime.Status().ContextWindow, catalogRequests.Load())
+	if runtime.Status().ContextWindow != 160000 {
+		t.Fatalf("manual context window = %d", runtime.Status().ContextWindow)
 	}
 	if _, err := runtime.Query(ctx, "same_session", "second turn", nil); err != nil {
 		t.Fatal(err)

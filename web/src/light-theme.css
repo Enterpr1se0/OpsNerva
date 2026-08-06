@@ -792,6 +792,25 @@
   box-shadow: inset 0 3px var(--light-accent), var(--light-shadow);
 }
 
+:root[data-theme='light'] :where(.app-select-trigger, .model-combobox-control, .app-select-menu, .model-combobox-menu) {
+  border-color: var(--light-border);
+  background: var(--light-surface);
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] :where(.app-select-menu, .model-combobox-menu) {
+  box-shadow: var(--light-shadow-high);
+}
+
+:root[data-theme='light'] :where(.app-select-menu > button:hover, .app-select-menu > button.active, .model-combobox-menu > button:hover, .model-combobox-menu > button.active) {
+  background: var(--light-subtle);
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] :where(.app-select-menu > button.selected, .model-combobox-menu > button.selected) {
+  color: var(--light-accent);
+}
+
 :root[data-theme='light'] :where(.model-card-head em, .host-state, .host-key-state.trusted, .host-agent-state.active) {
   border-color: var(--light-accent-border);
   background: var(--light-accent-soft);

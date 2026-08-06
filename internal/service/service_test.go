@@ -658,6 +658,7 @@ func newTestService(t *testing.T) (*Service, *fakeTransport, domain.Host) {
 	transport := &fakeTransport{}
 	limits := config.Default().Limits
 	svc := New(st, transport, encryptor, security.NewRedactor(), limits)
+	svc.modelMetadata.url = ""
 	t.Cleanup(func() { svc.explainWG.Wait() })
 	t.Cleanup(func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -2405,7 +2406,7 @@ func TestDiscoverModelsUsesStoredKeyAndRedactsUpstreamErrors(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":[{"id":"z-model","max_model_len":65536},{"id":"a-model"},{"id":"a-model","context_length":131072}]}`))
+		_, _ = w.Write([]byte(`{"data":[{"id":"z-model"},{"id":"a-model"},{"id":"a-model"}]}`))
 	}))
 	defer server.Close()
 
@@ -2421,16 +2422,8 @@ func TestDiscoverModelsUsesStoredKeyAndRedactsUpstreamErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if catalog.Count != 2 || strings.Join(catalog.Models, ",") != "a-model,z-model" || catalog.ContextWindows["a-model"] != 131072 || catalog.ContextWindows["z-model"] != 65536 {
+	if catalog.Count != 2 || strings.Join(catalog.Models, ",") != "a-model,z-model" || len(catalog.ContextWindows) != 0 {
 		t.Fatalf("unexpected catalog %#v", catalog)
-	}
-	cfg, _, err := svc.ModelProviderConfig(ctx, provider.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	detected, err := svc.DetectModelContextWindow(ctx, cfg)
-	if err != nil || detected != 131072 {
-		t.Fatalf("detected context window = %d, %v", detected, err)
 	}
 
 	badURL := server.URL + "/bad"
@@ -2445,37 +2438,113 @@ func TestDiscoverModelsUsesStoredKeyAndRedactsUpstreamErrors(t *testing.T) {
 	}
 }
 
-func TestDetectOllamaContextWindow(t *testing.T) {
-	tests := []struct {
-		name string
-		body string
-		want int
-	}{
-		{name: "configured num_ctx", body: `{"parameters":"temperature 0.8\nnum_ctx 65536\n"}`, want: 65536},
-		{name: "model architecture", body: `{"model_info":{"llama.context_length":131072}}`, want: 131072},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodPost || r.URL.Path != "/api/show" {
-					t.Fatalf("unexpected Ollama request: %s %s", r.Method, r.URL.Path)
-				}
-				var input map[string]string
-				if err := json.NewDecoder(r.Body).Decode(&input); err != nil || input["model"] != "llama-test" {
-					t.Fatalf("unexpected Ollama input %#v, %v", input, err)
-				}
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(test.body))
-			}))
-			defer server.Close()
-			svc, _, _ := newTestService(t)
-			window, err := svc.DetectModelContextWindow(context.Background(), config.Model{
-				Kind: "ollama", BaseURL: server.URL + "/v1", Name: "llama-test",
-			})
-			if err != nil || window != test.want {
-				t.Fatalf("context window = %d, %v; want %d", window, err, test.want)
+func TestDiscoverModelsEnrichesAndCachesModelsDevMetadata(t *testing.T) {
+	const secret = "catalog-secret"
+	var catalogRequests, metadataRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			catalogRequests++
+			if r.Header.Get("Authorization") != "Bearer "+secret {
+				http.Error(w, "missing provider authorization", http.StatusUnauthorized)
+				return
 			}
-		})
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"gpt-test"}]}`))
+		case "/models.json":
+			metadataRequests++
+			if r.Header.Get("Authorization") != "" || r.Header.Get("x-api-key") != "" {
+				http.Error(w, "provider credential leaked", http.StatusBadRequest)
+				return
+			}
+			if r.Header.Get("User-Agent") != "OpsNerva/1" {
+				http.Error(w, "missing metadata user agent", http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("ETag", `"fixture"`)
+			_, _ = w.Write([]byte(`{
+				"openai/gpt-test": {
+					"id":"openai/gpt-test","name":"GPT Test","family":"gpt","attachment":true,
+					"reasoning":true,"tool_call":true,"structured_output":true,"temperature":false,
+					"knowledge":"2026-01","release_date":"2026-02-01","last_updated":"2026-03-01",
+					"limit":{"context":200000,"input":180000,"output":20000},
+					"modalities":{"input":["text","image"],"output":["text"]}
+				}
+			}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	svc, _, _ := newTestService(t)
+	svc.modelMetadata.url = server.URL + "/models.json"
+	provider, err := svc.SaveModelProvider(context.Background(), domain.ModelProviderInput{
+		Name: "metadata", Kind: "openai_compatible", BaseURL: server.URL + "/v1", Model: "gpt-test", APIKey: secret,
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := svc.DiscoverModels(context.Background(), domain.ModelDiscoveryInput{ID: provider.ID}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, exists := catalog.Metadata["gpt-test"]
+	if !exists || metadata.ID != "openai/gpt-test" || metadata.Name != "GPT Test" || metadata.ContextWindow != 200000 || metadata.InputTokenLimit != 180000 || metadata.OutputTokenLimit != 20000 || !metadata.Attachment || !metadata.Reasoning || !metadata.ToolCall || !metadata.StructuredOutput || metadata.Temperature {
+		t.Fatalf("unexpected models.dev metadata: %#v", metadata)
+	}
+	if catalog.ContextWindows["gpt-test"] != 200000 {
+		t.Fatalf("context window was not enriched: %#v", catalog)
+	}
+	providers, err := svc.ListModelProviders(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listed domain.ModelProvider
+	for _, candidate := range providers {
+		if candidate.ID == provider.ID {
+			listed = candidate
+			break
+		}
+	}
+	if listed.ContextWindow != 0 || listed.ResolvedContextWindow != 200000 {
+		t.Fatalf("automatic context window was not exposed: %#v", listed)
+	}
+	cfg, _, err := svc.ModelProviderConfig(context.Background(), provider.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	window, err := svc.DetectModelContextWindow(context.Background(), cfg)
+	if err != nil || window != 200000 {
+		t.Fatalf("detected context window = %d, %v", window, err)
+	}
+	if catalogRequests != 1 || metadataRequests != 1 {
+		t.Fatalf("request counts: catalog=%d metadata=%d", catalogRequests, metadataRequests)
+	}
+	gateway, err := svc.SaveModelProvider(context.Background(), domain.ModelProviderInput{
+		Name: "OpenAI dialect gateway", Kind: "openai", BaseURL: server.URL + "/v1", Model: "gpt-test", APIKey: secret,
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gatewayCatalog, err := svc.DiscoverModels(context.Background(), domain.ModelDiscoveryInput{ID: gateway.ID}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(gatewayCatalog.Models, ",") != "gpt-test" || gatewayCatalog.Metadata["gpt-test"].ContextWindow != 200000 {
+		t.Fatalf("unexpected gateway catalog: %#v", gatewayCatalog)
+	}
+	gatewayConfig, _, err := svc.ModelProviderConfig(context.Background(), gateway.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	window, err = svc.DetectModelContextWindow(context.Background(), gatewayConfig)
+	if err != nil || window != 200000 {
+		t.Fatalf("gateway context window = %d, %v", window, err)
+	}
+	if catalogRequests != 2 || metadataRequests != 1 {
+		t.Fatalf("gateway did not preserve provider discovery and models.dev cache: catalog=%d metadata=%d", catalogRequests, metadataRequests)
 	}
 }
 

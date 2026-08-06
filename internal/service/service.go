@@ -65,6 +65,7 @@ type Service struct {
 	mcpOAuthMu             sync.Mutex
 	mcpOAuthFlows          map[string]*mcpOAuthFlow
 	mcpOAuthByServer       map[string]*mcpOAuthFlow
+	modelMetadata          *modelMetadataCache
 	executionCtx           context.Context
 	executionCancel        context.CancelFunc
 	executionMu            sync.Mutex
@@ -130,6 +131,7 @@ func New(st *store.Store, transport sshx.Transport, encryptor *security.Encrypto
 		workspaceSandboxPath: config.Default().WorkspaceSandboxPath,
 		globalSem:            make(chan struct{}, global), hostSems: make(map[string]chan struct{}), tasks: make(map[string]*taskState), workspaces: make(map[string]config.Workspace), validators: make(map[string]config.Validator), mcpRuntime: make(map[string]*mcpRuntimeState),
 		mcpOAuthFlows: make(map[string]*mcpOAuthFlow), mcpOAuthByServer: make(map[string]*mcpOAuthFlow),
+		modelMetadata:     newModelMetadataCache(modelsDevMetadataURL),
 		explanationActive: make(map[string]*approvalExplanationTask), explanationSem: make(chan struct{}, maxConcurrentApprovalExplanations), explanationSlots: make(chan struct{}, maxQueuedApprovalExplanations),
 		automaticApprovalSem: make(chan struct{}, maxConcurrentApprovalExplanations),
 		executionCtx:         executionCtx, executionCancel: executionCancel,
@@ -590,7 +592,20 @@ func (s *Service) SaveModelProvider(ctx context.Context, input domain.ModelProvi
 }
 
 func (s *Service) ListModelProviders(ctx context.Context) ([]domain.ModelProvider, error) {
-	return s.store.ListModelProviders(ctx)
+	providers, err := s.store.ListModelProviders(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for index := range providers {
+		if providers[index].ContextWindow != 0 {
+			continue
+		}
+		metadata, exists := s.cachedModelMetadata(providers[index].Kind, providers[index].Model)
+		if exists {
+			providers[index].ResolvedContextWindow = metadata.ContextWindow
+		}
+	}
+	return providers, nil
 }
 
 func (s *Service) SystemSettings(ctx context.Context) (domain.SystemSettings, error) {

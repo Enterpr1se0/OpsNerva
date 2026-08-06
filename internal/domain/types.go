@@ -85,20 +85,21 @@ const (
 )
 
 type ModelProvider struct {
-	ID              string    `json:"id"`
-	Name            string    `json:"name"`
-	Kind            string    `json:"kind"`
-	BaseURL         string    `json:"base_url,omitempty"`
-	Model           string    `json:"model"`
-	ContextWindow   int       `json:"context_window"`
-	ReasoningEffort string    `json:"reasoning_effort,omitempty"`
-	APIKeyCipher    string    `json:"-"`
-	HasAPIKey       bool      `json:"has_api_key"`
-	ProxyID         string    `json:"proxy_id,omitempty"`
-	UserAgent       string    `json:"user_agent,omitempty"`
-	Active          bool      `json:"active"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ID                    string    `json:"id"`
+	Name                  string    `json:"name"`
+	Kind                  string    `json:"kind"`
+	BaseURL               string    `json:"base_url,omitempty"`
+	Model                 string    `json:"model"`
+	ContextWindow         int       `json:"context_window"`
+	ResolvedContextWindow int       `json:"resolved_context_window,omitempty"`
+	ReasoningEffort       string    `json:"reasoning_effort,omitempty"`
+	APIKeyCipher          string    `json:"-"`
+	HasAPIKey             bool      `json:"has_api_key"`
+	ProxyID               string    `json:"proxy_id,omitempty"`
+	UserAgent             string    `json:"user_agent,omitempty"`
+	Active                bool      `json:"active"`
+	CreatedAt             time.Time `json:"created_at"`
+	UpdatedAt             time.Time `json:"updated_at"`
 }
 
 type ModelProviderInput struct {
@@ -165,9 +166,30 @@ type ProxyTestResult struct {
 }
 
 type ModelCatalog struct {
-	Models         []string       `json:"models"`
-	ContextWindows map[string]int `json:"context_windows,omitempty"`
-	Count          int            `json:"count"`
+	Models         []string                 `json:"models"`
+	ContextWindows map[string]int           `json:"context_windows,omitempty"`
+	Metadata       map[string]ModelMetadata `json:"metadata,omitempty"`
+	Count          int                      `json:"count"`
+}
+
+type ModelMetadata struct {
+	ID               string   `json:"id"`
+	Name             string   `json:"name,omitempty"`
+	Family           string   `json:"family,omitempty"`
+	ContextWindow    int      `json:"context_window,omitempty"`
+	InputTokenLimit  int      `json:"input_token_limit,omitempty"`
+	OutputTokenLimit int      `json:"output_token_limit,omitempty"`
+	Attachment       bool     `json:"attachment"`
+	Reasoning        bool     `json:"reasoning"`
+	ToolCall         bool     `json:"tool_call"`
+	StructuredOutput bool     `json:"structured_output"`
+	Temperature      bool     `json:"temperature"`
+	Knowledge        string   `json:"knowledge,omitempty"`
+	ReleaseDate      string   `json:"release_date,omitempty"`
+	LastUpdated      string   `json:"last_updated,omitempty"`
+	Status           string   `json:"status,omitempty"`
+	InputModalities  []string `json:"input_modalities,omitempty"`
+	OutputModalities []string `json:"output_modalities,omitempty"`
 }
 
 const (

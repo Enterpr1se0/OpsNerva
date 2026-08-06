@@ -368,6 +368,7 @@ export interface ModelProvider {
   base_url?: string
 	model: string
 	context_window: number
+	resolved_context_window?: number
 	reasoning_effort?: ModelReasoningEffort
 	has_api_key: boolean
 	proxy_id?: string
@@ -407,7 +408,28 @@ export interface ModelTestInput extends ModelDiscoveryInput {
 export interface ModelCatalog {
   models: string[]
 	context_windows?: Record<string,number>
+	metadata?: Record<string,ModelMetadata>
   count: number
+}
+
+export interface ModelMetadata {
+	id: string
+	name?: string
+	family?: string
+	context_window?: number
+	input_token_limit?: number
+	output_token_limit?: number
+	attachment: boolean
+	reasoning: boolean
+	tool_call: boolean
+	structured_output: boolean
+	temperature: boolean
+	knowledge?: string
+	release_date?: string
+	last_updated?: string
+	status?: string
+	input_modalities?: string[]
+	output_modalities?: string[]
 }
 
 export interface ModelStatus {
