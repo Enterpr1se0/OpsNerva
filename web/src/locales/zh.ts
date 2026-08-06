@@ -150,7 +150,7 @@ const zh = {
     stopped: '操作员已在完成前停止 Agent 运行。', agentError: 'Agent 错误',
     operator: '操作员', responseFailed: '回复生成失败', processing: '处理中', blockedImage: '[已阻止图片：{{alt}}]',
 	addImages: '添加图片', removeImage: '移除图片', imageTypeRejected: '部分图片格式未启用。',
-    reasoning: '思考过程', reasoningActive: '思考中', reasoningFallback: '正在思考...',
+    reasoning: '思考过程', reasoningActive: '思考中', reasoningFallback: '正在思考...', contextUsage: '上下文 {{used}} / {{limit}} tokens', contextUsageUnknown: '上下文 {{used}} / -- tokens',
   },
   workspace: {
     noConfigured: '未配置 Workspace', localFiles: '本地文件', terminal: '终端', newTerminal: '新建终端', switchTerminal: '切换终端', agent: 'Agent', operator: '用户', inputBy: '输入 · {{source}}', parent: '上级目录', uploadFile: '上传文件', refreshFiles: '刷新文件', switchWorkspace: '切换 Workspace', switching: '正在切换…', boundToConversation: '已绑定当前会话', collapsePanel: '收起 Workspace', expandPanel: '展开 Workspace',
@@ -222,7 +222,7 @@ const zh = {
     editTitle: '编辑提供商', newTitle: '新建模型提供商',
     displayName: '显示名称', providerType: '提供商类型', modelId: '模型 ID', fetching: '获取中...', fetchModels: '获取模型', selectModel: '选择模型...',
     modelPlaceholder: '获取模型或手动输入 ID', available: '有 {{count}} 个模型可用', enterManually: '手动输入', apiKey: 'API Key', keepKey: '留空以保留当前 Key',
-		reasoningEffort: '思考程度',
+		reasoningEffort: '思考程度', contextWindow: '上下文窗口', contextAuto: '自动',
     baseUrl: 'Base URL', officialEndpoint: '留空使用 OpenAI 官方地址',
     userAgent: 'User-Agent 改写', userAgentHint: '留空使用 SDK 默认值；网关拒绝 SDK 请求时可填写自定义 UA',
 		proxy: '代理', noProxy: '直连',

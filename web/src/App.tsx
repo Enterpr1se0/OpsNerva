@@ -25,6 +25,7 @@ type ChatEntry = { id: string; kind: 'user' | 'assistant' | 'tool' | 'reasoning'
 type ModelRetryState = {attempt:number;max:number;readyAt:number}
 type ActiveChatStream = { id: string; sessionId: string; controller: AbortController }
 type ConnectionRetryState = {attempt:number;readyAt:number}
+type ContextUsage = {tokens:number;window:number}
 
 function historyEntries(messages:ChatMessage[],sessionID:string):ChatEntry[]{
 	return messages.map((item,index)=>{
@@ -53,6 +54,26 @@ function waitForReconnect(delay:number,signal:AbortSignal){
 
 function deactivateReasoning(entry:ChatEntry):ChatEntry{
 	return entry.kind==='reasoning'&&entry.active?{...entry,active:false}:entry
+}
+
+function compactTokenCount(value:number){
+	if(value<1000)return String(value)
+	if(value<1_000_000)return `${Number((value/1000).toFixed(value<10_000?1:0))}K`
+	return `${Number((value/1_000_000).toFixed(value<10_000_000?1:0))}M`
+}
+
+function contextWindowForSession(tokens:number,window:number,fallback:number){
+	return tokens>0?window:(window||fallback)
+}
+
+function ContextUsageRing({usage}:{usage:ContextUsage}){
+	const {t,i18n:instance}=useTranslation()
+	const known=usage.window>0
+	const percent=known?Math.min(100,Math.max(0,Math.round(usage.tokens/usage.window*100))):0
+	const label=t(known?'chat.contextUsage':'chat.contextUsageUnknown',{used:usage.tokens.toLocaleString(localeFor(instance.language)),limit:usage.window.toLocaleString(localeFor(instance.language))})
+	return <span className={`context-usage-ring ${percent>=90?'danger':percent>=70?'warn':''}`} role={known?'meter':'status'} aria-label={label} aria-valuemin={known?0:undefined} aria-valuemax={known?usage.window:undefined} aria-valuenow={known?usage.tokens:undefined} title={label}>
+		<svg viewBox="0 0 36 36" aria-hidden="true"><circle className="context-usage-track" cx="18" cy="18" r="15.5"/><circle className="context-usage-value" cx="18" cy="18" r="15.5" pathLength="100" strokeDasharray={`${percent} 100`}/></svg>
+	</span>
 }
 
 function startAssistantLifecycle(entries:ChatEntry[],messageID:string):ChatEntry[]{
@@ -482,7 +503,7 @@ function App() {
 			<ChatPage visible={page==='chat'} onActivate={()=>navigate('chat')}
 				hosts={hosts} providers={providers} approvals={approvals} runs={runs} workspaceShells={sshShells.filter(shell=>shell.kind==='workspace')}
 				capabilities={capabilities} settings={settings} imageTypes={settings?.chat_image_allowed_types||defaultChatImageTypes}
-				agentAvailable={!!health?.agent_available} modelName={health?.model?.model} refresh={refresh} refreshConnections={refreshConnections}
+					agentAvailable={!!health?.agent_available} modelName={health?.model?.model} contextWindow={health?.model?.context_window||0} refresh={refresh} refreshConnections={refreshConnections}
 				refreshApprovals={refreshApprovals} onCreateWorkspaceShell={createWorkspaceShell} onOpenWorkspaceShell={setSelectedShell} onWorkspaceShellStarted={observeAgentWorkspaceShell} onSettingsChanged={setSettings}
 				onHostChanged={host=>setHosts(current=>current.map(item=>item.id===host.id?host:item))}
 				onModelChanged={provider=>{setProviders(current=>current.map(item=>item.id===provider.id?provider:{...item,active:provider.active?false:item.active}));void api.health().then(setHealth).catch(err=>reportError(errorText(err)))}}
@@ -661,7 +682,7 @@ function ComposerReasoningSelector({providers,disabled,onChanged,onError}:{provi
 		setBusy(true)
 		try{
 			const updated=await api.saveModelProvider({
-				id:active.id,name:active.name,kind:active.kind,base_url:active.base_url||'',model:active.model,
+				id:active.id,name:active.name,kind:active.kind,base_url:active.base_url||'',model:active.model,context_window:active.context_window||null,
 				reasoning_effort:reasoningEffort,api_key:'',proxy_id:active.proxy_id||'',user_agent:active.user_agent||'',
 			})
 			onChanged(updated)
@@ -1602,8 +1623,9 @@ function Nav({ active, icon, label, count, warn, onClick }: {active:boolean;icon
   return <button className={`nav-item ${active ? 'active' : ''}`} onClick={onClick} title={label} aria-label={label} aria-current={active?'page':undefined}>{icon}<span>{label}</span>{count !== undefined && <em className={warn ? 'warn' : ''}>{count}</em>}</button>
 }
 
-function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, workspaceShells, capabilities, settings, imageTypes, agentAvailable, modelName, refresh, refreshConnections, refreshApprovals, onCreateWorkspaceShell, onOpenWorkspaceShell, onWorkspaceShellStarted, onSettingsChanged, onHostChanged, onModelChanged, sidebarTarget, onSessionDeleted, onError, onStreamingChange }: {visible:boolean;onActivate:()=>void;hosts:Host[];providers:ModelProvider[];approvals:Approval[];runs:Run[];workspaceShells:SSHShell[];capabilities:ToolCapabilities;settings:SystemSettings|null;imageTypes:string[];agentAvailable:boolean;modelName?:string;refresh:()=>Promise<void>;refreshConnections:()=>Promise<void>;refreshApprovals:(decidedID?:string)=>Promise<void>;onCreateWorkspaceShell:(workspaceID:string)=>Promise<void>;onOpenWorkspaceShell:(shell:SSHShell)=>void;onWorkspaceShellStarted:(shell:SSHShell)=>void;onSettingsChanged:(settings:SystemSettings)=>void;onHostChanged:(host:Host)=>void;onModelChanged:(provider:ModelProvider)=>void;sidebarTarget:HTMLDivElement|null;onSessionDeleted:(sessionID:string)=>void;onError:(message:string)=>void;onStreamingChange:(streaming:boolean)=>void}) {
-	const {t,i18n:instance}=useTranslation()
+function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, workspaceShells, capabilities, settings, imageTypes, agentAvailable, modelName, contextWindow, refresh, refreshConnections, refreshApprovals, onCreateWorkspaceShell, onOpenWorkspaceShell, onWorkspaceShellStarted, onSettingsChanged, onHostChanged, onModelChanged, sidebarTarget, onSessionDeleted, onError, onStreamingChange }: {visible:boolean;onActivate:()=>void;hosts:Host[];providers:ModelProvider[];approvals:Approval[];runs:Run[];workspaceShells:SSHShell[];capabilities:ToolCapabilities;settings:SystemSettings|null;imageTypes:string[];agentAvailable:boolean;modelName?:string;contextWindow:number;refresh:()=>Promise<void>;refreshConnections:()=>Promise<void>;refreshApprovals:(decidedID?:string)=>Promise<void>;onCreateWorkspaceShell:(workspaceID:string)=>Promise<void>;onOpenWorkspaceShell:(shell:SSHShell)=>void;onWorkspaceShellStarted:(shell:SSHShell)=>void;onSettingsChanged:(settings:SystemSettings)=>void;onHostChanged:(host:Host)=>void;onModelChanged:(provider:ModelProvider)=>void;sidebarTarget:HTMLDivElement|null;onSessionDeleted:(sessionID:string)=>void;onError:(message:string)=>void;onStreamingChange:(streaming:boolean)=>void}) {
+		const {t,i18n:instance}=useTranslation()
+		const activeContextWindow=contextWindow
   const [entries, setEntries] = useState<ChatEntry[]>([])
 	  const [message, setMessage] = useState('')
 	  const [pendingImages,setPendingImages]=useState<PendingChatImage[]>([])
@@ -1623,6 +1645,8 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	const [connectionRetry,setConnectionRetry]=useState<ConnectionRetryState|null>(null)
 	const [retryClock,setRetryClock]=useState(0)
   const [reasoningSeen, setReasoningSeen] = useState(false)
+		const [contextUsage,setContextUsage]=useState<ContextUsage>({tokens:0,window:activeContextWindow})
+		useEffect(()=>setContextUsage(current=>current.tokens===0?{...current,window:activeContextWindow}:current),[activeContextWindow])
   const [plan,setPlan]=useState<AgentPlan|null>(null)
 	const [planExpanded,setPlanExpanded]=useState(false)
 	const [approvalNotice,setApprovalNotice]=useState('')
@@ -1642,6 +1666,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	const sessionBusy=running||detachedRunning
 	const toolsRunning=entries.some(item=>item.kind==='tool'&&item.transient)
 	const selectedWorkspace=capabilities.workspaces.find(workspace=>workspace.id===workspaceID)||capabilities.workspaces[0]
+	useEffect(()=>{if(!sessionId)setContextUsage({tokens:0,window:activeContextWindow})},[activeContextWindow,sessionId])
 	useEffect(()=>{if(!selectedWorkspace)return;if(workspaceID!==selectedWorkspace.id)setWorkspaceID(selectedWorkspace.id);rememberWorkspace(selectedWorkspace.id)},[selectedWorkspace,workspaceID])
 	useEffect(()=>{if(!plan)setPlanExpanded(false);else if(plan.status==='active')setPlanExpanded(true)},[plan?.session_id,plan?.status])
 	useEffect(()=>{
@@ -1688,12 +1713,12 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
     try {
       const state = await api.chatState(id)
       if(sessionLoadRef.current!==requestID)return
-	      setEntries(historyEntries(state.messages||[],id));setDetachedRunning(!!state.active);setStopping(false);setModelRetry(null);setConnectionRetry(null);setPlan(state.plan||null);setWorkspaceID(state.workspace_id||'');setBoundWorkspaceID(state.workspace_id||'')
+	      setEntries(historyEntries(state.messages||[],id));setDetachedRunning(!!state.active);setStopping(false);setModelRetry(null);setConnectionRetry(null);setPlan(state.plan||null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setWorkspaceID(state.workspace_id||'');setBoundWorkspaceID(state.workspace_id||'')
       setSessionId(id); rememberSession(id); setHistoryError('')
       void refresh()
     } catch (err) { if(sessionLoadRef.current===requestID)setHistoryError(errorText(err)) }
     finally { if(sessionLoadRef.current===requestID)setLoadingSession('') }
-  }, [refresh])
+  }, [activeContextWindow,refresh])
 
   const activeSessionCount=useMemo(()=>sessions.filter(item=>item.active).length,[sessions])
   useEffect(()=>{
@@ -1749,7 +1774,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
     detachActiveStream()
     sessionLoadRef.current=''
     setLoadingSession('')
-	    stickToLatest.current=true;setSessionId('');setBoundWorkspaceID('');setEntries([]); setMessage('');clearPendingImages(); setHistoryError(''); setReasoningSeen(false);setDetachedRunning(false);setStopping(false);setModelRetry(null);setConnectionRetry(null);setPlan(null); rememberSession(newSessionMarker)
+	    stickToLatest.current=true;setSessionId('');setBoundWorkspaceID('');setEntries([]); setMessage('');clearPendingImages(); setHistoryError(''); setReasoningSeen(false);setContextUsage({tokens:0,window:activeContextWindow});setDetachedRunning(false);setStopping(false);setModelRetry(null);setConnectionRetry(null);setPlan(null); rememberSession(newSessionMarker)
     void refreshSessions()
   }
 
@@ -1811,6 +1836,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			void refreshApprovals()
 		}
 		if(frame.type==='tool_output')setEntries(old=>appendToolOutput(old,frame))
+		if(frame.type==='context_usage'&&frame.context_tokens!==undefined)setContextUsage({tokens:frame.context_tokens,window:frame.context_window||activeContextWindow})
 		if(frame.type==='reasoning'&&frame.content){
 			setReasoningSeen(true)
 			const reasoningID=`reasoning_${frame.segment_id||'current'}`
@@ -1856,7 +1882,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			setEntries(old=>[...old.map(item=>updateUser(deactivateReasoning(item),'failed')),{id:clientId(),kind:'assistant',content:frame.content||t('chat.stopped'),lifecycle:'committed'}])
 		}
 		if(frame.type==='model_error'||frame.type==='error')setEntries(old=>[...old.map(item=>updateUser(item,'failed')),{id:clientId(),kind:'error',content:frame.error||t('chat.agentError')}])
-	},[onWorkspaceShellStarted,refresh,refreshApprovals,refreshConnections,t])
+	},[activeContextWindow,onWorkspaceShellStarted,refresh,refreshApprovals,refreshConnections,t])
 
 	useEffect(()=>{
 		if(!sessionId||running||!detachedRunning)return
@@ -1875,6 +1901,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 					const state=await api.chatState(sessionId)
 					if(!active)return
 					setPlan(state.plan||null)
+					setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)})
 					setBoundWorkspaceID(state.workspace_id||'')
 					if(!state.active){
 						setEntries(old=>settledTurnEntries(state.messages||[],sessionId,old,false))
@@ -1901,7 +1928,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		}
 		void reconnect()
 		return()=>{active=false;controller.abort()}
-	},[detachedRunning,handleAgentFrame,refresh,refreshSessions,running,sessionId])
+	},[activeContextWindow,detachedRunning,handleAgentFrame,refresh,refreshSessions,running,sessionId])
 
 	useEffect(()=>{
 		if(!sessionId||!toolsRunning)return
@@ -1911,6 +1938,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 				const state=await api.chatState(sessionId)
 				if(!active)return
 				setEntries(old=>mergePersistedToolEntries(state.messages||[],sessionId,old))
+				setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)})
 				if(state.active&&!running)setDetachedRunning(true)
 				if(!state.active&&!(state.tool_calls||[]).some(call=>call.status==='running'))setStopping(false)
 			}catch{/* keep the last confirmed tool state and retry */}
@@ -1918,7 +1946,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		void poll()
 		const timer=window.setInterval(()=>{if(document.visibilityState==='visible')void poll()},1000)
 		return()=>{active=false;window.clearInterval(timer)}
-	},[running,sessionId,toolsRunning])
+	},[activeContextWindow,running,sessionId,toolsRunning])
 
 	  const sendQuery = async (query:string,queryImages:PendingChatImage[]) => {
 	    query=query.trim(); if((!query&&!queryImages.length)||sessionBusy||loadingSession||workspaceSwitching)return
@@ -1960,7 +1988,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			setEntries((old) => old.map(deactivateReasoning))
       setRunning(false)
 		setStopping(false)
-		if(querySessionID){try{const state=await api.chatState(querySessionID);if(!isAttached())return;setDetachedRunning(!!state.active);setPlan(state.plan||null);setBoundWorkspaceID(state.workspace_id||'');setEntries(old=>settledTurnEntries(state.messages||[],querySessionID,old,!!state.active));for(const image of queryImages){URL.revokeObjectURL(image.url);imageURLsRef.current.delete(image.url)}}catch{/* polling or the next reload will recover state */}}
+		if(querySessionID){try{const state=await api.chatState(querySessionID);if(!isAttached())return;setDetachedRunning(!!state.active);setPlan(state.plan||null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setBoundWorkspaceID(state.workspace_id||'');setEntries(old=>settledTurnEntries(state.messages||[],querySessionID,old,!!state.active));for(const image of queryImages){URL.revokeObjectURL(image.url);imageURLsRef.current.delete(image.url)}}catch{/* polling or the next reload will recover state */}}
       if(!isAttached())return
       activeStreamRef.current=null
       void refreshSessions();void refresh()
@@ -1976,7 +2004,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		try{
 			const result=await api.cancelChatSession(targetSessionID)
 			requested=result.cancelled
-			if(!result.cancelled){const state=await api.chatState(targetSessionID);setDetachedRunning(!!state.active);setPlan(state.plan||null);setEntries(historyEntries(state.messages||[],targetSessionID));void refreshSessions();void refresh()}
+			if(!result.cancelled){const state=await api.chatState(targetSessionID);setDetachedRunning(!!state.active);setPlan(state.plan||null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setEntries(historyEntries(state.messages||[],targetSessionID));void refreshSessions();void refresh()}
 		}catch(err){setEntries(old=>[...old,{id:clientId(),kind:'error',content:t('chat.stopFailed',{message:errorText(err)})}])}
 		finally{if(!requested)setStopping(false)}
   }
@@ -2020,7 +2048,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		</div>
 		  <form className="composer" onSubmit={submit}>
 			  {(sessionBusy||toolsRunning)&&<div className="llm-work-status" role="status" aria-live="polite"><LoaderCircle className="spin" size={13}/><b>{stopping?t('chat.stopping'):connectionRetryLabel||modelRetryLabel||t(sessionBusy?'chat.running':'chat.toolsRunning')}</b><button type="button" className="agent-stop-button" onClick={()=>void stopAgent()} disabled={stopping||!(activeStreamRef.current?.sessionId||sessionId)} title={t('chat.stopTitle')}><Square size={11} fill="currentColor"/>{t('chat.stop')}</button></div>}
-			  <div className="context-line"><ApprovalModeStatus settings={settings} onChanged={onSettingsChanged} onError={onError}/><ComposerHostSelector hosts={hosts} disabled={sessionBusy} onChanged={onHostChanged} onError={onError}/><div className="composer-model-controls"><ComposerReasoningSelector providers={providers} disabled={sessionBusy} onChanged={onModelChanged} onError={onError}/><ComposerModelSelector providers={providers} fallbackModel={modelName} disabled={sessionBusy} onChanged={onModelChanged} onError={onError}/></div></div>
+			  <div className="context-line"><ApprovalModeStatus settings={settings} onChanged={onSettingsChanged} onError={onError}/><ComposerHostSelector hosts={hosts} disabled={sessionBusy} onChanged={onHostChanged} onError={onError}/><div className="composer-model-controls"><ContextUsageRing usage={contextUsage}/><ComposerReasoningSelector providers={providers} disabled={sessionBusy} onChanged={onModelChanged} onError={onError}/><ComposerModelSelector providers={providers} fallbackModel={modelName} disabled={sessionBusy} onChanged={onModelChanged} onError={onError}/></div></div>
 			  {pendingImages.length>0&&<div className="composer-images">{pendingImages.map(image=><div key={image.id}><img src={image.url} alt={image.file.name}/><span title={image.file.name}>{image.file.name}</span><button type="button" onClick={()=>removePendingImage(image.id)} title={t('chat.removeImage')}><X size={11}/></button></div>)}</div>}
 			  {imageNotice&&<div className="composer-image-notice">{imageNotice}<button type="button" onClick={()=>setImageNotice('')}><X size={11}/></button></div>}
 			  <div className="input-row"><label className="image-attach-button" title={t('chat.addImages')}><ImagePlus size={18}/><input key={imageInputKey} type="file" accept={imageTypes.join(',')} multiple disabled={!agentAvailable||sessionBusy||workspaceSwitching||!!loadingSession} onChange={event=>addImages(Array.from(event.target.files||[]))}/></label><textarea value={message} onChange={(event) => setMessage(event.target.value)} onPaste={event=>{const files=Array.from(event.clipboardData.files).filter(file=>file.type.startsWith('image/'));if(files.length)addImages(files)}} placeholder={!agentAvailable?t('chat.configureModel'):loadingSession?t('chat.loadingConversation'):sessionBusy?t('chat.busyPlaceholder'):t('chat.prompt')} disabled={!agentAvailable||sessionBusy||workspaceSwitching||!!loadingSession} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }}/><button aria-label={t('common.next')} disabled={!agentAvailable || sessionBusy || workspaceSwitching || !!loadingSession || (!message.trim()&&!pendingImages.length)}><Send size={18}/></button></div>
@@ -3095,7 +3123,7 @@ function ProxiesPage({proxies,showAddresses,onToggleAddresses,refresh}:{proxies:
 	</div>
 }
 
-const emptyProviderForm: ModelProviderInput = {name:'',kind:'openai',base_url:'',model:'gpt-4o-mini',reasoning_effort:'',api_key:'',proxy_id:'',user_agent:''}
+const emptyProviderForm: ModelProviderInput = {name:'',kind:'openai',base_url:'',model:'gpt-4o-mini',context_window:null,reasoning_effort:'',api_key:'',proxy_id:'',user_agent:''}
 const providerLabels: Record<ModelProviderKind,string> = {
   openai: 'OpenAI', deepseek: 'DeepSeek', anthropic: 'Anthropic', openai_compatible: 'OpenAI-compatible', ollama: 'Ollama',
 }
@@ -3120,11 +3148,11 @@ function ModelsPage({providers,proxies,showAddresses,onToggleAddresses,refresh}:
   const editing=!!form.id
 
   const openCreate=()=>{setForm(emptyProviderForm);setCatalog([]);setShowForm(true)}
-  const openEdit=(provider:ModelProvider)=>{setForm({id:provider.id,name:provider.name,kind:provider.kind,base_url:provider.base_url||'',model:provider.model,reasoning_effort:provider.reasoning_effort||'',api_key:'',proxy_id:provider.proxy_id||'',user_agent:provider.user_agent||''});setCatalog([]);setShowForm(true)}
-  const changeKind=(kind:ModelProviderKind)=>{setCatalog([]);setForm({...form,kind,...providerDefaults[kind]})}
-	const discover=async()=>{setDiscovering(true);try{const {name:_name,model:_model,reasoning_effort:_reasoningEffort,...payload}=form;const result=await api.discoverModels(payload);setCatalog(result.models);setForm(current=>({...current,model:result.models.includes(current.model)?current.model:''}));notify(t('models.found',{count:result.count}))}catch(err){setCatalog([]);notify(errorText(err),'error')}finally{setDiscovering(false)}}
+	const openEdit=(provider:ModelProvider)=>{setForm({id:provider.id,name:provider.name,kind:provider.kind,base_url:provider.base_url||'',model:provider.model,context_window:provider.context_window||null,reasoning_effort:provider.reasoning_effort||'',api_key:'',proxy_id:provider.proxy_id||'',user_agent:provider.user_agent||''});setCatalog([]);setShowForm(true)}
+	const changeKind=(kind:ModelProviderKind)=>{setCatalog([]);setForm({...form,kind,context_window:null,...providerDefaults[kind]})}
+	const discover=async()=>{setDiscovering(true);try{const {name:_name,model:_model,context_window:_contextWindow,reasoning_effort:_reasoningEffort,...payload}=form;const result=await api.discoverModels(payload);setCatalog(result.models);setForm(current=>({...current,model:result.models.includes(current.model)?current.model:''}));notify(t('models.found',{count:result.count}))}catch(err){setCatalog([]);notify(errorText(err),'error')}finally{setDiscovering(false)}}
 		const setTestRunning=(key:string,running:boolean)=>setTesting(current=>{const next=new Set(current);if(running)next.add(key);else next.delete(key);return next})
-		const testForm=async()=>{const key='form';setTestRunning(key,true);try{const {name:_name,...payload}=form;const result=await api.testModelConfiguration(payload);notify(t('models.healthy',{name:result.model,response:result.response,latency:result.latency_ms}))}catch(err){notify(errorText(err),'error')}finally{setTestRunning(key,false)}}
+		const testForm=async()=>{const key='form';setTestRunning(key,true);try{const {name:_name,context_window:_contextWindow,...payload}=form;const result=await api.testModelConfiguration(payload);notify(t('models.healthy',{name:result.model,response:result.response,latency:result.latency_ms}))}catch(err){notify(errorText(err),'error')}finally{setTestRunning(key,false)}}
 	const save=async(event:FormEvent)=>{event.preventDefault();setBusy('save');try{const saved=await api.saveModelProvider(form);notify(t('models.saved',{name:saved.name}));setShowForm(false);setForm(emptyProviderForm);await refresh()}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
 	const activate=async(provider:ModelProvider)=>{setBusy(provider.id);try{await api.activateModelProvider(provider.id);notify(t('models.activated',{name:provider.name}));await refresh()}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
 		const test=async(provider:ModelProvider)=>{setTestRunning(provider.id,true);try{const result=await api.testModelProvider(provider.id);notify(t('models.healthy',{name:provider.name,response:result.response,latency:result.latency_ms}))}catch(err){notify(errorText(err),'error')}finally{setTestRunning(provider.id,false)}}
@@ -3138,6 +3166,7 @@ function ModelsPage({providers,proxies,showAddresses,onToggleAddresses,refresh}:
 		<label><span>{t('models.providerType')}</span><select value={form.kind} onChange={event=>changeKind(event.target.value as ModelProviderKind)}>{(Object.keys(providerLabels) as ModelProviderKind[]).map(kind=><option key={kind} value={kind}>{providerLabels[kind]}</option>)}</select></label>
 		<label className="model-id-field"><span className="field-title"><span>{t('models.modelId')}</span><button type="button" onClick={discover} disabled={discovering}><RefreshCw size={12}/>{discovering?t('models.fetching'):t('models.fetchModels')}</button></span>{catalog.length>0?<select value={form.model} onChange={event=>setForm({...form,model:event.target.value})} required><option value="">{t('models.selectModel')}</option>{catalog.map(model=><option value={model} key={model}>{model}</option>)}</select>:<input value={form.model} onChange={event=>setForm({...form,model:event.target.value})} placeholder={t('models.modelPlaceholder')} required/>}{catalog.length>0&&<small>{t('models.available',{count:catalog.length})} · <button type="button" onClick={()=>setCatalog([])}>{t('models.enterManually')}</button></small>}</label>
 			<label><span>{t('models.reasoningEffort')}</span><select value={form.reasoning_effort} onChange={event=>setForm({...form,reasoning_effort:event.target.value as ModelProviderInput['reasoning_effort']})}><option value="">default</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select></label>
+			<label><span>{t('models.contextWindow')}</span><input type="number" min={1024} max={10000000} value={form.context_window??''} onChange={event=>setForm({...form,context_window:event.target.value?Number(event.target.value):null})} placeholder={t('models.contextAuto')}/></label>
 			<label><span>{t('models.apiKey')}</span><PasswordInput autoComplete="new-password" value={form.api_key} onChange={event=>{setCatalog([]);setForm({...form,api_key:event.target.value})}} placeholder={editing?t('models.keepKey'):''}/></label>
 			<label className="base-url-field"><span>{t('models.baseUrl')}</span><input value={form.base_url} onChange={event=>{setCatalog([]);setForm({...form,base_url:event.target.value})}} placeholder={form.kind==='openai'?t('models.officialEndpoint'):''}/></label>
 			<label><span>{t('models.userAgent')}</span><input value={form.user_agent} onChange={event=>{setCatalog([]);setForm({...form,user_agent:event.target.value})}} placeholder={t('models.userAgentHint')}/></label>
@@ -3148,7 +3177,7 @@ function ModelsPage({providers,proxies,showAddresses,onToggleAddresses,refresh}:
     {!showForm&&<div className="model-grid">{providers.map(provider=>{const proxy=proxies.find(item=>item.id===provider.proxy_id);return <article className={`model-card panel ${provider.active?'active':''}`} key={provider.id}>
 	  <div className="model-card-head"><div className="provider-glyph"><Cpu size={21}/></div><div><h3>{provider.name}</h3><span>{providerLabels[provider.kind]}</span></div>{provider.active&&<em><Zap size={12}/>{t('models.active')}</em>}</div>
       <div className="model-name">{provider.model}</div>
-	  <dl><div><dt>{t('models.endpoint')}</dt><dd>{provider.base_url?(showAddresses?provider.base_url:'••••••'):t('models.providerDefault')}</dd></div><div><dt>{t('models.proxy')}</dt><dd title={showAddresses?proxy?.url:undefined}>{proxy?.name||t('models.noProxy')}</dd></div>{provider.user_agent&&<div><dt>{t('models.userAgent')}</dt><dd>{provider.user_agent}</dd></div>}<div><dt>{t('models.credential')}</dt><dd>{provider.has_api_key?t('models.encryptedKey'):t('models.noApiKey')}</dd></div><div><dt>{t('common.updated')}</dt><dd>{new Date(provider.updated_at).toLocaleString(localeFor(instance.language))}</dd></div></dl>
+	  <dl><div><dt>{t('models.endpoint')}</dt><dd>{provider.base_url?(showAddresses?provider.base_url:'••••••'):t('models.providerDefault')}</dd></div><div><dt>{t('models.contextWindow')}</dt><dd>{provider.context_window?compactTokenCount(provider.context_window):t('models.contextAuto')}</dd></div><div><dt>{t('models.proxy')}</dt><dd title={showAddresses?proxy?.url:undefined}>{proxy?.name||t('models.noProxy')}</dd></div>{provider.user_agent&&<div><dt>{t('models.userAgent')}</dt><dd>{provider.user_agent}</dd></div>}<div><dt>{t('models.credential')}</dt><dd>{provider.has_api_key?t('models.encryptedKey'):t('models.noApiKey')}</dd></div><div><dt>{t('common.updated')}</dt><dd>{new Date(provider.updated_at).toLocaleString(localeFor(instance.language))}</dd></div></dl>
 		  <div className="model-actions"><button onClick={()=>test(provider)} disabled={!!busy||testing.has(provider.id)}><Activity size={14}/>{testing.has(provider.id)?t('common.testing'):t('common.test')}</button><button onClick={()=>openEdit(provider)} disabled={!!busy}><Edit3 size={14}/>{t('common.edit')}</button>{!provider.active&&<button className="use-model" onClick={()=>activate(provider)} disabled={!!busy}><Zap size={14}/>{busy===provider.id?t('models.switching'):t('models.useModel')}</button>}<button className="danger" title={t('common.delete')} onClick={()=>setDeleteCandidate(provider)} disabled={!!busy}><Trash2 size={14}/></button></div>
     </article>})}</div>}
 		{!showForm&&!providers.length&&<Empty icon={<Cpu/>} title={t('models.emptyTitle')}/>}

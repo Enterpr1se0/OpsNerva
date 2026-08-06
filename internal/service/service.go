@@ -490,6 +490,13 @@ func (s *Service) SaveModelProvider(ctx context.Context, input domain.ModelProvi
 	input.BaseURL = strings.TrimSpace(input.BaseURL)
 	input.Model = strings.TrimSpace(input.Model)
 	input.ProxyID = strings.TrimSpace(input.ProxyID)
+	contextWindow := 0
+	if input.ContextWindow != nil {
+		contextWindow = *input.ContextWindow
+		if contextWindow != 0 && (contextWindow < domain.MinModelContextWindow || contextWindow > domain.MaxModelContextWindow) {
+			return domain.ModelProvider{}, fmt.Errorf("context_window must be between %d and %d", domain.MinModelContextWindow, domain.MaxModelContextWindow)
+		}
+	}
 	reasoningEffort := ""
 	if input.ReasoningEffort != nil {
 		var err error
@@ -531,18 +538,25 @@ func (s *Service) SaveModelProvider(ctx context.Context, input domain.ModelProvi
 		}
 	}
 
-	provider := domain.ModelProvider{
-		ID: input.ID, Name: input.Name, Kind: input.Kind, BaseURL: input.BaseURL, Model: input.Model,
-		ProxyID: input.ProxyID, UserAgent: userAgent, ReasoningEffort: reasoningEffort,
-	}
+	var existing domain.ModelProvider
 	if input.ID != "" {
-		existing, err := s.store.GetModelProvider(ctx, input.ID)
+		existing, err = s.store.GetModelProvider(ctx, input.ID)
 		if err != nil {
 			return domain.ModelProvider{}, err
 		}
+	}
+	provider := domain.ModelProvider{
+		ID: input.ID, Name: input.Name, Kind: input.Kind, BaseURL: input.BaseURL, Model: input.Model,
+		ContextWindow: contextWindow,
+		ProxyID:       input.ProxyID, UserAgent: userAgent, ReasoningEffort: reasoningEffort,
+	}
+	if existing.ID != "" {
 		provider.CreatedAt = existing.CreatedAt
 		provider.Active = existing.Active
 		provider.APIKeyCipher = existing.APIKeyCipher
+		if input.ContextWindow == nil {
+			provider.ContextWindow = existing.ContextWindow
+		}
 		if input.UserAgent == nil {
 			provider.UserAgent = existing.UserAgent
 		}
@@ -570,6 +584,7 @@ func (s *Service) SaveModelProvider(ctx context.Context, input domain.ModelProvi
 	s.audit(ctx, "", "model_provider_saved", actor, map[string]any{
 		"provider_id": saved.ID, "name": saved.Name, "kind": saved.Kind, "model": saved.Model,
 		"proxy_id": saved.ProxyID, "reasoning_effort": saved.ReasoningEffort,
+		"context_window": saved.ContextWindow,
 	})
 	return saved, nil
 }
@@ -821,7 +836,7 @@ func (s *Service) ModelProviderConfig(ctx context.Context, id string) (config.Mo
 		return config.Model{}, domain.ModelProvider{}, err
 	}
 	return config.Model{
-		APIKey: string(key), Kind: provider.Kind, BaseURL: provider.BaseURL, Name: provider.Model, ReasoningEffort: provider.ReasoningEffort, UserAgent: provider.UserAgent,
+		APIKey: string(key), Kind: provider.Kind, BaseURL: provider.BaseURL, Name: provider.Model, ContextWindow: provider.ContextWindow, ReasoningEffort: provider.ReasoningEffort, UserAgent: provider.UserAgent,
 		ProxyURL: proxy.URL, ProxyUsername: proxy.Username, ProxyPassword: proxy.Password,
 	}, provider, nil
 }

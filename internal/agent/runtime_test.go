@@ -372,7 +372,14 @@ func TestRuntimeReloadAppliesCompleteSystemPromptToExistingConversation(t *testi
 		Content string `json:"content"`
 	}
 	requests := make(chan []wireMessage, 3)
+	var catalogRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
+			catalogRequests.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"fixture-model","context_length":200000}]}`))
+			return
+		}
 		var request struct {
 			Messages []wireMessage `json:"messages"`
 		}
@@ -412,6 +419,16 @@ func TestRuntimeReloadAppliesCompleteSystemPromptToExistingConversation(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
+	deadline := time.Now().Add(time.Second)
+	for runtime.Status().ContextWindow != 200000 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if runtime.Status().ContextWindow != 200000 {
+		t.Fatalf("detected context window = %d", runtime.Status().ContextWindow)
+	}
+	if catalogRequests.Load() != 1 {
+		t.Fatalf("model catalog requests = %d", catalogRequests.Load())
+	}
 	if _, err := runtime.Query(ctx, "same_session", "first turn", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -441,8 +458,12 @@ func TestRuntimeReloadAppliesCompleteSystemPromptToExistingConversation(t *testi
 	}, "test"); err != nil {
 		t.Fatal(err)
 	}
+	runtime.fallback.ContextWindow = 160000
 	if err := runtime.Reload(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if runtime.Status().ContextWindow != 160000 || catalogRequests.Load() != 1 {
+		t.Fatalf("manual context window = %d, catalog requests = %d", runtime.Status().ContextWindow, catalogRequests.Load())
 	}
 	if _, err := runtime.Query(ctx, "same_session", "second turn", nil); err != nil {
 		t.Fatal(err)
@@ -989,6 +1010,81 @@ func TestQueryPersistsToolCallPreambleForDisplay(t *testing.T) {
 		contextMessages[1].Role != domain.ChatMessageRoleAssistantProgress ||
 		contextMessages[2].Role != "tool" || contextMessages[3].Role != "assistant" {
 		t.Fatalf("model context omitted tool preamble: %#v", contextMessages)
+	}
+}
+
+func TestQueryEmitsAndPersistsContextUsage(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	message := schema.AssistantMessage("Context recorded.", nil)
+	message.ResponseMeta = &schema.ResponseMeta{
+		FinishReason: "stop",
+		Usage:        &schema.TokenUsage{PromptTokens: 1200, CompletionTokens: 80, TotalTokens: 1280},
+	}
+	stream := schema.StreamReaderFromArray([]*schema.Message{message})
+	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{{
+		adk.EventFromMessage(nil, stream, schema.Assistant, ""),
+	}}}
+	runtime := &Runtime{runner: runner, store: st, contextWindow: 200000}
+	var usage Event
+	if _, err := runtime.Query(ctx, "session_context_usage", "inspect context", func(event Event) {
+		if event.Type == "context_usage" {
+			usage = event
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if usage.ContextTokens != 1280 || usage.ContextWindow != 200000 {
+		t.Fatalf("context usage event = %#v", usage)
+	}
+	session, err := st.GetChatSession(ctx, "session_context_usage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.ContextTokens != 1280 || session.ContextWindow != 200000 {
+		t.Fatalf("stored context usage = %d/%d", session.ContextTokens, session.ContextWindow)
+	}
+}
+
+func TestQueryKeepsLatestModelContextUsageInsteadOfAccumulatingToolLoop(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	toolCall := schema.ToolCall{ID: "call-context", Type: "function", Function: schema.FunctionCall{Name: "ssh_exec", Arguments: `{}`}}
+	preamble := schema.AssistantMessage("Checking.", []schema.ToolCall{toolCall})
+	preamble.ResponseMeta = &schema.ResponseMeta{FinishReason: "tool_calls", Usage: &schema.TokenUsage{TotalTokens: 400}}
+	terminal := schema.AssistantMessage("Completed.", nil)
+	terminal.ResponseMeta = &schema.ResponseMeta{FinishReason: "stop", Usage: &schema.TokenUsage{TotalTokens: 900}}
+	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{{
+		adk.EventFromMessage(preamble, nil, schema.Assistant, ""),
+		adk.EventFromMessage(schema.ToolMessage("done", "call-context", schema.WithToolName("ssh_exec")), nil, schema.Tool, "ssh_exec"),
+		adk.EventFromMessage(terminal, nil, schema.Assistant, ""),
+	}}}
+	runtime := &Runtime{runner: runner, store: st, contextWindow: 128000}
+	var usages []int
+	if _, err := runtime.Query(ctx, "session_context_loop", "inspect", func(event Event) {
+		if event.Type == "context_usage" {
+			usages = append(usages, event.ContextTokens)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(usages) != 2 || usages[0] != 400 || usages[1] != 900 {
+		t.Fatalf("context usage events = %#v", usages)
+	}
+	session, err := st.GetChatSession(ctx, "session_context_loop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.ContextTokens != 900 || session.ContextWindow != 128000 {
+		t.Fatalf("stored context usage = %d/%d", session.ContextTokens, session.ContextWindow)
 	}
 }
 

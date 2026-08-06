@@ -2222,7 +2222,7 @@ func TestModelProvidersEncryptKeysAndSwitchActiveProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !first.HasAPIKey || first.Active || first.ReasoningEffort != "xhigh" {
+	if !first.HasAPIKey || first.Active || first.ReasoningEffort != "xhigh" || first.ContextWindow != 0 {
 		t.Fatalf("unexpected saved provider %#v", first)
 	}
 	stored, err := svc.store.GetModelProvider(ctx, first.ID)
@@ -2273,6 +2273,32 @@ func TestModelProvidersEncryptKeysAndSwitchActiveProvider(t *testing.T) {
 	}
 	if updatedCfg.APIKey != "sk-super-secret" || updatedCfg.ReasoningEffort != "xhigh" {
 		t.Fatalf("blank update did not preserve provider settings: %#v", updatedCfg)
+	}
+	contextWindow := 200000
+	updated, err = svc.SaveModelProvider(ctx, domain.ModelProviderInput{
+		ID: first.ID, Name: first.Name, Kind: first.Kind, Model: first.Model, ContextWindow: &contextWindow,
+	}, "test")
+	if err != nil || updated.ContextWindow != contextWindow {
+		t.Fatalf("context window update = %#v, %v", updated, err)
+	}
+	updated, err = svc.SaveModelProvider(ctx, domain.ModelProviderInput{
+		ID: first.ID, Name: first.Name, Kind: first.Kind, Model: first.Model,
+	}, "test")
+	if err != nil || updated.ContextWindow != contextWindow {
+		t.Fatalf("nil update did not preserve context window = %#v, %v", updated, err)
+	}
+	zeroContextWindow := 0
+	updated, err = svc.SaveModelProvider(ctx, domain.ModelProviderInput{
+		ID: first.ID, Name: first.Name, Kind: first.Kind, Model: first.Model, ContextWindow: &zeroContextWindow,
+	}, "test")
+	if err != nil || updated.ContextWindow != 0 {
+		t.Fatalf("explicit zero cleared context window = %#v, %v", updated, err)
+	}
+	invalidContextWindow := 100
+	if _, err := svc.SaveModelProvider(ctx, domain.ModelProviderInput{
+		Name: "invalid context", Kind: "openai", Model: "gpt-test", ContextWindow: &invalidContextWindow, APIKey: "test",
+	}, "test"); err == nil {
+		t.Fatal("invalid context window was accepted")
 	}
 	invalidReasoningEffort := "maximum"
 	if _, err := svc.SaveModelProvider(ctx, domain.ModelProviderInput{
@@ -2379,7 +2405,7 @@ func TestDiscoverModelsUsesStoredKeyAndRedactsUpstreamErrors(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":[{"id":"z-model"},{"id":"a-model"},{"id":"a-model"}]}`))
+		_, _ = w.Write([]byte(`{"data":[{"id":"z-model","max_model_len":65536},{"id":"a-model"},{"id":"a-model","context_length":131072}]}`))
 	}))
 	defer server.Close()
 
@@ -2395,8 +2421,16 @@ func TestDiscoverModelsUsesStoredKeyAndRedactsUpstreamErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if catalog.Count != 2 || strings.Join(catalog.Models, ",") != "a-model,z-model" {
+	if catalog.Count != 2 || strings.Join(catalog.Models, ",") != "a-model,z-model" || catalog.ContextWindows["a-model"] != 131072 || catalog.ContextWindows["z-model"] != 65536 {
 		t.Fatalf("unexpected catalog %#v", catalog)
+	}
+	cfg, _, err := svc.ModelProviderConfig(ctx, provider.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detected, err := svc.DetectModelContextWindow(ctx, cfg)
+	if err != nil || detected != 131072 {
+		t.Fatalf("detected context window = %d, %v", detected, err)
 	}
 
 	badURL := server.URL + "/bad"
@@ -2408,6 +2442,40 @@ func TestDiscoverModelsUsesStoredKeyAndRedactsUpstreamErrors(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), secret) {
 		t.Fatalf("upstream error exposed API key: %v", err)
+	}
+}
+
+func TestDetectOllamaContextWindow(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want int
+	}{
+		{name: "configured num_ctx", body: `{"parameters":"temperature 0.8\nnum_ctx 65536\n"}`, want: 65536},
+		{name: "model architecture", body: `{"model_info":{"llama.context_length":131072}}`, want: 131072},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/api/show" {
+					t.Fatalf("unexpected Ollama request: %s %s", r.Method, r.URL.Path)
+				}
+				var input map[string]string
+				if err := json.NewDecoder(r.Body).Decode(&input); err != nil || input["model"] != "llama-test" {
+					t.Fatalf("unexpected Ollama input %#v, %v", input, err)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			svc, _, _ := newTestService(t)
+			window, err := svc.DetectModelContextWindow(context.Background(), config.Model{
+				Kind: "ollama", BaseURL: server.URL + "/v1", Name: "llama-test",
+			})
+			if err != nil || window != test.want {
+				t.Fatalf("context window = %d, %v; want %d", window, err, test.want)
+			}
+		})
 	}
 }
 

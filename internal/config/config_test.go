@@ -149,3 +149,28 @@ func TestLoadNormalizesAndValidatesReasoningEffort(t *testing.T) {
 		t.Fatal("invalid reasoning effort was accepted")
 	}
 }
+
+func TestModelContextWindowAllowsAutoOrManualValue(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("model:\n  context_window: 0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil || cfg.Model.ContextWindow != 0 {
+		t.Fatalf("automatic context window = %d, %v", cfg.Model.ContextWindow, err)
+	}
+	if err := os.WriteFile(path, []byte("model:\n  context_window: 200000\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load(path)
+	if err != nil || cfg.Model.ContextWindow != 200000 {
+		t.Fatalf("manual context window = %d, %v", cfg.Model.ContextWindow, err)
+	}
+	if err := os.WriteFile(path, []byte("model:\n  context_window: 100\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("invalid context window was accepted")
+	}
+}

@@ -252,12 +252,16 @@ export interface AgentEvent {
   retry_attempt?: number
   retry_max?: number
   retry_delay_ms?: number
+	context_tokens?: number
+	context_window?: number
 }
 
 export interface ChatSession {
   id: string
   title: string
 	workspace_id: string
+	context_tokens: number
+	context_window: number
   message_count: number
   updated_at: string
   active: boolean
@@ -320,6 +324,8 @@ export interface AgentPlan {
 export interface ChatState {
   active: boolean
 	workspace_id: string
+	context_tokens: number
+	context_window: number
   messages: ChatMessage[]
 	tool_calls: ChatToolCall[]
   plan?: AgentPlan | null
@@ -361,6 +367,7 @@ export interface ModelProvider {
   kind: ModelProviderKind
   base_url?: string
 	model: string
+	context_window: number
 	reasoning_effort?: ModelReasoningEffort
 	has_api_key: boolean
 	proxy_id?: string
@@ -376,6 +383,7 @@ export interface ModelProviderInput {
   kind: ModelProviderKind
   base_url: string
 	model: string
+	context_window: number | null
 	reasoning_effort: ModelReasoningEffort
 	api_key: string
 	proxy_id: string
@@ -398,6 +406,7 @@ export interface ModelTestInput extends ModelDiscoveryInput {
 
 export interface ModelCatalog {
   models: string[]
+	context_windows?: Record<string,number>
   count: number
 }
 
@@ -418,6 +427,7 @@ export interface ModelStatus {
   provider_id?: string
   name?: string
   model?: string
+	context_window: number
   error?: string
 }
 

@@ -62,6 +62,7 @@ type Model struct {
 	Kind            string `yaml:"kind"`
 	BaseURL         string `yaml:"base_url"`
 	Name            string `yaml:"name"`
+	ContextWindow   int    `yaml:"context_window"`
 	ReasoningEffort string `yaml:"reasoning_effort"`
 	UserAgent       string `yaml:"user_agent"`
 	ProxyURL        string `yaml:"-"`
@@ -175,6 +176,9 @@ func resolvePath(baseDir, path string) string {
 }
 
 func validateOperationsConfig(cfg *Config) error {
+	if cfg.Model.ContextWindow != 0 && (cfg.Model.ContextWindow < 1024 || cfg.Model.ContextWindow > 10000000) {
+		return fmt.Errorf("model.context_window must be between 1024 and 10000000")
+	}
 	cfg.Model.ReasoningEffort = strings.ToLower(strings.TrimSpace(cfg.Model.ReasoningEffort))
 	switch cfg.Model.ReasoningEffort {
 	case "", "low", "medium", "high", "xhigh":
@@ -230,6 +234,7 @@ func applyEnv(cfg *Config) {
 	setString(&cfg.Model.APIKey, "OPENAI_API_KEY")
 	setString(&cfg.Model.BaseURL, "OPENAI_BASE_URL")
 	setString(&cfg.Model.Name, "OPENAI_MODEL")
+	setInt(&cfg.Model.ContextWindow, "OPENAI_CONTEXT_WINDOW")
 	setString(&cfg.Model.ReasoningEffort, "OPENAI_REASONING_EFFORT")
 	setInt(&cfg.Limits.GlobalConcurrency, "OPS_AGENT_GLOBAL_CONCURRENCY")
 	setInt(&cfg.Limits.HostConcurrency, "OPS_AGENT_HOST_CONCURRENCY")

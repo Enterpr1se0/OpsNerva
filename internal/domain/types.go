@@ -79,12 +79,18 @@ type HostCapability struct {
 	SudoMode string `json:"sudo_mode"`
 }
 
+const (
+	MinModelContextWindow = 1024
+	MaxModelContextWindow = 10000000
+)
+
 type ModelProvider struct {
 	ID              string    `json:"id"`
 	Name            string    `json:"name"`
 	Kind            string    `json:"kind"`
 	BaseURL         string    `json:"base_url,omitempty"`
 	Model           string    `json:"model"`
+	ContextWindow   int       `json:"context_window"`
 	ReasoningEffort string    `json:"reasoning_effort,omitempty"`
 	APIKeyCipher    string    `json:"-"`
 	HasAPIKey       bool      `json:"has_api_key"`
@@ -101,6 +107,7 @@ type ModelProviderInput struct {
 	Kind            string  `json:"kind"`
 	BaseURL         string  `json:"base_url,omitempty"`
 	Model           string  `json:"model"`
+	ContextWindow   *int    `json:"context_window,omitempty"`
 	ReasoningEffort *string `json:"reasoning_effort,omitempty"`
 	APIKey          string  `json:"api_key,omitempty"`
 	ProxyID         string  `json:"proxy_id,omitempty"`
@@ -158,8 +165,9 @@ type ProxyTestResult struct {
 }
 
 type ModelCatalog struct {
-	Models []string `json:"models"`
-	Count  int      `json:"count"`
+	Models         []string       `json:"models"`
+	ContextWindows map[string]int `json:"context_windows,omitempty"`
+	Count          int            `json:"count"`
 }
 
 const (
@@ -372,12 +380,14 @@ type MCPTestResult struct {
 }
 
 type ChatSession struct {
-	ID           string    `json:"id"`
-	Title        string    `json:"title"`
-	WorkspaceID  string    `json:"workspace_id"`
-	MessageCount int       `json:"message_count"`
-	UpdatedAt    time.Time `json:"updated_at"`
-	Active       bool      `json:"active"`
+	ID            string    `json:"id"`
+	Title         string    `json:"title"`
+	WorkspaceID   string    `json:"workspace_id"`
+	ContextTokens int       `json:"context_tokens"`
+	ContextWindow int       `json:"context_window"`
+	MessageCount  int       `json:"message_count"`
+	UpdatedAt     time.Time `json:"updated_at"`
+	Active        bool      `json:"active"`
 }
 
 type ChatMessage struct {

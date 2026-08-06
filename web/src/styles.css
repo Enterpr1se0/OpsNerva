@@ -428,5 +428,6 @@
 .sidebar-foot{grid-row:4;margin-top:8px;padding-top:8px;border-top:1px solid var(--line)}.build{margin-top:0;font-size:var(--text-micro)}
 main{grid-column:2}.topbar{height:72px;padding:14px 24px}.topbar h1{margin:0;font-size:20px}.workspace{max-width:1800px;padding:16px 24px 24px}.chat-layout{grid-template-columns:290px minmax(580px,1fr);height:calc(100vh - 112px)}.chat-layout.page-hidden{display:none}
 .composer-model-controls{justify-self:end;display:flex;align-items:center;gap:3px;min-width:0}.composer-reasoning-menu{right:0;width:150px}
+.context-usage-ring{position:relative;flex:0 0 21px;width:21px;height:21px;display:grid;place-items:center;margin-right:2px;color:var(--green)}.context-usage-ring svg{position:absolute;inset:0;width:100%;height:100%;transform:rotate(-90deg);overflow:visible}.context-usage-ring circle{fill:none;stroke-width:3}.context-usage-track{stroke:var(--line)}.context-usage-value{stroke:currentColor;stroke-linecap:round}.context-usage-ring.warn{color:var(--amber)}.context-usage-ring.danger{color:var(--red)}
 @media(max-width:1450px){.chat-layout{grid-template-columns:280px minmax(580px,1fr)}}
 @media(max-width:1200px){.chat-layout{grid-template-columns:270px minmax(540px,1fr)}}

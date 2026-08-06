@@ -149,7 +149,7 @@ const en = {
     stopped: 'Agent run stopped by the operator before completion.', agentError: 'Agent error',
     operator: 'Operator', responseFailed: 'response failed', processing: 'processing', blockedImage: '[Blocked image: {{alt}}]',
 	addImages: 'Add images', removeImage: 'Remove image', imageTypeRejected: 'Some image formats are not enabled.',
-    reasoning: 'Reasoning', reasoningActive: 'Reasoning...', reasoningFallback: 'Thinking...',
+    reasoning: 'Reasoning', reasoningActive: 'Reasoning...', reasoningFallback: 'Thinking...', contextUsage: 'Context {{used}} / {{limit}} tokens', contextUsageUnknown: 'Context {{used}} / -- tokens',
   },
   workspace: {
     noConfigured: 'No Workspace configured', localFiles: 'Local files', terminal: 'Terminal', newTerminal: 'New terminal', switchTerminal: 'Switch terminal', agent: 'Agent', operator: 'User', inputBy: 'Input · {{source}}', parent: 'Parent directory', uploadFile: 'Upload file', refreshFiles: 'Refresh files', switchWorkspace: 'Switch Workspace', switching: 'Switching…', boundToConversation: 'Bound to this conversation', collapsePanel: 'Collapse Workspace', expandPanel: 'Expand Workspace',
@@ -221,7 +221,7 @@ const en = {
     editTitle: 'Edit provider', newTitle: 'New model provider',
     displayName: 'Display name', providerType: 'Provider type', modelId: 'Model ID', fetching: 'Fetching...', fetchModels: 'Fetch models', selectModel: 'Select a model...',
     modelPlaceholder: 'Fetch models or enter an ID', available: '{{count}} models available', enterManually: 'enter manually', apiKey: 'API key', keepKey: 'Leave blank to keep current key',
-		reasoningEffort: 'Reasoning effort',
+		reasoningEffort: 'Reasoning effort', contextWindow: 'Context window', contextAuto: 'Auto',
     baseUrl: 'Base URL', officialEndpoint: 'Blank uses the official OpenAI endpoint',
     userAgent: 'User-Agent override', userAgentHint: 'Blank keeps the SDK default; set this when a gateway rejects SDK requests',
 		proxy: 'Proxy', noProxy: 'Direct',

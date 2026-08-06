@@ -203,27 +203,32 @@ type Event struct {
 	RetryAttempt     int    `json:"retry_attempt,omitempty"`
 	RetryMax         int    `json:"retry_max,omitempty"`
 	RetryDelayMS     int64  `json:"retry_delay_ms,omitempty"`
+	ContextTokens    int    `json:"context_tokens,omitempty"`
+	ContextWindow    int    `json:"context_window,omitempty"`
 	TransferredBytes int64  `json:"transferred_bytes,omitempty"`
 	TotalBytes       int64  `json:"total_bytes,omitempty"`
 }
 
 type Runtime struct {
-	mu         sync.RWMutex
-	reloadMu   sync.Mutex
-	activeMu   sync.RWMutex
-	baseCtx    context.Context
-	runner     agentRunner
-	finalizer  agentRunner
-	store      *store.Store
-	service    *service.Service
-	fallback   config.Model
-	status     Status
-	modelKind  string
-	tools      []ToolDescriptor
-	toolsAt    string
-	active     map[string]*activeAgentSession
-	toolScopes map[string]map[*toolExecutionScope]struct{}
-	retryWait  func(context.Context, time.Duration) error
+	mu                  sync.RWMutex
+	reloadMu            sync.Mutex
+	activeMu            sync.RWMutex
+	baseCtx             context.Context
+	runner              agentRunner
+	finalizer           agentRunner
+	store               *store.Store
+	service             *service.Service
+	fallback            config.Model
+	status              Status
+	modelKind           string
+	contextWindow       int
+	contextRevision     uint64
+	contextDetectCancel context.CancelFunc
+	tools               []ToolDescriptor
+	toolsAt             string
+	active              map[string]*activeAgentSession
+	toolScopes          map[string]map[*toolExecutionScope]struct{}
+	retryWait           func(context.Context, time.Duration) error
 }
 
 type activeAgentSession struct {
@@ -248,6 +253,7 @@ type Status struct {
 	ProviderID                      string `json:"provider_id,omitempty"`
 	Name                            string `json:"name,omitempty"`
 	Model                           string `json:"model,omitempty"`
+	ContextWindow                   int    `json:"context_window"`
 	Error                           string `json:"error,omitempty"`
 }
 
@@ -319,9 +325,11 @@ func (r *Runtime) Reload(ctx context.Context) error {
 		status = Status{Source: "none"}
 		if cfg.APIKey == "" {
 			r.mu.Lock()
+			r.resetContextDetectionLocked()
 			r.runner = nil
 			r.finalizer = nil
 			r.modelKind = ""
+			r.contextWindow = 0
 			r.status = status
 			r.tools = nil
 			r.toolsAt = ""
@@ -340,6 +348,7 @@ func (r *Runtime) Reload(ctx context.Context) error {
 		status.Name = provider.Name
 		status.Model = provider.Model
 	}
+	status.ContextWindow = cfg.ContextWindow
 
 	settings, err := r.service.SystemSettings(ctx)
 	if err != nil {
@@ -350,9 +359,11 @@ func (r *Runtime) Reload(ctx context.Context) error {
 	if err != nil {
 		status.Error = err.Error()
 		r.mu.Lock()
+		r.resetContextDetectionLocked()
 		r.runner = nil
 		r.finalizer = nil
 		r.modelKind = ""
+		r.contextWindow = 0
 		r.status = status
 		r.tools = nil
 		r.toolsAt = ""
@@ -370,9 +381,11 @@ func (r *Runtime) Reload(ctx context.Context) error {
 	if err != nil {
 		status.Error = err.Error()
 		r.mu.Lock()
+		r.resetContextDetectionLocked()
 		r.runner = nil
 		r.finalizer = nil
 		r.modelKind = ""
+		r.contextWindow = 0
 		r.status = status
 		r.tools = nil
 		r.toolsAt = ""
@@ -448,18 +461,69 @@ func (r *Runtime) Reload(ctx context.Context) error {
 		status.AutomaticApprovalAgentAvailable = true
 	}
 	status.Available = true
+	var detectCtx context.Context
+	var detectCancel context.CancelFunc
 	r.mu.Lock()
+	revision := r.resetContextDetectionLocked()
 	r.runner = runner
 	r.finalizer = finalizer
 	r.status = status
 	r.modelKind = cfg.Kind
+	r.contextWindow = cfg.ContextWindow
+	if cfg.ContextWindow == 0 {
+		detectCtx, detectCancel = context.WithTimeout(r.baseCtx, 15*time.Second)
+		r.contextDetectCancel = detectCancel
+	}
 	r.tools = toolDescriptors
 	r.toolsAt = time.Now().UTC().Format(time.RFC3339Nano)
 	r.mu.Unlock()
+	if detectCancel != nil {
+		go r.detectContextWindow(detectCtx, detectCancel, cfg, revision)
+	}
 	r.service.SetApprovalReviewer(approvalCoordinator)
 	r.service.SetAutomaticApprovalReviewer(automaticApprovalCoordinator)
 	observability.FromContext(ctx).InfoContext(ctx, "model runtime ready", "component", "agent", "source", status.Source, "provider_id", status.ProviderID, "model", status.Model, "max_iterations", settings.AgentMaxIterations, "approval_agent", status.ApprovalAgentAvailable, "automatic_approval_agent", status.AutomaticApprovalAgentAvailable, "approval_provider_id", status.ApprovalProviderID, "approval_model", status.ApprovalModel, "automatic_approval_provider_id", status.AutomaticApprovalProviderID, "automatic_approval_model", status.AutomaticApprovalModel, "approval_timeout_seconds", status.ApprovalTimeoutSeconds)
 	return nil
+}
+
+func (r *Runtime) resetContextDetectionLocked() uint64 {
+	if r.contextDetectCancel != nil {
+		r.contextDetectCancel()
+		r.contextDetectCancel = nil
+	}
+	r.contextRevision++
+	return r.contextRevision
+}
+
+func (r *Runtime) detectContextWindow(ctx context.Context, cancel context.CancelFunc, cfg config.Model, revision uint64) {
+	defer func() {
+		cancel()
+		r.mu.Lock()
+		if revision == r.contextRevision {
+			r.contextDetectCancel = nil
+		}
+		r.mu.Unlock()
+	}()
+	window, err := r.service.DetectModelContextWindow(ctx, cfg)
+	if err != nil {
+		if !errors.Is(err, context.Canceled) {
+			observability.FromContext(ctx).WarnContext(ctx, "detect model context window failed", "component", "agent", "model", cfg.Name, "error", err)
+		}
+		return
+	}
+	if window == 0 {
+		observability.FromContext(ctx).DebugContext(ctx, "model context window unavailable", "component", "agent", "model", cfg.Name)
+		return
+	}
+	r.mu.Lock()
+	if revision != r.contextRevision || r.contextWindow != 0 {
+		r.mu.Unlock()
+		return
+	}
+	r.contextWindow = window
+	r.status.ContextWindow = window
+	r.mu.Unlock()
+	observability.FromContext(ctx).InfoContext(ctx, "model context window detected", "component", "agent", "model", cfg.Name, "context_window", window)
 }
 
 func (r *Runtime) Available() bool {
@@ -660,6 +724,8 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 	runner := r.runner
 	finalizer := r.finalizer
 	modelKind := r.modelKind
+	contextWindow := r.contextWindow
+	contextRevision := r.contextRevision
 	inlineContext := modelKind == "anthropic"
 	r.mu.RUnlock()
 	if runner == nil {
@@ -814,6 +880,45 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 	userMessageID, err := r.store.AppendPendingChatMessageWithAttachments(ctx, sessionID, "user", query, attachments)
 	if err != nil {
 		return "", err
+	}
+	lastContextTokens := chatSession.ContextTokens
+	lastEmittedContextTokens := -1
+	lastEmittedContextWindow := -1
+	recordContextUsage := func(message *schema.Message) {
+		if message == nil || message.ResponseMeta == nil || message.ResponseMeta.Usage == nil {
+			return
+		}
+		usage := message.ResponseMeta.Usage
+		tokens := usage.TotalTokens
+		if tokens <= 0 {
+			tokens = usage.PromptTokens + usage.CompletionTokens
+		}
+		if tokens <= 0 {
+			return
+		}
+		usageWindow := contextWindow
+		if usageWindow == 0 {
+			r.mu.RLock()
+			if r.contextRevision == contextRevision {
+				usageWindow = r.contextWindow
+			}
+			r.mu.RUnlock()
+		}
+		if tokens != lastContextTokens || usageWindow != chatSession.ContextWindow {
+			persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			if persistErr := r.store.SetChatSessionContextUsage(persistCtx, sessionID, tokens, usageWindow); persistErr != nil {
+				logger.ErrorContext(persistCtx, "persist chat context usage failed", "context_tokens", tokens, "context_window", usageWindow, "error", persistErr)
+			}
+			cancel()
+			lastContextTokens = tokens
+			chatSession.ContextWindow = usageWindow
+		}
+		if tokens == lastEmittedContextTokens && usageWindow == lastEmittedContextWindow {
+			return
+		}
+		lastEmittedContextTokens = tokens
+		lastEmittedContextWindow = usageWindow
+		emit(Event{Type: "context_usage", SessionID: sessionID, ContextTokens: tokens, ContextWindow: usageWindow})
 	}
 	turnCompleted := false
 	finalAnswerContext := finalAnswerInput{Request: query, ToolResults: make([]finalAnswerToolResult, 0)}
@@ -1053,6 +1158,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 					streamChunks++
 					if variant.Role == schema.Assistant {
 						assistantChunks = append(assistantChunks, message)
+						recordContextUsage(message)
 						if message.ResponseMeta != nil && message.ResponseMeta.FinishReason != "" {
 							lastFinishReason = message.ResponseMeta.FinishReason
 						}
@@ -1168,6 +1274,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 			if variant.Message != nil {
 				assistantHasToolCalls := variant.Role == schema.Assistant && len(variant.Message.ToolCalls) > 0
 				if variant.Role == schema.Assistant {
+					recordContextUsage(variant.Message)
 					if assistantHasToolCalls {
 						toolCalls.add(variant.Message.ToolCalls)
 					}

@@ -1774,7 +1774,11 @@ func (s *Server) chatState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	active := s.agent != nil && s.agent.IsSessionActive(sessionID)
-	writeJSON(w, http.StatusOK, map[string]any{"active": active, "workspace_id": session.WorkspaceID, "messages": messages, "tool_calls": toolCalls, "plan": plan})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"active": active, "workspace_id": session.WorkspaceID,
+		"context_tokens": session.ContextTokens, "context_window": session.ContextWindow,
+		"messages": messages, "tool_calls": toolCalls, "plan": plan,
+	})
 }
 
 func (s *Server) chatSessions(w http.ResponseWriter, r *http.Request) {

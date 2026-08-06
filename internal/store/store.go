@@ -306,6 +306,8 @@ CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_events(created_at DESC);
 CREATE TABLE IF NOT EXISTS chat_sessions (
   session_id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL DEFAULT '',
+	context_tokens INTEGER NOT NULL DEFAULT 0,
+	context_window INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -441,6 +443,7 @@ CREATE TABLE IF NOT EXISTS model_providers (
   kind TEXT NOT NULL,
   base_url TEXT NOT NULL DEFAULT '',
   model TEXT NOT NULL,
+	context_window INTEGER NOT NULL DEFAULT 0,
   api_key_cipher TEXT NOT NULL DEFAULT '',
   proxy_id TEXT NOT NULL DEFAULT '',
   user_agent TEXT NOT NULL DEFAULT '',
@@ -522,6 +525,15 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
 		return err
 	}
 	if err := s.ensureColumn(ctx, "model_providers", "reasoning_effort", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "model_providers", "context_window", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "chat_sessions", "context_tokens", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "chat_sessions", "context_window", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "chat_messages", "model_extra_json", "TEXT NOT NULL DEFAULT '{}'"); err != nil {
@@ -685,12 +697,12 @@ func (s *Store) UpsertModelProvider(ctx context.Context, provider domain.ModelPr
 	}
 	provider.UpdatedAt = now
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO model_providers(id,name,kind,base_url,model,api_key_cipher,proxy_id,user_agent,reasoning_effort,active,created_at,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+INSERT INTO model_providers(id,name,kind,base_url,model,context_window,api_key_cipher,proxy_id,user_agent,reasoning_effort,active,created_at,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET name=excluded.name,kind=excluded.kind,base_url=excluded.base_url,
-model=excluded.model,api_key_cipher=excluded.api_key_cipher,proxy_id=excluded.proxy_id,
+model=excluded.model,context_window=excluded.context_window,api_key_cipher=excluded.api_key_cipher,proxy_id=excluded.proxy_id,
 user_agent=excluded.user_agent,reasoning_effort=excluded.reasoning_effort,updated_at=excluded.updated_at`,
-		provider.ID, provider.Name, provider.Kind, provider.BaseURL, provider.Model, provider.APIKeyCipher,
+		provider.ID, provider.Name, provider.Kind, provider.BaseURL, provider.Model, provider.ContextWindow, provider.APIKeyCipher,
 		provider.ProxyID, provider.UserAgent, provider.ReasoningEffort,
 		boolInt(provider.Active), formatTime(provider.CreatedAt), formatTime(provider.UpdatedAt))
 	if err != nil {
@@ -700,19 +712,19 @@ user_agent=excluded.user_agent,reasoning_effort=excluded.reasoning_effort,update
 }
 
 func (s *Store) GetModelProvider(ctx context.Context, id string) (domain.ModelProvider, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id,name,kind,base_url,model,api_key_cipher,proxy_id,user_agent,reasoning_effort,active,created_at,updated_at
+	row := s.db.QueryRowContext(ctx, `SELECT id,name,kind,base_url,model,context_window,api_key_cipher,proxy_id,user_agent,reasoning_effort,active,created_at,updated_at
 FROM model_providers WHERE id=?`, id)
 	return scanModelProvider(row)
 }
 
 func (s *Store) ActiveModelProvider(ctx context.Context) (domain.ModelProvider, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id,name,kind,base_url,model,api_key_cipher,proxy_id,user_agent,reasoning_effort,active,created_at,updated_at
+	row := s.db.QueryRowContext(ctx, `SELECT id,name,kind,base_url,model,context_window,api_key_cipher,proxy_id,user_agent,reasoning_effort,active,created_at,updated_at
 FROM model_providers WHERE active=1 LIMIT 1`)
 	return scanModelProvider(row)
 }
 
 func (s *Store) ListModelProviders(ctx context.Context) ([]domain.ModelProvider, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,kind,base_url,model,api_key_cipher,proxy_id,user_agent,reasoning_effort,active,created_at,updated_at
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,kind,base_url,model,context_window,api_key_cipher,proxy_id,user_agent,reasoning_effort,active,created_at,updated_at
 FROM model_providers ORDER BY active DESC,name`)
 	if err != nil {
 		return nil, err
@@ -1012,7 +1024,7 @@ func scanModelProvider(row scanner) (domain.ModelProvider, error) {
 	var provider domain.ModelProvider
 	var active int
 	var created, updated string
-	err := row.Scan(&provider.ID, &provider.Name, &provider.Kind, &provider.BaseURL, &provider.Model,
+	err := row.Scan(&provider.ID, &provider.Name, &provider.Kind, &provider.BaseURL, &provider.Model, &provider.ContextWindow,
 		&provider.APIKeyCipher, &provider.ProxyID, &provider.UserAgent, &provider.ReasoningEffort, &active, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.ModelProvider{}, ErrNotFound
@@ -1988,7 +2000,7 @@ func (s *Store) CreateChatSession(ctx context.Context, sessionID, workspaceID st
 func (s *Store) GetChatSession(ctx context.Context, sessionID string) (domain.ChatSession, error) {
 	var session domain.ChatSession
 	var updated string
-	err := s.db.QueryRowContext(ctx, `SELECT session_id,workspace_id,updated_at FROM chat_sessions WHERE session_id=?`, sessionID).Scan(&session.ID, &session.WorkspaceID, &updated)
+	err := s.db.QueryRowContext(ctx, `SELECT session_id,workspace_id,context_tokens,context_window,updated_at FROM chat_sessions WHERE session_id=?`, sessionID).Scan(&session.ID, &session.WorkspaceID, &session.ContextTokens, &session.ContextWindow, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.ChatSession{}, ErrNotFound
 	}
@@ -2010,6 +2022,17 @@ func (s *Store) SetChatSessionWorkspace(ctx context.Context, sessionID, workspac
 	return s.GetChatSession(ctx, sessionID)
 }
 
+func (s *Store) SetChatSessionContextUsage(ctx context.Context, sessionID string, tokens, window int) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE chat_sessions SET context_tokens=?,context_window=? WHERE session_id=?`, tokens, window, sessionID)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) ListChatSessions(ctx context.Context, limit int) ([]domain.ChatSession, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
@@ -2020,6 +2043,8 @@ SELECT sessions.session_id,
     WHERE first.session_id=sessions.session_id AND first.role='user'
     ORDER BY first.created_at ASC LIMIT 1),''),'New conversation') AS title,
   sessions.workspace_id,
+	sessions.context_tokens,
+	sessions.context_window,
   (SELECT count(*) FROM chat_messages AS messages WHERE messages.session_id=sessions.session_id),
   sessions.updated_at
 FROM chat_sessions AS sessions
@@ -2033,7 +2058,7 @@ LIMIT ?`, limit)
 	for rows.Next() {
 		var session domain.ChatSession
 		var updated string
-		if err := rows.Scan(&session.ID, &session.Title, &session.WorkspaceID, &session.MessageCount, &updated); err != nil {
+		if err := rows.Scan(&session.ID, &session.Title, &session.WorkspaceID, &session.ContextTokens, &session.ContextWindow, &session.MessageCount, &updated); err != nil {
 			return nil, err
 		}
 		session.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
