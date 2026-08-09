@@ -464,20 +464,23 @@ type ChatAttachment struct {
 	Data      []byte `json:"-"`
 }
 
-type AgentPlan struct {
-	SessionID string          `json:"session_id"`
-	Goal      string          `json:"goal"`
-	Status    string          `json:"status"`
-	Steps     []AgentPlanStep `json:"steps"`
-	CreatedAt time.Time       `json:"created_at"`
-	UpdatedAt time.Time       `json:"updated_at"`
+type AgentTaskList struct {
+	SessionID string      `json:"session_id"`
+	Items     []AgentTask `json:"items"`
+	UpdatedAt time.Time   `json:"updated_at"`
 }
 
-type AgentPlanStep struct {
-	Number    int       `json:"number"`
-	Title     string    `json:"title"`
-	Status    string    `json:"status"`
-	UpdatedAt time.Time `json:"updated_at"`
+type AgentTask struct {
+	ID          string         `json:"id"`
+	Subject     string         `json:"subject"`
+	Description string         `json:"description"`
+	Status      string         `json:"status"`
+	Blocks      []string       `json:"blocks"`
+	BlockedBy   []string       `json:"blocked_by"`
+	ActiveForm  string         `json:"active_form,omitempty"`
+	Owner       string         `json:"owner,omitempty"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
+	UpdatedAt   time.Time      `json:"updated_at"`
 }
 
 type ExecMode string
@@ -770,7 +773,7 @@ type TextEdit struct {
 type CommandReviewInput struct {
 	Request       ExecRequest    `json:"request"`
 	Host          HostCapability `json:"host"`
-	PlanStep      string         `json:"plan_step,omitempty"`
+	CurrentTask   string         `json:"current_task,omitempty"`
 	RequestDigest string         `json:"request_digest"`
 }
 
@@ -778,8 +781,7 @@ type AutomaticApprovalInput struct {
 	Request       ExecRequest    `json:"request"`
 	Host          HostCapability `json:"host"`
 	UserRequest   string         `json:"user_request"`
-	PlanGoal      string         `json:"plan_goal,omitempty"`
-	PlanStep      string         `json:"plan_step,omitempty"`
+	CurrentTask   string         `json:"current_task,omitempty"`
 	RequestDigest string         `json:"request_digest"`
 }
 

@@ -1494,69 +1494,22 @@ func TestApprovalDecisionCancelsRetriedCommandExplanation(t *testing.T) {
 	}
 }
 
-func TestAgentPlanTransitionsPreserveFinishedHistory(t *testing.T) {
-	svc, _, _ := newTestService(t)
-	ctx := WithSessionID(context.Background(), "session_plan_test")
-	plan, err := svc.CreateAgentPlan(ctx, "Deploy and verify the service", []string{
-		"Inspect the project and host", "Deploy the service", "Verify health",
-	}, "test")
-	if err != nil {
-		t.Fatal(err)
+func TestCurrentAgentTaskPrefersInProgressThenUnblockedPending(t *testing.T) {
+	tasks := domain.AgentTaskList{Items: []domain.AgentTask{
+		{ID: "1", Subject: "Blocked", Status: "pending", BlockedBy: []string{"2"}},
+		{ID: "2", Subject: "Ready", Status: "pending"},
+		{ID: "3", Subject: "Running", Status: "in_progress"},
+	}}
+	if got := currentAgentTask(tasks); got != "#3 Running" {
+		t.Fatalf("current task = %q", got)
 	}
-	if plan.Status != "active" || len(plan.Steps) != 3 || plan.Steps[0].Status != "in_progress" || plan.Steps[1].Status != "pending" {
-		t.Fatalf("unexpected initial plan: %#v", plan)
+	tasks.Items[2].Status = "completed"
+	if got := currentAgentTask(tasks); got != "#2 Ready" {
+		t.Fatalf("ready task = %q", got)
 	}
-	if _, err := svc.UpdateAgentPlanStep(ctx, 2, "completed", "test"); err == nil {
-		t.Fatal("expected out-of-order step completion to fail")
-	} else {
-		var transition *store.PlanTransitionError
-		if !errors.As(err, &transition) || transition.StepNumber != 2 || transition.Status != "pending" {
-			t.Fatalf("out-of-order update did not return a typed transition error: %v", err)
-		}
-	}
-	plan, err = svc.UpdateAgentPlanStep(ctx, 1, "completed", "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if plan.Steps[0].Status != "completed" || plan.Steps[1].Status != "in_progress" || plan.Steps[2].Status != "pending" {
-		t.Fatalf("plan did not advance exactly one step: %#v", plan)
-	}
-	plan, err = svc.UpdateAgentPlanStep(ctx, 2, "blocked", "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if plan.Status != "blocked" || plan.Steps[1].Status != "blocked" || plan.Steps[2].Status != "pending" {
-		t.Fatalf("blocked plan state is inconsistent: %#v", plan)
-	}
-	plan, err = svc.UpdateAgentPlanStep(ctx, 2, "in_progress", "test")
-	if err != nil || plan.Status != "active" || plan.Steps[1].Status != "in_progress" {
-		t.Fatalf("blocked step did not resume: plan=%#v err=%v", plan, err)
-	}
-	plan, err = svc.UpdateAgentPlanStep(ctx, 2, "skipped", "test")
-	if err != nil || plan.Steps[1].Status != "skipped" || plan.Steps[2].Status != "in_progress" {
-		t.Fatalf("skipped step did not advance: plan=%#v err=%v", plan, err)
-	}
-	plan, err = svc.ReviseAgentPlan(ctx, []string{"Verify the endpoint", "Record the outcome"}, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(plan.Steps) != 4 || plan.Steps[0].Status != "completed" || plan.Steps[1].Status != "skipped" || plan.Steps[2].Title != "Verify the endpoint" || plan.Steps[2].Status != "in_progress" || plan.Steps[3].Status != "pending" {
-		t.Fatalf("revision did not preserve finished history and replace remaining steps: %#v", plan)
-	}
-	plan, err = svc.UpdateAgentPlanStep(ctx, 3, "completed", "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	plan, err = svc.UpdateAgentPlanStep(ctx, 4, "completed", "test")
-	if err != nil || plan.Status != "completed" {
-		t.Fatalf("revised plan did not complete: plan=%#v err=%v", plan, err)
-	}
-	if _, err := svc.ReviseAgentPlan(ctx, []string{"Unexpected extra work"}, "test"); err == nil || !strings.Contains(err.Error(), "completed plans cannot be revised") {
-		t.Fatalf("completed plan history was mutable: %v", err)
-	}
-	loaded, err := svc.GetAgentPlan(context.Background(), "session_plan_test")
-	if err != nil || loaded.Status != "completed" || len(loaded.Steps) != 4 {
-		t.Fatalf("plan was not persisted: plan=%#v err=%v", loaded, err)
+	tasks.Items[1].Status = "completed"
+	if got := currentAgentTask(tasks); got != "#1 Blocked" {
+		t.Fatalf("resolved dependency task = %q", got)
 	}
 }
 
@@ -2710,13 +2663,16 @@ func TestChatSessionsCanBeListedLoadedAndDeleted(t *testing.T) {
 	if err := svc.store.UpsertTask(ctx, task, domain.ExecResult{RunID: run.ID, Status: "completed"}, ""); err != nil {
 		t.Fatal(err)
 	}
+	if err := svc.store.WriteAgentTaskFile(ctx, "session-one", "agent-tasks/1.json", `{"id":"1","subject":"Inspect","description":"Inspect","status":"in_progress","blocks":[],"blockedBy":[]}`); err != nil {
+		t.Fatal(err)
+	}
 	if err := svc.store.AppendAudit(ctx, domain.AuditEvent{RunID: run.ID, Type: "command_completed", Actor: "test"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.store.AppendAudit(ctx, domain.AuditEvent{Type: "agent_plan_created", Actor: "test", Data: map[string]any{"session_id": "session-one"}}); err != nil {
+	if err := svc.store.AppendAudit(ctx, domain.AuditEvent{Type: "agent_task_created", Actor: "test", Data: map[string]any{"session_id": "session-one"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.store.AppendAudit(ctx, domain.AuditEvent{Type: "agent_plan_created", Actor: "test", Data: map[string]any{"session_id": "session-two"}}); err != nil {
+	if err := svc.store.AppendAudit(ctx, domain.AuditEvent{Type: "agent_task_created", Actor: "test", Data: map[string]any{"session_id": "session-two"}}); err != nil {
 		t.Fatal(err)
 	}
 	sessions, err := svc.ListChatSessions(ctx, 10)
@@ -2749,6 +2705,9 @@ func TestChatSessionsCanBeListedLoadedAndDeleted(t *testing.T) {
 	}
 	if _, _, _, err := svc.store.GetTask(ctx, task.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("conversation task survived deletion: %v", err)
+	}
+	if agentTasks, err := svc.store.ListAgentTasks(ctx, "session-one"); err != nil || len(agentTasks.Items) != 0 {
+		t.Fatalf("conversation Agent tasks survived deletion: tasks=%#v err=%v", agentTasks, err)
 	}
 	audit, err := svc.store.ListAudit(ctx, "", 100)
 	if err != nil {

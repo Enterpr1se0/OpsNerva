@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,25 +22,10 @@ import (
 )
 
 var (
-	ErrNotFound              = errors.New("not found")
-	ErrAlreadyExists         = errors.New("already exists")
-	ErrInUse                 = errors.New("in use")
-	ErrInvalidPlanTransition = errors.New("invalid plan transition")
+	ErrNotFound      = errors.New("not found")
+	ErrAlreadyExists = errors.New("already exists")
+	ErrInUse         = errors.New("in use")
 )
-
-type PlanTransitionError struct {
-	StepNumber int
-	Status     string
-	Target     string
-}
-
-func (e *PlanTransitionError) Error() string {
-	return fmt.Sprintf("invalid plan transition: step %d cannot change from %s to %s", e.StepNumber, e.Status, e.Target)
-}
-
-func (e *PlanTransitionError) Unwrap() error {
-	return ErrInvalidPlanTransition
-}
 
 type Store struct {
 	db *sql.DB
@@ -352,23 +339,15 @@ CREATE TABLE IF NOT EXISTS chat_attachments (
   FOREIGN KEY(message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_chat_attachments_message ON chat_attachments(message_id, created_at);
-CREATE TABLE IF NOT EXISTS agent_plans (
-  session_id TEXT PRIMARY KEY,
-  goal TEXT NOT NULL,
-  status TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS agent_plan_steps (
+CREATE TABLE IF NOT EXISTS agent_task_files (
   session_id TEXT NOT NULL,
-  step_number INTEGER NOT NULL,
-  title TEXT NOT NULL,
-  status TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  content TEXT NOT NULL,
+  created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  PRIMARY KEY(session_id,step_number),
-  FOREIGN KEY(session_id) REFERENCES agent_plans(session_id) ON DELETE CASCADE
+  PRIMARY KEY(session_id,file_path)
 );
-CREATE INDEX IF NOT EXISTS idx_agent_plan_steps_session ON agent_plan_steps(session_id,step_number);
+CREATE INDEX IF NOT EXISTS idx_agent_task_files_session ON agent_task_files(session_id,file_path);
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL DEFAULT '',
@@ -1649,196 +1628,109 @@ AND NOT EXISTS (
 	return len(turns), nil
 }
 
-func (s *Store) ReplaceAgentPlan(ctx context.Context, plan domain.AgentPlan) (domain.AgentPlan, error) {
-	now := time.Now().UTC()
-	plan.CreatedAt = now
-	plan.UpdatedAt = now
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return domain.AgentPlan{}, err
-	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM agent_plans WHERE session_id=?`, plan.SessionID); err != nil {
-		return domain.AgentPlan{}, err
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO agent_plans(session_id,goal,status,created_at,updated_at) VALUES(?,?,?,?,?)`,
-		plan.SessionID, plan.Goal, plan.Status, formatTime(plan.CreatedAt), formatTime(plan.UpdatedAt)); err != nil {
-		return domain.AgentPlan{}, err
-	}
-	for _, step := range plan.Steps {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO agent_plan_steps(session_id,step_number,title,status,updated_at) VALUES(?,?,?,?,?)`,
-			plan.SessionID, step.Number, step.Title, step.Status, formatTime(now)); err != nil {
-			return domain.AgentPlan{}, err
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return domain.AgentPlan{}, err
-	}
-	return s.GetAgentPlan(ctx, plan.SessionID)
+type AgentTaskFile struct {
+	Path      string
+	Content   string
+	UpdatedAt time.Time
 }
 
-func (s *Store) GetAgentPlan(ctx context.Context, sessionID string) (domain.AgentPlan, error) {
-	var plan domain.AgentPlan
-	var created, updated string
-	err := s.db.QueryRowContext(ctx, `SELECT session_id,goal,status,created_at,updated_at FROM agent_plans WHERE session_id=?`, sessionID).Scan(
-		&plan.SessionID, &plan.Goal, &plan.Status, &created, &updated,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return domain.AgentPlan{}, ErrNotFound
-	}
+func (s *Store) ListAgentTaskFiles(ctx context.Context, sessionID string) ([]AgentTaskFile, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT file_path,content,updated_at FROM agent_task_files WHERE session_id=? ORDER BY file_path`, sessionID)
 	if err != nil {
-		return domain.AgentPlan{}, err
-	}
-	plan.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-	plan.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
-	rows, err := s.db.QueryContext(ctx, `SELECT step_number,title,status,updated_at FROM agent_plan_steps WHERE session_id=? ORDER BY step_number`, sessionID)
-	if err != nil {
-		return domain.AgentPlan{}, err
+		return nil, err
 	}
 	defer rows.Close()
-	plan.Steps = make([]domain.AgentPlanStep, 0)
+	files := make([]AgentTaskFile, 0)
 	for rows.Next() {
-		var step domain.AgentPlanStep
-		var stepUpdated string
-		if err := rows.Scan(&step.Number, &step.Title, &step.Status, &stepUpdated); err != nil {
-			return domain.AgentPlan{}, err
+		var file AgentTaskFile
+		var updated string
+		if err := rows.Scan(&file.Path, &file.Content, &updated); err != nil {
+			return nil, err
 		}
-		step.UpdatedAt, _ = time.Parse(time.RFC3339Nano, stepUpdated)
-		plan.Steps = append(plan.Steps, step)
+		file.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+		files = append(files, file)
 	}
-	return plan, rows.Err()
+	return files, rows.Err()
 }
 
-func (s *Store) TransitionAgentPlanStep(ctx context.Context, sessionID string, stepNumber int, status string) (domain.AgentPlan, error) {
-	now := time.Now().UTC()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return domain.AgentPlan{}, err
-	}
-	defer tx.Rollback()
-	var currentStatus string
-	err = tx.QueryRowContext(ctx, `SELECT status FROM agent_plan_steps WHERE session_id=? AND step_number=?`, sessionID, stepNumber).Scan(&currentStatus)
+func (s *Store) ReadAgentTaskFile(ctx context.Context, sessionID, filePath string) (AgentTaskFile, error) {
+	var file AgentTaskFile
+	var updated string
+	err := s.db.QueryRowContext(ctx, `SELECT file_path,content,updated_at FROM agent_task_files WHERE session_id=? AND file_path=?`, sessionID, filePath).Scan(
+		&file.Path, &file.Content, &updated,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return domain.AgentPlan{}, ErrNotFound
+		return AgentTaskFile{}, ErrNotFound
 	}
 	if err != nil {
-		return domain.AgentPlan{}, err
+		return AgentTaskFile{}, err
 	}
-	validTransition := currentStatus == "in_progress" && (status == "completed" || status == "blocked" || status == "skipped") ||
-		currentStatus == "blocked" && status == "in_progress"
-	if !validTransition {
-		return domain.AgentPlan{}, &PlanTransitionError{StepNumber: stepNumber, Status: currentStatus, Target: status}
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE agent_plan_steps SET status=?,updated_at=? WHERE session_id=? AND step_number=?`,
-		status, formatTime(now), sessionID, stepNumber); err != nil {
-		return domain.AgentPlan{}, err
-	}
-	planStatus := "blocked"
-	if status == "in_progress" {
-		planStatus = "active"
-	} else if status == "completed" || status == "skipped" {
-		var next int
-		err := tx.QueryRowContext(ctx, `SELECT step_number FROM agent_plan_steps WHERE session_id=? AND step_number>? ORDER BY step_number LIMIT 1`, sessionID, stepNumber).Scan(&next)
-		if errors.Is(err, sql.ErrNoRows) {
-			planStatus = "completed"
-		} else if err != nil {
-			return domain.AgentPlan{}, err
-		} else {
-			planStatus = "active"
-			if _, err := tx.ExecContext(ctx, `UPDATE agent_plan_steps SET status='in_progress',updated_at=? WHERE session_id=? AND step_number=? AND status='pending'`,
-				formatTime(now), sessionID, next); err != nil {
-				return domain.AgentPlan{}, err
-			}
-		}
-	}
-	result, err := tx.ExecContext(ctx, `UPDATE agent_plans SET status=?,updated_at=? WHERE session_id=?`, planStatus, formatTime(now), sessionID)
+	file.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	return file, nil
+}
+
+func (s *Store) WriteAgentTaskFile(ctx context.Context, sessionID, filePath, content string) error {
+	now := formatTime(time.Now().UTC())
+	_, err := s.db.ExecContext(ctx, `INSERT INTO agent_task_files(session_id,file_path,content,created_at,updated_at) VALUES(?,?,?,?,?)
+ON CONFLICT(session_id,file_path) DO UPDATE SET content=excluded.content,updated_at=excluded.updated_at`,
+		sessionID, filePath, content, now, now)
+	return err
+}
+
+func (s *Store) DeleteAgentTaskFile(ctx context.Context, sessionID, filePath string) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM agent_task_files WHERE session_id=? AND file_path=?`, sessionID, filePath)
 	if err != nil {
-		return domain.AgentPlan{}, err
+		return err
 	}
 	if count, _ := result.RowsAffected(); count == 0 {
-		return domain.AgentPlan{}, ErrNotFound
+		return ErrNotFound
 	}
-	if err := tx.Commit(); err != nil {
-		return domain.AgentPlan{}, err
-	}
-	return s.GetAgentPlan(ctx, sessionID)
+	return nil
 }
 
-// ReviseAgentPlanRemaining replaces only the mutable portion of a plan. Steps
-// already completed or skipped remain immutable history with their original
-// timestamps.
-func (s *Store) ReviseAgentPlanRemaining(ctx context.Context, sessionID string, titles []string) (domain.AgentPlan, error) {
-	now := time.Now().UTC()
-	tx, err := s.db.BeginTx(ctx, nil)
+func (s *Store) ListAgentTasks(ctx context.Context, sessionID string) (domain.AgentTaskList, error) {
+	files, err := s.ListAgentTaskFiles(ctx, sessionID)
 	if err != nil {
-		return domain.AgentPlan{}, err
+		return domain.AgentTaskList{}, err
 	}
-	defer tx.Rollback()
-
-	var planStatus string
-	if err := tx.QueryRowContext(ctx, `SELECT status FROM agent_plans WHERE session_id=?`, sessionID).Scan(&planStatus); errors.Is(err, sql.ErrNoRows) {
-		return domain.AgentPlan{}, ErrNotFound
-	} else if err != nil {
-		return domain.AgentPlan{}, err
-	}
-	if planStatus == "completed" {
-		return domain.AgentPlan{}, fmt.Errorf("completed plans cannot be revised")
-	}
-
-	rows, err := tx.QueryContext(ctx, `SELECT step_number,status FROM agent_plan_steps WHERE session_id=? ORDER BY step_number`, sessionID)
-	if err != nil {
-		return domain.AgentPlan{}, err
-	}
-	retained := 0
-	mutableSeen := false
-	for rows.Next() {
-		var number int
-		var status string
-		if err := rows.Scan(&number, &status); err != nil {
-			rows.Close()
-			return domain.AgentPlan{}, err
+	result := domain.AgentTaskList{SessionID: sessionID, Items: make([]domain.AgentTask, 0)}
+	for _, file := range files {
+		name := filepath.Base(file.Path)
+		if filepath.Ext(name) != ".json" {
+			continue
 		}
-		terminal := status == "completed" || status == "skipped"
-		if terminal && mutableSeen {
-			rows.Close()
-			return domain.AgentPlan{}, fmt.Errorf("plan history is inconsistent at step %d", number)
+		id := strings.TrimSuffix(name, ".json")
+		if _, err := strconv.Atoi(id); err != nil {
+			continue
 		}
-		if terminal {
-			retained++
-		} else {
-			mutableSeen = true
+		var stored struct {
+			Subject     string         `json:"subject"`
+			Description string         `json:"description"`
+			Status      string         `json:"status"`
+			Blocks      []string       `json:"blocks"`
+			BlockedBy   []string       `json:"blockedBy"`
+			ActiveForm  string         `json:"activeForm"`
+			Owner       string         `json:"owner"`
+			Metadata    map[string]any `json:"metadata"`
+		}
+		if err := json.Unmarshal([]byte(file.Content), &stored); err != nil {
+			return domain.AgentTaskList{}, fmt.Errorf("decode agent task %s: %w", id, err)
+		}
+		result.Items = append(result.Items, domain.AgentTask{
+			ID: id, Subject: stored.Subject, Description: stored.Description, Status: stored.Status,
+			Blocks: stored.Blocks, BlockedBy: stored.BlockedBy, ActiveForm: stored.ActiveForm,
+			Owner: stored.Owner, Metadata: stored.Metadata, UpdatedAt: file.UpdatedAt,
+		})
+		if file.UpdatedAt.After(result.UpdatedAt) {
+			result.UpdatedAt = file.UpdatedAt
 		}
 	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return domain.AgentPlan{}, err
-	}
-	if err := rows.Close(); err != nil {
-		return domain.AgentPlan{}, err
-	}
-	if retained+len(titles) > 8 {
-		return domain.AgentPlan{}, fmt.Errorf("revised plan exceeds the 8-step limit after preserving %d finished steps", retained)
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM agent_plan_steps WHERE session_id=? AND step_number>?`, sessionID, retained); err != nil {
-		return domain.AgentPlan{}, err
-	}
-	for index, title := range titles {
-		status := "pending"
-		if index == 0 {
-			status = "in_progress"
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO agent_plan_steps(session_id,step_number,title,status,updated_at) VALUES(?,?,?,?,?)`,
-			sessionID, retained+index+1, title, status, formatTime(now)); err != nil {
-			return domain.AgentPlan{}, err
-		}
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE agent_plans SET status='active',updated_at=? WHERE session_id=?`, formatTime(now), sessionID); err != nil {
-		return domain.AgentPlan{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return domain.AgentPlan{}, err
-	}
-	return s.GetAgentPlan(ctx, sessionID)
+	sort.Slice(result.Items, func(i, j int) bool {
+		left, _ := strconv.Atoi(result.Items[i].ID)
+		right, _ := strconv.Atoi(result.Items[j].ID)
+		return left < right
+	})
+	return result, nil
 }
 
 func (s *Store) ListChatMessages(ctx context.Context, sessionID string, limit int) ([]domain.ChatMessage, error) {
@@ -2105,7 +1997,7 @@ WHERE run_id IN (SELECT id FROM runs WHERE session_id=?)
 WHERE session_id=? OR run_id IN (SELECT id FROM runs WHERE session_id=?)`, sessionID, sessionID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM agent_plans WHERE session_id=?`, sessionID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM agent_task_files WHERE session_id=?`, sessionID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM runs WHERE session_id=?`, sessionID); err != nil {

@@ -1765,19 +1765,16 @@ func (s *Server) chatState(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	var plan *domain.AgentPlan
-	currentPlan, planErr := s.service.GetAgentPlan(r.Context(), sessionID)
-	if planErr == nil {
-		plan = &currentPlan
-	} else if !errors.Is(planErr, store.ErrNotFound) {
-		writeError(w, planErr)
+	tasks, taskErr := s.service.GetAgentTasks(r.Context(), sessionID)
+	if taskErr != nil {
+		writeError(w, taskErr)
 		return
 	}
 	active := s.agent != nil && s.agent.IsSessionActive(sessionID)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"active": active, "workspace_id": session.WorkspaceID,
 		"context_tokens": session.ContextTokens, "context_window": session.ContextWindow,
-		"messages": messages, "tool_calls": toolCalls, "plan": plan,
+		"messages": messages, "tool_calls": toolCalls, "tasks": tasks,
 	})
 }
 

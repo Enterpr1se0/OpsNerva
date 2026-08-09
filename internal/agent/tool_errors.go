@@ -74,11 +74,6 @@ func notifyToolStarted(ctx context.Context, input *compose.ToolInput) {
 	})
 }
 
-type planToolResult struct {
-	domain.ToolFailure
-	Plan *domain.AgentPlan `json:"plan,omitempty"`
-}
-
 func normalizeValueToolResult[T any](ctx context.Context, toolName string, value T, err error) (any, error) {
 	if err == nil {
 		return value, nil
@@ -88,32 +83,6 @@ func normalizeValueToolResult[T any](ctx context.Context, toolName string, value
 		return nil, fatalErr
 	}
 	return failure, nil
-}
-
-func normalizePlanToolResult(ctx context.Context, svc *service.Service, toolName string, plan domain.AgentPlan, err error) (any, error) {
-	if err == nil {
-		return plan, nil
-	}
-	failure, fatalErr := normalizeToolFailure(ctx, toolName, err)
-	if fatalErr != nil {
-		return nil, fatalErr
-	}
-	result := planToolResult{ToolFailure: failure}
-	current, currentErr := svc.GetAgentPlan(ctx, "")
-	if currentErr == nil {
-		result.Plan = &current
-		for _, step := range current.Steps {
-			if step.Status == "in_progress" {
-				result.NextAction = fmt.Sprintf("update step %d, or revise the remaining plan if its order or scope changed", step.Number)
-				break
-			}
-			if step.Status == "blocked" {
-				result.NextAction = fmt.Sprintf("resume, skip, or revise blocked step %d", step.Number)
-				break
-			}
-		}
-	}
-	return result, nil
 }
 
 func normalizeToolFailure(ctx context.Context, toolName string, err error) (domain.ToolFailure, error) {
@@ -160,11 +129,8 @@ func toolFailureFromError(toolName string, err error) domain.ToolFailure {
 func classifyAgentToolError(toolName string, err error) (code, message string, retryable bool, nextAction string) {
 	messageLower := strings.ToLower(err.Error())
 	rootMessage := rootToolError(err).Error()
-	var transition *store.PlanTransitionError
 	var inputValidation *toolInputValidationError
 	switch {
-	case errors.As(err, &transition):
-		return "invalid_state", transition.Error(), false, "update the current step or revise the remaining plan"
 	case errors.As(err, &inputValidation):
 		return "validation_failed", inputValidation.Error(), false, "correct the function tool input using this error; do not repeat unchanged input"
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, skills.ErrNotFound):

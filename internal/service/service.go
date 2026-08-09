@@ -357,132 +357,44 @@ func (s *Service) hasActiveTaskForSession(sessionID string) bool {
 	return false
 }
 
-func (s *Service) CreateAgentPlan(ctx context.Context, goal string, titles []string, actor string) (domain.AgentPlan, error) {
-	sessionID := SessionIDFromContext(ctx)
-	if sessionID == "" {
-		return domain.AgentPlan{}, fmt.Errorf("agent plan requires a session context")
-	}
-	goal = strings.TrimSpace(goal)
-	if goal == "" || len(goal) > 500 {
-		return domain.AgentPlan{}, fmt.Errorf("invalid plan goal: use 1-500 characters")
-	}
-	if len(titles) < 2 || len(titles) > 8 {
-		return domain.AgentPlan{}, fmt.Errorf("invalid plan: provide 2-8 steps")
-	}
-	normalizedTitles, err := normalizePlanTitles(titles, nil)
-	if err != nil {
-		return domain.AgentPlan{}, err
-	}
-	steps := make([]domain.AgentPlanStep, 0, len(normalizedTitles))
-	for index, title := range normalizedTitles {
-		status := "pending"
-		if index == 0 {
-			status = "in_progress"
-		}
-		steps = append(steps, domain.AgentPlanStep{Number: index + 1, Title: title, Status: status})
-	}
-	plan, err := s.store.ReplaceAgentPlan(ctx, domain.AgentPlan{SessionID: sessionID, Goal: goal, Status: "active", Steps: steps})
-	if err != nil {
-		return domain.AgentPlan{}, err
-	}
-	s.audit(ctx, "", "agent_plan_created", actor, map[string]any{"session_id": sessionID, "goal": goal, "step_count": len(steps)})
-	observability.FromContext(ctx).InfoContext(ctx, "agent plan created", "component", "agent", "session_id", sessionID, "step_count", len(steps))
-	return plan, nil
-}
-
-func (s *Service) GetAgentPlan(ctx context.Context, sessionID string) (domain.AgentPlan, error) {
+func (s *Service) GetAgentTasks(ctx context.Context, sessionID string) (domain.AgentTaskList, error) {
 	if strings.TrimSpace(sessionID) == "" {
 		sessionID = SessionIDFromContext(ctx)
 	}
 	if sessionID == "" {
-		return domain.AgentPlan{}, fmt.Errorf("agent plan requires a session context")
+		return domain.AgentTaskList{}, fmt.Errorf("agent tasks require a session context")
 	}
-	return s.store.GetAgentPlan(ctx, sessionID)
+	return s.store.ListAgentTasks(ctx, sessionID)
 }
 
-func (s *Service) UpdateAgentPlanStep(ctx context.Context, stepNumber int, status, actor string) (domain.AgentPlan, error) {
-	sessionID := SessionIDFromContext(ctx)
-	if sessionID == "" {
-		return domain.AgentPlan{}, fmt.Errorf("agent plan requires a session context")
+func currentAgentTask(tasks domain.AgentTaskList) string {
+	for _, task := range tasks.Items {
+		if task.Status == "in_progress" {
+			return fmt.Sprintf("#%s %s", task.ID, task.Subject)
+		}
 	}
-	if stepNumber < 1 || stepNumber > 8 {
-		return domain.AgentPlan{}, fmt.Errorf("invalid plan step number")
+	for _, task := range tasks.Items {
+		if task.Status == "pending" && !agentTaskBlocked(tasks, task) {
+			return fmt.Sprintf("#%s %s", task.ID, task.Subject)
+		}
 	}
-	status = strings.TrimSpace(status)
-	if status != "completed" && status != "blocked" && status != "skipped" && status != "in_progress" {
-		return domain.AgentPlan{}, fmt.Errorf("invalid plan step status: use completed, blocked, skipped, or in_progress")
-	}
-	plan, err := s.store.TransitionAgentPlanStep(ctx, sessionID, stepNumber, status)
-	if err != nil {
-		return domain.AgentPlan{}, err
-	}
-	s.audit(ctx, "", "agent_plan_step_updated", actor, map[string]any{
-		"session_id": sessionID, "step_number": stepNumber, "status": status, "plan_status": plan.Status,
-	})
-	observability.FromContext(ctx).InfoContext(ctx, "agent plan step updated", "component", "agent", "session_id", sessionID, "step_number", stepNumber, "status", status, "plan_status", plan.Status)
-	return plan, nil
+	return ""
 }
 
-func (s *Service) ReviseAgentPlan(ctx context.Context, titles []string, actor string) (domain.AgentPlan, error) {
-	sessionID := SessionIDFromContext(ctx)
-	if sessionID == "" {
-		return domain.AgentPlan{}, fmt.Errorf("agent plan requires a session context")
-	}
-	current, err := s.store.GetAgentPlan(ctx, sessionID)
-	if err != nil {
-		return domain.AgentPlan{}, err
-	}
-	if current.Status == "completed" {
-		return domain.AgentPlan{}, fmt.Errorf("completed plans cannot be revised; create a new plan for new work")
-	}
-	if len(titles) < 1 {
-		return domain.AgentPlan{}, fmt.Errorf("invalid revised plan: provide at least one remaining step")
-	}
-	seen := make(map[string]struct{}, len(current.Steps)+len(titles))
-	finished := 0
-	for _, step := range current.Steps {
-		if step.Status != "completed" && step.Status != "skipped" {
-			break
+func agentTaskBlocked(tasks domain.AgentTaskList, task domain.AgentTask) bool {
+	for _, blockerID := range task.BlockedBy {
+		resolved := false
+		for _, candidate := range tasks.Items {
+			if candidate.ID == blockerID {
+				resolved = candidate.Status == "completed"
+				break
+			}
 		}
-		seen[strings.ToLower(strings.TrimSpace(step.Title))] = struct{}{}
-		finished++
-	}
-	if finished+len(titles) > 8 {
-		return domain.AgentPlan{}, fmt.Errorf("invalid revised plan: at most %d remaining steps are allowed", 8-finished)
-	}
-	normalizedTitles, err := normalizePlanTitles(titles, seen)
-	if err != nil {
-		return domain.AgentPlan{}, err
-	}
-	plan, err := s.store.ReviseAgentPlanRemaining(ctx, sessionID, normalizedTitles)
-	if err != nil {
-		return domain.AgentPlan{}, err
-	}
-	s.audit(ctx, "", "agent_plan_revised", actor, map[string]any{
-		"session_id": sessionID, "finished_steps": finished, "remaining_steps": len(normalizedTitles),
-	})
-	observability.FromContext(ctx).InfoContext(ctx, "agent plan revised", "component", "agent", "session_id", sessionID, "finished_steps", finished, "remaining_steps", len(normalizedTitles))
-	return plan, nil
-}
-
-func normalizePlanTitles(titles []string, seen map[string]struct{}) ([]string, error) {
-	if seen == nil {
-		seen = make(map[string]struct{}, len(titles))
-	}
-	normalized := make([]string, 0, len(titles))
-	for index, title := range titles {
-		title = strings.TrimSpace(title)
-		if title == "" || len(title) > 240 {
-			return nil, fmt.Errorf("invalid plan step %d: use 1-240 characters", index+1)
+		if !resolved {
+			return true
 		}
-		key := strings.ToLower(title)
-		if _, exists := seen[key]; exists {
-			return nil, fmt.Errorf("invalid plan: duplicate step %q", title)
-		}
-		seen[key] = struct{}{}
-		normalized = append(normalized, title)
 	}
-	return normalized, nil
+	return false
 }
 
 func (s *Service) SaveModelProvider(ctx context.Context, input domain.ModelProviderInput, actor string) (domain.ModelProvider, error) {
@@ -1363,21 +1275,16 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 }
 
 func (s *Service) commandReviewInput(ctx context.Context, req domain.ExecRequest, host domain.Host, digest, sessionID string) domain.CommandReviewInput {
-	planStep := ""
+	currentTask := ""
 	if sessionID != "" {
-		if plan, err := s.store.GetAgentPlan(ctx, sessionID); err == nil {
-			for _, step := range plan.Steps {
-				if step.Status == "in_progress" {
-					planStep = fmt.Sprintf("%d. %s", step.Number, step.Title)
-					break
-				}
-			}
+		if tasks, err := s.store.ListAgentTasks(ctx, sessionID); err == nil {
+			currentTask = currentAgentTask(tasks)
 		}
 	}
 	return domain.CommandReviewInput{
 		Request:       req,
 		Host:          domain.HostCapability{ID: host.ID, Name: host.Name, AuthType: host.AuthType, SudoMode: host.SudoMode},
-		PlanStep:      planStep,
+		CurrentTask:   currentTask,
 		RequestDigest: digest,
 	}
 }
@@ -1390,14 +1297,8 @@ func (s *Service) automaticApprovalInput(ctx context.Context, req domain.ExecReq
 	if sessionID == "" {
 		return input
 	}
-	if plan, err := s.store.GetAgentPlan(ctx, sessionID); err == nil {
-		input.PlanGoal = s.redactor.Redact(strings.TrimSpace(plan.Goal))
-		for _, step := range plan.Steps {
-			if step.Status == "in_progress" {
-				input.PlanStep = s.redactor.Redact(fmt.Sprintf("%d. %s", step.Number, step.Title))
-				break
-			}
-		}
+	if tasks, err := s.store.ListAgentTasks(ctx, sessionID); err == nil {
+		input.CurrentTask = s.redactor.Redact(currentAgentTask(tasks))
 	}
 	return input
 }
@@ -2702,20 +2603,15 @@ func (s *Service) RetryApprovalExplanation(ctx context.Context, approvalID, acto
 		return domain.Approval{}, err
 	}
 
-	planStep := ""
+	currentTask := ""
 	if approval.SessionID != "" {
-		if plan, planErr := s.store.GetAgentPlan(ctx, approval.SessionID); planErr == nil {
-			for _, step := range plan.Steps {
-				if step.Status == "in_progress" {
-					planStep = fmt.Sprintf("%d. %s", step.Number, step.Title)
-					break
-				}
-			}
+		if tasks, taskErr := s.store.ListAgentTasks(ctx, approval.SessionID); taskErr == nil {
+			currentTask = currentAgentTask(tasks)
 		}
 	}
 	input := domain.CommandReviewInput{
 		Request: req, Host: domain.HostCapability{ID: host.ID, Name: host.Name, AuthType: host.AuthType, SudoMode: host.SudoMode},
-		PlanStep: planStep, RequestDigest: digest,
+		CurrentTask: currentTask, RequestDigest: digest,
 	}
 
 	retryCtx, cancelRetry := context.WithCancel(ctx)

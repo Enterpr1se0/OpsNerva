@@ -152,8 +152,8 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 	if len(descriptors) != len(loaded) || len(descriptors) < 20 {
 		t.Fatalf("catalog=%d loaded=%d", len(descriptors), len(loaded))
 	}
-	if len(descriptors) != 25 {
-		t.Fatalf("built-in catalog size=%d, want 25", len(descriptors))
+	if len(descriptors) != 22 {
+		t.Fatalf("built-in catalog size=%d, want 22", len(descriptors))
 	}
 
 	seen := make(map[string]bool, len(descriptors))
@@ -285,12 +285,12 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 			t.Fatalf("web_extract metadata does not reflect its runtime schema: %#v", descriptor)
 		}
 	}
-	for _, retired := range []string{"ssh_approval_status", "ssh_task_start", "ssh_task_status", "ssh_task_tail", "ssh_task_list", "ssh_task_get", "ssh_task_cancel", "ssh_file_write", "ssh_file_apply_patch", "ssh_file_restore", "ssh_file_create", "ssh_file_stat", "ssh_config_apply", "ssh_config_restore", "workspace_list", "workspace_file_apply_patch", "workspace_file_create", "ssh_file_search", "workspace_file_search", "ssh_history_search", "ssh_history_get", "ops_skill", "ops_skill_list", "ops_skill_get", "ops_plan_get"} {
+	for _, retired := range []string{"ssh_approval_status", "ssh_task_start", "ssh_task_status", "ssh_task_tail", "ssh_task_list", "ssh_task_get", "ssh_task_cancel", "ssh_file_write", "ssh_file_apply_patch", "ssh_file_restore", "ssh_file_create", "ssh_file_stat", "ssh_config_apply", "ssh_config_restore", "workspace_list", "workspace_file_apply_patch", "workspace_file_create", "ssh_file_search", "workspace_file_search", "ssh_history_search", "ssh_history_get", "ops_skill", "ops_skill_list", "ops_skill_get", "ops_plan_get", "ops_plan_create", "ops_plan_step_update", "ops_plan_revise"} {
 		if seen[retired] {
 			t.Fatalf("removed %s tool remains in the Agent catalog", retired)
 		}
 	}
-	if !seen["ops_plan_create"] || !seen["ops_plan_step_update"] || !seen["ops_plan_revise"] || !seen["ssh_file_edit"] || !seen["ssh_file_transfer"] || !seen["ssh_tunnel"] || !seen["ssh_shell"] || !seen["workspace_file_edit"] || !seen["workspace_file_delete"] || !seen["workspace_file_upload"] || !seen["workspace_file_download"] || !seen["workspace_shell"] || !seen["web_search"] || !seen["web_extract"] || !seen["ssh_task"] || !seen["ssh_history"] || !seen["skill"] {
+	if !seen["ssh_file_edit"] || !seen["ssh_file_transfer"] || !seen["ssh_tunnel"] || !seen["ssh_shell"] || !seen["workspace_file_edit"] || !seen["workspace_file_delete"] || !seen["workspace_file_upload"] || !seen["workspace_file_download"] || !seen["workspace_shell"] || !seen["web_search"] || !seen["web_extract"] || !seen["ssh_task"] || !seen["ssh_history"] || !seen["skill"] {
 		t.Fatalf("representative functions missing: %#v", seen)
 	}
 }
@@ -1414,55 +1414,6 @@ func TestUnifiedSkillToolReadsTheLiveAdministratorRegistry(t *testing.T) {
 	}
 	if disabled.OK || disabled.Status != "failed" || disabled.Code != "configuration_required" || !strings.Contains(disabled.Message, "disabled") {
 		t.Fatalf("disabled skill did not return a structured failure: %#v", disabled)
-	}
-}
-
-func TestPlanStepUpdateReturnsCurrentPlanWithoutAbortingToolNode(t *testing.T) {
-	ctx := service.WithSessionID(context.Background(), "session_plan_transition")
-	st, err := store.Open(ctx, t.TempDir()+"/tools.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	encryptor, err := security.NewEncryptor("", t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	svc := service.New(st, nil, encryptor, security.NewRedactor(), config.Default().Limits)
-	if _, err := svc.CreateAgentPlan(ctx, "Repair the service", []string{"Inspect", "Repair"}, "test"); err != nil {
-		t.Fatal(err)
-	}
-	tools, err := BuildTools(svc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var updateTool tool.InvokableTool
-	for _, candidate := range tools {
-		info, infoErr := candidate.Info(ctx)
-		if infoErr != nil {
-			t.Fatal(infoErr)
-		}
-		if info.Name == "ops_plan_step_update" {
-			updateTool = candidate.(tool.InvokableTool)
-			break
-		}
-	}
-	if updateTool == nil {
-		t.Fatal("ops_plan_step_update tool was not registered")
-	}
-	resultJSON, err := updateTool.InvokableRun(ctx, `{"step_number":2,"status":"completed"}`)
-	if err != nil {
-		t.Fatalf("invalid plan transition aborted the ToolNode: %v", err)
-	}
-	var result planToolResult
-	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
-		t.Fatal(err)
-	}
-	if result.OK || result.Status != "failed" || result.Code != "invalid_state" || result.Plan == nil {
-		t.Fatalf("unexpected plan transition failure: %#v", result)
-	}
-	if result.Plan.Steps[0].Status != "in_progress" || result.Plan.Steps[1].Status != "pending" || !strings.Contains(result.NextAction, "step 1") {
-		t.Fatalf("current plan state was not returned: %#v", result.Plan)
 	}
 }
 

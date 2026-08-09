@@ -19,11 +19,11 @@ func TestInjectControlPlaneContexts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	planContent, err := agentPlanContextContent(domain.AgentPlan{Goal: "g", Status: "active"})
+	taskContent, err := agentTaskContextContent(domain.AgentTaskList{Items: []domain.AgentTask{{ID: "1", Subject: "Inspect", Status: "in_progress"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	contents := []string{workspaceContent, planContent}
+	contents := []string{workspaceContent, taskContent}
 
 	inline, inlineBytes := injectControlPlaneContexts(base, contents, true)
 	if len(inline) != len(base) {
@@ -45,9 +45,9 @@ func TestInjectControlPlaneContexts(t *testing.T) {
 		t.Fatalf("inline context byte count = %d, want %d", inlineBytes, len(last.Content)-len("list hosts"))
 	}
 	workspaceAt := strings.Index(last.Content, workspaceContent)
-	planAt := strings.Index(last.Content, planContent)
-	if workspaceAt < 0 || planAt < 0 || workspaceAt > planAt {
-		t.Fatalf("blocks must keep injection order (workspace before plan): workspace=%d plan=%d", workspaceAt, planAt)
+	taskAt := strings.Index(last.Content, taskContent)
+	if workspaceAt < 0 || taskAt < 0 || workspaceAt > taskAt {
+		t.Fatalf("blocks must keep injection order (workspace before tasks): workspace=%d tasks=%d", workspaceAt, taskAt)
 	}
 	if base[len(base)-1].Content != "list hosts" {
 		t.Fatal("inline injection mutated the caller's message slice")
@@ -60,11 +60,11 @@ func TestInjectControlPlaneContexts(t *testing.T) {
 	if system[1].Role != schema.Assistant || system[2].Role != schema.System || system[3].Role != schema.System || system[4].Content != "list hosts" {
 		t.Fatal("system messages must sit between history and the trailing user message")
 	}
-	if system[2].Content != workspaceContent || system[3].Content != planContent {
-		t.Fatal("system messages must keep injection order (workspace before plan)")
+	if system[2].Content != workspaceContent || system[3].Content != taskContent {
+		t.Fatal("system messages must keep injection order (workspace before tasks)")
 	}
-	if systemBytes != len(workspaceContent)+len(planContent) {
-		t.Fatalf("system context byte count = %d, want %d", systemBytes, len(workspaceContent)+len(planContent))
+	if systemBytes != len(workspaceContent)+len(taskContent) {
+		t.Fatalf("system context byte count = %d, want %d", systemBytes, len(workspaceContent)+len(taskContent))
 	}
 
 	if got, gotBytes := injectControlPlaneContexts(base, nil, true); len(got) != len(base) || gotBytes != 0 {

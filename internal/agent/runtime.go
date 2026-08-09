@@ -51,15 +51,9 @@ type finalAnswerToolResult struct {
 	Content  string `json:"content"`
 }
 
-type finalAnswerPlan struct {
-	Goal   string                 `json:"goal"`
-	Status string                 `json:"status"`
-	Steps  []domain.AgentPlanStep `json:"steps"`
-}
-
 type finalAnswerInput struct {
 	Request     string                  `json:"request"`
-	Plan        *finalAnswerPlan        `json:"plan,omitempty"`
+	Tasks       []domain.AgentTask      `json:"tasks,omitempty"`
 	ToolResults []finalAnswerToolResult `json:"tool_results"`
 }
 
@@ -283,6 +277,25 @@ func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st
 	if err != nil {
 		return nil, nil, fmt.Errorf("build Eino tools: %w", err)
 	}
+	toolStates, err := svc.AgentToolStates(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load Agent tool settings: %w", err)
+	}
+	plantaskMiddleware, plantaskTools, err := newPlantaskMiddleware(ctx, st, toolStates)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build Eino plantask middleware: %w", err)
+	}
+	plantaskDescriptors, err := DescribeTools(ctx, plantaskTools)
+	if err != nil {
+		return nil, nil, fmt.Errorf("describe Eino plantask tools: %w", err)
+	}
+	for index := range plantaskDescriptors {
+		plantaskDescriptors[index].Description = agentTaskCatalogDescriptions[plantaskDescriptors[index].Name]
+		if enabled, configured := toolStates[plantaskDescriptors[index].Name]; configured {
+			plantaskDescriptors[index].Enabled = enabled
+		}
+	}
+	descriptors = append(plantaskDescriptors, descriptors...)
 	middlewares := []compose.ToolMiddleware{{Invokable: normalizeToolCallErrors}}
 	if cfg.Kind == "anthropic" {
 		// The claude model component rewrites "{}" streaming tool arguments to
@@ -297,6 +310,7 @@ func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st
 			Tools: tools, ExecuteSequentially: true, UnknownToolsHandler: unknownToolResult,
 			ToolCallMiddlewares: middlewares,
 		}},
+		Handlers: []adk.ChatModelAgentMiddleware{plantaskMiddleware},
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("create Eino agent: %w", err)
@@ -738,6 +752,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 	if !sessionStarted {
 		return "", ErrSessionBusy
 	}
+	ctx = service.WithSessionID(ctx, sessionID)
 	defer r.endSession(sessionID)
 	started := time.Now()
 	logger := observability.FromContext(ctx).With("component", "agent", "session_id", sessionID)
@@ -853,18 +868,16 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 		}
 		contextContents = append(contextContents, content)
 	}
-	planInjected := false
-	planStatus := ""
-	if plan, planErr := r.store.GetAgentPlan(ctx, sessionID); planErr == nil {
-		content, contentErr := agentPlanContextContent(plan)
+	tasksInjected := false
+	if tasks, taskErr := r.store.ListAgentTasks(ctx, sessionID); taskErr == nil && len(tasks.Items) > 0 {
+		content, contentErr := agentTaskContextContent(tasks)
 		if contentErr != nil {
-			return "", fmt.Errorf("prepare agent plan context: %w", contentErr)
+			return "", fmt.Errorf("prepare agent task context: %w", contentErr)
 		}
 		contextContents = append(contextContents, content)
-		planInjected = true
-		planStatus = plan.Status
-	} else if !errors.Is(planErr, store.ErrNotFound) {
-		return "", fmt.Errorf("load agent plan context: %w", planErr)
+		tasksInjected = true
+	} else if taskErr != nil {
+		return "", fmt.Errorf("load agent task context: %w", taskErr)
 	}
 	var controlPlaneBytes int
 	messages, controlPlaneBytes = injectControlPlaneContexts(messages, contextContents, inlineContext)
@@ -874,7 +887,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 		"included_turns", contextStats.IncludedTurns, "model_messages", len(messages),
 		"tool_results", contextStats.ToolResults, "context_bytes", contextStats.Bytes,
 		"images", contextStats.Images, "image_bytes", contextStats.ImageBytes,
-		"plan_injected", planInjected, "plan_status", planStatus,
+		"tasks_injected", tasksInjected,
 		"workspace_id", workspaceState.ID, "workspace_access", workspaceState.Access,
 	)
 	userMessageID, err := r.store.AppendPendingChatMessageWithAttachments(ctx, sessionID, "user", query, attachments)
@@ -1367,21 +1380,17 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 			break
 		}
 		if len(finalAnswerContext.ToolResults) > 0 && finalizer != nil {
-			if plan, planErr := r.store.GetAgentPlan(ctx, sessionID); planErr == nil {
-				finalAnswerContext.Plan = &finalAnswerPlan{Goal: plan.Goal, Status: plan.Status, Steps: plan.Steps}
-			} else if !errors.Is(planErr, store.ErrNotFound) {
-				return "", fmt.Errorf("refresh final answer plan context: %w", planErr)
-			}
-			finalPlanStatus := ""
-			if finalAnswerContext.Plan != nil {
-				finalPlanStatus = finalAnswerContext.Plan.Status
+			if tasks, taskErr := r.store.ListAgentTasks(ctx, sessionID); taskErr == nil {
+				finalAnswerContext.Tasks = tasks.Items
+			} else {
+				return "", fmt.Errorf("refresh final answer task context: %w", taskErr)
 			}
 			reason := "empty_terminal_output"
 			if internalContextLeak {
 				reason = "internal_context_blocked"
 			}
 			logger.InfoContext(ctx, "generating safe final answer",
-				"reason", reason, "tool_results", len(finalAnswerContext.ToolResults), "plan_status", finalPlanStatus)
+				"reason", reason, "tool_results", len(finalAnswerContext.ToolResults), "tasks", len(finalAnswerContext.Tasks))
 			finalAnswer, finalErr := generateFinalAnswer(ctx, finalizer, finalAnswerContext)
 			if finalErr != nil {
 				logger.ErrorContext(ctx, "final answer generation failed", "error", finalErr)
@@ -1494,6 +1503,14 @@ func (r *Runtime) enrichToolContent(ctx context.Context, content string, capture
 		var status string
 		if err := json.Unmarshal(payload["status"], &status); err == nil && status == "in_progress" {
 			display["request"] = arguments
+		}
+		if isAgentTaskTool(captured[0].Name) && r.store != nil {
+			tasks, taskErr := r.store.ListAgentTasks(ctx, service.SessionIDFromContext(ctx))
+			if taskErr == nil {
+				if taskJSON, marshalErr := json.Marshal(tasks); marshalErr == nil {
+					payload["tasks"] = taskJSON
+				}
+			}
 		}
 	}
 	runID := toolPayloadRunID(payload)
