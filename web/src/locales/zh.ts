@@ -137,7 +137,7 @@ const zh = {
     started: 'MCP Server 已启动。', stopped: 'MCP Server 已停止。', endpointCopied: 'Endpoint 已复制。', tokenCopied: '令牌已复制。',
   },
   chat: {
-    session: 'OpsNerva 会话', newSession: '新会话', conversations: '会话记录',
+    conversations: '会话记录',
     newConversation: '新建会话', noSaved: '没有会话',
     emptyTitle: '需要排查什么？',
     waitingModel: '等待模型响应', retryWaiting: '模型请求失败 · 第 {{attempt}}/{{max}} 次重试 · {{delay}} 秒后重试', retryingModel: '模型重试中 · 第 {{attempt}}/{{max}} 次', reconnecting: '正在重连 · 第 {{attempt}} 次 · {{delay}} 秒',

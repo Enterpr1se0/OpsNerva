@@ -136,7 +136,7 @@ const en = {
     started: 'MCP Server started.', stopped: 'MCP Server stopped.', endpointCopied: 'Endpoint copied.', tokenCopied: 'Token copied.',
   },
   chat: {
-    session: 'OpsNerva session', newSession: 'NEW SESSION', conversations: 'Conversations',
+    conversations: 'Conversations',
     newConversation: 'New conversation', noSaved: 'No conversations',
     emptyTitle: 'What should we investigate?',
     waitingModel: 'Waiting for model response', retryWaiting: 'Model request failed · retry {{attempt}}/{{max}} in {{delay}}s', retryingModel: 'Retrying model · attempt {{attempt}}/{{max}}', reconnecting: 'Reconnecting · attempt {{attempt}} · {{delay}}s',

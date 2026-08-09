@@ -347,7 +347,7 @@
   color: var(--light-accent);
 }
 
-:root[data-theme='light'] :where(.session-open span, .session-id, .history-empty, .bubble-label, .context-line) {
+:root[data-theme='light'] :where(.session-open span, .history-empty, .bubble-label, .context-line) {
   color: var(--light-text-muted);
 }
 
