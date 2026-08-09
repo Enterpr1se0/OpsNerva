@@ -94,7 +94,7 @@ export interface SSHTunnel {
   local_port: number
   remote_host: string
   remote_port: number
-  status: 'running' | 'stopping' | 'stopped' | 'failed'
+  status: 'running' | 'retrying' | 'stopping' | 'stopped' | 'failed'
   proxy_used: boolean
   active_connections: number
   total_connections: number

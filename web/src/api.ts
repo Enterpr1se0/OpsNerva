@@ -85,6 +85,7 @@ export const api = {
   hosts: () => requestList<Host>('/api/v1/hosts'),
   sshTunnels: () => request<SSHTunnelList>('/api/v1/ssh-tunnels'),
   startSSHTunnel: (input:SSHTunnelStartInput) => request<SSHTunnel>('/api/v1/ssh-tunnels', { method:'POST', body:JSON.stringify(input) }),
+  retrySSHTunnel: (id:string) => request<SSHTunnel>(`/api/v1/ssh-tunnels/${encodeURIComponent(id)}/retry`, { method:'POST', body:'{}' }),
   stopSSHTunnel: (id:string) => request<SSHTunnel>(`/api/v1/ssh-tunnels/${encodeURIComponent(id)}`, { method:'DELETE' }),
   sshShells: (sessionId='') => request<SSHShellList>(`/api/v1/ssh-shells?session_id=${encodeURIComponent(sessionId)}`),
   startSSHShell: (input:SSHShellStartInput) => request<SSHShell>('/api/v1/ssh-shells', { method:'POST', body:JSON.stringify(input) }),

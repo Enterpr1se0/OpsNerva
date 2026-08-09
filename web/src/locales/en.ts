@@ -24,7 +24,7 @@ const en = {
   tunnels: {
     short: 'Tunnels', title: 'SSH port forwarding', localOnly: 'Listens only on local 127.0.0.1', empty: 'No SSH forwarding is active.',
     connections: 'Connections', traffic: 'Traffic', started: 'Started', viaProxy: 'Using proxy / jump chain', direct: 'Direct SSH',
-    stop: 'Stop', automaticPort: 'auto', forwarding: 'SSH port forwarding', remoteEndpoint: 'Remote endpoint',
+    retry: 'Retry', stop: 'Stop', automaticPort: 'auto', forwarding: 'SSH port forwarding', remoteEndpoint: 'Remote endpoint',
     create: 'New forward', start: 'Start forwarding', starting: 'Connecting...', remoteHost: 'Host-side target', remotePort: 'Host-side target port', localPort: 'Local port', portRange: 'Ports must be between 1–65535.',
   },
   sshShell: {
@@ -240,7 +240,7 @@ const en = {
     debugHint: 'Debug logs are off. Set OPS_AGENT_LOG_LEVEL=debug and restart the service.',
     columns: { time: 'Time', level: 'Level', component: 'Component', event: 'Event / fields' }, general: 'general', emptyTitle: 'No matching server logs',
   },
-  statusLabels: { pending: 'pending', completed: 'completed', skipped: 'skipped', partial: 'partial', closed: 'closed', expired: 'expired', failed: 'failed', unknown: 'result unknown', active: 'active', running: 'running', stopping: 'stopping', stopped: 'stopped', blocked: 'blocked', in_progress: 'in progress', ready: 'ready', error: 'error', connecting: 'connecting', interrupted: 'interrupted', rejected: 'rejected', approval_required: 'approval required' },
+  statusLabels: { pending: 'pending', completed: 'completed', skipped: 'skipped', partial: 'partial', closed: 'closed', expired: 'expired', failed: 'failed', unknown: 'result unknown', active: 'active', running: 'running', retrying: 'retrying', stopping: 'stopping', stopped: 'stopped', blocked: 'blocked', in_progress: 'in progress', ready: 'ready', error: 'error', connecting: 'connecting', interrupted: 'interrupted', rejected: 'rejected', approval_required: 'approval required' },
   toolCategories: { planning: 'Task orchestration', execution: 'Command execution', hosts: 'SSH hosts', tasks: 'Long tasks', remote_files: 'Remote files', workspace: 'Workspace', web: 'Web search', history: 'Audit history', approvals: 'Approvals', skills: 'Skills', mcp: 'External MCP' },
   toolGuards: { read_only: 'Read only', approval_required: 'Approval control', agent_state: 'Agent state', audited_control: 'Audited control', external_mcp: 'External MCP' },
   toolNames: {

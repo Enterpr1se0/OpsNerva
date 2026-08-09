@@ -24,7 +24,7 @@ const zh = {
   tunnels: {
     short: '隧道', title: 'SSH 端口转发', localOnly: '仅监听本机 127.0.0.1', empty: '当前没有 SSH 转发。',
     connections: '连接', traffic: '流量', started: '启动时间', viaProxy: '使用代理 / 跳板链路', direct: 'SSH 直连',
-    stop: '停止', automaticPort: '自动端口', forwarding: 'SSH 端口转发', remoteEndpoint: '远程端点',
+    retry: '重试', stop: '停止', automaticPort: '自动端口', forwarding: 'SSH 端口转发', remoteEndpoint: '远程端点',
     create: '新建转发', start: '开始转发', starting: '正在连接...', remoteHost: '主机侧目标地址', remotePort: '主机侧目标端口', localPort: '本机端口', portRange: '端口必须在 1–65535 之间。',
   },
   sshShell: {
@@ -241,7 +241,7 @@ const zh = {
     debugHint: 'Debug 日志未启用。设置 OPS_AGENT_LOG_LEVEL=debug 后重启服务。',
     columns: { time: '时间', level: '级别', component: '组件', event: '事件 / 字段' }, general: '通用', emptyTitle: '没有匹配的服务日志',
   },
-  statusLabels: { pending: '待处理', completed: '已完成', skipped: '已跳过', partial: '部分成功', closed: '已关闭', expired: '已到期', failed: '失败', unknown: '结果未知', active: '进行中', running: '运行中', stopping: '停止中', stopped: '已停止', blocked: '已阻塞', in_progress: '执行中', ready: '就绪', error: '错误', connecting: '连接中', interrupted: '已中断', rejected: '已拒绝', approval_required: '待审批' },
+  statusLabels: { pending: '待处理', completed: '已完成', skipped: '已跳过', partial: '部分成功', closed: '已关闭', expired: '已到期', failed: '失败', unknown: '结果未知', active: '进行中', running: '运行中', retrying: '重试中', stopping: '停止中', stopped: '已停止', blocked: '已阻塞', in_progress: '执行中', ready: '就绪', error: '错误', connecting: '连接中', interrupted: '已中断', rejected: '已拒绝', approval_required: '待审批' },
   toolCategories: { planning: '任务编排', execution: '命令执行', hosts: 'SSH 主机', tasks: '长任务', remote_files: '远程文件', workspace: 'Workspace', web: '网络搜索', history: '审计历史', approvals: '审批', skills: 'Skills', mcp: '外部 MCP' },
   toolGuards: { read_only: '只读', approval_required: '审批控制', agent_state: 'Agent 状态', audited_control: '审计控制', external_mcp: '外部 MCP' },
   toolNames: {

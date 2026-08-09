@@ -466,6 +466,15 @@ function App() {
 			notify(errorText(err),'error')
 		}
 	}
+	const retrySSHTunnel=async(id:string)=>{
+		try{
+			const tunnel=await api.retrySSHTunnel(id)
+			setSSHTunnels(current=>[...current.filter(item=>item.id!==id&&item.id!==tunnel.id),tunnel])
+		}catch(err){
+			notify(errorText(err),'error')
+			void refreshConnections()
+		}
+	}
 	const registerSSHTunnel=(tunnel:SSHTunnel)=>{
 		setSSHTunnels(current=>[...current.filter(item=>item.id!==tunnel.id),tunnel])
 	}
@@ -501,7 +510,7 @@ function App() {
     </aside>
     <main>
 	      <header className="topbar"><div><h1>{title}</h1></div><div className="top-actions">
-        <SSHTunnelStatus tunnels={sshTunnels} hosts={hosts} open={openConnectionPanel==='tunnel'} onOpenChange={open=>setOpenConnectionPanel(current=>open?'tunnel':current==='tunnel'?null:current)} onStop={stopSSHTunnel} onCreated={registerSSHTunnel}/>
+        <SSHTunnelStatus tunnels={sshTunnels} hosts={hosts} open={openConnectionPanel==='tunnel'} onOpenChange={open=>setOpenConnectionPanel(current=>open?'tunnel':current==='tunnel'?null:current)} onRetry={retrySSHTunnel} onStop={stopSSHTunnel} onCreated={registerSSHTunnel}/>
 		<SSHShellStatus shells={sshShells.filter(topbarShell)} hosts={hosts} open={openConnectionPanel==='shell'} onOpenChange={open=>setOpenConnectionPanel(current=>open?'shell':current==='shell'?null:current)} onOpen={shell=>{setOpenConnectionPanel(null);setSelectedShell(shell)}} onCreated={registerSSHShell}/>
         <LanguageSwitch/>
 		<ThemeSwitch preference={themePreference} onChange={setThemePreference}/>
@@ -707,8 +716,9 @@ function ComposerReasoningSelector({providers,disabled,onChanged,onError}:{provi
 	</details>
 }
 
-function SSHTunnelStatus({tunnels,hosts,open,onOpenChange,onStop,onCreated}:{tunnels:SSHTunnel[];hosts:Host[];open:boolean;onOpenChange:(open:boolean)=>void;onStop:(id:string)=>Promise<void>;onCreated:(tunnel:SSHTunnel)=>void}){
+function SSHTunnelStatus({tunnels,hosts,open,onOpenChange,onRetry,onStop,onCreated}:{tunnels:SSHTunnel[];hosts:Host[];open:boolean;onOpenChange:(open:boolean)=>void;onRetry:(id:string)=>Promise<void>;onStop:(id:string)=>Promise<void>;onCreated:(tunnel:SSHTunnel)=>void}){
 	const {t,i18n:instance}=useTranslation()
+	const [retrying,setRetrying]=useState('')
 	const [stopping,setStopping]=useState('')
 	const [creating,setCreating]=useState(false)
 	const detailsRef=useAutoCollapseDetails(open,()=>onOpenChange(false))
@@ -721,7 +731,7 @@ function SSHTunnelStatus({tunnels,hosts,open,onOpenChange,onStop,onCreated}:{tun
 					{tunnels.map(tunnel=><section className={tunnel.status} key={tunnel.id}>
 						<div className="ssh-tunnel-route"><i/><code>{tunnel.host_name||tunnel.host_id}:{tunnel.remote_host}:{tunnel.remote_port}</code><span>→</span><code>localhost:{tunnel.local_port}</code></div>
 						<dl><div><dt>{t('common.status')}</dt><dd>{t(`statusLabels.${tunnel.status}`,{defaultValue:tunnel.status})}</dd></div><div><dt>{t('tunnels.connections')}</dt><dd>{tunnel.active_connections} / {tunnel.total_connections}</dd></div><div><dt>{t('tunnels.traffic')}</dt><dd>↑ {formatFileSize(tunnel.bytes_sent)} · ↓ {formatFileSize(tunnel.bytes_received)}</dd></div><div><dt>{t('tunnels.started')}</dt><dd>{new Date(tunnel.started_at).toLocaleTimeString(localeFor(instance.language))}</dd></div></dl>
-						<div className="ssh-tunnel-meta"><span>{tunnel.proxy_used?t('tunnels.viaProxy'):t('tunnels.direct')}</span><code>{tunnel.id}</code><button type="button" disabled={stopping===tunnel.id} onClick={async()=>{setStopping(tunnel.id);try{await onStop(tunnel.id)}finally{setStopping('')}}}>{stopping===tunnel.id?<LoaderCircle className="spin" size={12}/>:<Square size={10} fill="currentColor"/>}{t('tunnels.stop')}</button></div>
+						<div className="ssh-tunnel-meta"><span>{tunnel.proxy_used?t('tunnels.viaProxy'):t('tunnels.direct')}</span><code>{tunnel.id}</code>{tunnel.status==='failed'&&<button className="retry" type="button" disabled={retrying===tunnel.id||stopping===tunnel.id} onClick={async()=>{setRetrying(tunnel.id);try{await onRetry(tunnel.id)}finally{setRetrying('')}}}>{retrying===tunnel.id?<LoaderCircle className="spin" size={12}/>:<RefreshCw size={12}/>} {t('tunnels.retry')}</button>}<button type="button" disabled={stopping===tunnel.id||retrying===tunnel.id} onClick={async()=>{setStopping(tunnel.id);try{await onStop(tunnel.id)}finally{setStopping('')}}}>{stopping===tunnel.id?<LoaderCircle className="spin" size={12}/>:<Square size={10} fill="currentColor"/>}{t('tunnels.stop')}</button></div>
 						{tunnel.error&&<p><ShieldAlert size={12}/>{tunnel.error}</p>}
 					</section>)}
 					{!tunnels.length&&<div className="ssh-tunnel-empty">{hosts.length?t('tunnels.empty'):t('connections.noHosts')}</div>}
