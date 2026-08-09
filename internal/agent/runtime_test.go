@@ -625,18 +625,23 @@ func TestCancelSessionStopsQueryAndPersistsInterruption(t *testing.T) {
 	}
 }
 
-func TestQueryRetriesEmptyResponseWithoutDuplicatingUserMessage(t *testing.T) {
+func TestQueryEmitsFrameworkRetryWithoutRerunningAgent(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
+	retryStream, retryWriter := schema.Pipe[*schema.Message](1)
+	retryWriter.Send(nil, &adk.WillRetryError{ErrStr: "temporary upstream failure", RetryAttempt: 1})
+	retryWriter.Close()
 	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{
-		nil,
-		{adk.EventFromMessage(schema.AssistantMessage("recovered", nil), nil, schema.Assistant, "")},
+		{
+			adk.EventFromMessage(nil, retryStream, schema.Assistant, ""),
+			adk.EventFromMessage(schema.AssistantMessage("recovered", nil), nil, schema.Assistant, ""),
+		},
 	}}
-	runtime := &Runtime{runner: runner, store: st, retryWait: func(context.Context, time.Duration) error { return nil }}
+	runtime := &Runtime{runner: runner, store: st}
 	var emitted []Event
 	answer, err := runtime.Query(ctx, "session_retry", "continue", func(event Event) {
 		emitted = append(emitted, event)
@@ -648,7 +653,7 @@ func TestQueryRetriesEmptyResponseWithoutDuplicatingUserMessage(t *testing.T) {
 		t.Fatalf("answer = %q", answer)
 	}
 	calls, inputs := runner.snapshot()
-	if calls != 2 || len(inputs) != 2 || len(inputs[0]) != 1 || len(inputs[1]) != 1 {
+	if calls != 1 || len(inputs) != 1 || len(inputs[0]) != 1 {
 		t.Fatalf("retry calls/inputs = %d %#v", calls, inputs)
 	}
 	messages, err := st.ListChatMessages(ctx, "session_retry", 10)
@@ -673,7 +678,7 @@ func TestQueryRetriesEmptyResponseWithoutDuplicatingUserMessage(t *testing.T) {
 			retries = append(retries, event)
 		}
 	}
-	if len(retries) != 1 || retries[0].RetryAttempt != 1 || retries[0].RetryMax != modelRequestMaxRetries || retries[0].RetryDelayMS != 1000 {
+	if len(retries) != 1 || retries[0].RetryAttempt != 1 || retries[0].RetryMax != modelRequestMaxRetries {
 		t.Fatalf("retry events = %#v", retries)
 	}
 }
@@ -751,15 +756,15 @@ func TestQueryEmitsCurrentTasksWithTaskToolResult(t *testing.T) {
 	}
 }
 
-func TestQueryRejectsRepeatedEmptyResponseAndExcludesFailedTurn(t *testing.T) {
+func TestQueryRejectsEmptyResponseWithoutRerunningAgent(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{nil, nil}}
-	runtime := &Runtime{runner: runner, store: st, retryWait: func(context.Context, time.Duration) error { return nil }}
+	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{nil}}
+	runtime := &Runtime{runner: runner, store: st}
 	var emitted []Event
 	_, err = runtime.Query(ctx, "session_empty", "continue", func(event Event) {
 		emitted = append(emitted, event)
@@ -768,7 +773,7 @@ func TestQueryRejectsRepeatedEmptyResponseAndExcludesFailedTurn(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 	calls, _ := runner.snapshot()
-	if calls != emptyResponseMaxAttempts {
+	if calls != 1 {
 		t.Fatalf("calls = %d", calls)
 	}
 	messages, err := st.ListChatMessages(ctx, "session_empty", 10)

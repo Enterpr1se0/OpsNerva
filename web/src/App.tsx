@@ -23,7 +23,7 @@ type Page = 'chat' | 'ssh' | 'config' | 'extensions' | 'audit' | 'logs'
 type ChatEntryImage = {id:string;name:string;mimeType:string;sizeBytes:number;url:string}
 type PendingChatImage = {id:string;file:File;url:string}
 type ChatEntry = { id: string; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; tool?: string; toolCallId?:string; runId?:string; transient?:boolean; startedAt?:number; liveStdout?:string; liveStderr?:string; liveOutput?:string; liveOutputStream?:'stdout'|'stderr'; transferredBytes?:number; transferTotalBytes?:number; images?:ChatEntryImage[]; active?: boolean; lifecycle?:'streaming'|'committed'; status?: 'pending' | 'completed' | 'failed' }
-type ModelRetryState = {attempt:number;max:number;readyAt:number}
+type ModelRetryState = {attempt:number;max:number}
 type ActiveChatStream = { id: string; sessionId: string; controller: AbortController }
 type ConnectionRetryState = {attempt:number;readyAt:number}
 type ContextUsage = {tokens:number;window:number}
@@ -1703,11 +1703,11 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	useEffect(()=>{if(!selectedWorkspace)return;if(workspaceID!==selectedWorkspace.id)setWorkspaceID(selectedWorkspace.id);rememberWorkspace(selectedWorkspace.id)},[selectedWorkspace,workspaceID])
 	useEffect(()=>{if(!tasks)setTasksExpanded(false);else setTasksExpanded(true)},[tasks?.session_id,!!tasks])
 	useEffect(()=>{
-		if(!modelRetry&&!connectionRetry)return
+		if(!connectionRetry)return
 		setRetryClock(Date.now())
 		const timer=window.setInterval(()=>setRetryClock(Date.now()),1000)
 		return()=>window.clearInterval(timer)
-	},[modelRetry,connectionRetry])
+	},[connectionRetry])
 	useEffect(()=>{onStreamingChange(running)},[running,onStreamingChange])
 	useEffect(()=>()=>onStreamingChange(false),[onStreamingChange])
 	useEffect(()=>()=>{sessionLoadRef.current='';const stream=activeStreamRef.current;activeStreamRef.current=null;stream?.controller.abort();window.cancelAnimationFrame(userScrollFrame.current);window.cancelAnimationFrame(disclosureScrollFrame.current)},[])
@@ -1871,9 +1871,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		}
 		if(frame.type==='session'||frame.type==='title')void refreshSessions()
 		if(frame.type==='retry'){
-			const now=Date.now()
-			setRetryClock(now)
-			setModelRetry({attempt:frame.retry_attempt||1,max:frame.retry_max||1,readyAt:now+(frame.retry_delay_ms||0)})
+			setModelRetry({attempt:frame.retry_attempt||1,max:frame.retry_max||1})
 		}else if(['approval','reasoning','tool','tool_output','message_start','message','message_commit','message_reset','done','interrupted','model_error','error'].includes(frame.type))setModelRetry(null)
 		if(frame.type==='approval'){
 			setEntries(old=>updateToolStatusByRunID(old.map(item=>updateUser(item,'completed')),'approval_required',frame.run_id))
@@ -2054,11 +2052,9 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		finally{if(!requested)setStopping(false)}
   }
 	const streamingResponseStarted=entries.some((item)=>item.kind==='assistant'&&item.lifecycle==='streaming'&&item.content!=='')
-  const retryDelay=modelRetry?Math.max(0,Math.ceil((modelRetry.readyAt-retryClock)/1000)):0
-  const modelRetryLabel=modelRetry?t(retryDelay>0?'chat.retryWaiting':'chat.retryingModel',{
+	const modelRetryLabel=modelRetry?t('chat.retryingModel',{
 	  attempt:modelRetry.attempt,
 	  max:modelRetry.max,
-	  delay:retryDelay,
   }):''
 	const connectionRetryDelay=connectionRetry?Math.max(0,Math.ceil((connectionRetry.readyAt-retryClock)/1000)):0
 	const connectionRetryLabel=connectionRetry?t('chat.reconnecting',{attempt:connectionRetry.attempt,delay:connectionRetryDelay}):''

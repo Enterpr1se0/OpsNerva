@@ -6,7 +6,6 @@ import (
 	"io"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	modelopenai "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
@@ -47,59 +46,52 @@ func (m *transientAfterToolModel) WithTools([]*schema.ToolInfo) (model.ToolCalli
 }
 
 func TestModelRequestRetryPolicy(t *testing.T) {
+	shouldRetry := func(ctx context.Context, output *schema.Message, err error) bool {
+		decision := modelRequestRetryConfig().ShouldRetry(ctx, &adk.RetryContext{OutputMessage: output, Err: err})
+		return decision != nil && decision.Retry
+	}
 	ctx := context.Background()
-	if modelRequestRetryDecision(ctx, 1, nil, &modelopenai.APIError{HTTPStatusCode: 400}).Retry {
+	if shouldRetry(ctx, nil, &modelopenai.APIError{HTTPStatusCode: 400}) {
 		t.Fatal("HTTP 400 was marked retryable")
 	}
-	if !modelRequestRetryDecision(ctx, 1, nil, &modelopenai.APIError{HTTPStatusCode: 429}).Retry {
+	if !shouldRetry(ctx, nil, &modelopenai.APIError{HTTPStatusCode: 429}) {
 		t.Fatal("HTTP 429 was not marked retryable")
 	}
-	if !modelRequestRetryDecision(ctx, 1, nil, &modelopenai.APIError{HTTPStatusCode: 502}).Retry {
+	if !shouldRetry(ctx, nil, &modelopenai.APIError{HTTPStatusCode: 502}) {
 		t.Fatal("HTTP 502 was not marked retryable")
 	}
-	if modelRequestRetryDecision(ctx, 1, schema.AssistantMessage("partial", nil), errors.New("connection reset")).Retry {
+	if !shouldRetry(ctx, nil, errors.New("[NodeRunError] error, status code: 503, status: 503 Service Unavailable")) {
+		t.Fatal("wrapped HTTP 503 was not marked retryable")
+	}
+	if shouldRetry(ctx, schema.AssistantMessage("partial", nil), errors.New("connection reset")) {
 		t.Fatal("partial model output was marked retryable")
 	}
-	if !modelRequestRetryDecision(ctx, 2, nil, context.DeadlineExceeded).Retry {
-		t.Fatal("a second model timeout was not marked retryable")
+	if shouldRetry(ctx, &schema.Message{Role: schema.Assistant, ReasoningContent: "partial reasoning"}, io.ErrUnexpectedEOF) {
+		t.Fatal("partial reasoning output was marked retryable")
 	}
-	if modelRequestRetryDecision(ctx, 3, nil, context.DeadlineExceeded).Retry {
-		t.Fatal("a third model timeout was marked retryable")
+	if shouldRetry(ctx, schema.AssistantMessage("", []schema.ToolCall{{ID: "call-1"}}), io.ErrUnexpectedEOF) {
+		t.Fatal("partial tool-call output was marked retryable")
 	}
-	if !modelRequestRetryDecision(ctx, 4, nil, &modelopenai.APIError{HTTPStatusCode: 503}).Retry {
-		t.Fatal("the fourth transient provider failure was not marked retryable")
+	if !shouldRetry(ctx, nil, context.DeadlineExceeded) {
+		t.Fatal("model timeout was not marked retryable")
 	}
-	if modelRequestRetryDecision(ctx, 5, nil, &modelopenai.APIError{HTTPStatusCode: 503}).Retry {
-		t.Fatal("a fifth transient provider failure was marked retryable")
+	if !shouldRetry(ctx, nil, nil) {
+		t.Fatal("empty model output was not delegated to Eino retry")
 	}
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
-	if modelRequestRetryDecision(cancelled, 1, nil, &modelopenai.APIError{HTTPStatusCode: 502}).Retry {
+	if shouldRetry(cancelled, nil, &modelopenai.APIError{HTTPStatusCode: 502}) {
 		t.Fatal("a canceled request was marked retryable")
 	}
 }
 
-func TestModelRequestRetryNoticeMatchesBackoff(t *testing.T) {
-	var notices []modelRequestRetryNotice
-	ctx := withModelRequestRetryNotifier(context.Background(), func(notice modelRequestRetryNotice) {
-		notices = append(notices, notice)
-	})
-	for attempt, expectedDelay := range []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second} {
-		retryAttempt := attempt + 1
-		if !modelRequestRetryDecision(ctx, retryAttempt, nil, &modelopenai.APIError{HTTPStatusCode: 502}).Retry {
-			t.Fatalf("attempt %d was not marked retryable", retryAttempt)
-		}
-		if delay := modelRequestRetryBackoff(ctx, retryAttempt); delay != expectedDelay {
-			t.Fatalf("attempt %d delay = %v, want %v", retryAttempt, delay, expectedDelay)
-		}
+func TestModelRequestRetryConfigUsesEinoBackoff(t *testing.T) {
+	config := modelRequestRetryConfig()
+	if config.MaxRetries != modelRequestMaxRetries || config.ShouldRetry == nil {
+		t.Fatalf("retry config = %#v", config)
 	}
-	if len(notices) != modelRequestMaxRetries {
-		t.Fatalf("notices = %#v", notices)
-	}
-	for index, notice := range notices {
-		if notice.Attempt != index+1 || notice.Max != modelRequestMaxRetries || notice.Delay != time.Second*time.Duration(1<<index) {
-			t.Fatalf("notice %d = %#v", index, notice)
-		}
+	if config.BackoffFunc != nil {
+		t.Fatal("custom retry backoff is still configured")
 	}
 }
 
@@ -114,11 +106,9 @@ func TestModelRequestRetryDoesNotRepeatCompletedTool(t *testing.T) {
 		t.Fatal(err)
 	}
 	chatModel := &transientAfterToolModel{}
-	retryConfig := modelRequestRetryConfig()
-	retryConfig.BackoffFunc = func(context.Context, int) time.Duration { return 0 }
 	agentInstance, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name: "retry-test", Description: "model request retry regression", Model: chatModel, MaxIterations: 3,
-		ModelRetryConfig: retryConfig,
+		ModelRetryConfig: modelRequestRetryConfig(),
 		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
 			Tools: []tool.BaseTool{countedTool}, ExecuteSequentially: true,
 		}},

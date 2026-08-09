@@ -139,7 +139,7 @@ const en = {
     conversations: 'Conversations',
     newConversation: 'New conversation', noSaved: 'No conversations',
     emptyTitle: 'What should we investigate?',
-    waitingModel: 'Waiting for model response', retryWaiting: 'Model request failed · retry {{attempt}}/{{max}} in {{delay}}s', retryingModel: 'Retrying model · attempt {{attempt}}/{{max}}', reconnecting: 'Reconnecting · attempt {{attempt}} · {{delay}}s',
+    waitingModel: 'Waiting for model response', retryingModel: 'Retrying model · attempt {{attempt}}/{{max}}', reconnecting: 'Reconnecting · attempt {{attempt}} · {{delay}}s',
     stopping: 'Stopping Agent', running: 'LLM running', toolsRunning: 'Tool running', stop: 'Stop', stopTitle: 'Stop Agent run',
     hostsCount: '{{count}} hosts: {{names}}', noHosts: 'No hosts available to Agent', switchHosts: 'Switch Agent hosts', switchModel: 'Switch model', workspaceSelected: 'Workspace: {{id}}', noWorkspace: 'No Workspace', noModel: 'No active model',
     configureModel: 'Configure and activate a model provider', loadingConversation: 'Loading conversation...',

@@ -140,7 +140,7 @@ const zh = {
     conversations: '会话记录',
     newConversation: '新建会话', noSaved: '没有会话',
     emptyTitle: '需要排查什么？',
-    waitingModel: '等待模型响应', retryWaiting: '模型请求失败 · 第 {{attempt}}/{{max}} 次重试 · {{delay}} 秒后重试', retryingModel: '模型重试中 · 第 {{attempt}}/{{max}} 次', reconnecting: '正在重连 · 第 {{attempt}} 次 · {{delay}} 秒',
+    waitingModel: '等待模型响应', retryingModel: '模型重试中 · 第 {{attempt}}/{{max}} 次', reconnecting: '正在重连 · 第 {{attempt}} 次 · {{delay}} 秒',
     stopping: '正在停止 Agent', running: 'LLM 运行中', toolsRunning: '工具执行中', stop: '停止', stopTitle: '停止 Agent 运行',
     hostsCount: '{{count}} 台主机：{{names}}', noHosts: 'Agent 无可用主机', switchHosts: '切换 Agent 主机', switchModel: '切换模型', workspaceSelected: 'Workspace：{{id}}', noWorkspace: '未选择 Workspace', noModel: '没有活动模型',
     configureModel: '请配置并启用模型提供商', loadingConversation: '正在加载会话...',

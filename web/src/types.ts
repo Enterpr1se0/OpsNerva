@@ -252,7 +252,6 @@ export interface AgentEvent {
   status?: string
   retry_attempt?: number
   retry_max?: number
-  retry_delay_ms?: number
 	context_tokens?: number
 	context_window?: number
 }
