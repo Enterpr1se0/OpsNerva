@@ -720,7 +720,7 @@ FROM model_providers WHERE active=1 LIMIT 1`)
 
 func (s *Store) ListModelProviders(ctx context.Context) ([]domain.ModelProvider, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id,name,kind,base_url,model,context_window,api_key_cipher,proxy_id,user_agent,reasoning_effort,active,created_at,updated_at
-FROM model_providers ORDER BY active DESC,name`)
+FROM model_providers ORDER BY created_at,id`)
 	if err != nil {
 		return nil, err
 	}
