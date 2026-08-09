@@ -341,7 +341,6 @@ function App() {
   const [selectedShell,setSelectedShell]=useState<SSHShell|null>(null)
   const [openConnectionPanel,setOpenConnectionPanel]=useState<'tunnel'|'shell'|null>(null)
 	const [notifications,setNotifications]=useState<AppNotification[]>([])
-	const [agentStreaming,setAgentStreaming]=useState(false)
 	const connectionRefreshRef=useRef<Promise<void>|null>(null)
 	const dismissNotification=useCallback((id:string)=>setNotifications(current=>current.filter(item=>item.id!==id)),[])
 	const notify=useCallback<NotificationSink>((message,tone='success')=>{
@@ -367,19 +366,62 @@ function App() {
 		return task
 	},[])
 
-  const refresh = useCallback(async () => {
-    try {
-	  const [nextHealth, nextHosts, nextProviders, nextProxies, nextSettings, nextCapabilities, nextToolCatalog, nextSkills, nextMCPServers, nextApprovals, nextRuns] = await Promise.all([
-		api.health(), api.hosts(), api.modelProviders(), api.proxies(), api.systemSettings(), api.capabilities(), api.llmTools(), api.skills(), api.mcpServers(), api.approvals(), api.runs(), refreshConnections(),
-      ])
-	  setHealth(nextHealth); setHosts(nextHosts); setProviders(nextProviders); setProxies(nextProxies);setSettings(nextSettings);setCapabilities(nextCapabilities);setToolCatalog(nextToolCatalog);setSkills(nextSkills);setMCPServers(nextMCPServers); setApprovals(nextApprovals); setRuns(nextRuns)
-	} catch (err) { notify(errorText(err),'error') }
-  }, [notify,refreshConnections])
+	const refreshToolCatalog=useCallback(async()=>{
+		try{setToolCatalog(await api.llmTools())}
+		catch(err){notify(errorText(err),'error')}
+	},[notify])
+	const refreshSkills=useCallback(async()=>{
+		try{setSkills(await api.skills())}
+		catch(err){notify(errorText(err),'error')}
+	},[notify])
+	const refreshMCPServers=useCallback(async()=>{
+		try{setMCPServers(await api.mcpServers())}
+		catch(err){notify(errorText(err),'error')}
+	},[notify])
+	const refreshExtensions=useCallback(async()=>{await Promise.all([refreshToolCatalog(),refreshSkills(),refreshMCPServers()])},[refreshMCPServers,refreshSkills,refreshToolCatalog])
+	const refreshRuns=useCallback(async()=>{
+		try{setRuns(await api.runs())}
+		catch(err){notify(errorText(err),'error')}
+	},[notify])
+	const refreshHealth=useCallback(async()=>{
+		try{setHealth(await api.health())}
+		catch(err){notify(errorText(err),'error')}
+	},[notify])
+	const refreshHosts=useCallback(async()=>{
+		try{setHosts(await api.hosts())}
+		catch(err){notify(errorText(err),'error')}
+	},[notify])
+	const refreshProviders=useCallback(async()=>{
+		try{setProviders(await api.modelProviders())}
+		catch(err){notify(errorText(err),'error')}
+	},[notify])
+	const refreshModels=useCallback(async()=>{await Promise.all([refreshProviders(),refreshHealth()])},[refreshHealth,refreshProviders])
+	const refreshProxies=useCallback(async()=>{
+		try{setProxies(await api.proxies())}
+		catch(err){notify(errorText(err),'error')}
+	},[notify])
+	const refreshSettings=useCallback(async()=>{
+		try{setSettings(await api.systemSettings())}
+		catch(err){notify(errorText(err),'error')}
+	},[notify])
+	const refreshCapabilities=useCallback(async()=>{
+		try{setCapabilities(await api.capabilities())}
+		catch(err){notify(errorText(err),'error')}
+	},[notify])
 	const refreshApprovals=useCallback(async(decidedID?:string)=>{
 		if(decidedID)setApprovals(current=>current.filter(item=>item.id!==decidedID))
 		try{setApprovals(await api.approvals())}
 		catch(err){notify(errorText(err),'error')}
 	},[notify])
+	const refreshBootstrap=useCallback(async()=>{
+		await Promise.all([refreshHealth(),refreshHosts(),refreshProviders(),refreshSettings(),refreshCapabilities(),refreshApprovals()])
+	},[refreshApprovals,refreshCapabilities,refreshHealth,refreshHosts,refreshProviders,refreshSettings])
+	const refreshConfiguration=useCallback(async()=>{
+		await Promise.all([refreshHealth(),refreshHosts(),refreshProviders(),refreshProxies(),refreshSettings(),refreshCapabilities()])
+	},[refreshCapabilities,refreshHealth,refreshHosts,refreshProviders,refreshProxies,refreshSettings])
+	const refreshChat=useCallback(async()=>{
+		await Promise.all([refreshHealth(),refreshHosts(),refreshProviders(),refreshSettings(),refreshCapabilities(),refreshApprovals()])
+	},[refreshApprovals,refreshCapabilities,refreshHealth,refreshHosts,refreshProviders,refreshSettings])
 	const removeSessionState=useCallback((sessionID:string)=>{
 		setApprovals(current=>current.filter(item=>item.session_id!==sessionID))
 		setRuns(current=>current.filter(item=>item.session_id!==sessionID))
@@ -419,21 +461,29 @@ function App() {
 		sync();window.addEventListener('focus',sync);window.addEventListener('blur',sync)
 		return()=>{window.removeEventListener('focus',sync);window.removeEventListener('blur',sync)}
 	},[])
-	useEffect(() => { void refresh() }, [refresh])
+	useEffect(() => { void refreshBootstrap();void refreshConnections() }, [refreshBootstrap,refreshConnections])
 	useEffect(()=>{
+		if(page==='extensions')void refreshExtensions()
+		else if(page==='audit')void Promise.all([refreshRuns(),refreshHosts()])
+		else if(page==='ssh')void Promise.all([refreshHosts(),refreshConnections()])
+		else if(page==='config')void refreshConfiguration()
+	},[page,refreshConfiguration,refreshConnections,refreshExtensions,refreshHosts,refreshRuns])
+	const pollConnections=page==='ssh'||openConnectionPanel!==null||sshTunnels.some(tunnel=>['running','retrying','stopping'].includes(tunnel.status))||sshShells.some(shell=>sshShellActive(shell.status))
+	useEffect(()=>{
+		if(!pollConnections)return
 		const timer=window.setInterval(()=>{if(document.visibilityState==='visible')void refreshConnections()},2000)
 		return()=>window.clearInterval(timer)
-	},[refreshConnections])
+	},[pollConnections,refreshConnections])
 	useEffect(() => {
-		if(agentStreaming)return
-		const timer=window.setInterval(()=>{if(document.visibilityState==='visible')void refresh()},10000)
+		const timer=window.setInterval(()=>{if(document.visibilityState==='visible')void refreshHealth()},30000)
 		return()=>window.clearInterval(timer)
-	},[agentStreaming,refresh])
+	},[refreshHealth])
 	const navigate=useCallback((next:Page)=>{
 		if(next===page)return
 		const reduced=window.matchMedia('(prefers-reduced-motion: reduce)').matches
 		const transition=(document as Document&{startViewTransition?:(update:()=>void)=>unknown}).startViewTransition
-		if(transition&&!reduced)transition.call(document,()=>setPage(next))
+		const extensionEdge=page==='extensions'||next==='extensions'
+		if(transition&&!reduced&&!extensionEdge)transition.call(document,()=>setPage(next))
 		else setPage(next)
 	},[page])
 	useEffect(()=>{
@@ -456,7 +506,14 @@ function App() {
 	const manualRefresh=async()=>{
 		if(refreshing)return
 		setRefreshing(true)
-		try{await refresh()}finally{setRefreshing(false)}
+		try{
+			if(page==='extensions')await refreshExtensions()
+			else if(page==='audit')await Promise.all([refreshRuns(),refreshHosts()])
+			else if(page==='ssh')await Promise.all([refreshHosts(),refreshConnections()])
+			else if(page==='config')await refreshConfiguration()
+			else if(page==='chat')await refreshChat()
+			else await refreshHealth()
+		}finally{setRefreshing(false)}
 	}
 	const stopSSHTunnel=async(id:string)=>{
 		try{
@@ -521,18 +578,18 @@ function App() {
 			<ChatPage visible={page==='chat'} onActivate={()=>navigate('chat')}
 				hosts={hosts} providers={providers} approvals={approvals} runs={runs} workspaceShells={sshShells.filter(shell=>shell.kind==='workspace')}
 				capabilities={capabilities} settings={settings} imageTypes={settings?.chat_image_allowed_types||defaultChatImageTypes}
-					agentAvailable={!!health?.agent_available} modelName={health?.model?.model} contextWindow={health?.model?.context_window||0} refresh={refresh} refreshConnections={refreshConnections}
+					agentAvailable={!!health?.agent_available} modelName={health?.model?.model} contextWindow={health?.model?.context_window||0} refreshConnections={refreshConnections}
 				refreshApprovals={refreshApprovals} onCreateWorkspaceShell={createWorkspaceShell} onOpenWorkspaceShell={setSelectedShell} onWorkspaceShellStarted={observeAgentWorkspaceShell} onSettingsChanged={setSettings}
 				onHostChanged={host=>setHosts(current=>current.map(item=>item.id===host.id?host:item))}
 				onModelChanged={provider=>{setProviders(current=>current.map(item=>item.id===provider.id?provider:{...item,active:provider.active?false:item.active}));void api.health().then(setHealth).catch(err=>reportError(errorText(err)))}}
-				sidebarTarget={chatSidebarTarget} onSessionDeleted={removeSessionState} onError={reportError} onStreamingChange={setAgentStreaming}
+				sidebarTarget={chatSidebarTarget} onSessionDeleted={removeSessionState} onError={reportError}
 			/>
 			{page === 'ssh' && <SSHWorkspacePage
 				hosts={hosts} shells={sshShells.filter(shell=>shell.kind!=='workspace'&&shell.surface==='workspace')}
-				onCreated={rememberSSHShell} refresh={refresh} onError={reportError}
+				onCreated={rememberSSHShell} refresh={refreshConnections} onError={reportError}
 			/>}
-		{page === 'config' && <ConfigurationPage hosts={hosts} providers={providers} proxies={proxies} settings={settings} capabilities={capabilities} health={health} refresh={refresh}/>}
-		{page === 'extensions' && <ExtensionsPage skills={skills} mcpServers={mcpServers} toolCatalog={toolCatalog} refresh={refresh}/>}
+		{page === 'config' && <ConfigurationPage hosts={hosts} providers={providers} proxies={proxies} settings={settings} capabilities={capabilities} health={health} refreshModels={refreshModels} refreshHosts={refreshHosts} refreshProxies={refreshProxies} refreshCapabilities={refreshCapabilities} refreshHealth={refreshHealth} onSettingsChanged={setSettings}/>}
+		{page === 'extensions' && <ExtensionsPage skills={skills} mcpServers={mcpServers} toolCatalog={toolCatalog} refreshSkills={refreshSkills} refreshMCPServers={refreshMCPServers} refreshToolCatalog={refreshToolCatalog} onToolCatalogChanged={setToolCatalog}/>}
         {page === 'audit' && <AuditPage runs={runs} hosts={hosts}/>}
         {page === 'logs' && <LogsPage/>}
       </section>
@@ -542,7 +599,7 @@ function App() {
 			relatedShells={selectedShell.kind==='workspace'?sshShells.filter(shell=>shell.kind==='workspace'&&shell.workspace_id===selectedShell.workspace_id&&sshShellActive(shell.status)):[]}
 			onSelect={setSelectedShell}
 			onClose={()=>setSelectedShell(null)}
-			onChanged={()=>void refresh()}
+			onChanged={()=>void refreshConnections()}
 			onError={reportError}
 		/>}
     </main>
@@ -1196,7 +1253,7 @@ function ConfigurationEditorPage({icon,title,busy,onBack,children}:{icon:React.R
 	</div>
 }
 
-function ConfigurationPage({hosts,providers,proxies,settings,capabilities,health,refresh}:{hosts:Host[];providers:ModelProvider[];proxies:Proxy[];settings:SystemSettings|null;capabilities:ToolCapabilities;health:Health|null;refresh:()=>Promise<void>}) {
+function ConfigurationPage({hosts,providers,proxies,settings,capabilities,health,refreshModels,refreshHosts,refreshProxies,refreshCapabilities,refreshHealth,onSettingsChanged}:{hosts:Host[];providers:ModelProvider[];proxies:Proxy[];settings:SystemSettings|null;capabilities:ToolCapabilities;health:Health|null;refreshModels:()=>Promise<void>;refreshHosts:()=>Promise<void>;refreshProxies:()=>Promise<void>;refreshCapabilities:()=>Promise<void>;refreshHealth:()=>Promise<void>;onSettingsChanged:(settings:SystemSettings)=>void}) {
   const {t}=useTranslation()
   const [section,setSection]=useState<ConfigurationSection>('models')
   const [showAddresses,setShowAddresses]=useState(false)
@@ -1210,15 +1267,15 @@ function ConfigurationPage({hosts,providers,proxies,settings,capabilities,health
 	    <div className="section-tabs-row"><div className="configuration-tabs" role="tablist" aria-label={t('config.sections')}>{tabs.map(([id,icon,label,meta])=><button type="button" role="tab" aria-selected={section===id} className={section===id?'active':''} onClick={()=>setSection(id)} key={id}>{icon}<span><b>{label}</b><small>{meta}</small></span><ChevronRight size={15}/></button>)}</div></div>
     <div className="configuration-content" role="tabpanel">
 	  {section==='models'&&(
-		<ModelsPage providers={providers} proxies={proxies} showAddresses={showAddresses} onToggleAddresses={()=>setShowAddresses(value=>!value)} refresh={refresh}/>
+		<ModelsPage providers={providers} proxies={proxies} showAddresses={showAddresses} onToggleAddresses={()=>setShowAddresses(value=>!value)} refresh={refreshModels}/>
 	  )}
 	  {section==='hosts'&&(
-		<HostsPage hosts={hosts} proxies={proxies} showAddresses={showAddresses} onToggleAddresses={()=>setShowAddresses(value=>!value)} refresh={refresh}/>
+		<HostsPage hosts={hosts} proxies={proxies} showAddresses={showAddresses} onToggleAddresses={()=>setShowAddresses(value=>!value)} refresh={refreshHosts}/>
 	  )}
 	  {section==='proxies'&&(
-		<ProxiesPage proxies={proxies} showAddresses={showAddresses} onToggleAddresses={()=>setShowAddresses(value=>!value)} refresh={refresh}/>
+		<ProxiesPage proxies={proxies} showAddresses={showAddresses} onToggleAddresses={()=>setShowAddresses(value=>!value)} refresh={refreshProxies}/>
 	  )}
-	  {section==='system'&&<SystemSettingsPage settings={settings} providers={providers} proxies={proxies} capabilities={capabilities} modelStatus={health?.model} refresh={refresh}/>}
+	  {section==='system'&&<SystemSettingsPage settings={settings} providers={providers} proxies={proxies} capabilities={capabilities} modelStatus={health?.model} refreshCapabilities={refreshCapabilities} refreshHealth={refreshHealth} onSettingsChanged={onSettingsChanged}/>}
     </div>
   </div>
 }
@@ -1229,15 +1286,18 @@ function AddressVisibilityButton({visible,onToggle}:{visible:boolean;onToggle:()
 	return <button type="button" className={`icon-button configuration-address-toggle ${visible?'active':''}`} aria-label={label} title={label} onClick={onToggle}>{visible?<EyeOff size={17}/>:<Eye size={17}/>}</button>
 }
 
-type ExtensionSection = 'overview' | 'skills' | 'mcp' | 'tools'
+function FloatingPageActions({children}:{children:React.ReactNode}){
+	return createPortal(<div className="floating-page-actions">{children}</div>,document.body)
+}
 
-function ExtensionsPage({skills,mcpServers,toolCatalog,refresh}:{skills:ManagedSkill[];mcpServers:MCPServer[];toolCatalog:LLMToolCatalog|null;refresh:()=>Promise<void>}){
+type ExtensionSection = 'skills' | 'mcp' | 'tools'
+
+function ExtensionsPage({skills,mcpServers,toolCatalog,refreshSkills,refreshMCPServers,refreshToolCatalog,onToolCatalogChanged}:{skills:ManagedSkill[];mcpServers:MCPServer[];toolCatalog:LLMToolCatalog|null;refreshSkills:()=>Promise<void>;refreshMCPServers:()=>Promise<void>;refreshToolCatalog:()=>Promise<void>;onToolCatalogChanged:(catalog:LLMToolCatalog)=>void}){
 	const {t}=useTranslation()
-		const [section,setSection]=useState<ExtensionSection>('overview')
+		const [section,setSection]=useState<ExtensionSection>('skills')
 		const enabledSkills=skills.filter(skill=>skill.enabled).length
 		const readyMCP=mcpServers.filter(server=>server.status==='ready').length
 		const tabs:[ExtensionSection,React.ReactNode,string,string][]=[
-		['overview',<Braces size={17}/>, t('extensions.tabs.overview'), t('extensions.active',{count:enabledSkills+readyMCP})],
 		['skills',<BookOpen size={17}/>, t('extensions.tabs.skills'), t('extensions.enabledRatio',{enabled:enabledSkills,total:skills.length})],
 		['mcp',<Zap size={17}/>, t('extensions.tabs.mcp'), t('extensions.readyRatio',{ready:readyMCP,total:mcpServers.length})],
 		['tools',<FunctionSquare size={17}/>, t('extensions.tabs.tools'), t('extensions.loaded',{count:toolCatalog?.count??0})],
@@ -1245,10 +1305,9 @@ function ExtensionsPage({skills,mcpServers,toolCatalog,refresh}:{skills:ManagedS
 		return <div className="extensions-center page-stack">
 			<div className="section-tabs-row"><div className="extension-tabs configuration-tabs" role="tablist" aria-label={t('extensions.sections')}>{tabs.map(([id,icon,label,meta])=><button type="button" role="tab" aria-selected={section===id} className={section===id?'active':''} onClick={()=>setSection(id)} key={id}>{icon}<span><b>{label}</b><small>{meta}</small></span><ChevronRight size={15}/></button>)}</div></div>
 		<div className="configuration-content" role="tabpanel">
-			{section==='overview'&&<div className="extension-overview"><button className="panel" onClick={()=>setSection('skills')}><div><BookOpen size={21}/></div><span><h3>Skills</h3></span><strong>{enabledSkills}<small>{t('extensions.enabledUnit')}</small></strong><ChevronRight size={16}/></button><button className="panel" onClick={()=>setSection('mcp')}><div><Zap size={21}/></div><span><h3>{t('extensions.tabs.mcp')}</h3></span><strong>{readyMCP}<small>{t('extensions.readyUnit')}</small></strong><ChevronRight size={16}/></button><button className="panel" onClick={()=>setSection('tools')}><div><FunctionSquare size={21}/></div><span><h3>{t('extensions.tabs.tools')}</h3></span><strong>{toolCatalog?.count??0}<small>{t('extensions.functionsUnit')}</small></strong><ChevronRight size={16}/></button></div>}
-			{section==='skills'&&<SkillsPage skills={skills} refresh={refresh}/>}
-			{section==='mcp'&&<MCPServersPage servers={mcpServers} refresh={refresh}/>}
-			{section==='tools'&&<LLMToolsPage catalog={toolCatalog} refresh={refresh}/>}
+			{section==='skills'&&<SkillsPage skills={skills} refreshSkills={refreshSkills} refreshToolCatalog={refreshToolCatalog} onToolCatalogChanged={onToolCatalogChanged}/>}
+			{section==='mcp'&&<MCPServersPage servers={mcpServers} refreshServers={refreshMCPServers} refreshToolCatalog={refreshToolCatalog}/>}
+			{section==='tools'&&<LLMToolsPage catalog={toolCatalog} refresh={refreshToolCatalog} onCatalogChanged={onToolCatalogChanged}/>}
 		</div>
 	</div>
 }
@@ -1314,7 +1373,7 @@ function parseMCPPairs(value:string,kind:'env'|'header'){
 	return result
 }
 
-function MCPServersPage({servers,refresh}:{servers:MCPServer[];refresh:()=>Promise<void>}){
+function MCPServersPage({servers,refreshServers,refreshToolCatalog}:{servers:MCPServer[];refreshServers:()=>Promise<void>;refreshToolCatalog:()=>Promise<void>}){
 	const {t,i18n:instance}=useTranslation()
 	const notify=useNotifier()
 	const [form,setForm]=useState<MCPFormState|null>(null)
@@ -1323,6 +1382,7 @@ function MCPServersPage({servers,refresh}:{servers:MCPServer[];refresh:()=>Promi
 	const [error,setError]=useState('')
 	const [deleteCandidate,setDeleteCandidate]=useState<MCPServer|null>(null)
 	const [authorizing,setAuthorizing]=useState('')
+	const refresh=async()=>{await Promise.all([refreshServers(),refreshToolCatalog()])}
 	const openCreate=()=>{setForm(null);setImportConfig('');setError('')}
 	const openEdit=(server:MCPServer)=>{setImportConfig(null);setForm({id:server.id,name:server.name,transport:server.transport,command:server.command||'',argsText:(server.args||[]).join('\n'),cwd:server.cwd||'',url:server.url||'',envText:'',headersText:'',enabled:server.enabled,clearEnv:false,clearHeaders:false});setError('')}
 	const importServers=async(event:FormEvent)=>{event.preventDefault();if(importConfig===null)return;setBusy('import');setError('');let imported=0;try{
@@ -1363,8 +1423,8 @@ function MCPServersPage({servers,refresh}:{servers:MCPServer[];refresh:()=>Promi
 	}
 	const clearOAuth=async(server:MCPServer)=>{setBusy(`oauth-clear-${server.id}`);setError('');try{await api.clearMCPOAuth(server.id);notify(t('mcp.authorizationCleared',{name:server.name}));await refresh()}catch(err){setError(errorText(err))}finally{setBusy('')}}
 	const remove=async()=>{if(!deleteCandidate)return;const server=deleteCandidate;setBusy(`delete-${server.id}`);setError('');try{await api.deleteMCPServer(server.id);notify(t('mcp.deleted',{name:server.name}));await refresh()}catch(err){setError(errorText(err))}finally{setBusy('');setDeleteCandidate(null)}}
-		return <div className="mcp-page page-stack">
-			<div className="page-actions"><div/><button className="primary" onClick={openCreate}><Plus size={15}/>{t('mcp.add')}</button></div>
+		return <div className="mcp-page page-stack has-floating-actions">
+			{importConfig===null&&!form&&<FloatingPageActions><button className="primary" onClick={openCreate}><Plus size={15}/>{t('mcp.add')}</button></FloatingPageActions>}
 		{error&&<div className="skill-error"><ShieldAlert size={15}/>{error}<button onClick={()=>setError('')}><X size={14}/></button></div>}
 		{importConfig!==null&&<form className="mcp-form mcp-import-form panel" onSubmit={importServers}><header><div><Zap size={19}/><span><h3>{t('mcp.importConfig')}</h3></span></div><button type="button" onClick={()=>setImportConfig(null)} title={t('common.close')}><X size={15}/></button></header><div className="mcp-import-body"><textarea autoFocus spellCheck={false} aria-label={t('mcp.config')} value={importConfig} onChange={event=>setImportConfig(event.target.value)} placeholder={mcpImportExample}/></div><footer><span className="mcp-form-spacer"/><button type="button" onClick={()=>setImportConfig(null)}>{t('common.cancel')}</button><button className="primary" disabled={busy==='import'||!importConfig.trim()}>{busy==='import'?<LoaderCircle className="spin" size={14}/>:<Plus size={14}/>} {busy==='import'?t('mcp.importing'):t('mcp.import')}</button></footer></form>}
 		{form&&<form className="mcp-form panel" noValidate onSubmit={save}><header><div><Zap size={19}/><span><h3>{form.name||t('mcp.server')}</h3></span></div><button type="button" onClick={()=>setForm(null)} title={t('common.close')}><X size={15}/></button></header><div className="mcp-form-grid"><label><span>{t('mcp.displayName')}</span><input value={form.name} onChange={event=>setForm({...form,name:event.target.value})}/></label><label><span>{t('mcp.transport')}</span><AppSelect value={form.transport} ariaLabel={t('mcp.transport')} onChange={value=>setForm({...form,transport:value as MCPTransport})} options={[{value:'stdio',label:t('mcp.localProcess')},{value:'streamable_http',label:'Streamable HTTP'}]}/></label>{form.transport==='stdio'?<><label><span>{t('mcp.command')}</span><input value={form.command} onChange={event=>setForm({...form,command:event.target.value})}/></label><label><span>{t('mcp.cwd')}</span><input value={form.cwd} onChange={event=>setForm({...form,cwd:event.target.value})}/></label><label className="mcp-wide"><span>{t('mcp.args')}</span><textarea value={form.argsText} onChange={event=>setForm({...form,argsText:event.target.value})}/></label></>:<label className="mcp-wide"><span>{t('mcp.endpoint')}</span><input value={form.url} onChange={event=>setForm({...form,url:event.target.value})}/></label>}<label className="mcp-wide"><span>{t('mcp.env')}</span><textarea value={form.envText} onChange={event=>setForm({...form,envText:event.target.value,clearEnv:false})} placeholder={t('mcp.preserve')}/><small><label><input type="checkbox" checked={form.clearEnv} onChange={event=>setForm({...form,clearEnv:event.target.checked,envText:event.target.checked?'':form.envText})}/> {t('mcp.clearEnv')}</label></small></label><label className="mcp-wide"><span>{t('mcp.headers')}</span><textarea value={form.headersText} onChange={event=>setForm({...form,headersText:event.target.value,clearHeaders:false})} placeholder={t('mcp.preserve')}/><small><label><input type="checkbox" checked={form.clearHeaders} onChange={event=>setForm({...form,clearHeaders:event.target.checked,headersText:event.target.checked?'':form.headersText})}/> {t('mcp.clearHeaders')}</label></small></label></div><footer><label className="mcp-enable-on-save"><input type="checkbox" checked={form.enabled} onChange={event=>setForm({...form,enabled:event.target.checked})}/><i/><span><b>{t('mcp.enableAfterSave')}</b></span></label><button type="button" onClick={()=>setForm(null)}>{t('common.cancel')}</button><button className="primary" disabled={busy==='save'}>{busy==='save'?<LoaderCircle className="spin" size={14}/>:<Save size={14}/>} {busy==='save'?t('common.saving'):t('mcp.saveServer')}</button></footer></form>}
@@ -1389,7 +1449,7 @@ function toolParameters(tool?:LLMToolDescriptor):ToolParameterView[]{
 	return Object.entries(properties).map(([name,value])=>{const field=schemaRecord(value);return{name,type:schemaType(field.type),description:typeof field.description==='string'?field.description:'',required:required.has(name)}})
 }
 
-function LLMToolsPage({catalog,refresh}:{catalog:LLMToolCatalog|null;refresh:()=>Promise<void>}){
+function LLMToolsPage({catalog,refresh,onCatalogChanged}:{catalog:LLMToolCatalog|null;refresh:()=>Promise<void>;onCatalogChanged:(catalog:LLMToolCatalog)=>void}){
 	const {t}=useTranslation()
 	const [query,setQuery]=useState('')
 	const [category,setCategory]=useState('all')
@@ -1402,21 +1462,12 @@ function LLMToolsPage({catalog,refresh}:{catalog:LLMToolCatalog|null;refresh:()=
 	const filtered=useMemo(()=>{const needle=query.trim().toLowerCase();return tools.filter(tool=>(category==='all'||tool.category===category)&&(!needle||`${tool.name} ${tool.description} ${tool.category}`.toLowerCase().includes(needle)))},[tools,query,category])
 	const selected=filtered.find(tool=>tool.name===selectedName)||filtered[0]
 	const parameters=toolParameters(selected)
-	const protectedCount=tools.filter(tool=>tool.enabled&&tool.guard==='approval_required').length
-	const readOnlyCount=tools.filter(tool=>tool.enabled&&tool.guard==='read_only').length
 	const refreshCatalog=async()=>{setRefreshing(true);try{await refresh()}finally{setRefreshing(false)}}
-	const setEnabled=async(tool:LLMToolDescriptor)=>{setBusyName(tool.name);setError('');try{await api.setLLMToolEnabled(tool.name,!tool.enabled);await refresh()}catch(err){setError(errorText(err))}finally{setBusyName('')}}
+	const setEnabled=async(tool:LLMToolDescriptor)=>{setBusyName(tool.name);setError('');try{onCatalogChanged(await api.setLLMToolEnabled(tool.name,!tool.enabled))}catch(err){setError(errorText(err))}finally{setBusyName('')}}
 
 	return <div className="llm-tools-page page-stack">
-		<section className={`tool-catalog-hero panel ${catalog?.loaded?'loaded':'unloaded'}`}>
-			<div className="tool-catalog-mark"><FunctionSquare size={24}/><i/></div>
-				<div><h2>{catalog?.loaded?t('tools.loadedTitle'):t('tools.unloadedTitle')}</h2></div>
-			<dl><div><dt>{t('common.agent')}</dt><dd>{catalog?.agent||'ops-nerva'}</dd></div><div><dt>{t('common.model')}</dt><dd>{catalog?.model||t('tools.notLoaded')}</dd></div><div><dt>{t('common.functions')}</dt><dd>{catalog?.count??0} / {catalog?.total??0}</dd></div><div><dt>{t('tools.execution')}</dt><dd>{catalog?.execution_mode||'sequential'}</dd></div></dl>
-			<button className="tool-catalog-refresh" onClick={refreshCatalog} disabled={refreshing}><RefreshCw className={refreshing?'spin':''} size={14}/>{refreshing?t('common.refreshing'):t('tools.refreshSnapshot')}</button>
-		</section>
-			{error&&<div className="tool-function-error"><ShieldAlert size={15}/><span>{error}</span><button onClick={()=>setError('')} title={t('common.dismiss')}><X size={14}/></button></div>}
-		<div className="tool-catalog-metrics"><Metric label={t('tools.enabledFunctions')} value={String(catalog?.count??0)} tone="green"/><Metric label={t('tools.availableFunctions')} value={String(catalog?.total??0)}/><Metric label={t('tools.readOnlyEnabled')} value={String(readOnlyCount)}/><Metric label={t('tools.approvalEnabled')} value={String(protectedCount)} tone="amber"/></div>
-		<div className="tool-catalog-toolbar panel"><label><Search size={15}/><input value={query} onChange={event=>setQuery(event.target.value)} placeholder={t('tools.searchPlaceholder')}/></label><AppSelect value={category} ariaLabel={t('tools.category')} onChange={setCategory} options={[{value:'all',label:t('tools.allCategories',{count:tools.length})},...categories.map(value=>({value,label:`${toolCategoryLabel(value)} · ${tools.filter(tool=>tool.category===value).length}`}))]}/><span>{t('tools.visible',{count:filtered.length})}</span></div>
+		{error&&<div className="tool-function-error"><ShieldAlert size={15}/><span>{error}</span><button onClick={()=>setError('')} title={t('common.dismiss')}><X size={14}/></button></div>}
+		<div className="tool-catalog-toolbar panel"><label><Search size={15}/><input value={query} onChange={event=>setQuery(event.target.value)} placeholder={t('tools.searchPlaceholder')}/></label><AppSelect value={category} ariaLabel={t('tools.category')} onChange={setCategory} options={[{value:'all',label:t('tools.allCategories',{count:tools.length})},...categories.map(value=>({value,label:`${toolCategoryLabel(value)} · ${tools.filter(tool=>tool.category===value).length}`}))]}/><span>{t('tools.visible',{count:filtered.length})}</span><button className="tool-catalog-refresh" onClick={refreshCatalog} disabled={refreshing} title={t('tools.refreshSnapshot')}><RefreshCw className={refreshing?'spin':''} size={14}/><span>{refreshing?t('common.refreshing'):t('tools.refreshSnapshot')}</span></button></div>
 		{!catalog?<div className="tool-catalog-loading panel"><LoaderCircle className="spin" size={20}/>{t('tools.loadingSnapshot')}</div>:!catalog.loaded?<Empty icon={<FunctionSquare/>} title={t('tools.runtimeMissing')} text={t('tools.runtimeMissingText')}/>:<div className="tool-catalog-browser">
 			<section className="tool-function-list panel">{filtered.length?filtered.map(tool=>{const count=toolParameters(tool).length;return <button className={`${selected?.name===tool.name?'active':''} ${tool.enabled?'':'disabled'}`} onClick={()=>setSelectedName(tool.name)} key={tool.name}><div className="tool-function-icon"><Braces size={16}/></div><span><code>{tool.name}</code><p>{tool.description}</p><small><em>{toolCategoryLabel(tool.category)}</em><i className={tool.guard}>{toolGuardLabel(tool.guard)}</i>{!tool.enabled&&<i className="disabled">{t('tools.disabled')}</i>}</small></span><b>{count}<small>{t('tools.argsUnit')}</small></b><ChevronRight size={14}/></button>}):<div className="tool-filter-empty"><Search size={20}/><b>{t('tools.noMatch')}</b></div>}</section>
 			<aside className={`tool-function-inspector panel ${selected?.enabled?'':'disabled'}`}>{selected?<><header><div className="tool-function-icon"><FunctionSquare size={18}/></div><span><small>{t('tools.functionDetail')}</small><code>{selected.name}</code></span><div className="tool-function-controls"><em className={selected.guard}>{toolGuardLabel(selected.guard)}</em><button className={selected.enabled?'enabled':''} role="switch" aria-checked={selected.enabled} onClick={()=>void setEnabled(selected)} disabled={busyName===selected.name} title={selected.enabled?t('tools.disableFunction'):t('tools.enableFunction')}>{busyName===selected.name?<LoaderCircle className="spin" size={14}/>:<Power size={14}/>}<span>{selected.enabled?t('common.enabled'):t('common.disabled')}</span></button></div></header><p className="tool-function-description">{selected.description}</p><dl className="tool-function-meta"><div><dt>{t('tools.category')}</dt><dd>{toolCategoryLabel(selected.category)}</dd></div><div><dt>{t('common.arguments')}</dt><dd>{parameters.length}</dd></div><div><dt>{t('tools.safetyGate')}</dt><dd>{toolGuardLabel(selected.guard)}</dd></div></dl><section className="tool-parameter-list"><h3>{t('tools.inputParameters')} <span>{t('tools.requiredCount',{count:parameters.filter(item=>item.required).length})}</span></h3>{parameters.length?parameters.map(parameter=><div key={parameter.name}><code>{parameter.name}</code><em>{parameter.type}</em>{parameter.required&&<b>{t('common.required')}</b>}{parameter.description&&<p>{parameter.description}</p>}</div>):<p className="tool-no-arguments">{t('tools.noArguments')}</p>}</section><details className="tool-schema-raw"><summary>{t('tools.rawSchema')} <ChevronRight size={13}/></summary><CopyablePre>{JSON.stringify(selected.input_schema,null,2)}</CopyablePre></details></>:<div className="tool-inspector-empty"><Braces size={26}/></div>}</aside>
@@ -1424,14 +1475,14 @@ function LLMToolsPage({catalog,refresh}:{catalog:LLMToolCatalog|null;refresh:()=
 	</div>
 }
 
-function SkillsPage({skills,refresh}:{skills:ManagedSkill[];refresh:()=>Promise<void>}){
+function SkillsPage({skills,refreshSkills,refreshToolCatalog,onToolCatalogChanged}:{skills:ManagedSkill[];refreshSkills:()=>Promise<void>;refreshToolCatalog:()=>Promise<void>;onToolCatalogChanged:(catalog:LLMToolCatalog)=>void}){
 	const {t,i18n:instance}=useTranslation()
 	const notify=useNotifier()
 	const [query,setQuery]=useState('')
-	const [selectedName,setSelectedName]=useState('')
+	const [selectedName,setSelectedName]=useState(()=>skills[0]?.name||'')
 	const [selected,setSelected]=useState<ManagedSkill|null>(null)
 	const [draft,setDraft]=useState('')
-	const [loading,setLoading]=useState(false)
+	const [loading,setLoading]=useState(()=>skills.length>0)
 	const [saving,setSaving]=useState(false)
 	const [uploading,setUploading]=useState(false)
 	const [reloading,setReloading]=useState(false)
@@ -1448,19 +1499,18 @@ function SkillsPage({skills,refresh}:{skills:ManagedSkill[];refresh:()=>Promise<
 	const dirty=!!selected&&draft!==selected.content
 	const markdownUpload=!!uploadFile&&/\.(?:md|markdown)$/i.test(uploadFile.name)
 	const selectFile=(file:File|null)=>{setUploadFile(file);if(file&&/\.(?:md|markdown)$/i.test(file.name)&&!uploadName){const base=file.name.replace(/\.(markdown|md)$/i,'').replace(/[^A-Za-z0-9_.-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,64);setUploadName(base)}else if(file)setUploadName('')}
-	const upload=async(event:FormEvent)=>{event.preventDefault();if(!uploadFile)return;if(markdownUpload&&!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(uploadName.trim())){setError(t('skills.invalidName'));return}setUploading(true);setError('');try{const results=await api.uploadSkill(uploadName.trim(),uploadFile);const result=results[0]!;await refresh();setSelectedName(result.name);setSelected(result);setDraft(result.content||'');setUploadOpen(false);setUploadName('');setUploadFile(null);notify(t(results.length===1?'skills.uploaded':'skills.uploadedMany',{name:result.name,count:results.length}))}catch(err){setError(errorText(err))}finally{setUploading(false)}}
-	const save=async()=>{if(!selected)return;setSaving(true);setError('');try{const result=await api.saveSkill(selected.name,draft);setSelected(result);setDraft(result.content||'');await refresh();notify(t('skills.saved',{name:result.name}))}catch(err){setError(errorText(err))}finally{setSaving(false)}}
-	const permanentlyDelete=async()=>{if(!deleteName)return;setDeleting(true);setError('');try{await api.deleteSkill(deleteName);setDeleteName('');setSelectedName('');setSelected(null);setDraft('');await refresh();notify(t('skills.deleted',{name:deleteName}))}catch(err){setError(errorText(err))}finally{setDeleting(false)}}
-	const toggleEnabled=async()=>{if(!selected)return;setToggling(true);setError('');try{const result=await api.setSkillEnabled(selected.name,!selected.enabled);setSelected(result);setDraft(result.content||draft);await refresh();notify(t(result.enabled?'skills.toggledEnabled':'skills.toggledDisabled',{name:result.name}))}catch(err){setError(errorText(err))}finally{setToggling(false)}}
-	const reload=async()=>{setReloading(true);setError('');try{await api.reloadSkills();await refresh();notify(t('skills.reloaded'))}catch(err){setError(errorText(err))}finally{setReloading(false)}}
+	const upload=async(event:FormEvent)=>{event.preventDefault();if(!uploadFile)return;if(markdownUpload&&!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(uploadName.trim())){setError(t('skills.invalidName'));return}setUploading(true);setError('');try{const results=await api.uploadSkill(uploadName.trim(),uploadFile);const result=results[0]!;await Promise.all([refreshSkills(),refreshToolCatalog()]);setSelectedName(result.name);setSelected(result);setDraft(result.content||'');setUploadOpen(false);setUploadName('');setUploadFile(null);notify(t(results.length===1?'skills.uploaded':'skills.uploadedMany',{name:result.name,count:results.length}))}catch(err){setError(errorText(err))}finally{setUploading(false)}}
+	const save=async()=>{if(!selected)return;setSaving(true);setError('');try{const result=await api.saveSkill(selected.name,draft);setSelected(result);setDraft(result.content||'');await refreshSkills();notify(t('skills.saved',{name:result.name}))}catch(err){setError(errorText(err))}finally{setSaving(false)}}
+	const permanentlyDelete=async()=>{if(!deleteName)return;setDeleting(true);setError('');try{await api.deleteSkill(deleteName);setDeleteName('');setSelectedName('');setSelected(null);setDraft('');await refreshSkills();notify(t('skills.deleted',{name:deleteName}))}catch(err){setError(errorText(err))}finally{setDeleting(false)}}
+	const toggleEnabled=async()=>{if(!selected)return;setToggling(true);setError('');try{const result=await api.setSkillEnabled(selected.name,!selected.enabled);setSelected(result);setDraft(result.content||draft);await refreshSkills();notify(t(result.enabled?'skills.toggledEnabled':'skills.toggledDisabled',{name:result.name}))}catch(err){setError(errorText(err))}finally{setToggling(false)}}
+	const reload=async()=>{setReloading(true);setError('');try{onToolCatalogChanged(await api.reloadSkills());await refreshSkills();notify(t('skills.reloaded'))}catch(err){setError(errorText(err))}finally{setReloading(false)}}
 
-	return <div className="skills-page page-stack">
-			<div className="page-actions"><div/><div className="skill-page-actions"><button onClick={()=>void reload()} disabled={reloading}><RefreshCw className={reloading?'spin':''} size={15}/>{reloading?t('common.refreshing'):t('skills.reload')}</button><button className="primary" onClick={()=>{setUploadOpen(value=>!value);setError('')}}><UploadCloud size={15}/>{uploadOpen?t('skills.closeUpload'):t('skills.uploadSkill')}</button></div></div>
+	return <div className="skills-page page-stack has-floating-actions">
+			<FloatingPageActions><button onClick={()=>void reload()} disabled={reloading}><RefreshCw className={reloading?'spin':''} size={15}/>{reloading?t('common.refreshing'):t('skills.reload')}</button><button className="primary" onClick={()=>{setUploadOpen(value=>!value);setError('')}}>{uploadOpen?<X size={15}/>:<UploadCloud size={15}/>} {uploadOpen?t('skills.closeUpload'):t('skills.uploadSkill')}</button></FloatingPageActions>
 		{error&&<div className="skill-error"><ShieldAlert size={15}/>{error}<button onClick={()=>setError('')}><X size={14}/></button></div>}
 		{uploadOpen&&<form className="skill-upload-panel panel" noValidate onSubmit={upload}><div><div className="skill-upload-icon"><UploadCloud size={20}/></div><span><b>{t('skills.uploadPackage')}</b><small>{t('skills.packageHelp')}</small></span></div>{markdownUpload&&<label><span>{t('skills.skillName')}</span><input value={uploadName} onChange={event=>setUploadName(event.target.value)}/></label>}<label className="skill-file-picker"><FileText size={15}/><span><b>{uploadFile?.name||t('skills.choosePackage')}</b><small>{uploadFile?formatFileSize(uploadFile.size):t('skills.maxPackage')}</small></span><input type="file" accept=".md,.markdown,.zip,.7z,text/markdown,application/zip,application/x-7z-compressed" onChange={event=>selectFile(event.target.files?.[0]||null)}/></label><button className="primary" disabled={uploading||!uploadFile||(markdownUpload&&!uploadName.trim())}>{uploading?<LoaderCircle className="spin" size={14}/>:<UploadCloud size={14}/>} {uploading?t('common.uploading'):t('skills.uploadActivate')}</button></form>}
-		<section className="skill-registry-summary panel"><div><BookOpen size={19}/><span><b>{t('skills.summary',{enabled:skills.filter(skill=>skill.enabled).length,total:skills.length})}</b></span></div><label><Search size={14}/><input value={query} onChange={event=>setQuery(event.target.value)} placeholder={t('skills.search')}/></label></section>
 		<div className="skill-manager-layout">
-			<section className="skill-list panel">{filtered.length?filtered.map(skill=><button className={`${selectedName===skill.name?'active':''} ${skill.enabled?'':'disabled'}`} onClick={()=>setSelectedName(skill.name)} key={skill.name}><div className="skill-card-icon"><BookOpen size={16}/></div><span><code>{skill.name}</code>{skill.summary&&<p>{skill.summary}</p>}<small><em className={skill.enabled?'enabled':'disabled'}>{skill.enabled?t('common.enabled'):t('common.disabled')}</em>{skill.file_count||1} {t('common.files')} · {formatFileSize(skill.size_bytes||0)}{skill.updated_at?` · ${new Date(skill.updated_at).toLocaleDateString(localeFor(instance.language))}`:''}</small></span><ChevronRight size={14}/></button>):<div className="skill-list-empty"><BookOpen size={23}/><b>{skills.length?t('skills.noMatch'):t('skills.noneInstalled')}</b></div>}</section>
+			<section className="skill-list-panel panel"><label className="skill-search"><Search size={14}/><input value={query} onChange={event=>setQuery(event.target.value)} placeholder={t('skills.search')}/></label><div className="skill-list">{filtered.length?filtered.map(skill=><button className={`${selectedName===skill.name?'active':''} ${skill.enabled?'':'disabled'}`} onClick={()=>setSelectedName(skill.name)} key={skill.name}><div className="skill-card-icon"><BookOpen size={16}/></div><span><code>{skill.name}</code>{skill.summary&&<p>{skill.summary}</p>}<small><em className={skill.enabled?'enabled':'disabled'}>{skill.enabled?t('common.enabled'):t('common.disabled')}</em>{skill.file_count||1} {t('common.files')} · {formatFileSize(skill.size_bytes||0)}{skill.updated_at?` · ${new Date(skill.updated_at).toLocaleDateString(localeFor(instance.language))}`:''}</small></span><ChevronRight size={14}/></button>):<div className="skill-list-empty"><BookOpen size={23}/><b>{skills.length?t('skills.noMatch'):t('skills.noneInstalled')}</b></div>}</div></section>
 				<section className="skill-editor panel">{loading?<div className="skill-editor-state"><LoaderCircle className="spin" size={21}/>{t('skills.loading')}</div>:selected?<><header><div><BookOpen size={17}/><span><small>{t('skills.managed')} · {selected.enabled?t('common.enabled'):t('common.disabled')}</small><code>{selected.name}</code></span></div><section><button className={selected.enabled?'skill-disable':'skill-enable'} disabled={toggling} onClick={toggleEnabled}>{toggling?<LoaderCircle className="spin" size={13}/>:selected.enabled?<X size={13}/>:<Check size={13}/>} {selected.enabled?t('common.disable'):t('common.enable')}</button><button disabled={!dirty||saving} onClick={save}>{saving?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {saving?t('common.saving'):t('skills.saveChanges')}</button><button className="danger" onClick={()=>setDeleteName(selected.name)}><Trash2 size={13}/>{t('common.delete')}</button></section></header><div className="skill-editor-meta"><span><b>SHA256</b><code title={selected.content_sha256}>{selected.content_sha256?.slice(0,16)||'—'}</code></span><span><b>{t('common.files')}</b><code>{selected.file_count||1}</code></span><span><b>{t('common.size')}</b><code>{formatFileSize(selected.size_bytes||0)}</code></span><span><b>{t('common.updated')}</b><code>{selected.updated_at?new Date(selected.updated_at).toLocaleString(localeFor(instance.language)):'—'}</code></span></div><div className="skill-editor-split"><label><span>SKILL.md</span><textarea value={draft} spellCheck={false} onChange={event=>setDraft(event.target.value)}/></label><section><span>{t('skills.livePreview')}</span><div className="markdown-body"><Markdown skipHtml remarkPlugins={[remarkGfm]} components={{a:({href,children})=><a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,img:({alt})=><span className="markdown-image-blocked">{t('skills.blockedImage',{alt:alt||t('common.image')})}</span>,pre:({children})=><CopyablePre>{children}</CopyablePre>}}>{draft||t('skills.emptySkill')}</Markdown></div></section></div></>:<div className="skill-editor-state"><BookOpen size={25}/><b>{t('skills.select')}</b></div>}</section>
 		</div>
 		{deleteName&&<DestructiveConfirmDialog title={t('skills.deleteTitle',{name:deleteName})} busy={deleting} onCancel={()=>setDeleteName('')} onConfirm={()=>void permanentlyDelete()}/>}
@@ -1478,7 +1528,7 @@ function SettingsSectionFooter({dirty,busy,saving,onDiscard}:{dirty:boolean;busy
 
 type SystemSettingsSection='iterations'|'prompt'|'explanation'|'images'|'shell'
 
-function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus,refresh}:{settings:SystemSettings|null;providers:ModelProvider[];proxies:Proxy[];capabilities:ToolCapabilities;modelStatus?:Health['model'];refresh:()=>Promise<void>}) {
+function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus,refreshCapabilities,refreshHealth,onSettingsChanged}:{settings:SystemSettings|null;providers:ModelProvider[];proxies:Proxy[];capabilities:ToolCapabilities;modelStatus?:Health['model'];refreshCapabilities:()=>Promise<void>;refreshHealth:()=>Promise<void>;onSettingsChanged:(settings:SystemSettings)=>void}) {
   const {t}=useTranslation()
 	const notify=useNotifier()
   const savedValue=settings?.agent_max_iterations??50
@@ -1545,8 +1595,10 @@ function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus
 			case 'images':setImageTypes(result.chat_image_allowed_types);setImagesDirty(false);break
 			case 'shell':setShellMode(result.workspace_shell_mode);setShellDirty(false);break
 			}
+			onSettingsChanged(result)
 			notify(t('settings.saved'))
-			await refresh()
+			if(section==='shell')await refreshCapabilities()
+			else if(section==='explanation')await refreshHealth()
 		}catch(err){notify(errorText(err),'error')}finally{setSavingSection('')}
 	}
 	const submit=(section:SystemSettingsSection)=>(event:FormEvent)=>{event.preventDefault();void save(section)}
@@ -1569,10 +1621,10 @@ function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus
 			<SettingsDisclosure icon={<TerminalSquare size={18}/>} title={t('settings.shellBackend')} meta={settings?.workspace_shell_platform||t('settings.detecting')}>
 				<form onSubmit={submit('shell')}><div className="workspace-shell-modes" role="group" aria-label={t('settings.shellBackend')}><button type="button" className={shellMode==='sandbox'?'active':''} disabled={!settings?.workspace_sandbox_available} onClick={()=>selectShellMode('sandbox')}><ShieldCheck size={16}/><span><b>{t('settings.sandbox')}</b><small>{settings?.workspace_sandbox_available?t('settings.sandboxAvailable'):t('settings.unavailableHost')}</small></span></button><button type="button" className={`${shellMode==='host'?'active ':''}host`} disabled={!settings?.workspace_host_shell_available} onClick={()=>selectShellMode('host')}><TerminalSquare size={16}/><span><b>{t('settings.hostShell')}</b><small>{settings?.workspace_host_shell_available?`${settings.workspace_shell_name||t('settings.systemShell')} · ${t('settings.fullAuthority')}`:t('settings.noShell')}</small></span></button><button type="button" className={shellMode==='disabled'?'active':''} onClick={()=>selectShellMode('disabled')}><Power size={16}/><span><b>{t('settings.shellDisabled')}</b></span></button></div>{shellMode==='host'&&<div className="workspace-shell-warning"><ShieldAlert size={15}/><b>{t('settings.hostWarning')}</b></div>}{shellMode==='sandbox'&&!settings?.workspace_sandbox_available&&<div className="workspace-shell-warning"><ShieldAlert size={15}/><b>{t('settings.sandboxWarning')}</b></div>}<SettingsSectionFooter dirty={shellDirty} busy={busy} saving={savingSection==='shell'} onDiscard={()=>discard('shell')}/></form>
 			</SettingsDisclosure>
+			<WorkspaceSettingsPanel workspaces={capabilities.workspaces} refresh={refreshCapabilities} onNotify={notify}/>
+			<MCPServerModePanel settings={settings} onChanged={onSettingsChanged}/>
+			<WebSearchSettingsPanel proxies={proxies}/>
 		</div>
-	<WorkspaceSettingsPanel workspaces={capabilities.workspaces} refresh={refresh} onNotify={notify}/>
-	<MCPServerModePanel settings={settings} refresh={refresh}/>
-	<WebSearchSettingsPanel proxies={proxies} refresh={refresh}/>
   </div>
 }
 
@@ -1590,7 +1642,7 @@ function WorkspaceSettingsPanel({workspaces,refresh,onNotify}:{workspaces:Worksp
 
 const defaultWebSearchInput:WebSearchSettingsInput={enabled:false,base_url:'https://api.tavily.com',api_key:'',proxy_id:'',timeout_seconds:20,max_results:10}
 
-function MCPServerModePanel({settings,refresh}:{settings:SystemSettings|null;refresh:()=>Promise<void>}){
+function MCPServerModePanel({settings,onChanged}:{settings:SystemSettings|null;onChanged:(settings:SystemSettings)=>void}){
 	const {t}=useTranslation()
 	const notify=useNotifier()
 	const [busy,setBusy]=useState<'start'|'stop'|'rotate'|''>(''),[token,setToken]=useState('')
@@ -1607,9 +1659,9 @@ function MCPServerModePanel({settings,refresh}:{settings:SystemSettings|null;ref
 				rotate_mcp_http_token:rotate,
 			})
 			setToken(result.mcp_http_token||'')
+			onChanged(result)
 			notify(t(nextEnabled?'mcpServerMode.started':'mcpServerMode.stopped'))
 			if(desktopRuntime)await invoke('set_tray_mode',{enabled:result.mcp_http_enabled}).catch(()=>{})
-			await refresh()
 		}catch(err){notify(errorText(err),'error')}finally{setBusy('')}
 	}
 	const copy=async(value:string,message:string)=>{
@@ -1633,7 +1685,7 @@ function MCPServerModePanel({settings,refresh}:{settings:SystemSettings|null;ref
 	</SettingsDisclosure>
 }
 
-function WebSearchSettingsPanel({proxies,refresh}:{proxies:Proxy[];refresh:()=>Promise<void>}){
+function WebSearchSettingsPanel({proxies}:{proxies:Proxy[]}){
 	const {t}=useTranslation()
 	const notify=useNotifier()
 	const [stored,setStored]=useState<WebSearchSettings|null>(null),[input,setInput]=useState<WebSearchSettingsInput>(defaultWebSearchInput)
@@ -1642,7 +1694,7 @@ function WebSearchSettingsPanel({proxies,refresh}:{proxies:Proxy[];refresh:()=>P
 	const applyStored=(value:WebSearchSettings)=>{setStored(value);setInput({enabled:value.enabled,base_url:value.base_url,api_key:'',proxy_id:value.proxy_id||'',timeout_seconds:value.timeout_seconds,max_results:value.max_results});setDirty(false)}
 	useEffect(()=>{let active=true;api.webSearchSettings().then(value=>{if(active)applyStored(value)}).catch(err=>{if(active)notify(errorText(err),'error')}).finally(()=>{if(active)setLoading(false)});return()=>{active=false}},[])
 	const update=<K extends keyof WebSearchSettingsInput>(key:K,value:WebSearchSettingsInput[K])=>{setInput(current=>({...current,[key]:value}));setDirty(true)}
-	const save=async()=>{setBusy('save');try{const value=await api.saveWebSearchSettings(input);applyStored(value);notify(t('webSearch.saved'));await refresh()}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
+	const save=async()=>{setBusy('save');try{const value=await api.saveWebSearchSettings(input);applyStored(value);notify(t('webSearch.saved'))}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
 	const test=async()=>{setBusy('test');try{const result=await api.testWebSearch();notify(t('webSearch.testPassed',{count:result.results.length}))}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
 	const clearKey=()=>{setInput(current=>({...current,enabled:false,api_key:'',clear_api_key:true}));setDirty(true)}
 	if(loading)return <SettingsDisclosure className="web-search-settings" icon={<Search size={18}/>} title={t('webSearch.title')} meta={t('common.loading')}><div className="settings-loading"><LoaderCircle className="spin" size={16}/>{t('common.loading')}</div></SettingsDisclosure>
@@ -1653,7 +1705,7 @@ function Nav({ active, icon, label, count, warn, onClick }: {active:boolean;icon
   return <button className={`nav-item ${active ? 'active' : ''}`} onClick={onClick} title={label} aria-label={label} aria-current={active?'page':undefined}>{icon}<span>{label}</span>{count !== undefined && <em className={warn ? 'warn' : ''}>{count}</em>}</button>
 }
 
-function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, workspaceShells, capabilities, settings, imageTypes, agentAvailable, modelName, contextWindow, refresh, refreshConnections, refreshApprovals, onCreateWorkspaceShell, onOpenWorkspaceShell, onWorkspaceShellStarted, onSettingsChanged, onHostChanged, onModelChanged, sidebarTarget, onSessionDeleted, onError, onStreamingChange }: {visible:boolean;onActivate:()=>void;hosts:Host[];providers:ModelProvider[];approvals:Approval[];runs:Run[];workspaceShells:SSHShell[];capabilities:ToolCapabilities;settings:SystemSettings|null;imageTypes:string[];agentAvailable:boolean;modelName?:string;contextWindow:number;refresh:()=>Promise<void>;refreshConnections:()=>Promise<void>;refreshApprovals:(decidedID?:string)=>Promise<void>;onCreateWorkspaceShell:(workspaceID:string)=>Promise<void>;onOpenWorkspaceShell:(shell:SSHShell)=>void;onWorkspaceShellStarted:(shell:SSHShell)=>void;onSettingsChanged:(settings:SystemSettings)=>void;onHostChanged:(host:Host)=>void;onModelChanged:(provider:ModelProvider)=>void;sidebarTarget:HTMLDivElement|null;onSessionDeleted:(sessionID:string)=>void;onError:(message:string)=>void;onStreamingChange:(streaming:boolean)=>void}) {
+function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, workspaceShells, capabilities, settings, imageTypes, agentAvailable, modelName, contextWindow, refreshConnections, refreshApprovals, onCreateWorkspaceShell, onOpenWorkspaceShell, onWorkspaceShellStarted, onSettingsChanged, onHostChanged, onModelChanged, sidebarTarget, onSessionDeleted, onError }: {visible:boolean;onActivate:()=>void;hosts:Host[];providers:ModelProvider[];approvals:Approval[];runs:Run[];workspaceShells:SSHShell[];capabilities:ToolCapabilities;settings:SystemSettings|null;imageTypes:string[];agentAvailable:boolean;modelName?:string;contextWindow:number;refreshConnections:()=>Promise<void>;refreshApprovals:(decidedID?:string)=>Promise<void>;onCreateWorkspaceShell:(workspaceID:string)=>Promise<void>;onOpenWorkspaceShell:(shell:SSHShell)=>void;onWorkspaceShellStarted:(shell:SSHShell)=>void;onSettingsChanged:(settings:SystemSettings)=>void;onHostChanged:(host:Host)=>void;onModelChanged:(provider:ModelProvider)=>void;sidebarTarget:HTMLDivElement|null;onSessionDeleted:(sessionID:string)=>void;onError:(message:string)=>void}) {
 		const {t,i18n:instance}=useTranslation()
 		const activeContextWindow=contextWindow
   const [entries, setEntries] = useState<ChatEntry[]>([])
@@ -1708,8 +1760,6 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		const timer=window.setInterval(()=>setRetryClock(Date.now()),1000)
 		return()=>window.clearInterval(timer)
 	},[connectionRetry])
-	useEffect(()=>{onStreamingChange(running)},[running,onStreamingChange])
-	useEffect(()=>()=>onStreamingChange(false),[onStreamingChange])
 	useEffect(()=>()=>{sessionLoadRef.current='';const stream=activeStreamRef.current;activeStreamRef.current=null;stream?.controller.abort();window.cancelAnimationFrame(userScrollFrame.current);window.cancelAnimationFrame(disclosureScrollFrame.current)},[])
 	useEffect(()=>()=>{for(const url of imageURLsRef.current)URL.revokeObjectURL(url);imageURLsRef.current.clear()},[])
 	const addImages=(files:File[])=>{const accepted=files.filter(file=>imageTypes.includes(file.type));if(accepted.length!==files.length)setImageNotice(t('chat.imageTypeRejected'));if(!accepted.length)return;const next=accepted.map(file=>{const url=URL.createObjectURL(file);imageURLsRef.current.add(url);return{id:clientId(),file,url}});setPendingImages(current=>[...current,...next])}
@@ -1748,17 +1798,16 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
       if(sessionLoadRef.current!==requestID)return
 	      setEntries(historyEntries(state.messages||[],id));setDetachedRunning(!!state.active);setStopping(false);setModelRetry(null);setConnectionRetry(null);setTasks(state.tasks?.items?.length?state.tasks:null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setWorkspaceID(state.workspace_id||'');setBoundWorkspaceID(state.workspace_id||'')
       setSessionId(id); rememberSession(id); setHistoryError('')
-      void refresh()
-    } catch (err) { if(sessionLoadRef.current===requestID)setHistoryError(errorText(err)) }
-    finally { if(sessionLoadRef.current===requestID)setLoadingSession('') }
-  }, [activeContextWindow,refresh])
+	} catch (err) { if(sessionLoadRef.current===requestID)setHistoryError(errorText(err)) }
+	finally { if(sessionLoadRef.current===requestID)setLoadingSession('') }
+	}, [activeContextWindow])
 
-  const activeSessionCount=useMemo(()=>sessions.filter(item=>item.active).length,[sessions])
-  useEffect(()=>{
-    if(!activeSessionCount)return
-    const timer=window.setInterval(()=>{if(document.visibilityState==='visible')void refreshSessions()},2500)
-    return()=>window.clearInterval(timer)
-  },[activeSessionCount,refreshSessions])
+	const hasBackgroundActiveSession=useMemo(()=>sessions.some(item=>item.active&&item.id!==sessionId),[sessionId,sessions])
+	useEffect(()=>{
+		if(!hasBackgroundActiveSession)return
+		const timer=window.setInterval(()=>{if(document.visibilityState==='visible')void refreshSessions()},2500)
+		return()=>window.clearInterval(timer)
+	},[hasBackgroundActiveSession,refreshSessions])
 
   useLayoutEffect(()=>{
     if(!stickToLatest.current)return
@@ -1914,7 +1963,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 				return[...old.map(deactivateReasoning),entry]
 			})
 			if(/^Task(Create|Get|Update|List)$/.test(frame.tool_name||'')){const nextTasks=tasksFromToolContent(frame.content);if(nextTasks)setTasks(nextTasks.items.length?nextTasks:null)}
-			if(/approval_id|approval_required/.test(frame.content))void refresh()
+			if(/approval_id|approval_required/.test(frame.content))void refreshApprovals()
 		}
 		if(frame.type==='message_start'&&frame.message_id)setEntries(old=>startAssistantLifecycle(old,frame.message_id!))
 		if(frame.type==='message'&&frame.message_id&&frame.content)setEntries(old=>appendAssistantDelta(old,frame.message_id!,frame.content!))
@@ -1929,7 +1978,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			setEntries(old=>[...old.map(item=>updateUser(deactivateReasoning(item),'failed')),{id:clientId(),kind:'assistant',content:frame.content||t('chat.stopped'),lifecycle:'committed'}])
 		}
 		if(frame.type==='model_error'||frame.type==='error')setEntries(old=>[...old.map(item=>updateUser(item,'failed')),{id:clientId(),kind:'error',content:frame.error||t('chat.agentError')}])
-	},[activeContextWindow,onWorkspaceShellStarted,refresh,refreshApprovals,refreshConnections,refreshSessions,t])
+	},[activeContextWindow,onWorkspaceShellStarted,refreshApprovals,refreshConnections,refreshSessions,t])
 
 	useEffect(()=>{
 		if(!sessionId||running||!detachedRunning)return
@@ -1953,7 +2002,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 					if(!state.active){
 						setEntries(old=>settledTurnEntries(state.messages||[],sessionId,old,false))
 						setDetachedRunning(false);setStopping(false);setConnectionRetry(null);setHistoryError('')
-						void refreshSessions();void refresh()
+						void refreshSessions()
 						return
 					}
 					setEntries(reconnectBaseEntries(state.messages||[],sessionId))
@@ -1975,10 +2024,10 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		}
 		void reconnect()
 		return()=>{active=false;controller.abort()}
-	},[activeContextWindow,detachedRunning,handleAgentFrame,refresh,refreshSessions,running,sessionId])
+	},[activeContextWindow,detachedRunning,handleAgentFrame,refreshSessions,running,sessionId])
 
 	useEffect(()=>{
-		if(!sessionId||!toolsRunning)return
+		if(!sessionId||!toolsRunning||running)return
 		let active=true
 		const poll=async()=>{
 			try{
@@ -1991,7 +2040,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			}catch{/* keep the last confirmed tool state and retry */}
 		}
 		void poll()
-		const timer=window.setInterval(()=>{if(document.visibilityState==='visible')void poll()},1000)
+		const timer=window.setInterval(()=>{if(document.visibilityState==='visible')void poll()},3000)
 		return()=>{active=false;window.clearInterval(timer)}
 	},[activeContextWindow,running,sessionId,toolsRunning])
 
@@ -2038,7 +2087,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		if(querySessionID){try{const state=await api.chatState(querySessionID);if(!isAttached())return;setDetachedRunning(!!state.active);setTasks(state.tasks?.items?.length?state.tasks:null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setBoundWorkspaceID(state.workspace_id||'');setEntries(old=>settledTurnEntries(state.messages||[],querySessionID,old,!!state.active));for(const image of queryImages){URL.revokeObjectURL(image.url);imageURLsRef.current.delete(image.url)}}catch{/* polling or the next reload will recover state */}}
       if(!isAttached())return
       activeStreamRef.current=null
-      void refreshSessions();void refresh()
+	  void refreshSessions()
     }
   }
 
@@ -2051,7 +2100,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		try{
 			const result=await api.cancelChatSession(targetSessionID)
 			requested=result.cancelled
-			if(!result.cancelled){const state=await api.chatState(targetSessionID);setDetachedRunning(!!state.active);setTasks(state.tasks?.items?.length?state.tasks:null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setEntries(historyEntries(state.messages||[],targetSessionID));void refreshSessions();void refresh()}
+			if(!result.cancelled){const state=await api.chatState(targetSessionID);setDetachedRunning(!!state.active);setTasks(state.tasks?.items?.length?state.tasks:null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setEntries(historyEntries(state.messages||[],targetSessionID));void refreshSessions()}
 		}catch(err){setEntries(old=>[...old,{id:clientId(),kind:'error',content:t('chat.stopFailed',{message:errorText(err)})}])}
 		finally{if(!requested)setStopping(false)}
   }
@@ -2079,7 +2128,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		<ChatWorkspacePanel key={selectedWorkspace?.id||''} workspaces={capabilities.workspaces} workspaceID={selectedWorkspace?.id||''} shells={workspaceShells} switching={workspaceSwitching} disabled={sessionBusy||!!loadingSession} bound={!!selectedWorkspace&&boundWorkspaceID===selectedWorkspace.id} onSelect={id=>void switchWorkspace(id)} onCreateShell={onCreateWorkspaceShell} onOpenShell={onOpenWorkspaceShell} onCollapse={()=>setWorkspaceCollapsed(true)}/>
     <div className="chat-main panel">
 	  {workspacePanelCollapsed&&<button className="chat-panel-open-button" onClick={()=>setWorkspaceCollapsed(false)} title={t('workspace.expandPanel')} aria-label={t('workspace.expandPanel')}><PanelLeftOpen size={15}/></button>}
-      <div className="session-approval-slot">{currentApprovals.length>0&&<ApprovalDialog key={currentApprovals[0].id} approval={currentApprovals[0]} pendingCount={currentApprovals.length} hosts={hosts} running={sessionBusy} stopping={stopping} onStop={()=>void stopAgent()} refresh={refresh} refreshApprovals={refreshApprovals} onApproved={result=>{setEntries(old=>updateToolRunStatus(old,result.run_id,result.status==='running'?'in_progress':result.status));if(result.shell?.kind==='workspace')onWorkspaceShellStarted(result.shell)}} onNotice={setApprovalNotice}/>} {approvalNotice&&currentApprovals.length===0&&<div className="approval-toast"><ShieldCheck size={14}/><span>{approvalNotice}</span><button onClick={()=>setApprovalNotice('')}><X size={13}/></button></div>}</div>
+	  <div className="session-approval-slot">{currentApprovals.length>0&&<ApprovalDialog key={currentApprovals[0].id} approval={currentApprovals[0]} pendingCount={currentApprovals.length} hosts={hosts} running={sessionBusy} stopping={stopping} onStop={()=>void stopAgent()} refreshApprovals={refreshApprovals} onApproved={result=>{setEntries(old=>updateToolRunStatus(old,result.run_id,result.status==='running'?'in_progress':result.status));if(result.shell?.kind==='workspace')onWorkspaceShellStarted(result.shell)}} onNotice={setApprovalNotice}/>} {approvalNotice&&currentApprovals.length===0&&<div className="approval-toast"><ShieldCheck size={14}/><span>{approvalNotice}</span><button onClick={()=>setApprovalNotice('')}><X size={13}/></button></div>}</div>
 	      <div className="session-task-slot">{tasks&&<SessionTasks tasks={tasks} expanded={tasksExpanded} onExpanded={setTasksExpanded}/>}</div>
 		<div className="conversation-view">
 			<div className="messages" ref={messagesRef} onWheel={trackUserScroll} onTouchMove={trackUserScroll} onPointerUp={trackUserScroll}>
@@ -2645,7 +2694,6 @@ function ApprovalDialog({
   running,
   stopping,
   onStop,
-  refresh,
   refreshApprovals,
   onApproved,
   onNotice,
@@ -2656,7 +2704,6 @@ function ApprovalDialog({
   running: boolean;
   stopping: boolean;
   onStop: () => void;
-  refresh: () => Promise<void>;
   refreshApprovals: (decidedID?: string) => Promise<void>;
   onApproved: (result: ApprovalExecutionResult) => void;
   onNotice: (message: string) => void;
@@ -2837,7 +2884,6 @@ function ApprovalDialog({
         }),
       );
       void refreshApprovals(approval.id);
-      void refresh();
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -2856,7 +2902,6 @@ function ApprovalDialog({
       await api.reject(approval.id, instruction);
       onNotice(t("approval.rejected"));
       void refreshApprovals(approval.id);
-      void refresh();
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -2874,7 +2919,7 @@ function ApprovalDialog({
           ? t("approval.explanationReady")
           : t("approval.explanationDegraded"),
       );
-      await refresh();
+	  await refreshApprovals();
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -3135,7 +3180,7 @@ function HostsPage({ hosts, proxies, showAddresses, onToggleAddresses, refresh }
 	const save = async (event:FormEvent) => { event.preventDefault(); if(!validateHost())return;setSaving(true); try { const saved=await api.saveHost({...form,name:form.name.trim(),address:form.address.trim(),user:form.user.trim()}); setShowForm(false); setForm(emptyHostForm);setFormErrors({});resetPrivateKey();setHostKeys(current=>{const next={...current};delete next[saved.id];return next});setHostKeyErrors(current=>{const next={...current};delete next[saved.id];return next}); notify(t('hosts.saved',{name:saved.name,action:editing?t('hosts.updated'):t('hosts.registered')})); await refresh();void scan(saved) } catch(err){notify(errorText(err),'error')} finally{setSaving(false)} }
   const probe = async (host:Host) => { try { const info = await api.probe(host.id); notify(`${host.name}: ${Object.values(info).join(' · ')}`) } catch(err){notify(errorText(err),'error')} }
 	const remove=async()=>{const host=deleteCandidate;if(!host)return;setDeletingHost(host.id);try{await api.deleteHost(host.id);notify(t('hosts.deleted',{name:host.name}));await refresh()}catch(err){notify(errorText(err),'error')}finally{setDeletingHost('');setDeleteCandidate(null)}}
-		return <div className="page-stack">{!showForm&&<div className="page-actions"><div/><div className="page-action-buttons"><AddressVisibilityButton visible={showAddresses} onToggle={onToggleAddresses}/><button className="primary" onClick={openCreate}><Plus size={16}/>{t('hosts.add')}</button></div></div>}
+		return <div className="page-stack has-floating-actions">{!showForm&&<FloatingPageActions><AddressVisibilityButton visible={showAddresses} onToggle={onToggleAddresses}/><button className="primary" onClick={openCreate}><Plus size={16}/>{t('hosts.add')}</button></FloatingPageActions>}
 		{showForm && <ConfigurationEditorPage icon={<Server size={22}/>} title={editing?t('hosts.editTitle'):t('hosts.createTitle')} busy={saving} onBack={()=>setShowForm(false)}><form className="host-form configuration-editor-form panel" noValidate onSubmit={save}><div className="form-grid host-fields">
 	  <label className={formErrors.name?'invalid':''}><span>{t('hosts.name')}</span><input value={form.name} aria-invalid={!!formErrors.name} onChange={event=>updateHostForm('name',event.target.value)}/>{formErrors.name&&<small className="form-field-error">{formErrors.name}</small>}</label>
 	  <label className={formErrors.address?'invalid':''}><span>{t('hosts.address')}</span><input value={form.address} aria-invalid={!!formErrors.address} onChange={event=>updateHostForm('address',event.target.value)}/>{formErrors.address&&<small className="form-field-error">{formErrors.address}</small>}</label>
@@ -3177,8 +3222,8 @@ function ProxiesPage({proxies,showAddresses,onToggleAddresses,refresh}:{proxies:
 	const save=async(event:FormEvent)=>{event.preventDefault();if(!validateProxy())return;setBusy('save');try{const saved=await api.saveProxy({...form,name:form.name.trim(),url:form.url.trim()});notify(t('proxies.saved',{name:saved.name}));setForm(emptyProxyForm);setFormErrors({});setShowForm(false);await refresh()}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
 	const test=async(proxy:Proxy)=>{setBusy(`test-${proxy.id}`);try{const result=await api.testProxy(proxy.id);notify(t('proxies.testPassed',{name:proxy.name,status:result.status_code||0,latency:result.latency_ms}))}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
 	const remove=async()=>{const proxy=deleteCandidate;if(!proxy)return;setBusy(`delete-${proxy.id}`);try{await api.deleteProxy(proxy.id);notify(t('proxies.deleted',{name:proxy.name}));if(form.id===proxy.id){setForm(emptyProxyForm);setShowForm(false)}await refresh()}catch(err){notify(errorText(err),'error')}finally{setBusy('');setDeleteCandidate(null)}}
-	return <div className="page-stack">
-		{!showForm&&<div className="page-actions"><div><p>{t('proxies.title')}</p><span>{t('proxies.description')}</span></div><div className="page-action-buttons"><AddressVisibilityButton visible={showAddresses} onToggle={onToggleAddresses}/><button className="primary" onClick={openCreate}><Plus size={16}/>{t('proxies.add')}</button></div></div>}
+	return <div className="page-stack has-floating-actions">
+		{!showForm&&<FloatingPageActions><AddressVisibilityButton visible={showAddresses} onToggle={onToggleAddresses}/><button className="primary" onClick={openCreate}><Plus size={16}/>{t('proxies.add')}</button></FloatingPageActions>}
 		{showForm&&<ConfigurationEditorPage icon={<Cable size={22}/>} title={editing?t('proxies.editTitle'):t('proxies.createTitle')} busy={busy==='save'} onBack={()=>setShowForm(false)}><form className="proxy-form configuration-editor-form panel" noValidate onSubmit={save}><div className="form-grid proxy-fields"><label className={formErrors.name?'invalid':''}><span>{t('proxies.name')}</span><input value={form.name} maxLength={128} aria-invalid={!!formErrors.name} onChange={event=>updateProxyForm('name',event.target.value)}/>{formErrors.name&&<small className="form-field-error">{formErrors.name}</small>}</label><label className={`proxy-address-field ${formErrors.url?'invalid':''}`}><span>{t('proxies.url')}</span><input value={form.url} aria-invalid={!!formErrors.url} onChange={event=>updateProxyForm('url',event.target.value)} placeholder="socks5://127.0.0.1:1080"/>{formErrors.url&&<small className="form-field-error">{formErrors.url}</small>}</label><label><span>{t('proxies.username')}</span><input autoComplete="off" value={form.username} onChange={event=>setForm({...form,username:event.target.value,password:event.target.value?form.password:'',clear_password:false})}/></label><label><span>{t('proxies.password')}</span><PasswordInput autoComplete="new-password" value={form.password} disabled={!form.username} onChange={event=>setForm({...form,password:event.target.value,clear_password:false})} placeholder={preservesPassword?t('proxies.keepPassword'):''}/>{preservesPassword&&<small><button type="button" onClick={()=>setForm({...form,password:'',clear_password:true})}>{t('proxies.clearPassword')}</button></small>}</label></div><div className="form-actions"><button type="button" onClick={()=>setShowForm(false)}>{t('common.cancel')}</button><button className="primary" disabled={busy==='save'}>{busy==='save'?t('common.saving'):t('common.save')}</button></div></form></ConfigurationEditorPage>}
 		{!showForm&&<div className="proxy-grid">{proxies.map(proxy=><article className="proxy-card panel" key={proxy.id}><div className="proxy-card-head"><div><Cable size={20}/></div><span><h3>{proxy.name}</h3><code>{showAddresses?proxy.url:'••••••'}</code></span>{proxy.ssh_compatible&&<em>SSH</em>}</div><dl><div><dt>{t('proxies.authentication')}</dt><dd>{proxy.username?`${proxy.username}${proxy.has_password?` · ${t('proxies.passwordSaved')}`:''}`:t('proxies.noAuthentication')}</dd></div><div><dt>{t('common.updated')}</dt><dd>{new Date(proxy.updated_at).toLocaleString(localeFor(instance.language))}</dd></div></dl><div className="card-actions"><button disabled={!!busy} onClick={()=>void test(proxy)}>{busy===`test-${proxy.id}`?<LoaderCircle className="spin" size={14}/>:<Activity size={14}/>} {t('common.test')}</button><button disabled={!!busy} onClick={()=>openEdit(proxy)}><Edit3 size={14}/>{t('common.edit')}</button><button className="danger" disabled={!!busy} title={t('common.delete')} onClick={()=>setDeleteCandidate(proxy)}><Trash2 size={14}/></button></div></article>)}</div>}
 		{!showForm&&!proxies.length&&<Empty icon={<Cable/>} title={t('proxies.emptyTitle')}/>}
@@ -3225,8 +3270,8 @@ function ModelsPage({providers,proxies,showAddresses,onToggleAddresses,refresh}:
 		const test=async(provider:ModelProvider)=>{setTestRunning(provider.id,true);try{const result=await api.testModelProvider(provider.id);notify(t('models.healthy',{name:provider.name,response:result.response,latency:result.latency_ms}))}catch(err){notify(errorText(err),'error')}finally{setTestRunning(provider.id,false)}}
 	const remove=async()=>{const provider=deleteCandidate;if(!provider)return;setBusy(`delete-${provider.id}`);try{await api.deleteModelProvider(provider.id);notify(t('models.deleted',{name:provider.name}));await refresh()}catch(err){notify(errorText(err),'error')}finally{setBusy('');setDeleteCandidate(null)}}
 
-  return <div className="page-stack">
-	{!showForm&&<div className="page-actions"><div/><div className="page-action-buttons"><AddressVisibilityButton visible={showAddresses} onToggle={onToggleAddresses}/><button className="primary" onClick={openCreate}><Plus size={16}/>{t('models.add')}</button></div></div>}
+  return <div className="page-stack has-floating-actions">
+	{!showForm&&<FloatingPageActions><AddressVisibilityButton visible={showAddresses} onToggle={onToggleAddresses}/><button className="primary" onClick={openCreate}><Plus size={16}/>{t('models.add')}</button></FloatingPageActions>}
     {showForm&&<ConfigurationEditorPage icon={<Cpu size={22}/>} title={editing?t('models.editTitle'):t('models.newTitle')} busy={!!busy} onBack={()=>setShowForm(false)}><form className="model-form configuration-editor-form panel" noValidate onSubmit={save}>
       <div className="form-grid model-fields">
 		<label className={formErrors.name?'invalid':''}><span>{t('models.displayName')}</span><input value={form.name} aria-invalid={!!formErrors.name} onChange={event=>updateForm('name',event.target.value)}/>{formErrors.name&&<small className="form-field-error">{formErrors.name}</small>}</label>
@@ -3405,7 +3450,6 @@ function LogsPage(){
   </div>
 }
 
-function Metric({label,value,tone}:{label:string;value:string;tone?:string}){return <div className={`metric ${tone||''}`}><span>{label}</span><b>{value}</b></div>}
 function Empty({icon,title,text}:{icon:React.ReactNode;title:string;text?:string}){return <div className="empty-state"><div>{icon}</div><h2>{title}</h2>{text&&<p>{text}</p>}</div>}
 function pretty(value:string){try{return JSON.stringify(JSON.parse(value),null,2)}catch{return value}}
 

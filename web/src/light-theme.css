@@ -760,6 +760,55 @@
   background: color-mix(in srgb, var(--light-canvas) 94%, transparent);
 }
 
+:root[data-theme='light'] :where(.configuration-center, .extensions-center) .configuration-tabs {
+  border-color: var(--light-border);
+  background: var(--light-surface);
+}
+
+:root[data-theme='light'] :where(.configuration-center, .extensions-center) .configuration-tabs > button {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+
+:root[data-theme='light'] :where(.configuration-center, .extensions-center) .configuration-tabs > button:hover {
+  border-color: var(--light-border-strong);
+  background: var(--light-subtle);
+}
+
+:root[data-theme='light'] :where(.configuration-center, .extensions-center) .configuration-tabs > button.active {
+  border-color: var(--light-accent-border);
+  background: var(--light-accent-soft);
+  box-shadow: inset 0 -2px var(--light-accent);
+}
+
+:root[data-theme='light'] .floating-page-actions > button:not(.primary) {
+  border-color: var(--light-border);
+  background: var(--light-surface);
+  color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] .system-settings .settings-form {
+  border-color: var(--light-border);
+  background: var(--light-surface);
+  box-shadow: var(--light-shadow);
+}
+
+:root[data-theme='light'] .system-settings .settings-disclosure {
+  border-color: var(--light-border);
+  background: transparent;
+  box-shadow: none;
+}
+
+:root[data-theme='light'] .system-settings .settings-disclosure > summary {
+  background: transparent;
+}
+
+:root[data-theme='light'] .system-settings .settings-disclosure > summary:hover,
+:root[data-theme='light'] .system-settings .settings-disclosure[open] > summary {
+  background: var(--light-subtle);
+}
+
 :root[data-theme='light'] .configuration-address-toggle.active {
   border-color: var(--light-accent-border);
   background: var(--light-accent-soft);
@@ -981,7 +1030,6 @@
   .skill-list,
   .skill-editor,
   .mcp-card > header,
-  .mcp-card > dl > div,
   .mcp-tools > div,
   .mcp-tools section,
   .tool-function-list,
@@ -1017,7 +1065,7 @@
   color: var(--light-accent);
 }
 
-:root[data-theme='light'] :where(.skill-card-icon, .mcp-card-icon, .tool-function-icon, .tool-catalog-mark) {
+:root[data-theme='light'] :where(.skill-card-icon, .mcp-card-icon, .tool-function-icon) {
   background: var(--light-accent-soft);
   color: var(--light-accent);
 }
@@ -1028,6 +1076,20 @@
 
 :root[data-theme='light'] :where(.mcp-card code, .mcp-card dt, .mcp-card dd, .skill-list small, .tool-function-meta, .tool-function-description p) {
   color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] .skill-search {
+  border-color: var(--light-border);
+  background: var(--light-surface);
+}
+
+:root[data-theme='light'] :where(.mcp-card > dl, .skill-editor-meta, .tool-function-meta) {
+  border-color: var(--light-border);
+}
+
+:root[data-theme='light'] :where(.mcp-card > dl > div, .skill-editor-meta > span, .tool-function-meta > div) {
+  border-color: var(--light-border);
+  background: transparent;
 }
 
 :root[data-theme='light'] :where(.mcp-card-error, .skill-error, .tool-function-error) {

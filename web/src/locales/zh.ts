@@ -49,18 +49,16 @@ const zh = {
     sections: '配置栏目', editor: '配置编辑', backToList: '返回列表', showAddresses: '显示地址', hideAddresses: '隐藏地址',
   },
   proxies: {
-    title: '代理', description: '统一提供给模型、Tavily 和 SSH 主机使用。', add: '添加代理',
+    add: '添加代理',
     editTitle: '编辑代理', createTitle: '添加代理', name: '名称', url: '代理地址', username: '用户名', password: '密码',
     keepPassword: '留空保留当前密码', clearPassword: '清除已保存密码', authentication: '认证', passwordSaved: '已保存密码', noAuthentication: '无认证', invalidUrl: '代理地址格式无效。',
     saved: '{{name}} 已保存。', deleted: '{{name}} 已删除。', testPassed: '{{name}} 连接正常 · HTTP {{status}} · {{latency}} ms',
     emptyTitle: '没有代理', deleteTitle: '删除代理“{{name}}”？',
   },
   extensions: {
-    tabs: { overview: '概览', skills: 'Skills', mcp: 'MCP 服务', tools: '函数工具' },
-    active: '{{count}} 个已启用', enabledRatio: '{{enabled}}/{{total}} 已启用', readyRatio: '{{ready}}/{{total}} 就绪', loaded: '已加载 {{count}} 个',
+    tabs: { skills: 'Skills', mcp: 'MCP 服务', tools: '函数工具' },
+    enabledRatio: '{{enabled}}/{{total}} 已启用', readyRatio: '{{ready}}/{{total}} 就绪', loaded: '已加载 {{count}} 个',
     sections: '扩展栏目',
-
-    functionsUnit: '个函数工具', readyUnit: '个就绪', enabledUnit: '个启用',
   },
   mcp: {
     invalidEnv: '环境变量行“{{line}}”无效，请使用 NAME=value。', invalidHeader: '请求头行“{{line}}”无效，请使用 Name: value。', invalidName: '{{kind}} 名称无效。',
@@ -81,9 +79,7 @@ const zh = {
 		authorized: '{{name}} 已授权。', authorizationCleared: '{{name}} 已清除授权。', authorizationFailed: '授权失败。', authorizationExpired: '授权已超时。', popupBlocked: '无法打开授权窗口。',
   },
   tools: {
-    loadedTitle: '已加载函数工具', unloadedTitle: '函数工具未加载', notLoaded: '未加载',
-    execution: '执行方式', refreshSnapshot: '刷新', enabledFunctions: '已启用', availableFunctions: '全部函数工具',
-    readOnlyEnabled: '已启用只读函数工具', approvalEnabled: '已启用审批函数工具', searchPlaceholder: '搜索函数工具名称或用途...',
+    refreshSnapshot: '刷新', searchPlaceholder: '搜索函数工具名称或用途...',
     allCategories: '全部分类 · {{count}}', visible: '{{count}} 个', loadingSnapshot: '正在加载函数工具...',
     runtimeMissing: '函数工具未加载', runtimeMissingText: '请先启用可用的模型提供商。',
     disabled: '已停用', argsUnit: '参数', noMatch: '没有匹配的函数工具',
@@ -96,7 +92,7 @@ const zh = {
 	    title: 'Skills',
 	    reload: '重载', closeUpload: '关闭上传', uploadSkill: '上传 Skill', uploadPackage: '上传 Markdown、ZIP 或 7z 包',
     packageHelp: '每个 SKILL.md 目录安装为一个 Skill。', skillName: 'Skill 名称', invalidName: 'Skill 名称格式无效。', choosePackage: '选择 .md、.zip 或 .7z',
-    maxPackage: '最大包大小 · 8 MiB', uploadActivate: '上传并启用', summary: '{{enabled}} 个已启用 · {{total}} 个已安装',
+    maxPackage: '最大包大小 · 8 MiB', uploadActivate: '上传并启用',
     search: '搜索 Skills...',
     noMatch: '没有匹配的 Skills', noneInstalled: '尚未安装 Skills',
     loading: '正在加载 Skill...', managed: 'Skill 文件', saveChanges: '保存修改', livePreview: '实时预览', blockedImage: '[已阻止图片：{{alt}}]',
