@@ -141,6 +141,64 @@ func (s *Service) StopSSHTunnel(ctx context.Context, id, actor string) (domain.S
 	return stopped, nil
 }
 
+// RetryOperatorSSHTunnel replaces a failed tunnel while retaining its failure
+// record until the replacement has connected successfully.
+func (s *Service) RetryOperatorSSHTunnel(ctx context.Context, id, actor string) (domain.SSHTunnel, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return domain.SSHTunnel{}, fmt.Errorf("tunnel_id is required")
+	}
+
+	s.tunnelMu.Lock()
+	state, ok := s.tunnels[id]
+	if !ok {
+		s.tunnelMu.Unlock()
+		return domain.SSHTunnel{}, store.ErrNotFound
+	}
+	if state.tunnel.Status != "failed" {
+		status := state.tunnel.Status
+		s.tunnelMu.Unlock()
+		return domain.SSHTunnel{}, fmt.Errorf("invalid tunnel status %q: only failed tunnels can be retried", status)
+	}
+	failed := tunnelSnapshot(state)
+	state.tunnel.Status = "retrying"
+	state.tunnel.Error = ""
+	s.tunnelMu.Unlock()
+
+	retried, err := s.StartOperatorSSHTunnel(ctx, failed.HostID, failed.RemoteHost, failed.RemotePort, failed.LocalPort, actor)
+	if err != nil {
+		s.tunnelMu.Lock()
+		if current, exists := s.tunnels[id]; exists && current == state && state.tunnel.Status == "retrying" {
+			state.tunnel.Status = "failed"
+			state.tunnel.Error = s.redactor.Redact(err.Error())
+		}
+		s.tunnelMu.Unlock()
+		return domain.SSHTunnel{}, err
+	}
+
+	s.tunnelMu.Lock()
+	current, exists := s.tunnels[id]
+	committed := exists && current == state && state.tunnel.Status == "retrying"
+	if committed {
+		delete(s.tunnels, id)
+	}
+	s.tunnelMu.Unlock()
+	if !committed {
+		_, _ = s.StopSSHTunnel(context.WithoutCancel(ctx), retried.ID, actor)
+		return domain.SSHTunnel{}, fmt.Errorf("SSH tunnel retry was canceled: %w", store.ErrNotFound)
+	}
+
+	s.audit(context.WithoutCancel(ctx), "", "ssh_tunnel_retried", actor, map[string]any{
+		"tunnel_id": retried.ID, "previous_tunnel_id": id, "host_id": retried.HostID,
+		"local_port": retried.LocalPort, "remote_host": retried.RemoteHost, "remote_port": retried.RemotePort,
+	})
+	observability.FromContext(ctx).InfoContext(ctx, "SSH tunnel retried",
+		"component", "ssh_tunnel", "tunnel_id", retried.ID, "previous_tunnel_id", id,
+		"host_id", retried.HostID, "local_port", retried.LocalPort,
+		"remote_host", retried.RemoteHost, "remote_port", retried.RemotePort)
+	return retried, nil
+}
+
 func (s *Service) openSSHTunnel(ctx context.Context, host domain.Host, connection sshx.ConnectionSpec, req domain.ExecRequest, actor string) (domain.SSHTunnel, error) {
 	transport, ok := s.transport.(sshx.TunnelTransport)
 	if !ok {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os/exec"
 	"testing"
+	"time"
 
 	"eino-ops-agent/internal/domain"
 )
@@ -20,6 +21,52 @@ func TestOperatorCanStartTunnelWithoutAgentApproval(t *testing.T) {
 	}
 	assertNoPendingApprovals(t, svc)
 	if _, err := svc.StopSSHTunnel(context.Background(), tunnel.ID, "admin-web"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOperatorCanRetryFailedTunnel(t *testing.T) {
+	svc, transport, host := newTestService(t)
+
+	failed, err := svc.StartOperatorSSHTunnel(context.Background(), host.ID, "127.0.0.1", 8080, 0, "admin-web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.RetryOperatorSSHTunnel(context.Background(), failed.ID, "admin-web"); err == nil {
+		t.Fatal("running tunnel was retried")
+	}
+
+	transport.mu.Lock()
+	client := transport.tunnelClients[0]
+	transport.mu.Unlock()
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		list := svc.ListSSHTunnels()
+		if len(list.Tunnels) == 1 && list.Tunnels[0].Status == "failed" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("tunnel did not enter failed state: %#v", list)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	retried, err := svc.RetryOperatorSSHTunnel(context.Background(), failed.ID, "admin-web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.ID == failed.ID || retried.Status != "running" || retried.HostID != failed.HostID ||
+		retried.RemoteHost != failed.RemoteHost || retried.RemotePort != failed.RemotePort || retried.LocalPort != failed.LocalPort {
+		t.Fatalf("unexpected retried tunnel: failed=%#v retried=%#v", failed, retried)
+	}
+	list := svc.ListSSHTunnels()
+	if list.Count != 1 || len(list.Tunnels) != 1 || list.Tunnels[0].ID != retried.ID {
+		t.Fatalf("failed tunnel was not replaced: %#v", list)
+	}
+	if _, err := svc.StopSSHTunnel(context.Background(), retried.ID, "admin-web"); err != nil {
 		t.Fatal(err)
 	}
 }
