@@ -533,7 +533,6 @@
   .tool-command-block,
   .tool-context-pane,
   .tool-structured-result,
-  .tool-generic-note,
   .tool-no-arguments,
   .tool-schema-raw,
   .file-metadata-panel,
@@ -593,6 +592,23 @@
 :root[data-theme='light'] .tool-summary-icon {
   background: var(--light-accent-soft);
   color: var(--light-accent);
+}
+
+:root[data-theme='light'] .tool-event summary .tool-target-chip {
+  border-color: var(--light-accent-border);
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
+}
+
+:root[data-theme='light'] .tool-event summary .tool-target-chip.tool-target-workspace {
+  border-color: #a9c5dc;
+  background: #edf5fb;
+  color: #39739d;
+}
+
+:root[data-theme='light'] .tool-event summary .tool-target-chip :where(b, em),
+:root[data-theme='light'] .tool-event summary .tool-target-chip.tool-target-workspace :where(b, em) {
+  color: inherit;
 }
 
 :root[data-theme='light'] .tool-live-progress {
@@ -873,6 +889,42 @@
 :root[data-theme='light'] .audit-table details summary:hover,
 :root[data-theme='light'] .log-row:hover {
   background: var(--light-subtle);
+}
+
+:root[data-theme='light'] .audit-table > details[open] > .audit-row {
+  background: var(--light-subtle);
+  box-shadow: inset 2px 0 var(--light-accent-border);
+}
+
+:root[data-theme='light'] :where(.audit-run-context, .audit-request-detail, .audit-run-facts > div) {
+  border-color: var(--light-border);
+}
+
+:root[data-theme='light'] :where(.audit-run-facts dt, .audit-request-meta dt, .audit-run-purpose span, .audit-request-detail > summary) {
+  color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] :where(.audit-run-facts dd, .audit-request-meta dd) {
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] .audit-request-meta > div {
+  border-color: var(--light-border);
+  background: var(--light-subtle);
+}
+
+:root[data-theme='light'] .audit-run-purpose {
+  border-color: var(--light-accent-border);
+}
+
+:root[data-theme='light'] .audit-run-purpose p {
+  color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] .audit-request-detail-body > .copyable-pre > pre {
+  border-color: var(--light-border);
+  background: #f2f4f3;
+  color: #27352e;
 }
 
 :root[data-theme='light'] :where(.audit-session-glyph, .log-component) {

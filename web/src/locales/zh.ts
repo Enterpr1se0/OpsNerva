@@ -170,13 +170,12 @@ const zh = {
   tool: {
     bashScript: 'Bash 脚本', moreLines: '{{line}} ...（另有 {{count}} 行）', fileOperation: '文件操作', readOperation: '读取文件', searchOperation: '搜索文件',
     fullScript: '完整脚本', fullCommand: '完整命令', originalArgs: 'ARGV · 原始参数', environment: '环境变量',
-    actualParameters: '实际调用参数', normalizedRequest: '规范化执行请求', parameter: '参数',
+    actualParameters: '实际调用参数', normalizedRequest: '执行请求', parameter: '参数',
     targetHost: '目标主机', sourceHost: '源主机', historyHost: '结果主机', scope: '范围', allHosts: '全部主机（{{count}}）', moreHosts: '另有 {{count}} 台主机', sourceFile: '源文件', filePath: '文件路径', workingDirectory: '工作目录', defaultDirectory: '默认目录',
     permission: '权限', hostAuthority: '宿主机完整权限', sandbox: 'Bubblewrap 沙盒', managedSudo: '托管 sudo', normalUser: '普通用户', exitCode: '退出码', duration: '耗时', runId: '运行 ID',
     reason: '操作目的', result: '工具结果', operatorInstruction: '操作员指令',
     rawJson: '原始 JSON', fileDetails: '文件变更', diff: '文件差异', fileEdit: '编辑文件', bytesRead: '读取大小', nextOffset: '下一偏移', validated: '校验通过', mode: '权限模式', owner: '所有者', validator: '校验器', after: '修改后', index: '序号', key: '键', value: '值', stderrResult: 'STDERR / 结果', outputOmitted: '省略 {{count}} B', waitDeadline: '等待截止，任务继续运行', moreOutput: '还有输出', sensitive: '敏感内容已脱敏，请勿用占位内容覆盖原文件。',
     matchModeLiteral: '字面量', matchModeRegex: '正则表达式', searchMatched: '已找到匹配项', searchNoMatches: '未找到匹配项', transferProgress: '传输进度',
-    emptyResult: '工具执行完成。',
   },
   approval: {
     actionScript: '脚本', actionCommand: '命令', sudoFileTitle: '是否允许 sudo 修改系统文件', sudoTitle: '是否允许 sudo 以 root 权限执行{{kind}}',

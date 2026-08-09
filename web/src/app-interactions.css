@@ -2,6 +2,7 @@
   --motion-instant: 90ms;
   --motion-fast: 140ms;
   --motion-view: 180ms;
+  --motion-disclosure: 220ms;
   --motion-ease: cubic-bezier(.2, .8, .2, 1);
   --titlebar-height: 36px;
 }
@@ -226,9 +227,220 @@ body {
   animation-name: app-composer-host-popover-in;
 }
 
+/* Disclosure surfaces keep their native keyboard semantics while animating
+   the browser-managed content box in engines that support it. */
+@supports (interpolate-size: allow-keywords) and selector(details::details-content) {
+  :root {
+    interpolate-size: allow-keywords;
+  }
+
+  :where(
+    .tool-event-rich,
+    .reasoning-card,
+    .mcp-tools,
+    .tool-schema-raw,
+    .command-review-panel,
+    .approval-request-detail,
+    .tool-raw,
+    .audit-request-detail,
+    .audit-session,
+    .audit-table details
+  )::details-content {
+    block-size: 0;
+    overflow: clip;
+    opacity: 0;
+    transition:
+      block-size var(--motion-disclosure) var(--motion-ease),
+      opacity var(--motion-fast) ease,
+      content-visibility var(--motion-disclosure) allow-discrete;
+  }
+
+  :where(
+    .tool-event-rich,
+    .reasoning-card,
+    .mcp-tools,
+    .tool-schema-raw,
+    .command-review-panel,
+    .approval-request-detail,
+    .tool-raw,
+    .audit-request-detail,
+    .audit-session,
+    .audit-table details
+  )[open]::details-content {
+    block-size: auto;
+    opacity: 1;
+  }
+}
+
+:where(
+  .tool-event-rich,
+  .reasoning-card,
+  .mcp-tools,
+  .tool-schema-raw,
+  .command-review-panel,
+  .approval-request-detail,
+  .tool-raw,
+  .audit-request-detail,
+  .audit-session,
+  .audit-table details,
+  .settings-disclosure
+)[open] > :not(summary) {
+  animation: app-disclosure-content-in var(--motion-disclosure) var(--motion-ease) both;
+}
+
+:where(
+  .tool-event-rich > summary,
+  .reasoning-card > summary,
+  .session-tasks > summary,
+  .mcp-tools > summary,
+  .tool-schema-raw > summary,
+  .command-review-panel > summary,
+  .tool-raw > summary,
+  .audit-request-detail > summary,
+  .audit-session > summary,
+  .settings-disclosure > summary
+) {
+  transition:
+    color var(--motion-fast) var(--motion-ease),
+    background-color var(--motion-fast) var(--motion-ease),
+    border-color var(--motion-fast) var(--motion-ease);
+}
+
+:where(
+  .tool-event-rich > summary > svg,
+  .reasoning-card > summary > svg:last-child,
+  .session-tasks > summary > svg:last-child,
+  .mcp-tools > summary > svg:last-child,
+  .tool-schema-raw > summary > svg:last-child,
+  .command-review-panel > summary > svg:last-child,
+  .audit-request-detail > summary > svg:last-child,
+  .audit-session > summary > svg:last-child,
+  .settings-disclosure > summary > svg:last-child
+) {
+  transition: color var(--motion-fast) var(--motion-ease), transform var(--motion-disclosure) var(--motion-ease);
+}
+
+.tool-event-rich[open] > summary > svg,
+.reasoning-card[open] > summary > svg:last-child,
+.session-tasks[open] > summary > svg:last-child,
+.mcp-tools[open] > summary > svg:last-child,
+.tool-schema-raw[open] > summary > svg:last-child,
+.command-review-panel[open] > summary > svg:last-child,
+.audit-request-detail[open] > summary > svg:last-child,
+.audit-session[open] > summary > svg:last-child,
+.settings-disclosure[open] > summary > svg:last-child {
+  transform: rotate(90deg);
+}
+
+.audit-run-chevron {
+  transition: color var(--motion-fast) var(--motion-ease), transform var(--motion-disclosure) var(--motion-ease);
+}
+
+.audit-table details[open] > summary .audit-run-chevron {
+  transform: rotate(90deg);
+}
+
+.tool-event-rich {
+  transition:
+    border-color var(--motion-view) var(--motion-ease),
+    background-color var(--motion-view) var(--motion-ease),
+    box-shadow var(--motion-view) var(--motion-ease);
+}
+
+.tool-event-rich[open] {
+  box-shadow: 0 10px 28px #0003;
+}
+
+.tool-summary-icon,
+.tool-status,
+.task-list-icon,
+.task-list-state {
+  transition:
+    color var(--motion-view) var(--motion-ease),
+    background-color var(--motion-view) var(--motion-ease),
+    border-color var(--motion-view) var(--motion-ease),
+    box-shadow var(--motion-view) var(--motion-ease);
+}
+
+.tool-status,
+.task-list-state {
+  animation: app-status-settle var(--motion-view) var(--motion-ease) both;
+}
+
+.tool-live-progress,
+.tool-summary-preview,
+.file-transfer-progress,
+.llm-work-status {
+  animation: app-inline-status-in var(--motion-view) var(--motion-ease) both;
+}
+
+.task-list-progress > i > em,
+.tool-live-progress.determinate > i > em,
+.file-transfer-progress > i > em {
+  transition: width 280ms var(--motion-ease);
+}
+
+.session-task-view {
+  animation: app-task-backdrop-in var(--motion-view) ease both;
+}
+
+.session-task-items {
+  transform-origin: top center;
+  animation: app-task-panel-in var(--motion-disclosure) var(--motion-ease) both;
+}
+
+/* Keep both grid tracks mounted so collapsing the Workspace can interpolate. */
+.chat-layout {
+  transition: grid-template-columns 240ms var(--motion-ease), gap 240ms var(--motion-ease);
+}
+
+.chat-layout > .workspace-browser-panel {
+  transition:
+    opacity var(--motion-view) var(--motion-ease),
+    transform 240ms var(--motion-ease),
+    visibility 0s linear;
+}
+
+.chat-layout.workspace-panel-collapsed {
+  grid-template-columns: 0 minmax(580px, 1fr);
+  gap: 0;
+}
+
+.chat-layout.workspace-panel-collapsed > .workspace-browser-panel {
+  display: flex;
+  visibility: hidden;
+  opacity: 0;
+  transform: translateX(-8px);
+  pointer-events: none;
+  transition:
+    opacity var(--motion-view) var(--motion-ease),
+    transform 240ms var(--motion-ease),
+    visibility 0s linear 240ms;
+}
+
 @keyframes app-composer-host-popover-in {
   from { opacity: 0; transform: translateX(-50%) translateY(6px) scale(.98); }
   to { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+}
+
+@keyframes app-disclosure-content-in {
+  from { opacity: 0; transform: translateY(-4px); }
+}
+
+@keyframes app-status-settle {
+  from { opacity: 0; transform: translateY(2px) scale(.97); }
+}
+
+@keyframes app-inline-status-in {
+  from { opacity: 0; transform: translateY(-3px); }
+}
+
+@keyframes app-task-backdrop-in {
+  from { opacity: 0; }
+}
+
+@keyframes app-task-panel-in {
+  from { opacity: 0; transform: translateY(-6px) scaleY(.985); }
 }
 
 .workspace {

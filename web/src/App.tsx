@@ -2220,7 +2220,7 @@ function SessionTasks({tasks,expanded,onExpanded}:{tasks:AgentTaskList;expanded:
 	const blocked=tasks.items.filter(task=>task.status==='pending'&&unresolvedTaskDependencies(task,tasks.items).length>0).length
 	const state=current?'active':blocked?'blocked':'completed'
   const progress=tasks.items.length?Math.round(completed/tasks.items.length*100):0
-	return <details className={`session-tasks ${state}`} open={expanded} onToggle={event=>onExpanded(event.currentTarget.open)}><summary><span className="task-list-icon"><ListChecks size={16}/></span><span className="task-list-summary"><b>{t('agentTasks.title')}</b><small>{current?`${current.active_form||current.subject} · #${current.id}`:blocked?t('agentTasks.blocked',{count:blocked}):`${completed}/${tasks.items.length}`}</small></span><span className="task-list-progress"><i><em style={{width:`${progress}%`}}/></i><b>{progress}%</b></span><span className={`task-list-state ${state}`}>{t(`statusLabels.${state}`,{defaultValue:state})}</span><ChevronRight size={14}/></summary></details>
+	return <details className={`session-tasks ${state}`} open={expanded} onToggle={event=>onExpanded(event.currentTarget.open)}><summary><span className="task-list-icon"><ListChecks size={16}/></span><span className="task-list-summary"><b>{t('agentTasks.title')}</b><small>{current?`${current.active_form||current.subject} · #${current.id}`:blocked?t('agentTasks.blocked',{count:blocked}):`${completed}/${tasks.items.length}`}</small></span><span className="task-list-progress"><i><em style={{width:`${progress}%`}}/></i><b>{progress}%</b></span><span className={`task-list-state ${state}`} key={state}>{t(`statusLabels.${state}`,{defaultValue:state})}</span><ChevronRight size={14}/></summary></details>
 }
 
 function SessionTaskItems({tasks}:{tasks:AgentTaskList}){
@@ -2255,6 +2255,16 @@ function ReasoningCard({content,active}:{content:string;active:boolean}){
 
 type JsonRecord = Record<string,unknown>
 function toolLabel(value:string){return i18n.t(`toolNames.${value}`,{defaultValue:value})}
+function toolSummaryIcon(name:string|undefined){
+	if(name?.startsWith('Task'))return <ListChecks size={15}/>
+	if(name?.startsWith('workspace_'))return <FolderOpen size={15}/>
+	if(name?.startsWith('web_'))return <Search size={15}/>
+	if(name==='skill')return <BookOpen size={15}/>
+	if(name?.startsWith('mcp__'))return <Braces size={15}/>
+	if(name?.includes('file_'))return <FileText size={15}/>
+	if(name?.startsWith('ssh_'))return name==='ssh_exec'||name==='ssh_run_script'||name==='ssh_shell'?<TerminalSquare size={15}/>:<Server size={15}/>
+	return <FunctionSquare size={15}/>
+}
 function jsonRecord(value:unknown):JsonRecord|undefined{return value!==null&&typeof value==='object'&&!Array.isArray(value)?value as JsonRecord:undefined}
 function parseRecord(value:string):JsonRecord{try{return jsonRecord(JSON.parse(value))||{value:JSON.parse(value)}}catch{return{value}}}
 function requestFromRun(run?:Run):JsonRecord|undefined{if(!run)return;try{return jsonRecord(JSON.parse(run.request_json))}catch{return}}
@@ -2373,7 +2383,6 @@ function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run
 	const workspaceShellBackend=request?textValue(request.workspace_shell_backend):''
 	const workspaceUpload=requestMode==='workspace_upload'||entry.tool==='workspace_file_upload'
 	const workspaceDownload=requestMode==='workspace_download'||entry.tool==='workspace_file_download'
-	const workspaceTransfer=workspaceUpload||workspaceDownload
 	const sshTransfer=requestMode==='ssh_file_transfer'||entry.tool==='ssh_file_transfer'
 	const workspaceTool=!!entry.tool?.startsWith('workspace_')
 	const sourceHostID=(request?textValue(request.source_host_id):'')||textValue(toolArguments?.source_host_id)
@@ -2384,24 +2393,11 @@ function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run
 	const filePath=textValue(file?.path)||remotePath||relativePath
 	const fileTarget=`${workspaceID?`${workspaceID}:`:''}${filePath}`
 	const eventToolLabel=shellOperation?shellActionLabel:structuredFileOperation?t(fileSearchMode?(workspaceID?'toolNames.workspace_file_search_mode':'toolNames.ssh_file_search_mode'):(workspaceID?'toolNames.workspace_file_read':'toolNames.ssh_file_read')):toolLabel(entry.tool||'')
-	const fileOperationParameters:Array<Array<unknown>>=structuredFileOperation&&request?[
-		...(workspaceID?[["workspace_id",workspaceID]]:[["host_id",hostID]]),
-		["path",filePath],
-		...(fileSearchMode?[["match_mode",searchMatchModeLabel],["pattern",searchPattern],["context_lines",numberValue(request.context_lines)]]:[
-			...(workspaceID?[]:[["metadata_only",request.metadata_only===true]]),
-			["full_content",request.full_content===true],
-			["max_bytes",numberValue(request.max_bytes)],
-			["offset_bytes",numberValue(request.offset_bytes)],
-			["tail_lines",numberValue(request.tail_lines)]
-		]),
-		...(workspaceID?[]:[["elevated",request.elevated===true]])
-	]:[]
 	const transferSummary=tunnelRoute||shellSummary||(workspaceUpload?`${workspaceID}:${relativePath} → ${hostName}:${remotePath}`:workspaceDownload?`${hostName}:${remotePath} → ${workspaceID}:${relativePath}`:sshTransfer?`${sourceHostName}:${sourcePath} → ${hostName}:${remotePath}`:'')
   const planSteps=Array.isArray(payload.steps)?payload.steps.map(jsonRecord).filter((step):step is JsonRecord=>!!step):[]
   const planSummary=textValue(payload.goal)||textValue(planSteps.find(step=>textValue(step.status)==='in_progress'||textValue(step.status)==='blocked')?.title)
 	const genericArgumentSummary=executionTool?'':toolArgumentSummary(entry.tool,toolArguments)
 	const operation=filePath||(script?t('tool.bashScript'):program||genericArgumentSummary||eventToolLabel||t('tool.result'))
-  const args=request&&Array.isArray(request.args)?request.args.map(value=>String(value)):[]
   const env=request?jsonRecord(request.env):undefined
 	const rawStdout=shellOperation&&(shellAction==='input'||shellAction==='output')?(shellChunks.length?shellChunkStdout:shellOutput):textValue(payload.stdout)||textValue(resultPayload?.stdout)||entry.liveStdout||run?.stdout_redacted||''
 	const stdout=change?cleanFileChangeOutput(rawStdout):rawStdout
@@ -2416,8 +2412,9 @@ function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run
 	const outputLabel=(label:string,omitted:number)=>omitted>0?`${label} · ${outputView.toUpperCase()} · ${t('tool.outputOmitted',{count:omitted})}`:label
 		const previewStream=status==='in_progress'&&entry.liveOutput?entry.liveOutputStream:stdout?'stdout':stderr?'stderr':undefined
 		const previewContent=status==='in_progress'&&entry.liveOutput?entry.liveOutput:previewStream==='stderr'?stderr:stdout
-	  const outputPreview=latestOutput(previewContent)
+	  const outputPreview=status==='in_progress'?latestOutput(previewContent,1):''
 		const commandSummary=transferSummary||(fileSearchMode?`${fileTarget} · ${searchMatchModeLabel} pattern=${JSON.stringify(searchPattern)}`:filePath)||program||(script?compactScript(script):'')||planSummary||genericArgumentSummary||operation
+	const summaryLabel=eventToolLabel||entry.tool||t('common.functions')
 	const historyRuns=[...recordArray(payload.runs),...recordArray(resultPayload?.runs)]
 	const historyHostIDs=[...new Set(historyRuns.map(item=>textValue(item.host_id)).filter(Boolean))]
 	const listedHosts=[...recordArray(payload.hosts),...recordArray(resultPayload?.hosts)]
@@ -2459,25 +2456,23 @@ function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run
 		const elapsed=formatLiveDuration(Math.max(0,Math.floor((now-startedAt)/1000)))
 		const resultExitCode=resultPayload?.exit_code
 	const exitCode=typeof payload.exit_code==='number'?payload.exit_code:typeof resultExitCode==='number'?resultExitCode:run?.exit_code??'—'
+	const duration=formatDuration(payload.duration??resultPayload?.duration,run)
 	const autoApproved=payload.auto_approved===true||resultPayload?.auto_approved===true||runAutoApproved(run)
 		  return <details className={`tool-event tool-event-rich ${status}`} open={expanded}>
-			<summary onClick={event=>{event.preventDefault();onDisclosure(event.currentTarget);setExpanded(value=>!value)}}><div className="tool-summary-icon"><TerminalSquare size={15}/></div><div className="tool-summary-copy"><div className="tool-summary-operation"><b>{eventToolLabel||entry.tool||t('common.functions')}:</b><code title={commandSummary}>{commandSummary}</code></div>{targets.length>0&&<div className="tool-summary-targets">{targets.map((target,index)=><span className={`tool-target-chip tool-target-${target.kind}`} title={`${target.label}: ${[target.name,target.id].filter(Boolean).join(' · ')}`} key={`${target.kind}_${target.id||target.name}_${index}`}>{target.kind==='host'?<Server size={11}/>:target.kind==='workspace'?<FolderOpen size={11}/>:<ListChecks size={11}/>}<em>{target.label}</em>{target.name&&<b>{target.name}</b>}{target.id&&<code>{target.id}</code>}</span>)}</div>}</div><div className="tool-summary-statuses">{autoApproved&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}<span className={`tool-status ${status}`}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight size={14}/>{status==='in_progress'&&<div className={`tool-live-progress ${transferTotal>0?'determinate':''}`} role="progressbar" aria-valuemin={transferTotal>0?0:undefined} aria-valuemax={transferTotal>0?transferTotal:undefined} aria-valuenow={transferTotal>0?transferred:undefined}><i><em style={transferTotal>0?{width:`${transferPercent}%`}:undefined}/></i><span>{transferTotal>0?`${formatFileSize(transferred)} / ${formatFileSize(transferTotal)}`:entry.liveOutputStream?.toUpperCase()||''}</span><time>{elapsed}</time></div>}{outputPreview&&<div className={`tool-summary-preview ${previewStream==='stderr'?'stderr':''}`}><span>{shellAction==='output'?shellActionLabel:(previewStream||'stdout').toUpperCase()}</span><pre>{outputPreview}</pre></div>}</summary>
+			<summary onClick={event=>{event.preventDefault();onDisclosure(event.currentTarget);setExpanded(value=>!value)}}><div className="tool-summary-icon">{toolSummaryIcon(entry.tool)}</div><div className="tool-summary-copy"><div className="tool-summary-heading"><b>{summaryLabel}</b>{targets.length>0&&<div className="tool-summary-targets">{targets.map((target,index)=><span className={`tool-target-chip tool-target-${target.kind}`} title={`${target.label}: ${[target.name,target.id].filter(Boolean).join(' · ')}`} key={`${target.kind}_${target.id||target.name}_${index}`}>{target.kind==='host'?<Server size={11}/>:target.kind==='workspace'?<FolderOpen size={11}/>:<ListChecks size={11}/>} {(targets.length>1||target.kind==='scope')&&<em>{target.label}</em>}<b>{target.name||target.id}</b></span>)}</div>}</div>{commandSummary!==summaryLabel&&<code title={commandSummary}>{commandSummary}</code>}</div><div className="tool-summary-statuses">{autoApproved&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}<span className={`tool-status ${status}`} key={status}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight size={14}/>{status==='in_progress'&&<div className={`tool-live-progress ${transferTotal>0?'determinate':''}`} role="progressbar" aria-valuemin={transferTotal>0?0:undefined} aria-valuemax={transferTotal>0?transferTotal:undefined} aria-valuenow={transferTotal>0?transferred:undefined}><i><em style={transferTotal>0?{width:`${transferPercent}%`}:undefined}/></i><span>{transferTotal>0?`${formatFileSize(transferred)} / ${formatFileSize(transferTotal)}`:entry.liveOutputStream?.toUpperCase()||''}</span><time>{elapsed}</time></div>}{outputPreview&&<div className={`tool-summary-preview ${previewStream==='stderr'?'stderr':''}`}><span>{shellAction==='output'?shellActionLabel:(previewStream||'stdout').toUpperCase()}</span><pre>{outputPreview}</pre></div>}</summary>
     <div className="tool-event-body">
 		  {shellPrimaryAction&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellPrimaryContent||'—'}/><pre>{shellPrimaryContent||'—'}</pre></div></section>}
 		  {shellOutputAction&&!shellChunks.length&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellOutput||'—'}/><pre>{shellOutput||'—'}</pre></div></section>}
-	      {(shellOperation||entry.tool==='ssh_exec'||entry.tool==='ssh_run_script')&&toolArguments&&<CompactTable title={t('tool.actualParameters')} columns={[t('tool.parameter'),t('tool.value')]} rows={Object.entries(toolArguments).map(([key,value])=>[key,value])}/>}
 		  {!executionTool&&toolArguments&&Object.keys(toolArguments).length>0&&<CompactTable title={t('tool.actualParameters')} columns={[t('tool.parameter'),t('tool.value')]} rows={Object.entries(toolArguments).map(([key,value])=>[key,safeToolArgument(value,key)])}/>}
       {request?<div className="tool-execution-layout">
         <section className="tool-command-pane">
 		  <div className="tool-command-head"><span>{shellOperation?t('sshShell.interactive'):tunnelOperation?t('tunnels.forwarding'):structuredFileOperation?t(fileSearchMode?'tool.searchOperation':'tool.readOperation'):filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}{request.elevated===true&&<em><ShieldAlert size={12}/>sudo / root</em>}</div>
 			  <div className="tool-command-block"><CopyButton value={script||program||commandSummary}/>{shellOperation?<pre>{shellSummary}</pre>:tunnelOperation?<pre>{tunnelRoute||requestMode}</pre>:workspaceUpload?<pre>workspace_upload {workspaceID}:{relativePath} → {hostName}:{remotePath}</pre>:workspaceDownload?<pre>workspace_download {hostName}:{remotePath} → {workspaceID}:{relativePath}</pre>:sshTransfer?<pre>{sourceHostName}:{sourcePath} → {hostName}:{remotePath}</pre>:structuredFileOperation?<pre>{fileSearchMode?'search':'read'} {fileTarget}</pre>:filePath?<pre>{requestMode} {workspaceID?`${workspaceID}:`:''}{filePath}</pre>:script?<pre>{script}</pre>:program?<pre><span className="prompt-sign">$</span> {program}</pre>:<pre>{requestMode} {remotePath}</pre>}</div>
-		  {fileOperationParameters.length>0&&<CompactTable title={t('tool.actualParameters')} columns={[t('tool.parameter'),t('tool.value')]} rows={fileOperationParameters}/>}
 		  {change&&textValue(change.diff)&&<DiffViewer change={change}/>}
-		  {program&&<CompactTable title={t('tool.originalArgs')} columns={[t('tool.index'),t('tool.value')]} rows={[[0,textValue(request.program)],...args.map((arg,index)=>[index+1,JSON.stringify(arg)])]}/>}
 		  {env&&Object.keys(env).length>0&&<CompactTable title={t('tool.environment')} columns={[t('tool.key'),t('tool.value')]} rows={Object.entries(env).map(([key,value])=>[key,String(value)])}/>}
         </section>
         <aside className="tool-context-pane">
-		  <dl className="tool-context-grid"><div><dt>{workspaceUpload||sshTransfer?t('tool.targetHost'):workspaceID?t('common.workspace'):t('tool.targetHost')}</dt><dd>{workspaceUpload||sshTransfer?[destinationHost.name,hostID].filter(Boolean).join(' · '):workspaceID||[destinationHost.name,hostID].filter(Boolean).join(' · ')||'—'}</dd></div><div><dt>{tunnelOperation?t('tunnels.remoteEndpoint'):workspaceTransfer||sshTransfer?t('tool.sourceFile'):filePath?t('tool.filePath'):t('tool.workingDirectory')}</dt><dd>{tunnelOperation?`${tunnelRemoteHost}:${tunnelRemotePort}`:workspaceUpload?`${workspaceID}:${relativePath}`:workspaceDownload?`${hostName}:${remotePath}`:sshTransfer?`${[sourceHost.name,sourceHost.id].filter(Boolean).join(' · ')}:${sourcePath}`:filePath||textValue(request.cwd)||t('tool.defaultDirectory')}</dd></div><div><dt>{t('tool.permission')}</dt><dd>{workspaceShellBackend==='host'?t('tool.hostAuthority'):workspaceShellBackend==='sandbox'?t('tool.sandbox'):request.elevated===true?t('tool.managedSudo'):t('tool.normalUser')}</dd></div><div><dt>{t('common.status')}</dt><dd>{t(`statusLabels.${status}`,{defaultValue:status})}{waitDeadlineReached?` · ${t('tool.waitDeadline')}`:''}{shellHasMore?` · ${t('tool.moreOutput')}`:''}</dd></div><div><dt>{t('tool.exitCode')}</dt><dd>{exitCode}</dd></div><div><dt>{t('tool.duration')}</dt><dd>{formatDuration(payload.duration??resultPayload?.duration,run)}</dd></div><div><dt>{t('tool.runId')}</dt><dd>{runID||'—'}</dd></div></dl>
+		  <dl className="tool-context-grid"><div><dt>{t('tool.permission')}</dt><dd>{workspaceShellBackend==='host'?t('tool.hostAuthority'):workspaceShellBackend==='sandbox'?t('tool.sandbox'):request.elevated===true?t('tool.managedSudo'):t('tool.normalUser')}</dd></div>{exitCode!=='—'&&<div><dt>{t('tool.exitCode')}</dt><dd>{exitCode}</dd></div>}{duration!=='—'&&<div><dt>{t('tool.duration')}</dt><dd>{duration}</dd></div>}{(waitDeadlineReached||shellHasMore)&&<div><dt>{t('common.status')}</dt><dd>{waitDeadlineReached?t('tool.waitDeadline'):t('tool.moreOutput')}</dd></div>}</dl>
 		  {textValue(request.reason)&&<div className="tool-reason"><span>{t('tool.reason')}</span><p>{textValue(request.reason)}</p></div>}
         </aside>
       </div>:!shellPrimaryAction&&!shellOutputAction&&<GenericToolResult payload={payload}/>}
@@ -2538,6 +2533,13 @@ function safeToolArgument(value:unknown,key=''):unknown{
 
 function toolArgumentSummary(toolName:string|undefined,argumentsValue:JsonRecord|undefined){
 	if(!argumentsValue)return''
+	if(toolName==='TaskCreate')return argumentsValue.subject?displayValue(argumentsValue.subject):''
+	if(toolName==='TaskGet')return argumentsValue.taskId?`#${displayValue(argumentsValue.taskId)}`:''
+	if(toolName==='TaskUpdate'){
+		const taskID=argumentsValue.taskId||argumentsValue.task_id
+		const nextStatus=argumentsValue.status
+		return [taskID?`#${displayValue(taskID)}`:'',nextStatus?i18n.t(`statusLabels.${displayValue(nextStatus)}`,{defaultValue:displayValue(nextStatus)}):''].filter(Boolean).join(' · ')
+	}
 	const preferred=toolName==='web_extract'?['urls']:toolName==='skill'?['name','path']:toolName==='ssh_history'?['run_id','query']:['query','action','url','uri','path','name','run_id','task_id']
 	for(const key of preferred){
 		const value=safeToolArgument(argumentsValue[key],key)
@@ -2555,9 +2557,9 @@ function formatLiveDuration(seconds:number){
 }
 
 function GenericToolResult({payload}:{payload:JsonRecord}){
-	const {t}=useTranslation()
-  const hidden=new Set(['_display','stdout','stderr','operator_instruction'])
+  const hidden=new Set(['_display','stdout','stderr','operator_instruction','ok','status','code','message','next_action','run_id','duration','exit_code','auto_approved','tasks'])
   const entries=Object.entries(payload).filter(([key])=>!hidden.has(key))
+	if(!entries.length)return null
   const scalars=entries.filter(([,value])=>value===null||typeof value==='string'||typeof value==='number'||typeof value==='boolean')
   const arrays=entries.filter(([,value])=>Array.isArray(value))
   const objects=entries.filter(([,value])=>!!jsonRecord(value))
@@ -2565,7 +2567,6 @@ function GenericToolResult({payload}:{payload:JsonRecord}){
     {scalars.length>0&&<dl className="tool-generic-grid">{scalars.map(([key,value])=><div key={key}><dt>{key.replaceAll('_',' ')}</dt><dd>{displayValue(value)}</dd></div>)}</dl>}
     {arrays.map(([key,value])=><StructuredArray key={key} label={key} values={value as unknown[]}/>)}
     {objects.map(([key,value])=><StructuredObject key={key} label={key} value={value as JsonRecord}/>)}
-	{!entries.length&&<div className="tool-generic-note">{t('tool.emptyResult')}</div>}
   </div>
 }
 
@@ -3213,10 +3214,8 @@ function ModelsPage({providers,proxies,showAddresses,onToggleAddresses,refresh}:
 
 function AuditRunDetail({run,req,hosts}:{run:Run;req:JsonRecord;hosts:Host[]}){
 	const {t}=useTranslation()
-	const toolArguments=run.tool_arguments_json?parseRecord(run.tool_arguments_json):undefined
 	const script=textValue(req.script)
 	const program=textValue(req.program)?fullProgram(req):''
-	const args=Array.isArray(req.args)?req.args.map(value=>String(value)):[]
 	const mode=textValue(req.mode)
 	const workspaceID=textValue(req.workspace_id)
 	const remotePath=textValue(req.remote_path)
@@ -3241,34 +3240,34 @@ function AuditRunDetail({run,req,hosts}:{run:Run;req:JsonRecord;hosts:Host[]}){
 	const shellTarget=`${mode==='workspace_shell_start'?`${workspaceID}:${textValue(req.cwd)||'.'}`:destinationHost.name||destinationHost.id} · PTY`
 	const fileTarget=`${workspaceID?`${workspaceID}:`:''}${filePath}`
 	const commandText=shellMode?shellTarget:tunnelMode?tunnelRoute:workspaceUpload?`workspace_upload ${workspaceID}:${relativePath} → ${destinationHost.name||destinationHost.id}:${remotePath}`:workspaceDownload?`workspace_download ${destinationHost.name||destinationHost.id}:${remotePath} → ${workspaceID}:${relativePath}`:sshTransfer?`${[sourceHost.name||sourceHost.id,sourcePath].filter(Boolean).join(':')} → ${destinationHost.name||destinationHost.id}:${remotePath}`:searchMode||readMode?`${searchMode?'search':'read'} ${fileTarget}`:script?script:program?program:filePath?`${mode} ${fileTarget}`:JSON.stringify(req,null,2)
-	const consumed=new Set(['program','args','script','cwd','reason','change','env','host_id','workspace_id','remote_path','relative_path','source_path','source_host_id','mode','elevated','workspace_shell_backend','remote_host','remote_port','local_port'])
-	const extras=Object.entries(req).filter(([key,value])=>!consumed.has(key)&&value!==undefined&&value!==null&&value!==''&&!(Array.isArray(value)&&!value.length))
-	return <>
-		{toolArguments&&<CompactTable title={`${toolLabel(run.tool_name||'')} · ${t('tool.actualParameters')}`} columns={[t('tool.parameter'),t('tool.value')]} rows={Object.entries(toolArguments).map(([key,value])=>[key,value])}/>}
-		<div className="tool-execution-layout">
-			<section className="tool-command-pane">
-				<div className="tool-command-head"><span>{shellMode?shellModeLabel:tunnelMode?t('tunnels.forwarding'):searchMode?t('tool.searchOperation'):readMode?t('tool.readOperation'):workspaceTransfer||sshTransfer||filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}{req.elevated===true&&<em><ShieldAlert size={12}/>sudo / root</em>}</div>
+	return <div className="audit-run-detail">
+		<div className="audit-run-primary">
+			<section className="audit-operation-pane">
+				<div className="tool-command-head"><span>{shellMode?shellModeLabel:tunnelMode?t('tunnels.forwarding'):searchMode?t('tool.searchOperation'):readMode?t('tool.readOperation'):workspaceTransfer||sshTransfer||filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{(workspaceShellBackend||req.elevated===true)&&<div className="audit-operation-badges">{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}{req.elevated===true&&<em><ShieldAlert size={12}/>sudo / root</em>}</div>}</div>
 				<div className="tool-command-block"><CopyButton value={commandText}/><pre>{program&&commandText===program?<><span className="prompt-sign">$</span> {program}</>:commandText}</pre></div>
 				{change&&textValue(change.diff)&&<DiffViewer change={change}/>}
-				{program&&args.length>0&&<CompactTable title={t('tool.originalArgs')} columns={[t('tool.index'),t('tool.value')]} rows={[[0,textValue(req.program)],...args.map((arg,index)=>[index+1,JSON.stringify(arg)])]}/>}
-				{env&&Object.keys(env).length>0&&<CompactTable title={t('tool.environment')} columns={[t('tool.key'),t('tool.value')]} rows={Object.entries(env).map(([key,value])=>[key,String(value)])}/>}
-				{extras.length>0&&<CompactTable title={t('tool.actualParameters')} columns={[t('tool.parameter'),t('tool.value')]} rows={extras}/>}
 			</section>
-			<aside className="tool-context-pane">
-				<dl className="tool-context-grid">
+			<aside className="audit-run-context">
+				<dl className="audit-run-facts">
 					<div><dt>{workspaceID&&!sshTransfer?t('common.workspace'):t('tool.targetHost')}</dt><dd>{workspaceID&&!sshTransfer?workspaceID:[destinationHost.name,destinationHost.id].filter(Boolean).join(' · ')||'—'}</dd></div>
 					{sshTransfer&&<div><dt>{t('tool.sourceHost')}</dt><dd>{[sourceHost.name,sourceHost.id].filter(Boolean).join(' · ')||'—'}</dd></div>}
 					<div><dt>{tunnelMode?t('tunnels.remoteEndpoint'):filePath?t('tool.filePath'):t('tool.workingDirectory')}</dt><dd>{tunnelMode?`${textValue(req.remote_host)}:${numberValue(req.remote_port)}`:filePath||textValue(req.cwd)||t('tool.defaultDirectory')}</dd></div>
 					<div><dt>{t('tool.permission')}</dt><dd>{workspaceShellBackend==='host'?t('tool.hostAuthority'):workspaceShellBackend==='sandbox'?t('tool.sandbox'):req.elevated===true?t('tool.managedSudo'):t('tool.normalUser')}</dd></div>
 					<div><dt>{t('tool.duration')}</dt><dd>{formatDuration(undefined,run)}</dd></div>
-					<div><dt>{t('tool.runId')}</dt><dd>{run.id}</dd></div>
 				</dl>
-				{textValue(req.reason)&&<div className="tool-reason"><span>{t('tool.reason')}</span><p>{textValue(req.reason)}</p></div>}
+				{textValue(req.reason)&&<div className="audit-run-purpose"><span>{t('tool.reason')}</span><p>{textValue(req.reason)}</p></div>}
 			</aside>
 		</div>
 		{(run.stdout_redacted||run.stderr_redacted||run.error)&&<div className="tool-output-grid">{run.stdout_redacted&&<ToolOutputPanel kind="stdout" label="STDOUT · REDACTED" content={run.stdout_redacted} live={false}/>} {run.stderr_redacted&&<ToolOutputPanel kind="stderr" label="STDERR · REDACTED" content={run.stderr_redacted} live={false}/>} {run.error&&!run.stderr_redacted&&<ToolOutputPanel kind="stderr" label={t('common.error')} content={run.error} live={false}/>}</div>}
-		<details className="tool-raw"><summary>{t('tool.normalizedRequest')}</summary><CopyablePre>{JSON.stringify(req,null,2)}</CopyablePre></details>
-	</>
+		<details className="audit-request-detail">
+			<summary><Braces size={14}/><span>{t('tool.normalizedRequest')}</span><ChevronRight size={14}/></summary>
+			<div className="audit-request-detail-body">
+				<dl className="audit-request-meta"><div><dt>{t('common.operation')}</dt><dd>{toolLabel(run.tool_name||'')}</dd></div><div><dt>{t('tool.runId')}</dt><dd>{run.id}</dd></div></dl>
+				{env&&Object.keys(env).length>0&&<CompactTable title={t('tool.environment')} columns={[t('tool.key'),t('tool.value')]} rows={Object.entries(env).map(([key,value])=>[key,String(value)])}/>}
+				<CopyablePre>{JSON.stringify(req,null,2)}</CopyablePre>
+			</div>
+		</details>
+	</div>
 }
 
 function auditOperationSummary(req:JsonRecord,run:Run,hosts:Host[],t:TFunction){
@@ -3313,7 +3312,7 @@ function AuditPage({runs,hosts}:{runs:Run[];hosts:Host[]}) {
     for(const run of filtered){const key=run.session_id||'__direct__';grouped.set(key,[...(grouped.get(key)||[]),run])}
 	return [...grouped.entries()].map(([id,items])=>{items.sort((a,b)=>Date.parse(b.started_at)-Date.parse(a.started_at));return{id,title:id==='__direct__'?t('audit.direct'):titles.get(id)||t('audit.missingConversation'),runs:items,latest:items[0]?.started_at,pending:items.filter(run=>run.status==='approval_required').length}}).sort((a,b)=>Date.parse(b.latest||'')-Date.parse(a.latest||''))
 	},[filtered,sessions,t,instance.language])
-	return <div className="page-stack"><div className="audit-toolbar"><div className="search-box"><Search size={16}/><input aria-label={t('common.search')} value={query} onChange={event=>setQuery(event.target.value)}/></div><span>{t('audit.counts',{sessions:groups.length,runs:filtered.length})}</span></div><div className="audit-groups">{groups.map(group=><details className="audit-session panel" key={group.id}><summary className="audit-session-summary"><div className="audit-session-glyph"><History size={17}/></div><div className="audit-session-name"><b>{group.title}</b><span>{group.id==='__direct__'?t('audit.noSession'):group.id} · {t('audit.lastRun',{date:new Date(group.latest).toLocaleString(localeFor(instance.language))})}</span></div><div className="audit-session-stats"><span><b>{group.runs.length}</b> {t('audit.runs')}</span>{group.pending>0&&<span className="pending-count"><b>{group.pending}</b> {t('audit.pending')}</span>}</div><ChevronRight className="audit-session-chevron" size={17}/></summary><div className="audit-table"><div className="audit-row audit-head"><span>{t('audit.columns.time')}</span><span>{t('audit.columns.operation')}</span><span>{t('audit.columns.status')}</span><span>{t('audit.columns.host')}</span><span>{t('audit.columns.exit')}</span></div>{group.runs.map(run=>{let req:Record<string,unknown>={};try{req=JSON.parse(run.request_json)}catch{req={request:run.request_json}};const auditHost=hostIdentity(hosts,run.host_id);const workspaceID=textValue(req.workspace_id);const target=auditHost.name||(run.host_id.startsWith('workspace_')?workspaceID:run.host_id)||'—';const operation=auditOperationSummary(req,run,hosts,t);return <details key={run.id}><summary className="audit-row"><span>{new Date(run.started_at).toLocaleString(localeFor(instance.language))}</span><span className="command">{operation}</span><span className="audit-run-status"><span className={`run-status ${run.status}`}>{t(`statusLabels.${run.status}`,{defaultValue:run.status})}</span>{runAutoApproved(run)&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}</span><span title={run.host_id}>{target}</span><span>{run.exit_code}</span></summary><div className="run-detail"><AuditRunDetail run={run} req={req} hosts={hosts}/></div></details>})}</div></details>)}</div>{!runs.length&&<Empty icon={<History/>} title={t('audit.emptyTitle')}/>} {runs.length>0&&!groups.length&&<Empty icon={<Search/>} title={t('audit.noMatch')}/>}</div>
+	return <div className="page-stack"><div className="audit-toolbar"><div className="search-box"><Search size={16}/><input aria-label={t('common.search')} value={query} onChange={event=>setQuery(event.target.value)}/></div><span>{t('audit.counts',{sessions:groups.length,runs:filtered.length})}</span></div><div className="audit-groups">{groups.map(group=><details className="audit-session panel" key={group.id}><summary className="audit-session-summary"><div className="audit-session-glyph"><History size={17}/></div><div className="audit-session-name"><b>{group.title}</b><span>{group.id==='__direct__'?t('audit.noSession'):group.id} · {t('audit.lastRun',{date:new Date(group.latest).toLocaleString(localeFor(instance.language))})}</span></div><div className="audit-session-stats"><span><b>{group.runs.length}</b> {t('audit.runs')}</span>{group.pending>0&&<span className="pending-count"><b>{group.pending}</b> {t('audit.pending')}</span>}</div><ChevronRight className="audit-session-chevron" size={17}/></summary><div className="audit-table"><div className="audit-row audit-head"><span>{t('audit.columns.time')}</span><span>{t('audit.columns.operation')}</span><span>{t('audit.columns.status')}</span><span>{t('audit.columns.host')}</span><span>{t('audit.columns.exit')}</span><span aria-hidden="true"/></div>{group.runs.map(run=>{let req:Record<string,unknown>={};try{req=JSON.parse(run.request_json)}catch{req={request:run.request_json}};const auditHost=hostIdentity(hosts,run.host_id);const workspaceID=textValue(req.workspace_id);const target=auditHost.name||(run.host_id.startsWith('workspace_')?workspaceID:run.host_id)||'—';const operation=auditOperationSummary(req,run,hosts,t);return <details key={run.id}><summary className="audit-row"><span>{new Date(run.started_at).toLocaleString(localeFor(instance.language))}</span><span className="command">{operation}</span><span className="audit-run-status"><span className={`run-status ${run.status}`}>{t(`statusLabels.${run.status}`,{defaultValue:run.status})}</span>{runAutoApproved(run)&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}</span><span title={run.host_id}>{target}</span><span>{run.exit_code}</span><ChevronRight className="audit-run-chevron" size={15}/></summary><div className="run-detail"><AuditRunDetail run={run} req={req} hosts={hosts}/></div></details>})}</div></details>)}</div>{!runs.length&&<Empty icon={<History/>} title={t('audit.emptyTitle')}/>} {runs.length>0&&!groups.length&&<Empty icon={<Search/>} title={t('audit.noMatch')}/>}</div>
 }
 
 function logFieldValue(value:unknown){

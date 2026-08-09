@@ -169,13 +169,12 @@ const en = {
   tool: {
     bashScript: 'Bash script', moreLines: '{{line}} ... (+{{count}} lines)', fileOperation: 'File operation', readOperation: 'Read file', searchOperation: 'Search file',
     fullScript: 'Full script', fullCommand: 'Full command', originalArgs: 'ARGV · original arguments', environment: 'Environment variables',
-    actualParameters: 'Actual call parameters', normalizedRequest: 'Normalized execution request', parameter: 'Parameter',
+    actualParameters: 'Actual call parameters', normalizedRequest: 'Execution request', parameter: 'Parameter',
     targetHost: 'Target host', sourceHost: 'Source host', historyHost: 'Result host', scope: 'Scope', allHosts: 'All hosts ({{count}})', moreHosts: '{{count}} more hosts', sourceFile: 'Source file', filePath: 'File path', workingDirectory: 'Working directory', defaultDirectory: 'Default directory',
     permission: 'Permission', hostAuthority: 'Full host authority', sandbox: 'Bubblewrap sandbox', managedSudo: 'Managed sudo', normalUser: 'Standard user', exitCode: 'Exit code', duration: 'Duration', runId: 'Run ID',
     reason: 'Purpose', result: 'Tool result', operatorInstruction: 'Operator instruction',
     rawJson: 'Raw JSON', fileDetails: 'File changes', diff: 'File diff', fileEdit: 'Edit file', bytesRead: 'Bytes read', nextOffset: 'Next offset', validated: 'Validated', mode: 'Mode', owner: 'Owner', validator: 'Validator', after: 'After', index: 'Index', key: 'Key', value: 'Value', stderrResult: 'STDERR / result', outputOmitted: '{{count}} B omitted', waitDeadline: 'Wait ended; task still running', moreOutput: 'More output', sensitive: 'Sensitive content is redacted. Do not overwrite the source file with placeholders.',
     matchModeLiteral: 'Literal', matchModeRegex: 'Regular expression', searchMatched: 'Matches found', searchNoMatches: 'No matches found', transferProgress: 'Transfer progress',
-    emptyResult: 'Tool completed.',
   },
   approval: {
     actionScript: 'script', actionCommand: 'command', sudoFileTitle: 'Allow sudo to modify this system file?', sudoTitle: 'Allow sudo to run this {{kind}} as root?',
