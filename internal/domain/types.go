@@ -418,6 +418,7 @@ type ChatMessage struct {
 	Role        string           `json:"role"`
 	Content     string           `json:"content"`
 	ModelExtra  map[string]any   `json:"-"`
+	TokenUsage  *ChatTokenUsage  `json:"token_usage,omitempty"`
 	ToolName    string           `json:"tool_name,omitempty"`
 	ToolCallID  string           `json:"tool_call_id,omitempty"`
 	RunID       string           `json:"run_id,omitempty"`
@@ -428,6 +429,14 @@ type ChatMessage struct {
 }
 
 const ChatMessageRoleAssistantProgress = "assistant_progress"
+
+type ChatTokenUsage struct {
+	InputTokens     int `json:"input_tokens"`
+	OutputTokens    int `json:"output_tokens"`
+	TotalTokens     int `json:"total_tokens"`
+	CachedTokens    int `json:"cached_tokens,omitempty"`
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+}
 
 const (
 	ChatToolCallRunning     = "running"

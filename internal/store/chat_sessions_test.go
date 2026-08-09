@@ -4,6 +4,8 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+
+	"eino-ops-agent/internal/domain"
 )
 
 func TestChatSessionPersistsWorkspaceBinding(t *testing.T) {
@@ -61,5 +63,39 @@ func TestChatSessionPersistsWorkspaceBinding(t *testing.T) {
 	}
 	if len(sessions) != 1 || sessions[0].Title != "Project status" || sessions[0].WorkspaceID != "project-b" || sessions[0].ContextTokens != 24576 || sessions[0].ContextWindow != 128000 || sessions[0].MessageCount != 1 {
 		t.Fatalf("sessions = %#v", sessions)
+	}
+}
+
+func TestChatMessageTokenUsagePersistsCurrentContext(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "chat-token-usage.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := st.CreateChatSession(ctx, "session-usage", ""); err != nil {
+		t.Fatal(err)
+	}
+	first := domain.ChatTokenUsage{
+		InputTokens: 100, OutputTokens: 20, TotalTokens: 120, CachedTokens: 40, ReasoningTokens: 5,
+	}
+	if err := st.AppendChatAssistantMessageWithUsage(ctx, "message-one", "session-usage", "First", first); err != nil {
+		t.Fatal(err)
+	}
+	second := domain.ChatTokenUsage{
+		InputTokens: 200, OutputTokens: 30, TotalTokens: 230,
+	}
+	if err := st.AppendChatAssistantMessageWithUsage(ctx, "message-two", "session-usage", "Second", second); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := st.ListChatMessages(ctx, "session-usage", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 || messages[0].TokenUsage == nil || messages[1].TokenUsage == nil {
+		t.Fatalf("stored token usage = %#v", messages)
+	}
+	if *messages[0].TokenUsage != first || *messages[1].TokenUsage != second {
+		t.Fatalf("loaded token usage = %#v, %#v", messages[0].TokenUsage, messages[1].TokenUsage)
 	}
 }

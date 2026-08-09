@@ -1054,16 +1054,22 @@ func TestQueryEmitsAndPersistsContextUsage(t *testing.T) {
 		adk.EventFromMessage(nil, stream, schema.Assistant, ""),
 	}}}
 	runtime := &Runtime{runner: runner, store: st, contextWindow: 200000}
-	var usage Event
+	var contextUsage, tokenUsage Event
 	if _, err := runtime.Query(ctx, "session_context_usage", "inspect context", func(event Event) {
 		if event.Type == "context_usage" {
-			usage = event
+			contextUsage = event
+		}
+		if event.Type == "token_usage" {
+			tokenUsage = event
 		}
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if usage.ContextTokens != 1280 || usage.ContextWindow != 200000 {
-		t.Fatalf("context usage event = %#v", usage)
+	if contextUsage.ContextTokens != 1280 || contextUsage.ContextWindow != 200000 {
+		t.Fatalf("context usage event = %#v", contextUsage)
+	}
+	if tokenUsage.InputTokens != 1200 || tokenUsage.OutputTokens != 80 || tokenUsage.TotalTokens != 1280 || tokenUsage.MessageID == "" {
+		t.Fatalf("token usage event = %#v", tokenUsage)
 	}
 	session, err := st.GetChatSession(ctx, "session_context_usage")
 	if err != nil {
@@ -1071,6 +1077,13 @@ func TestQueryEmitsAndPersistsContextUsage(t *testing.T) {
 	}
 	if session.ContextTokens != 1280 || session.ContextWindow != 200000 {
 		t.Fatalf("stored context usage = %d/%d", session.ContextTokens, session.ContextWindow)
+	}
+	messages, err := st.ListChatMessages(ctx, "session_context_usage", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 || messages[1].TokenUsage == nil || messages[1].TokenUsage.InputTokens != 1200 || messages[1].TokenUsage.TotalTokens != 1280 {
+		t.Fatalf("stored token usage = %#v", messages)
 	}
 }
 
@@ -1083,9 +1096,9 @@ func TestQueryKeepsLatestModelContextUsageInsteadOfAccumulatingToolLoop(t *testi
 	defer st.Close()
 	toolCall := schema.ToolCall{ID: "call-context", Type: "function", Function: schema.FunctionCall{Name: "ssh_exec", Arguments: `{}`}}
 	preamble := schema.AssistantMessage("Checking.", []schema.ToolCall{toolCall})
-	preamble.ResponseMeta = &schema.ResponseMeta{FinishReason: "tool_calls", Usage: &schema.TokenUsage{TotalTokens: 400}}
+	preamble.ResponseMeta = &schema.ResponseMeta{FinishReason: "tool_calls", Usage: &schema.TokenUsage{PromptTokens: 350, CompletionTokens: 50, TotalTokens: 400}}
 	terminal := schema.AssistantMessage("Completed.", nil)
-	terminal.ResponseMeta = &schema.ResponseMeta{FinishReason: "stop", Usage: &schema.TokenUsage{TotalTokens: 900}}
+	terminal.ResponseMeta = &schema.ResponseMeta{FinishReason: "stop", Usage: &schema.TokenUsage{PromptTokens: 800, CompletionTokens: 100, TotalTokens: 900}}
 	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{{
 		adk.EventFromMessage(preamble, nil, schema.Assistant, ""),
 		adk.EventFromMessage(schema.ToolMessage("done", "call-context", schema.WithToolName("ssh_exec")), nil, schema.Tool, "ssh_exec"),
@@ -1093,9 +1106,13 @@ func TestQueryKeepsLatestModelContextUsageInsteadOfAccumulatingToolLoop(t *testi
 	}}}
 	runtime := &Runtime{runner: runner, store: st, contextWindow: 128000}
 	var usages []int
+	var turnUsage Event
 	if _, err := runtime.Query(ctx, "session_context_loop", "inspect", func(event Event) {
 		if event.Type == "context_usage" {
 			usages = append(usages, event.ContextTokens)
+		}
+		if event.Type == "token_usage" {
+			turnUsage = event
 		}
 	}); err != nil {
 		t.Fatal(err)
@@ -1109,6 +1126,40 @@ func TestQueryKeepsLatestModelContextUsageInsteadOfAccumulatingToolLoop(t *testi
 	}
 	if session.ContextTokens != 900 || session.ContextWindow != 128000 {
 		t.Fatalf("stored context usage = %d/%d", session.ContextTokens, session.ContextWindow)
+	}
+	if turnUsage.InputTokens != 800 || turnUsage.OutputTokens != 100 || turnUsage.TotalTokens != 900 {
+		t.Fatalf("tool-loop token usage = %#v", turnUsage)
+	}
+	if turnUsage.TotalTokens != usages[len(usages)-1] {
+		t.Fatalf("reply total %d did not match context total %d", turnUsage.TotalTokens, usages[len(usages)-1])
+	}
+}
+
+func TestQueryCountsRepeatedStreamingUsageOnce(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	first := schema.AssistantMessage("Counted ", nil)
+	first.ResponseMeta = &schema.ResponseMeta{Usage: &schema.TokenUsage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15}}
+	second := schema.AssistantMessage("once.", nil)
+	second.ResponseMeta = &schema.ResponseMeta{FinishReason: "stop", Usage: &schema.TokenUsage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15}}
+	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{{
+		adk.EventFromMessage(nil, schema.StreamReaderFromArray([]*schema.Message{first, second}), schema.Assistant, ""),
+	}}}
+	runtime := &Runtime{runner: runner, store: st}
+	var usage Event
+	if _, err := runtime.Query(ctx, "session_stream_usage", "inspect", func(event Event) {
+		if event.Type == "token_usage" {
+			usage = event
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if usage.InputTokens != 10 || usage.OutputTokens != 5 || usage.TotalTokens != 15 {
+		t.Fatalf("streaming token usage = %#v", usage)
 	}
 }
 

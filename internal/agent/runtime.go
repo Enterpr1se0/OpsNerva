@@ -198,6 +198,9 @@ type Event struct {
 	RetryMax         int    `json:"retry_max,omitempty"`
 	ContextTokens    int    `json:"context_tokens,omitempty"`
 	ContextWindow    int    `json:"context_window,omitempty"`
+	InputTokens      int    `json:"input_tokens,omitempty"`
+	OutputTokens     int    `json:"output_tokens,omitempty"`
+	TotalTokens      int    `json:"total_tokens,omitempty"`
 	TransferredBytes int64  `json:"transferred_bytes,omitempty"`
 	TotalBytes       int64  `json:"total_bytes,omitempty"`
 }
@@ -961,18 +964,13 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 	lastContextTokens := chatSession.ContextTokens
 	lastEmittedContextTokens := -1
 	lastEmittedContextWindow := -1
-	recordContextUsage := func(message *schema.Message) {
-		if message == nil || message.ResponseMeta == nil || message.ResponseMeta.Usage == nil {
+	var latestTokenUsage domain.ChatTokenUsage
+	recordModelUsage := func(usage domain.ChatTokenUsage) {
+		if usage.TotalTokens <= 0 {
 			return
 		}
-		usage := message.ResponseMeta.Usage
+		latestTokenUsage = usage
 		tokens := usage.TotalTokens
-		if tokens <= 0 {
-			tokens = usage.PromptTokens + usage.CompletionTokens
-		}
-		if tokens <= 0 {
-			return
-		}
 		usageWindow := contextWindow
 		if usageWindow == 0 {
 			r.mu.RLock()
@@ -1197,6 +1195,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 			var reasoning strings.Builder
 			var assistantChunks []*schema.Message
 			var mergedAssistant *schema.Message
+			var streamTokenUsage domain.ChatTokenUsage
 			reasoningSegment := ""
 			toolName := variant.ToolName
 			toolCallID := ""
@@ -1225,7 +1224,9 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 				streamChunks++
 				if variant.Role == schema.Assistant {
 					assistantChunks = append(assistantChunks, message)
-					recordContextUsage(message)
+					if message.ResponseMeta != nil {
+						streamTokenUsage = mergeTokenUsageSnapshot(streamTokenUsage, normalizedTokenUsage(message.ResponseMeta.Usage))
+					}
 					if message.ResponseMeta != nil && message.ResponseMeta.FinishReason != "" {
 						lastFinishReason = message.ResponseMeta.FinishReason
 					}
@@ -1268,6 +1269,9 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 				emit(Event{Type: "message", Role: role, ToolName: variant.ToolName, Content: message.Content, SessionID: sessionID})
 			}
 			stream.Close()
+			if variant.Role == schema.Assistant {
+				recordModelUsage(streamTokenUsage)
+			}
 			if retryingStream {
 				if assistantStreamVisible {
 					resetAssistantMessage(assistantMessageID, role)
@@ -1341,7 +1345,9 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 		if variant.Message != nil {
 			assistantHasToolCalls := variant.Role == schema.Assistant && len(variant.Message.ToolCalls) > 0
 			if variant.Role == schema.Assistant {
-				recordContextUsage(variant.Message)
+				if variant.Message.ResponseMeta != nil {
+					recordModelUsage(normalizedTokenUsage(variant.Message.ResponseMeta.Usage))
+				}
 				if assistantHasToolCalls {
 					toolCalls.add(variant.Message.ToolCalls)
 				}
@@ -1465,10 +1471,21 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 		if answerMessageID == "" {
 			return answer, fmt.Errorf("assistant answer has no message lifecycle")
 		}
-		if err := r.store.AppendChatMessageWithID(ctx, answerMessageID, sessionID, "assistant", answer); err != nil {
+		if latestTokenUsage.TotalTokens > 0 {
+			if err := r.store.AppendChatAssistantMessageWithUsage(ctx, answerMessageID, sessionID, answer, latestTokenUsage); err != nil {
+				return answer, err
+			}
+		} else if err := r.store.AppendChatMessageWithID(ctx, answerMessageID, sessionID, "assistant", answer); err != nil {
 			return answer, err
 		}
 		commitAssistantMessage(answerMessageID, string(schema.Assistant))
+		if latestTokenUsage.TotalTokens > 0 {
+			emit(Event{
+				Type: "token_usage", MessageID: answerMessageID, SessionID: sessionID,
+				InputTokens: latestTokenUsage.InputTokens, OutputTokens: latestTokenUsage.OutputTokens,
+				TotalTokens: latestTokenUsage.TotalTokens,
+			})
+		}
 	}
 	if titleDone != nil {
 		<-titleDone

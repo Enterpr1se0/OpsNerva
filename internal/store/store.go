@@ -310,6 +310,18 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_messages(session_id, created_at);
+CREATE TABLE IF NOT EXISTS chat_message_context_usage (
+  message_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  total_tokens INTEGER NOT NULL DEFAULT 0,
+  cached_tokens INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_chat_message_context_usage_session ON chat_message_context_usage(session_id,created_at);
 CREATE TABLE IF NOT EXISTS chat_tool_calls (
   session_id TEXT NOT NULL,
   user_message_id TEXT NOT NULL,
@@ -1485,6 +1497,13 @@ func (s *Store) AppendChatMessageWithID(ctx context.Context, id, sessionID, role
 	return s.appendChatMessageWithAttachmentsID(ctx, id, sessionID, role, content, "completed", name, nil, nil)
 }
 
+func (s *Store) AppendChatAssistantMessageWithUsage(ctx context.Context, id, sessionID, content string, usage domain.ChatTokenUsage) error {
+	if usage.TotalTokens <= 0 {
+		return fmt.Errorf("chat token total must be positive")
+	}
+	return s.appendChatMessageWithAttachmentsID(ctx, id, sessionID, "assistant", content, "completed", "", nil, nil, &usage)
+}
+
 func (s *Store) AppendPendingChatMessage(ctx context.Context, sessionID, role, content string, toolName ...string) (string, error) {
 	return s.appendChatMessage(ctx, sessionID, role, content, "pending", toolName...)
 }
@@ -1510,7 +1529,7 @@ func (s *Store) appendChatMessageWithAttachments(ctx context.Context, sessionID,
 	return id, nil
 }
 
-func (s *Store) appendChatMessageWithAttachmentsID(ctx context.Context, id, sessionID, role, content, status, toolName string, attachments []domain.ChatAttachment, modelExtra map[string]any) error {
+func (s *Store) appendChatMessageWithAttachmentsID(ctx context.Context, id, sessionID, role, content, status, toolName string, attachments []domain.ChatAttachment, modelExtra map[string]any, tokenUsage ...*domain.ChatTokenUsage) error {
 	if strings.TrimSpace(id) == "" {
 		return fmt.Errorf("chat message id is required")
 	}
@@ -1533,6 +1552,18 @@ VALUES(?,?,?,?,?,?,?,?)`, id, sessionID, role, content, string(modelExtraJSON), 
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE chat_sessions SET updated_at=? WHERE session_id=?`, now, sessionID); err != nil {
 		return err
+	}
+	if len(tokenUsage) > 0 && tokenUsage[0] != nil {
+		usage := tokenUsage[0]
+		if usage.TotalTokens <= 0 {
+			return fmt.Errorf("chat token total must be positive")
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO chat_message_context_usage(
+message_id,session_id,input_tokens,output_tokens,total_tokens,cached_tokens,reasoning_tokens,created_at)
+VALUES(?,?,?,?,?,?,?,?)`, id, sessionID, usage.InputTokens, usage.OutputTokens, usage.TotalTokens,
+			usage.CachedTokens, usage.ReasoningTokens, now); err != nil {
+			return err
+		}
 	}
 	for _, attachment := range attachments {
 		attachmentID := attachment.ID
@@ -1826,7 +1857,38 @@ ORDER BY created_at`
 	if err := s.loadChatToolMessageState(ctx, result); err != nil {
 		return nil, err
 	}
+	if err := s.loadChatTokenUsage(ctx, sessionID, result); err != nil {
+		return nil, err
+	}
 	return result, nil
+}
+
+func (s *Store) loadChatTokenUsage(ctx context.Context, sessionID string, messages []domain.ChatMessage) error {
+	if len(messages) == 0 {
+		return nil
+	}
+	byID := make(map[string]*domain.ChatMessage, len(messages))
+	for index := range messages {
+		byID[messages[index].ID] = &messages[index]
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT message_id,input_tokens,output_tokens,total_tokens,cached_tokens,reasoning_tokens
+FROM chat_message_context_usage WHERE session_id=? ORDER BY created_at`, sessionID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var messageID string
+		var usage domain.ChatTokenUsage
+		if err := rows.Scan(&messageID, &usage.InputTokens, &usage.OutputTokens, &usage.TotalTokens,
+			&usage.CachedTokens, &usage.ReasoningTokens); err != nil {
+			return err
+		}
+		if message := byID[messageID]; message != nil {
+			message.TokenUsage = &usage
+		}
+	}
+	return rows.Err()
 }
 
 func (s *Store) loadChatAttachments(ctx context.Context, messages []domain.ChatMessage, includeData bool) error {
