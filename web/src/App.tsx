@@ -2578,7 +2578,7 @@ function toolArgumentSummary(toolName:string|undefined,argumentsValue:JsonRecord
 		const nextStatus=argumentsValue.status
 		return [taskID?`#${displayValue(taskID)}`:'',nextStatus?i18n.t(`statusLabels.${displayValue(nextStatus)}`,{defaultValue:displayValue(nextStatus)}):''].filter(Boolean).join(' · ')
 	}
-	const preferred=toolName==='web_extract'?['urls']:toolName==='skill'?['name','path']:toolName==='ssh_history'?['run_id','query']:['query','action','url','uri','path','name','run_id','task_id']
+	const preferred=toolName==='web_extract'?['urls']:toolName==='skill'?['skill']:toolName==='ssh_history'?['run_id','query']:['query','action','url','uri','path','name','run_id','task_id']
 	for(const key of preferred){
 		const value=safeToolArgument(argumentsValue[key],key)
 		if(value===undefined||value===null||value==='')continue

@@ -12,7 +12,6 @@ import (
 
 	"eino-ops-agent/internal/domain"
 	"eino-ops-agent/internal/service"
-	"eino-ops-agent/internal/skills"
 	"eino-ops-agent/internal/store"
 
 	"github.com/cloudwego/eino/components/tool"
@@ -973,14 +972,6 @@ func ReadHistoryTool(ctx context.Context, svc *service.Service, input HistorySea
 	return HistoryOutput{Runs: &summaries}, err
 }
 
-func ReadSkillTool(ctx context.Context, svc *service.Service, input SkillInput, actor string) (SkillOutput, error) {
-	item, err := svc.LoadSkill(ctx, input.Name, actor)
-	if err != nil {
-		return SkillOutput{}, err
-	}
-	return SkillOutput{Skill: item}, nil
-}
-
 func taskStartToolResult(svc *service.Service, task domain.Task, startErr error) (domain.ExecResult, error) {
 	if task.ID == "" {
 		return normalizeTaskResult(task, domain.ExecResult{}, "", startErr)
@@ -1534,22 +1525,10 @@ func NormalizeWebExtractToolResult(result domain.WebExtractResponse, err error) 
 	return result, nil
 }
 
-type SkillInput struct {
-	Name string `json:"name" jsonschema:"exact enabled Skill name from this description"`
-}
-
-type SkillOutput struct {
-	Skill skills.Skill `json:"skill"`
-}
-
 func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	var tools []tool.BaseTool
 	remoteValidatorIDs := svc.ValidatorIDs("remote")
 	workspaceValidatorIDs := svc.ValidatorIDs("workspace")
-	enabledSkills, err := svc.ListEnabledSkills()
-	if err != nil {
-		return nil, err
-	}
 	validatorHint := func(ids []string) string {
 		if len(ids) == 0 {
 			return " No validators; omit validator_id."
@@ -1716,48 +1695,28 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	}, fileSearchSchemaOption())); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("skill", skillToolDescription(enabledSkills), func(ctx context.Context, input SkillInput) (any, error) {
-		result, err := ReadSkillTool(ctx, svc, input, "eino-agent")
-		return normalizeValueToolResult(ctx, "skill", result, err)
-	})); err != nil {
-		return nil, err
-	}
 	tools = append(tools, svc.MCPTools()...)
 	return tools, nil
 }
 
-func skillToolDescription(items []skills.Skill) string {
-	const prefix = "Load one enabled Skill by exact name."
-	if len(items) == 0 {
-		return prefix + " No enabled Skills are available."
-	}
-	summaries := make([]string, 0, len(items))
-	for _, item := range items {
-		summary := strings.Join(strings.Fields(item.Summary), " ")
-		if summary == "" {
-			summaries = append(summaries, item.Name)
-			continue
-		}
-		if runes := []rune(summary); len(runes) > 120 {
-			summary = string(runes[:120]) + "…"
-		}
-		summaries = append(summaries, item.Name+": "+summary)
-	}
-	return prefix + " Enabled Skills: " + strings.Join(summaries, "; ")
-}
-
 func BuildTools(svc *service.Service) ([]tool.BaseTool, error) {
+	ctx := context.Background()
 	available, err := buildAvailableTools(svc)
 	if err != nil {
 		return nil, err
 	}
-	states, err := svc.AgentToolStates(context.Background())
+	states, err := svc.AgentToolStates(ctx)
 	if err != nil {
 		return nil, err
 	}
+	_, skillTools, err := newSkillMiddleware(ctx, svc, states)
+	if err != nil {
+		return nil, err
+	}
+	available = append(available, skillTools...)
 	enabled := make([]tool.BaseTool, 0, len(available))
 	for _, candidate := range available {
-		info, err := candidate.Info(context.Background())
+		info, err := candidate.Info(ctx)
 		if err != nil {
 			return nil, err
 		}

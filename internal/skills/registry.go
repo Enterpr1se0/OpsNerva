@@ -279,6 +279,10 @@ func (r *Registry) initializeRoot() error {
 
 func (r *Registry) readUnlocked(name string, includeContent bool) (Skill, error) {
 	directory := filepath.Join(r.root, name)
+	baseDirectory, err := filepath.Abs(directory)
+	if err != nil {
+		return Skill{}, fmt.Errorf("resolve skill directory: %w", err)
+	}
 	mainPath := filepath.Join(directory, "SKILL.md")
 	info, err := os.Lstat(mainPath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -298,7 +302,8 @@ func (r *Registry) readUnlocked(name string, includeContent bool) (Skill, error)
 		return Skill{}, fmt.Errorf("skill %q SKILL.md exceeds 2 MiB", name)
 	}
 	digest := sha256.Sum256(data)
-	skill := Skill{Name: name, Summary: firstParagraph(string(data)), Enabled: true, ContentSHA256: fmt.Sprintf("%x", digest), UpdatedAt: info.ModTime().UTC().Format(time.RFC3339Nano)}
+	summary, runtimeContent := parseSkillDocument(string(data))
+	skill := Skill{Name: name, Summary: summary, Enabled: true, BaseDirectory: baseDirectory, RuntimeContent: runtimeContent, ContentSHA256: fmt.Sprintf("%x", digest), UpdatedAt: info.ModTime().UTC().Format(time.RFC3339Nano)}
 	metadataPath := filepath.Join(directory, metadataFilename)
 	if metadataData, metadataErr := os.ReadFile(metadataPath); metadataErr == nil {
 		var saved metadata

@@ -287,6 +287,10 @@ func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st
 	if err != nil {
 		return nil, nil, fmt.Errorf("build Eino plantask middleware: %w", err)
 	}
+	skillMiddleware, skillTools, err := newSkillMiddleware(ctx, svc, toolStates)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build Eino skill middleware: %w", err)
+	}
 	plantaskDescriptors, err := DescribeTools(ctx, plantaskTools)
 	if err != nil {
 		return nil, nil, fmt.Errorf("describe Eino plantask tools: %w", err)
@@ -297,7 +301,20 @@ func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st
 			plantaskDescriptors[index].Enabled = enabled
 		}
 	}
-	descriptors = append(plantaskDescriptors, descriptors...)
+	skillDescriptors, err := DescribeTools(ctx, skillTools)
+	if err != nil {
+		return nil, nil, fmt.Errorf("describe Eino skill tools: %w", err)
+	}
+	for index := range skillDescriptors {
+		if enabled, configured := toolStates[skillDescriptors[index].Name]; configured {
+			skillDescriptors[index].Enabled = enabled
+		}
+	}
+	allDescriptors := make([]ToolDescriptor, 0, len(plantaskDescriptors)+len(skillDescriptors)+len(descriptors))
+	allDescriptors = append(allDescriptors, plantaskDescriptors...)
+	allDescriptors = append(allDescriptors, skillDescriptors...)
+	allDescriptors = append(allDescriptors, descriptors...)
+	descriptors = allDescriptors
 	middlewares := []compose.ToolMiddleware{{Invokable: normalizeToolCallErrors}}
 	if cfg.Kind == "anthropic" {
 		// The claude model component rewrites "{}" streaming tool arguments to
@@ -312,7 +329,7 @@ func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st
 			Tools: tools, ExecuteSequentially: true, UnknownToolsHandler: unknownToolResult,
 			ToolCallMiddlewares: middlewares,
 		}},
-		Handlers: []adk.ChatModelAgentMiddleware{plantaskMiddleware},
+		Handlers: []adk.ChatModelAgentMiddleware{plantaskMiddleware, skillMiddleware},
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("create Eino agent: %w", err)

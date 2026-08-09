@@ -1371,7 +1371,8 @@ func TestUnifiedSkillToolReadsTheLiveAdministratorRegistry(t *testing.T) {
 	cfg := config.Default()
 	cfg.DataDir = t.TempDir()
 	svc := service.New(st, nil, encryptor, security.NewRedactor(), cfg.Limits, cfg)
-	if _, err := svc.SaveAdminSkill(ctx, "custom-diagnosis", "# Custom Diagnosis\n\nUse the administrator workflow.", "test"); err != nil {
+	skillContent := "---\nname: custom-diagnosis\ndescription: Custom diagnosis workflow.\ncontext: fork\n---\n\n# Custom Diagnosis\n\nUse the administrator workflow."
+	if _, err := svc.SaveAdminSkill(ctx, "custom-diagnosis", skillContent, "test"); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := BuildTools(svc)
@@ -1385,8 +1386,19 @@ func TestUnifiedSkillToolReadsTheLiveAdministratorRegistry(t *testing.T) {
 			t.Fatal(infoErr)
 		}
 		if info.Name == "skill" {
-			if !strings.Contains(info.Desc, "custom-diagnosis") || !strings.Contains(info.Desc, "Use the administrator workflow") {
+			if !strings.Contains(info.Desc, "custom-diagnosis") {
 				t.Fatalf("enabled Skill summary was not included in the function description: %q", info.Desc)
+			}
+			schemaJSON, schemaErr := info.ParamsOneOf.ToJSONSchema()
+			if schemaErr != nil {
+				t.Fatal(schemaErr)
+			}
+			encodedSchema, schemaErr := json.Marshal(schemaJSON)
+			if schemaErr != nil {
+				t.Fatal(schemaErr)
+			}
+			if !strings.Contains(string(encodedSchema), `"skill"`) || strings.Contains(string(encodedSchema), `"name"`) {
+				t.Fatalf("Eino Skill schema was not used: %s", encodedSchema)
 			}
 			skillTool = candidate.(tool.InvokableTool)
 		}
@@ -1394,26 +1406,37 @@ func TestUnifiedSkillToolReadsTheLiveAdministratorRegistry(t *testing.T) {
 	if skillTool == nil {
 		t.Fatal("skill was not registered")
 	}
-	result, err := skillTool.InvokableRun(service.WithSessionID(ctx, "session_skill"), `{"name":"custom-diagnosis"}`)
+	sessionCtx := service.WithSessionID(ctx, "session_skill")
+	result, err := skillTool.InvokableRun(sessionCtx, `{"skill":"custom-diagnosis"}`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result, "Use the administrator workflow") {
+	expectedBaseDirectory := filepath.Join(cfg.DataDir, "skills", "custom-diagnosis")
+	if !strings.Contains(result, "Use the administrator workflow") || !strings.Contains(result, expectedBaseDirectory) {
 		t.Fatalf("dynamic skill content was not returned: %s", result)
+	}
+	if strings.Contains(result, "context: fork") || strings.Contains(result, "description: Custom diagnosis workflow") {
+		t.Fatalf("Skill frontmatter leaked into inline content: %s", result)
+	}
+	audit, err := svc.ListAudit(ctx, "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadedAudit := false
+	for _, event := range audit {
+		if event.Type == "skill_loaded" && event.Actor == "eino-agent" && event.Data["skill_name"] == "custom-diagnosis" && event.Data["session_id"] == "session_skill" {
+			loadedAudit = true
+			break
+		}
+	}
+	if !loadedAudit {
+		t.Fatalf("skill_loaded audit was not retained: %#v", audit)
 	}
 	if _, err := svc.SetAdminSkillEnabled(ctx, "custom-diagnosis", false, "test"); err != nil {
 		t.Fatal(err)
 	}
-	disabledJSON, err := skillTool.InvokableRun(ctx, `{"name":"custom-diagnosis"}`)
-	if err != nil {
-		t.Fatalf("disabled skill aborted the ToolNode: %v", err)
-	}
-	var disabled domain.ToolFailure
-	if err := json.Unmarshal([]byte(disabledJSON), &disabled); err != nil {
-		t.Fatal(err)
-	}
-	if disabled.OK || disabled.Status != "failed" || disabled.Code != "configuration_required" || !strings.Contains(disabled.Message, "disabled") {
-		t.Fatalf("disabled skill did not return a structured failure: %#v", disabled)
+	if _, err := skillTool.InvokableRun(ctx, `{"skill":"custom-diagnosis"}`); err == nil || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("disabled skill error = %v", err)
 	}
 }
 

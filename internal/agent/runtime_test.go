@@ -434,8 +434,8 @@ func TestRuntimeReloadAppliesCompleteSystemPromptToExistingConversation(t *testi
 		case messages := <-requests:
 			for _, message := range messages {
 				if message.Role == "system" {
-					if message.Content != want {
-						t.Fatalf("system prompt = %q, want %q", message.Content, want)
+					if !strings.HasPrefix(message.Content, want+"\n") || !strings.Contains(message.Content, "# Skills System") {
+						t.Fatalf("system prompt = %q, want configured prefix %q followed by Eino Skill instructions", message.Content, want)
 					}
 					return
 				}
