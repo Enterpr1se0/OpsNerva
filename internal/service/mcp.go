@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -20,9 +21,8 @@ import (
 	"eino-ops-agent/internal/observability"
 	"eino-ops-agent/internal/proxyx"
 
+	officialmcp "github.com/cloudwego/eino-ext/components/tool/mcp/officialmcp"
 	"github.com/cloudwego/eino/components/tool"
-	"github.com/cloudwego/eino/schema"
-	einojsonschema "github.com/eino-contrib/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -50,38 +50,68 @@ type mcpRuntimeState struct {
 	lastError   string
 	connectedAt *time.Time
 	session     *mcp.ClientSession
-	tools       []mcpResolvedTool
+	tools       []tool.BaseTool
 }
 
-type mcpResolvedTool struct {
-	Name        string
-	ExposedName string
-	Description string
-	Schema      *einojsonschema.Schema
+type mcpClientSessionAdapter struct {
+	service          *Service
+	serverID         string
+	serverName       string
+	discoverySession officialmcp.ClientSession
+	discoveredTools  int
 }
 
-type mcpDynamicTool struct {
-	service  *Service
-	serverID string
-	resolved mcpResolvedTool
-}
-
-func (t *mcpDynamicTool) Info(context.Context) (*schema.ToolInfo, error) {
-	return &schema.ToolInfo{
-		Name:        t.resolved.ExposedName,
-		Desc:        t.resolved.Description,
-		ParamsOneOf: schema.NewParamsOneOfByJSONSchema(t.resolved.Schema),
-	}, nil
-}
-
-func (t *mcpDynamicTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
-	var arguments any = map[string]any{}
-	if strings.TrimSpace(argumentsInJSON) != "" {
-		if err := json.Unmarshal([]byte(argumentsInJSON), &arguments); err != nil {
-			return "", fmt.Errorf("invalid MCP tool arguments: %w", err)
-		}
+func (a *mcpClientSessionAdapter) ListTools(ctx context.Context, params *mcp.ListToolsParams) (*mcp.ListToolsResult, error) {
+	if a.discoverySession == nil {
+		return nil, fmt.Errorf("MCP discovery session is not ready")
 	}
-	return t.service.callMCPTool(ctx, t.serverID, t.resolved.Name, arguments)
+	response, err := a.discoverySession.ListTools(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+	if response == nil {
+		return nil, fmt.Errorf("MCP server returned an empty tool list")
+	}
+	filtered := *response
+	filtered.Tools = make([]*mcp.Tool, 0, len(response.Tools))
+	for _, candidate := range response.Tools {
+		if a.discoveredTools >= mcpMaxTools {
+			filtered.NextCursor = ""
+			break
+		}
+		if candidate == nil || strings.TrimSpace(candidate.Name) == "" {
+			continue
+		}
+		copyOfTool := *candidate
+		if copyOfTool.InputSchema == nil {
+			copyOfTool.InputSchema = map[string]any{"type": "object"}
+		}
+		encodedSchema, err := json.Marshal(copyOfTool.InputSchema)
+		if err != nil {
+			return nil, fmt.Errorf("encode MCP tool %q input schema: %w", candidate.Name, err)
+		}
+		if len(encodedSchema) > mcpMaxSchemaBytes {
+			return nil, fmt.Errorf("MCP tool %q input schema exceeds %d bytes", candidate.Name, mcpMaxSchemaBytes)
+		}
+		description := strings.TrimSpace(copyOfTool.Description)
+		if description == "" {
+			description = copyOfTool.Name
+		}
+		copyOfTool.Description = fmt.Sprintf("%s: %s", a.serverName, strings.ToValidUTF8(description, "�"))
+		filtered.Tools = append(filtered.Tools, &copyOfTool)
+		a.discoveredTools++
+	}
+	if a.discoveredTools >= mcpMaxTools {
+		filtered.NextCursor = ""
+	}
+	return &filtered, nil
+}
+
+func (a *mcpClientSessionAdapter) CallTool(ctx context.Context, params *mcp.CallToolParams) (*mcp.CallToolResult, error) {
+	if a.service == nil {
+		return nil, fmt.Errorf("MCP service is not ready")
+	}
+	return a.service.callMCPTool(ctx, a.serverID, params)
 }
 
 func (s *Service) InitializeMCPServers(ctx context.Context) error {
@@ -298,13 +328,11 @@ func (s *Service) MCPTools() []tool.BaseTool {
 	s.mcpMu.RLock()
 	defer s.mcpMu.RUnlock()
 	result := make([]tool.BaseTool, 0)
-	for serverID, state := range s.mcpRuntime {
+	for _, state := range s.mcpRuntime {
 		if state == nil || state.status != "ready" || state.session == nil {
 			continue
 		}
-		for _, resolved := range state.tools {
-			result = append(result, &mcpDynamicTool{service: s, serverID: serverID, resolved: resolved})
-		}
+		result = append(result, state.tools...)
 	}
 	sort.Slice(result, func(i, j int) bool {
 		left, _ := result[i].Info(context.Background())
@@ -314,13 +342,27 @@ func (s *Service) MCPTools() []tool.BaseTool {
 	return result
 }
 
-func (s *Service) callMCPTool(ctx context.Context, serverID, toolName string, arguments any) (string, error) {
+func (s *Service) callMCPTool(ctx context.Context, serverID string, params *mcp.CallToolParams) (*mcp.CallToolResult, error) {
+	if params == nil || strings.TrimSpace(params.Name) == "" {
+		return nil, fmt.Errorf("MCP tool name is required")
+	}
+	callParams := *params
+	if raw, ok := callParams.Arguments.(json.RawMessage); ok {
+		raw = json.RawMessage(bytes.TrimSpace(raw))
+		if len(raw) == 0 {
+			raw = json.RawMessage(`{}`)
+		}
+		if !json.Valid(raw) {
+			return nil, fmt.Errorf("invalid MCP tool arguments")
+		}
+		callParams.Arguments = raw
+	}
 	started := time.Now()
 	s.mcpMu.RLock()
 	state := s.mcpRuntime[serverID]
 	if state == nil || state.status != "ready" || state.session == nil {
 		s.mcpMu.RUnlock()
-		return "", fmt.Errorf("MCP server is not ready")
+		return nil, fmt.Errorf("MCP server is not ready")
 	}
 	callCtx := ctx
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
@@ -328,7 +370,7 @@ func (s *Service) callMCPTool(ctx context.Context, serverID, toolName string, ar
 		callCtx, cancel = context.WithTimeout(ctx, mcpCallTimeout)
 		defer cancel()
 	}
-	result, err := state.session.CallTool(callCtx, &mcp.CallToolParams{Name: toolName, Arguments: arguments})
+	result, err := state.session.CallTool(callCtx, &callParams)
 	s.mcpMu.RUnlock()
 	status := "completed"
 	if err != nil {
@@ -340,33 +382,15 @@ func (s *Service) callMCPTool(ctx context.Context, serverID, toolName string, ar
 		status = "tool_error"
 	}
 	s.audit(ctx, "", "mcp_tool_called", "eino-agent", map[string]any{
-		"server_id": serverID, "tool_name": toolName, "status": status, "duration_ms": time.Since(started).Milliseconds(), "session_id": SessionIDFromContext(ctx),
+		"server_id": serverID, "tool_name": callParams.Name, "status": status, "duration_ms": time.Since(started).Milliseconds(), "session_id": SessionIDFromContext(ctx),
 	})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	envelope := map[string]any{
-		"tool_version":         "1.1",
-		"ok":                   !result.IsError,
-		"status":               "completed",
-		"code":                 "completed",
-		"content_is_untrusted": true,
-		"result":               result,
-	}
-	if result.IsError {
-		envelope["status"] = "failed"
-		envelope["code"] = "provider_failed"
-		envelope["message"] = "the external MCP function tool returned an error"
-		envelope["next_action"] = "inspect the returned error and external state; do not repeat the same call unchanged"
-	}
-	payload, err := json.Marshal(envelope)
-	if err != nil {
-		return "", err
-	}
-	return string(payload), nil
+	return result, nil
 }
 
-func (s *Service) connectMCPServer(ctx context.Context, server domain.MCPServer) (*mcp.ClientSession, []mcpResolvedTool, error) {
+func (s *Service) connectMCPServer(ctx context.Context, server domain.MCPServer) (*mcp.ClientSession, []tool.BaseTool, error) {
 	secrets, err := s.decryptMCPSecrets(server.SecretsCipher)
 	if err != nil {
 		return nil, nil, fmt.Errorf("decrypt MCP secrets: %w", err)
@@ -382,7 +406,7 @@ func (s *Service) connectMCPServer(ctx context.Context, server domain.MCPServer)
 	return s.connectMCPServerWithSecrets(ctx, server, secrets, oauthHandler)
 }
 
-func (s *Service) connectMCPServerWithSecrets(ctx context.Context, server domain.MCPServer, secrets mcpSecrets, oauthHandler auth.OAuthHandler) (*mcp.ClientSession, []mcpResolvedTool, error) {
+func (s *Service) connectMCPServerWithSecrets(ctx context.Context, server domain.MCPServer, secrets mcpSecrets, oauthHandler auth.OAuthHandler) (*mcp.ClientSession, []tool.BaseTool, error) {
 	var transport mcp.Transport
 	switch server.Transport {
 	case domain.MCPTransportStdio:
@@ -401,7 +425,7 @@ func (s *Service) connectMCPServerWithSecrets(ctx context.Context, server domain
 	if err != nil {
 		return nil, nil, err
 	}
-	resolved, err := listMCPTools(ctx, session, server.ID, server.Name)
+	resolved, err := s.resolveMCPTools(ctx, session, server)
 	if err != nil {
 		_ = session.Close()
 		return nil, nil, err
@@ -409,7 +433,7 @@ func (s *Service) connectMCPServerWithSecrets(ctx context.Context, server domain
 	return session, resolved, nil
 }
 
-func (s *Service) connectMCPServerWithTransport(ctx context.Context, server domain.MCPServer, client *http.Client, oauthHandler auth.OAuthHandler) (*mcp.ClientSession, []mcpResolvedTool, error) {
+func (s *Service) connectMCPServerWithTransport(ctx context.Context, server domain.MCPServer, client *http.Client, oauthHandler auth.OAuthHandler) (*mcp.ClientSession, []tool.BaseTool, error) {
 	transport := &mcp.StreamableClientTransport{
 		Endpoint: server.URL, HTTPClient: client, OAuthHandler: oauthHandler,
 		MaxRetries: 1, DisableStandaloneSSE: true,
@@ -419,7 +443,7 @@ func (s *Service) connectMCPServerWithTransport(ctx context.Context, server doma
 	if err != nil {
 		return nil, nil, err
 	}
-	resolved, err := listMCPTools(ctx, session, server.ID, server.Name)
+	resolved, err := s.resolveMCPTools(ctx, session, server)
 	if err != nil {
 		_ = session.Close()
 		return nil, nil, err
@@ -442,55 +466,60 @@ func mcpResourceHTTPClient(headers map[string]string, oauthEnabled bool) *http.C
 	}
 }
 
-func listMCPTools(ctx context.Context, session *mcp.ClientSession, serverID, serverName string) ([]mcpResolvedTool, error) {
-	result := make([]mcpResolvedTool, 0)
-	cursor := ""
+func (s *Service) resolveMCPTools(ctx context.Context, session officialmcp.ClientSession, server domain.MCPServer) ([]tool.BaseTool, error) {
+	adapter := &mcpClientSessionAdapter{
+		service: s, serverID: server.ID, serverName: server.Name, discoverySession: session,
+	}
+	errorAsError := false
 	seen := make(map[string]struct{})
-toolPages:
-	for page := 0; page < 100; page++ {
-		response, err := session.ListTools(ctx, &mcp.ListToolsParams{Cursor: cursor})
-		if err != nil {
-			return nil, err
-		}
-		for _, candidate := range response.Tools {
-			if len(result) >= mcpMaxTools {
-				break toolPages
-			}
-			if candidate == nil || strings.TrimSpace(candidate.Name) == "" {
-				continue
-			}
-			exposed := exposedMCPToolName(serverID, candidate.Name)
+	return officialmcp.GetTools(ctx, &officialmcp.Config{
+		Cli:           adapter,
+		ServerName:    server.Name,
+		ListToolsMode: officialmcp.ListToolsAllPages,
+		MaxToolPages:  100,
+		ToolNameMapper: func(_ context.Context, input officialmcp.ToolNameMapperInput) (officialmcp.ToolNameMapperOutput, error) {
+			exposed := exposedMCPToolName(server.ID, input.Tool.Name)
 			if _, exists := seen[exposed]; exists {
-				digest := sha256.Sum256([]byte(candidate.Name))
+				digest := sha256.Sum256([]byte(input.Tool.Name))
 				exposed = truncateToolName(exposed, 55) + "_" + hex.EncodeToString(digest[:4])
 			}
 			seen[exposed] = struct{}{}
-			inputSchema := &einojsonschema.Schema{Type: "object"}
-			if candidate.InputSchema != nil {
-				if encoded, marshalErr := json.Marshal(candidate.InputSchema); marshalErr == nil && len(encoded) <= mcpMaxSchemaBytes {
-					var decoded einojsonschema.Schema
-					if json.Unmarshal(encoded, &decoded) == nil {
-						inputSchema = &decoded
-					}
-				}
-			}
-			description := strings.TrimSpace(candidate.Description)
-			if description == "" {
-				description = candidate.Name
-			}
-			if len(description) > 1000 {
-				description = strings.ToValidUTF8(description[:1000], "�") + "…"
-			}
-			description = fmt.Sprintf("%s: %s", serverName, description)
-			result = append(result, mcpResolvedTool{Name: candidate.Name, ExposedName: exposed, Description: description, Schema: inputSchema})
-		}
-		if response.NextCursor == "" {
-			break
-		}
-		cursor = response.NextCursor
+			return officialmcp.ToolNameMapperOutput{ExposedName: exposed}, nil
+		},
+		MetadataMode:      officialmcp.MetadataBasic,
+		DescriptionPolicy: &officialmcp.DescriptionPolicy{MaxChars: 1000},
+		ResultPolicy: &officialmcp.ResultPolicy{
+			IncludeStructuredContent: true,
+			IncludeMeta:              true,
+			ErrorAsError:             &errorAsError,
+		},
+		ToolCallResultHandlerV2: markMCPToolResultUntrusted,
+	})
+}
+
+func markMCPToolResultUntrusted(_ context.Context, _ officialmcp.ToolCallInfo, result *mcp.CallToolResult) (*mcp.CallToolResult, error) {
+	if result == nil {
+		return nil, nil
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].ExposedName < result[j].ExposedName })
-	return result, nil
+	copyOfResult := *result
+	copyOfResult.Meta = make(mcp.Meta, len(result.Meta)+1)
+	for key, value := range result.Meta {
+		copyOfResult.Meta[key] = value
+	}
+	security := map[string]any{
+		"content_is_untrusted": true,
+		"ok":                   !result.IsError,
+		"status":               "completed",
+		"code":                 "completed",
+	}
+	if result.IsError {
+		security["status"] = "failed"
+		security["code"] = "provider_failed"
+		security["message"] = "the external MCP function tool returned an error"
+		security["next_action"] = "inspect the returned error and external state; do not repeat the same call unchanged"
+	}
+	copyOfResult.Meta["opsnerva"] = security
+	return &copyOfResult, nil
 }
 
 func (s *Service) decorateMCPServer(server domain.MCPServer) domain.MCPServer {
@@ -632,10 +661,18 @@ func truncateToolName(value string, max int) string {
 	return value[:max]
 }
 
-func publicMCPTools(items []mcpResolvedTool) []domain.MCPTool {
+func publicMCPTools(items []tool.BaseTool) []domain.MCPTool {
 	result := make([]domain.MCPTool, 0, len(items))
 	for _, item := range items {
-		result = append(result, domain.MCPTool{Name: item.Name, ExposedName: item.ExposedName, Description: item.Description})
+		info, err := item.Info(context.Background())
+		if err != nil || info == nil {
+			continue
+		}
+		rawName, _ := info.Extra[officialmcp.ExtraMCPRawToolName].(string)
+		if rawName == "" {
+			rawName = info.Name
+		}
+		result = append(result, domain.MCPTool{Name: rawName, ExposedName: info.Name, Description: info.Desc})
 	}
 	return result
 }
@@ -666,4 +703,4 @@ func mapAsEnvironment(values map[string]string) []string {
 	return result
 }
 
-var _ tool.InvokableTool = (*mcpDynamicTool)(nil)
+var _ officialmcp.ClientSession = (*mcpClientSessionAdapter)(nil)

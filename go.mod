@@ -10,6 +10,7 @@ require (
 	github.com/cloudwego/eino v0.9.13
 	github.com/cloudwego/eino-ext/components/model/claude v0.1.25
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.13
+	github.com/cloudwego/eino-ext/components/tool/mcp/officialmcp v0.1.1
 	github.com/eino-contrib/jsonschema v1.0.3
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/google/jsonschema-go v0.4.3

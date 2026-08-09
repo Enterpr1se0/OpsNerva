@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,9 +14,26 @@ import (
 
 	"eino-ops-agent/internal/domain"
 
+	officialmcp "github.com/cloudwego/eino-ext/components/tool/mcp/officialmcp"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+type staticMCPClientSession struct {
+	tools []*mcp.Tool
+	pages map[string]*mcp.ListToolsResult
+}
+
+func (s *staticMCPClientSession) ListTools(_ context.Context, params *mcp.ListToolsParams) (*mcp.ListToolsResult, error) {
+	if s.pages != nil {
+		return s.pages[params.Cursor], nil
+	}
+	return &mcp.ListToolsResult{Tools: s.tools}, nil
+}
+
+func (s *staticMCPClientSession) CallTool(context.Context, *mcp.CallToolParams) (*mcp.CallToolResult, error) {
+	return nil, nil
+}
 
 func TestManagedMCPServerInjectsNamespacedToolAndCanBeDisabled(t *testing.T) {
 	svc, _, _ := newTestService(t)
@@ -70,6 +88,17 @@ func TestManagedMCPServerInjectsNamespacedToolAndCanBeDisabled(t *testing.T) {
 	if err != nil || !strings.Contains(output, largeMessage) {
 		t.Fatalf("complete MCP invocation output was not preserved: bytes=%d err=%v", len(output), err)
 	}
+	info, err := loaded[0].Info(context.Background())
+	if err != nil || info.Extra[officialmcp.ExtraMCPRawToolName] != "echo.message" || !strings.HasPrefix(info.Desc, "Fixture MCP: ") {
+		t.Fatalf("official MCP tool metadata was not preserved: info=%#v err=%v", info, err)
+	}
+	if err := svc.ReconnectMCPServer(context.Background(), server.ID); err != nil {
+		t.Fatal(err)
+	}
+	afterReconnect, err := invokable.InvokableRun(context.Background(), `{"message":"after-reconnect"}`)
+	if err != nil || !strings.Contains(afterReconnect, "after-reconnect") {
+		t.Fatalf("stale MCP tool did not resolve the current ready session: output=%s err=%v", afterReconnect, err)
+	}
 
 	server, err = svc.SetMCPServerEnabled(context.Background(), server.ID, false, "test")
 	if err != nil {
@@ -83,7 +112,7 @@ func TestManagedMCPServerInjectsNamespacedToolAndCanBeDisabled(t *testing.T) {
 	}
 }
 
-func TestMCPToolErrorReturnsStructuredEnvelope(t *testing.T) {
+func TestMCPToolErrorReturnsOfficialResultWithSecurityMetadata(t *testing.T) {
 	svc, _, _ := newTestService(t)
 	t.Cleanup(svc.CloseMCPServers)
 	remote := mcp.NewServer(&mcp.Implementation{Name: "fixture", Version: "1.0.0"}, nil)
@@ -116,24 +145,94 @@ func TestMCPToolErrorReturnsStructuredEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MCP tool-level error escaped as a Go error: %v", err)
 	}
-	var envelope struct {
-		ToolVersion        string             `json:"tool_version"`
-		OK                 bool               `json:"ok"`
-		Status             string             `json:"status"`
-		Code               string             `json:"code"`
-		Message            string             `json:"message"`
-		NextAction         string             `json:"next_action"`
-		ContentIsUntrusted bool               `json:"content_is_untrusted"`
-		Result             mcp.CallToolResult `json:"result"`
-	}
-	if err := json.Unmarshal([]byte(output), &envelope); err != nil {
+	var result mcp.CallToolResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		t.Fatal(err)
 	}
-	if envelope.ToolVersion != "1.1" || envelope.OK || envelope.Status != "failed" || envelope.Code != "provider_failed" || !envelope.ContentIsUntrusted {
-		t.Fatalf("unexpected MCP failure envelope: %#v", envelope)
+	security, ok := result.Meta["opsnerva"].(map[string]any)
+	if !ok || security["ok"] != false || security["status"] != "failed" || security["code"] != "provider_failed" || security["content_is_untrusted"] != true {
+		t.Fatalf("unexpected MCP security metadata: result=%#v metadata=%#v", result, security)
 	}
-	if envelope.Message == "" || envelope.NextAction == "" || !envelope.Result.IsError || len(envelope.Result.Content) != 1 {
-		t.Fatalf("MCP failure details were not preserved: %#v", envelope)
+	if security["message"] == "" || security["next_action"] == "" || !result.IsError || len(result.Content) != 1 {
+		t.Fatalf("MCP failure details were not preserved: result=%#v metadata=%#v", result, security)
+	}
+	audit, err := svc.ListAudit(context.Background(), "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundAudit := false
+	for _, event := range audit {
+		if event.Type == "mcp_tool_called" && event.Data["tool_name"] == "always_fail" && event.Data["status"] == "tool_error" {
+			foundAudit = true
+			break
+		}
+	}
+	if !foundAudit {
+		t.Fatalf("MCP tool call audit was not recorded: %#v", audit)
+	}
+}
+
+func TestOfficialMCPToolDiscoveryKeepsSafetyLimitsAndUniqueNames(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	tools := make([]*mcp.Tool, 0, mcpMaxTools+2)
+	tools = append(tools,
+		&mcp.Tool{Name: "same.name", Description: "first", InputSchema: map[string]any{"type": "object"}},
+		&mcp.Tool{Name: "same name", Description: "second", InputSchema: map[string]any{"type": "object"}},
+	)
+	for index := 2; index < mcpMaxTools+2; index++ {
+		tools = append(tools, &mcp.Tool{Name: fmt.Sprintf("tool_%03d", index), InputSchema: map[string]any{"type": "object"}})
+	}
+	resolved, err := svc.resolveMCPTools(context.Background(), &staticMCPClientSession{tools: tools}, domain.MCPServer{ID: "server-limits", Name: "Limits"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolved) != mcpMaxTools {
+		t.Fatalf("resolved MCP tools=%d, want %d", len(resolved), mcpMaxTools)
+	}
+	first, err := resolved[0].Info(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := resolved[1].Info(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Name == second.Name || len(first.Name) > 64 || len(second.Name) > 64 {
+		t.Fatalf("colliding MCP names were not mapped safely: %q %q", first.Name, second.Name)
+	}
+	if first.Extra[officialmcp.ExtraMCPServerName] != "Limits" || first.Extra[officialmcp.ExtraMCPRawToolName] != "same.name" {
+		t.Fatalf("official MCP metadata is incomplete: %#v", first.Extra)
+	}
+}
+
+func TestOfficialMCPToolDiscoveryLoadsAllPages(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	session := &staticMCPClientSession{pages: map[string]*mcp.ListToolsResult{
+		"": {
+			Tools:      []*mcp.Tool{{Name: "first", InputSchema: map[string]any{"type": "object"}}},
+			NextCursor: "next",
+		},
+		"next": {
+			Tools: []*mcp.Tool{{Name: "second", InputSchema: map[string]any{"type": "object"}}},
+		},
+	}}
+	resolved, err := svc.resolveMCPTools(context.Background(), session, domain.MCPServer{ID: "server-pages", Name: "Pages"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolved) != 2 {
+		t.Fatalf("resolved paginated MCP tools=%d, want 2", len(resolved))
+	}
+}
+
+func TestOfficialMCPToolDiscoveryRejectsOversizedSchema(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	session := &staticMCPClientSession{tools: []*mcp.Tool{{
+		Name: "oversized", InputSchema: map[string]any{"type": "object", "description": strings.Repeat("x", mcpMaxSchemaBytes)},
+	}}}
+	_, err := svc.resolveMCPTools(context.Background(), session, domain.MCPServer{ID: "server-schema", Name: "Schema"})
+	if err == nil || !strings.Contains(err.Error(), "input schema exceeds") {
+		t.Fatalf("oversized MCP schema error=%v", err)
 	}
 }
 
