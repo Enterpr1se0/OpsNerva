@@ -305,19 +305,22 @@ export interface ChatAttachment {
 	size_bytes: number
 }
 
-export interface AgentPlanStep {
-  number: number
-  title: string
-  status: 'pending' | 'in_progress' | 'completed' | 'blocked' | 'skipped'
+export interface AgentTask {
+  id: string
+  subject: string
+  description: string
+  status: 'pending' | 'in_progress' | 'completed'
+  blocks: string[]
+  blocked_by: string[]
+  active_form?: string
+  owner?: string
+  metadata?: Record<string, unknown>
   updated_at: string
 }
 
-export interface AgentPlan {
+export interface AgentTaskList {
   session_id: string
-  goal: string
-  status: 'active' | 'completed' | 'blocked'
-  steps: AgentPlanStep[]
-  created_at: string
+  items: AgentTask[]
   updated_at: string
 }
 
@@ -328,7 +331,7 @@ export interface ChatState {
 	context_window: number
   messages: ChatMessage[]
 	tool_calls: ChatToolCall[]
-  plan?: AgentPlan | null
+  tasks: AgentTaskList
 }
 
 export type ModelProviderKind = 'openai' | 'deepseek' | 'anthropic' | 'openai_compatible' | 'ollama'

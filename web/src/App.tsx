@@ -17,7 +17,7 @@ import { CopyButton, CopyablePre } from './CopyButton'
 import { AppSelect, ModelCombobox } from './Controls'
 import i18n, { localeFor, type SupportedLanguage } from './i18n'
 import { TextFileEditor } from './TextFileEditor'
-import type { AgentEvent, AgentPlan, Approval, ApprovalExecutionResult, ApprovalMode, ChatMessage, ChatSession, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, Run, ServerLogEntry, SFTPFileEntry, SSHShell, SSHShellEvent, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
+import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, ChatMessage, ChatSession, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, Run, ServerLogEntry, SFTPFileEntry, SSHShell, SSHShellEvent, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
 
 type Page = 'chat' | 'ssh' | 'config' | 'extensions' | 'audit' | 'logs'
 type ChatEntryImage = {id:string;name:string;mimeType:string;sizeBytes:number;url:string}
@@ -215,8 +215,12 @@ function appendToolOutput(entries:ChatEntry[],frame:AgentEvent){
 	})
 }
 
-function planFromToolContent(content:string):AgentPlan|null{
-  try{const value=JSON.parse(content) as AgentPlan&{found?:boolean;plan?:AgentPlan};const plan=value?.plan||value;return plan&&typeof plan.goal==='string'&&Array.isArray(plan.steps)?plan:null}catch{return null}
+function tasksFromToolContent(content:string):AgentTaskList|undefined{
+  try{const value=JSON.parse(content) as {tasks?:AgentTaskList};return value.tasks&&Array.isArray(value.tasks.items)?value.tasks:undefined}catch{return undefined}
+}
+
+function unresolvedTaskDependencies(task:AgentTask,tasks:AgentTask[]){
+	return task.blocked_by.filter(id=>tasks.find(candidate=>candidate.id===id)?.status!=='completed')
 }
 
 let clientIdCounter = 0
@@ -1651,8 +1655,8 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
   const [reasoningSeen, setReasoningSeen] = useState(false)
 		const [contextUsage,setContextUsage]=useState<ContextUsage>({tokens:0,window:activeContextWindow})
 		useEffect(()=>setContextUsage(current=>current.tokens===0?{...current,window:activeContextWindow}:current),[activeContextWindow])
-  const [plan,setPlan]=useState<AgentPlan|null>(null)
-	const [planExpanded,setPlanExpanded]=useState(false)
+  const [tasks,setTasks]=useState<AgentTaskList|null>(null)
+	const [tasksExpanded,setTasksExpanded]=useState(false)
 	const [approvalNotice,setApprovalNotice]=useState('')
 	const [workspaceID,setWorkspaceID]=useState(recalledWorkspace)
 	const [boundWorkspaceID,setBoundWorkspaceID]=useState('')
@@ -1672,7 +1676,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	const selectedWorkspace=capabilities.workspaces.find(workspace=>workspace.id===workspaceID)||capabilities.workspaces[0]
 	useEffect(()=>{if(!sessionId)setContextUsage({tokens:0,window:activeContextWindow})},[activeContextWindow,sessionId])
 	useEffect(()=>{if(!selectedWorkspace)return;if(workspaceID!==selectedWorkspace.id)setWorkspaceID(selectedWorkspace.id);rememberWorkspace(selectedWorkspace.id)},[selectedWorkspace,workspaceID])
-	useEffect(()=>{if(!plan)setPlanExpanded(false);else if(plan.status==='active')setPlanExpanded(true)},[plan?.session_id,plan?.status])
+	useEffect(()=>{if(!tasks)setTasksExpanded(false);else setTasksExpanded(true)},[tasks?.session_id,!!tasks])
 	useEffect(()=>{
 		if(!modelRetry&&!connectionRetry)return
 		setRetryClock(Date.now())
@@ -1717,7 +1721,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
     try {
       const state = await api.chatState(id)
       if(sessionLoadRef.current!==requestID)return
-	      setEntries(historyEntries(state.messages||[],id));setDetachedRunning(!!state.active);setStopping(false);setModelRetry(null);setConnectionRetry(null);setPlan(state.plan||null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setWorkspaceID(state.workspace_id||'');setBoundWorkspaceID(state.workspace_id||'')
+	      setEntries(historyEntries(state.messages||[],id));setDetachedRunning(!!state.active);setStopping(false);setModelRetry(null);setConnectionRetry(null);setTasks(state.tasks?.items?.length?state.tasks:null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setWorkspaceID(state.workspace_id||'');setBoundWorkspaceID(state.workspace_id||'')
       setSessionId(id); rememberSession(id); setHistoryError('')
       void refresh()
     } catch (err) { if(sessionLoadRef.current===requestID)setHistoryError(errorText(err)) }
@@ -1778,7 +1782,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
     detachActiveStream()
     sessionLoadRef.current=''
     setLoadingSession('')
-	    stickToLatest.current=true;setSessionId('');setBoundWorkspaceID('');setEntries([]); setMessage('');clearPendingImages(); setHistoryError(''); setReasoningSeen(false);setContextUsage({tokens:0,window:activeContextWindow});setDetachedRunning(false);setStopping(false);setModelRetry(null);setConnectionRetry(null);setPlan(null); rememberSession(newSessionMarker)
+	    stickToLatest.current=true;setSessionId('');setBoundWorkspaceID('');setEntries([]); setMessage('');clearPendingImages(); setHistoryError(''); setReasoningSeen(false);setContextUsage({tokens:0,window:activeContextWindow});setDetachedRunning(false);setStopping(false);setModelRetry(null);setConnectionRetry(null);setTasks(null); rememberSession(newSessionMarker)
     void refreshSessions()
   }
 
@@ -1870,7 +1874,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 				const entry:ChatEntry={id:callID?`tool_${callID}`:clientId(),kind:'tool',content:frame.content!,tool:frame.tool_name,toolCallId:callID||undefined,runId:runID||undefined,transient,startedAt:Date.now()}
 				return[...old.map(deactivateReasoning),entry]
 			})
-			if(frame.tool_name?.startsWith('ops_plan_')){const nextPlan=planFromToolContent(frame.content);if(nextPlan)setPlan(nextPlan)}
+			if(/^Task(Create|Get|Update|List)$/.test(frame.tool_name||'')){const nextTasks=tasksFromToolContent(frame.content);if(nextTasks)setTasks(nextTasks.items.length?nextTasks:null)}
 			if(/approval_id|approval_required/.test(frame.content))void refresh()
 		}
 		if(frame.type==='message_start'&&frame.message_id)setEntries(old=>startAssistantLifecycle(old,frame.message_id!))
@@ -1904,7 +1908,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 					await waitForReconnect(delay,controller.signal)
 					const state=await api.chatState(sessionId)
 					if(!active)return
-					setPlan(state.plan||null)
+					setTasks(state.tasks?.items?.length?state.tasks:null)
 					setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)})
 					setBoundWorkspaceID(state.workspace_id||'')
 					if(!state.active){
@@ -1992,7 +1996,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			setEntries((old) => old.map(deactivateReasoning))
       setRunning(false)
 		setStopping(false)
-		if(querySessionID){try{const state=await api.chatState(querySessionID);if(!isAttached())return;setDetachedRunning(!!state.active);setPlan(state.plan||null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setBoundWorkspaceID(state.workspace_id||'');setEntries(old=>settledTurnEntries(state.messages||[],querySessionID,old,!!state.active));for(const image of queryImages){URL.revokeObjectURL(image.url);imageURLsRef.current.delete(image.url)}}catch{/* polling or the next reload will recover state */}}
+		if(querySessionID){try{const state=await api.chatState(querySessionID);if(!isAttached())return;setDetachedRunning(!!state.active);setTasks(state.tasks?.items?.length?state.tasks:null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setBoundWorkspaceID(state.workspace_id||'');setEntries(old=>settledTurnEntries(state.messages||[],querySessionID,old,!!state.active));for(const image of queryImages){URL.revokeObjectURL(image.url);imageURLsRef.current.delete(image.url)}}catch{/* polling or the next reload will recover state */}}
       if(!isAttached())return
       activeStreamRef.current=null
       void refreshSessions();void refresh()
@@ -2008,7 +2012,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		try{
 			const result=await api.cancelChatSession(targetSessionID)
 			requested=result.cancelled
-			if(!result.cancelled){const state=await api.chatState(targetSessionID);setDetachedRunning(!!state.active);setPlan(state.plan||null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setEntries(historyEntries(state.messages||[],targetSessionID));void refreshSessions();void refresh()}
+			if(!result.cancelled){const state=await api.chatState(targetSessionID);setDetachedRunning(!!state.active);setTasks(state.tasks?.items?.length?state.tasks:null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setEntries(historyEntries(state.messages||[],targetSessionID));void refreshSessions();void refresh()}
 		}catch(err){setEntries(old=>[...old,{id:clientId(),kind:'error',content:t('chat.stopFailed',{message:errorText(err)})}])}
 		finally{if(!requested)setStopping(false)}
   }
@@ -2039,7 +2043,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
     <div className="chat-main panel">
 	  <div className="panel-header"><div><Bot size={18}/><span>{t('chat.session')}</span>{workspacePanelCollapsed&&<button className="chat-panel-open-button" onClick={()=>setWorkspaceCollapsed(false)} title={t('workspace.expandPanel')} aria-label={t('workspace.expandPanel')}><PanelLeftOpen size={15}/></button>}</div><div className="chat-header-actions"><span className="session-id">{sessionId ? sessionId.slice(0, 20) : t('chat.newSession')}</span></div></div>
       <div className="session-approval-slot">{currentApprovals.length>0&&<ApprovalDialog key={currentApprovals[0].id} approval={currentApprovals[0]} pendingCount={currentApprovals.length} hosts={hosts} running={sessionBusy} stopping={stopping} onStop={()=>void stopAgent()} refresh={refresh} refreshApprovals={refreshApprovals} onApproved={result=>{setEntries(old=>updateToolRunStatus(old,result.run_id,result.status==='running'?'in_progress':result.status));if(result.shell?.kind==='workspace')onWorkspaceShellStarted(result.shell)}} onNotice={setApprovalNotice}/>} {approvalNotice&&currentApprovals.length===0&&<div className="approval-toast"><ShieldCheck size={14}/><span>{approvalNotice}</span><button onClick={()=>setApprovalNotice('')}><X size={13}/></button></div>}</div>
-      <div className="session-plan-slot">{plan&&<SessionPlan plan={plan} expanded={planExpanded} onExpanded={setPlanExpanded}/>}</div>
+	      <div className="session-task-slot">{tasks&&<SessionTasks tasks={tasks} expanded={tasksExpanded} onExpanded={setTasksExpanded}/>}</div>
 		<div className="conversation-view">
 			<div className="messages" ref={messagesRef} onWheel={trackUserScroll} onTouchMove={trackUserScroll} onPointerUp={trackUserScroll}>
 				{entries.length === 0 && <div className="empty-chat"><div className="radar"><Activity size={35}/></div><h2>{t('chat.emptyTitle')}</h2></div>}
@@ -2048,7 +2052,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 				{running&&!modelRetry&&!reasoningSeen&&!streamingResponseStarted&&<div className="thinking"><span/><span/><span/> {t('chat.waitingModel')}</div>}
 				{detachedRunning&&!running&&connectionRetry&&<div className="thinking background-agent"><span/><span/><span/> {connectionRetryLabel}</div>}
 			</div>
-			{plan&&planExpanded&&<SessionPlanSteps plan={plan}/>}
+			{tasks&&tasksExpanded&&<SessionTaskItems tasks={tasks}/>}
 		</div>
 		  <form className="composer" onSubmit={submit}>
 			  {(sessionBusy||toolsRunning)&&<div className="llm-work-status" role="status" aria-live="polite"><LoaderCircle className="spin" size={13}/><b>{stopping?t('chat.stopping'):connectionRetryLabel||modelRetryLabel||t(sessionBusy?'chat.running':'chat.toolsRunning')}</b><button type="button" className="agent-stop-button" onClick={()=>void stopAgent()} disabled={stopping||!(activeStreamRef.current?.sessionId||sessionId)} title={t('chat.stopTitle')}><Square size={11} fill="currentColor"/>{t('chat.stop')}</button></div>}
@@ -2209,17 +2213,20 @@ function ChatWorkspacePanel({workspaces,workspaceID,shells,switching,disabled,bo
 	</>
 }
 
-function SessionPlan({plan,expanded,onExpanded}:{plan:AgentPlan;expanded:boolean;onExpanded:(expanded:boolean)=>void}){
+function SessionTasks({tasks,expanded,onExpanded}:{tasks:AgentTaskList;expanded:boolean;onExpanded:(expanded:boolean)=>void}){
 	const {t}=useTranslation()
-	const completed=plan.steps.filter(step=>step.status==='completed'||step.status==='skipped').length
-  const current=plan.steps.find(step=>step.status==='in_progress'||step.status==='blocked')
-  const progress=plan.steps.length?Math.round(completed/plan.steps.length*100):0
-	return <details className={`session-plan ${plan.status}`} open={expanded} onToggle={event=>onExpanded(event.currentTarget.open)}><summary><span className="plan-icon"><ListChecks size={16}/></span><span className="plan-summary-copy"><b>{plan.goal}</b><small>{current?t(current.status==='blocked'?'plan.blockedAt':'plan.current',{current:current.number,total:plan.steps.length,title:current.title}):t('plan.completed',{completed,total:plan.steps.length})}</small></span><span className="plan-progress"><i><em style={{width:`${progress}%`}}/></i><b>{progress}%</b></span><span className={`plan-state ${plan.status}`}>{t(`statusLabels.${plan.status}`,{defaultValue:plan.status})}</span><ChevronRight size={14}/></summary></details>
+	const completed=tasks.items.filter(task=>task.status==='completed').length
+	const current=tasks.items.find(task=>task.status==='in_progress')||tasks.items.find(task=>task.status==='pending'&&!unresolvedTaskDependencies(task,tasks.items).length)
+	const blocked=tasks.items.filter(task=>task.status==='pending'&&unresolvedTaskDependencies(task,tasks.items).length>0).length
+	const state=current?'active':blocked?'blocked':'completed'
+  const progress=tasks.items.length?Math.round(completed/tasks.items.length*100):0
+	return <details className={`session-tasks ${state}`} open={expanded} onToggle={event=>onExpanded(event.currentTarget.open)}><summary><span className="task-list-icon"><ListChecks size={16}/></span><span className="task-list-summary"><b>{t('agentTasks.title')}</b><small>{current?`${current.active_form||current.subject} · #${current.id}`:blocked?t('agentTasks.blocked',{count:blocked}):`${completed}/${tasks.items.length}`}</small></span><span className="task-list-progress"><i><em style={{width:`${progress}%`}}/></i><b>{progress}%</b></span><span className={`task-list-state ${state}`}>{t(`statusLabels.${state}`,{defaultValue:state})}</span><ChevronRight size={14}/></summary></details>
 }
 
-function SessionPlanSteps({plan}:{plan:AgentPlan}){
+function SessionTaskItems({tasks}:{tasks:AgentTaskList}){
 	const {t}=useTranslation()
-	return <section className={`session-plan-view ${plan.status}`}><ol className="session-plan-steps">{plan.steps.map(step=><li className={step.status} key={step.number}><span className="plan-step-marker">{step.status==='completed'?<Check size={12}/>:step.status==='skipped'?<ChevronRight size={12}/>:step.status==='in_progress'?<LoaderCircle size={12}/>:step.status==='blocked'?<ShieldAlert size={12}/>:step.number}</span><div><b>{step.title}</b></div><em>{t(`statusLabels.${step.status}`,{defaultValue:step.status.replace('_',' ')})}</em></li>)}</ol></section>
+	const blocked=tasks.items.some(task=>task.status==='pending'&&unresolvedTaskDependencies(task,tasks.items).length>0)&&!tasks.items.some(task=>task.status==='in_progress'||task.status==='pending'&&!unresolvedTaskDependencies(task,tasks.items).length)
+	return <section className={`session-task-view ${blocked?'blocked':'active'}`}><ol className="session-task-items">{tasks.items.map(task=>{const blockers=unresolvedTaskDependencies(task,tasks.items);const taskBlocked=task.status==='pending'&&blockers.length>0;const status=taskBlocked?'blocked':task.status;return <li className={status} key={task.id}><span className="task-item-marker">{task.status==='completed'?<Check size={12}/>:task.status==='in_progress'?<LoaderCircle size={12}/>:taskBlocked?<ShieldAlert size={12}/>:task.id}</span><div title={task.description}><b>{task.subject}</b>{taskBlocked&&<small>#{blockers.join(', #')}</small>}</div><em>{task.owner||t(`statusLabels.${status}`,{defaultValue:status.replace('_',' ')})}</em></li>})}</ol></section>
 }
 
 const ChatBubble=memo(function ChatBubble({ entry, runs, hosts, onToolDisclosure }: {entry: ChatEntry;runs:Run[];hosts:Host[];onToolDisclosure:(summary:HTMLElement)=>void}) {

@@ -164,8 +164,8 @@ const zh = {
     uploadingFiles: '正在上传 {{count}} 个文件...', uploadedFiles: '已上传 {{count}} 个文件', uploadPartial: '已上传 {{uploaded}} 个，{{failed}} 个失败：{{message}}',
     file: '文件', directory: '目录',
   },
-  plan: {
-    blockedAt: '阻塞在 {{current}}/{{total}} · {{title}}', current: '当前 {{current}}/{{total}} · {{title}}', completed: '已完成 {{completed}}/{{total}} 个步骤',
+  agentTasks: {
+    title: '任务', blocked: '{{count}} 个阻塞',
   },
   tool: {
     bashScript: 'Bash 脚本', moreLines: '{{line}} ...（另有 {{count}} 行）', fileOperation: '文件操作', readOperation: '读取文件', searchOperation: '搜索文件',
@@ -243,7 +243,7 @@ const zh = {
     columns: { time: '时间', level: '级别', component: '组件', event: '事件 / 字段' }, general: '通用', emptyTitle: '没有匹配的服务日志',
   },
   statusLabels: { pending: '待处理', completed: '已完成', skipped: '已跳过', partial: '部分成功', closed: '已关闭', expired: '已到期', failed: '失败', unknown: '结果未知', active: '进行中', running: '运行中', stopping: '停止中', stopped: '已停止', blocked: '已阻塞', in_progress: '执行中', ready: '就绪', error: '错误', connecting: '连接中', interrupted: '已中断', rejected: '已拒绝', approval_required: '待审批' },
-  toolCategories: { planning: '任务计划', execution: '命令执行', hosts: 'SSH 主机', tasks: '长任务', remote_files: '远程文件', workspace: 'Workspace', web: '网络搜索', history: '审计历史', approvals: '审批', skills: 'Skills', mcp: '外部 MCP' },
+  toolCategories: { planning: '任务编排', execution: '命令执行', hosts: 'SSH 主机', tasks: '长任务', remote_files: '远程文件', workspace: 'Workspace', web: '网络搜索', history: '审计历史', approvals: '审批', skills: 'Skills', mcp: '外部 MCP' },
   toolGuards: { read_only: '只读', approval_required: '审批控制', agent_state: 'Agent 状态', audited_control: '审计控制', external_mcp: '外部 MCP' },
   toolNames: {
     ssh_exec: '执行远程命令', ssh_run_script: '执行 Bash 脚本', ssh_file_read: '读取远程文件', ssh_file_search_mode: '搜索远程文件', ssh_file_list: '列出远程目录',
@@ -251,7 +251,7 @@ const zh = {
     ssh_task: '管理后台任务', ssh_tunnel: '管理 SSH 端口转发', ssh_shell: 'SSH Shell', ssh_host_list: '列出主机', ssh_host_inspect: '检查主机',
     workspace_file_list: '列出 Workspace 目录', workspace_file_read: '读取 Workspace 文件', workspace_file_search_mode: '搜索 Workspace 文件', workspace_file_edit: '编辑 Workspace 文件', workspace_file_delete: '删除 Workspace 条目',
     workspace_file_upload: '上传 Workspace 文件', workspace_file_download: '下载到 Workspace', workspace_shell: 'Workspace 终端', ssh_history: '读取执行历史', skill: '读取 Skill',
-    ops_plan_create: '创建任务计划', ops_plan_step_update: '更新任务步骤', ops_plan_revise: '修订任务计划', web_search: '搜索网络', web_extract: '提取网页',
+    TaskCreate: '创建任务', TaskGet: '获取任务', TaskUpdate: '更新任务', TaskList: '列出任务', web_search: '搜索网络', web_extract: '提取网页',
   },
 }
 

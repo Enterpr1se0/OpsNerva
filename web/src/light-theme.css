@@ -525,10 +525,10 @@
   color: var(--light-text-muted);
 }
 
-/* Reasoning, plans, and tool execution. */
+/* Reasoning, tasks, and tool execution. */
 :root[data-theme='light'] :where(
   .reasoning-content,
-  .session-plan-steps,
+  .session-task-items,
   .tool-event,
   .tool-command-block,
   .tool-context-pane,
@@ -560,7 +560,7 @@
   .tool-array-section code,
   .tool-object-section h4,
   .reasoning-title b,
-  .plan-summary-copy b
+  .task-list-summary b
 ) {
   color: var(--light-text);
 }
@@ -574,7 +574,7 @@
   .tool-instruction,
   .tool-compact-table th,
   .reasoning-title span,
-  .plan-summary-copy span
+  .task-list-summary small
 ) {
   color: var(--light-text-muted);
 }
@@ -621,29 +621,29 @@
   color: var(--light-danger);
 }
 
-:root[data-theme='light'] .session-plan-steps {
+:root[data-theme='light'] .session-task-items {
   background: rgb(255 255 255 / 97%);
   box-shadow: var(--light-shadow);
 }
 
-:root[data-theme='light'] .session-plan-steps li:not(:last-child)::before {
+:root[data-theme='light'] .session-task-items li:not(:last-child)::before {
   background: var(--light-border-strong);
 }
 
-:root[data-theme='light'] .plan-step-marker {
+:root[data-theme='light'] .task-item-marker {
   border-color: var(--light-border-strong);
   background: var(--light-surface);
   color: var(--light-text-muted);
 }
 
-:root[data-theme='light'] .session-plan-steps li.in_progress .plan-step-marker,
-:root[data-theme='light'] .session-plan-steps li.completed .plan-step-marker {
+:root[data-theme='light'] .session-task-items li.in_progress .task-item-marker,
+:root[data-theme='light'] .session-task-items li.completed .task-item-marker {
   border-color: var(--light-accent-border);
   background: var(--light-accent-soft);
   color: var(--light-accent);
 }
 
-:root[data-theme='light'] .session-plan-steps li.blocked .plan-step-marker {
+:root[data-theme='light'] .session-task-items li.blocked .task-item-marker {
   border-color: var(--light-warning-border);
   background: var(--light-warning-soft);
   color: var(--light-warning);

@@ -163,8 +163,8 @@ const en = {
     uploadingFiles: 'Uploading {{count}} files...', uploadedFiles: 'Uploaded {{count}} files', uploadPartial: 'Uploaded {{uploaded}}; {{failed}} failed: {{message}}',
     file: 'file', directory: 'directory',
   },
-  plan: {
-    blockedAt: 'Blocked at {{current}}/{{total}} · {{title}}', current: 'Current {{current}}/{{total}} · {{title}}', completed: '{{completed}}/{{total}} steps completed',
+  agentTasks: {
+    title: 'Tasks', blocked: '{{count}} blocked',
   },
   tool: {
     bashScript: 'Bash script', moreLines: '{{line}} ... (+{{count}} lines)', fileOperation: 'File operation', readOperation: 'Read file', searchOperation: 'Search file',
@@ -242,7 +242,7 @@ const en = {
     columns: { time: 'Time', level: 'Level', component: 'Component', event: 'Event / fields' }, general: 'general', emptyTitle: 'No matching server logs',
   },
   statusLabels: { pending: 'pending', completed: 'completed', skipped: 'skipped', partial: 'partial', closed: 'closed', expired: 'expired', failed: 'failed', unknown: 'result unknown', active: 'active', running: 'running', stopping: 'stopping', stopped: 'stopped', blocked: 'blocked', in_progress: 'in progress', ready: 'ready', error: 'error', connecting: 'connecting', interrupted: 'interrupted', rejected: 'rejected', approval_required: 'approval required' },
-  toolCategories: { planning: 'Task planning', execution: 'Command execution', hosts: 'SSH hosts', tasks: 'Long tasks', remote_files: 'Remote files', workspace: 'Workspace', web: 'Web search', history: 'Audit history', approvals: 'Approvals', skills: 'Skills', mcp: 'External MCP' },
+  toolCategories: { planning: 'Task orchestration', execution: 'Command execution', hosts: 'SSH hosts', tasks: 'Long tasks', remote_files: 'Remote files', workspace: 'Workspace', web: 'Web search', history: 'Audit history', approvals: 'Approvals', skills: 'Skills', mcp: 'External MCP' },
   toolGuards: { read_only: 'Read only', approval_required: 'Approval control', agent_state: 'Agent state', audited_control: 'Audited control', external_mcp: 'External MCP' },
   toolNames: {
     ssh_exec: 'Run remote command', ssh_run_script: 'Run Bash script', ssh_file_read: 'Read remote file', ssh_file_search_mode: 'Search remote file', ssh_file_list: 'List remote directory',
@@ -250,7 +250,7 @@ const en = {
     ssh_task: 'Manage background task', ssh_tunnel: 'Manage SSH port forwarding', ssh_shell: 'SSH Shell', ssh_host_list: 'List hosts', ssh_host_inspect: 'Inspect host',
     workspace_file_list: 'List Workspace directory', workspace_file_read: 'Read Workspace file', workspace_file_search_mode: 'Search Workspace file', workspace_file_edit: 'Edit Workspace file', workspace_file_delete: 'Delete Workspace entry',
     workspace_file_upload: 'Upload Workspace file', workspace_file_download: 'Download to Workspace', workspace_shell: 'Workspace Shell', ssh_history: 'Read execution history', skill: 'Read Skill',
-    ops_plan_create: 'Create task plan', ops_plan_step_update: 'Update task step', ops_plan_revise: 'Revise task plan', web_search: 'Search the Web', web_extract: 'Extract Web pages',
+    TaskCreate: 'Create task', TaskGet: 'Get task', TaskUpdate: 'Update task', TaskList: 'List tasks', web_search: 'Search the Web', web_extract: 'Extract Web pages',
   },
 }
 
