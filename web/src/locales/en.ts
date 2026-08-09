@@ -150,6 +150,7 @@ const en = {
     operator: 'Operator', responseFailed: 'response failed', processing: 'processing', blockedImage: '[Blocked image: {{alt}}]',
 	addImages: 'Add images', removeImage: 'Remove image', imageTypeRejected: 'Some image formats are not enabled.',
     reasoning: 'Reasoning', reasoningActive: 'Reasoning...', reasoningFallback: 'Thinking...', contextUsage: 'Context {{used}} / {{limit}} tokens', contextUsageUnknown: 'Context {{used}} / -- tokens',
+    tokenInput: 'Input', tokenOutput: 'Output', tokenTotal: 'Total',
   },
   workspace: {
     noConfigured: 'No Workspace configured', localFiles: 'Local files', terminal: 'Terminal', newTerminal: 'New terminal', switchTerminal: 'Switch terminal', agent: 'Agent', operator: 'User', inputBy: 'Input · {{source}}', parent: 'Parent directory', uploadFile: 'Upload file', refreshFiles: 'Refresh files', switchWorkspace: 'Switch Workspace', switching: 'Switching…', boundToConversation: 'Bound to this conversation', collapsePanel: 'Collapse Workspace', expandPanel: 'Expand Workspace',

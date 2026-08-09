@@ -151,6 +151,7 @@ const zh = {
     operator: '操作员', responseFailed: '回复生成失败', processing: '处理中', blockedImage: '[已阻止图片：{{alt}}]',
 	addImages: '添加图片', removeImage: '移除图片', imageTypeRejected: '部分图片格式未启用。',
     reasoning: '思考过程', reasoningActive: '思考中', reasoningFallback: '正在思考...', contextUsage: '上下文 {{used}} / {{limit}} tokens', contextUsageUnknown: '上下文 {{used}} / -- tokens',
+    tokenInput: '输入', tokenOutput: '输出', tokenTotal: '总计',
   },
   workspace: {
     noConfigured: '未配置 Workspace', localFiles: '本地文件', terminal: '终端', newTerminal: '新建终端', switchTerminal: '切换终端', agent: 'Agent', operator: '用户', inputBy: '输入 · {{source}}', parent: '上级目录', uploadFile: '上传文件', refreshFiles: '刷新文件', switchWorkspace: '切换 Workspace', switching: '正在切换…', boundToConversation: '已绑定当前会话', collapsePanel: '收起 Workspace', expandPanel: '展开 Workspace',

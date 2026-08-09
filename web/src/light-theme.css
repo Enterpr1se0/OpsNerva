@@ -442,6 +442,19 @@
   color: #27332d;
 }
 
+:root[data-theme='light'] .token-usage-line {
+  border-top-color: var(--light-border);
+  color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] .token-usage-line :where(em, span b) {
+  color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] .token-usage-line span:not(:last-child)::after {
+  color: var(--light-border-strong);
+}
+
 :root[data-theme='light'] :where(.thinking, .thinking.background-agent) {
   color: var(--light-text-muted);
 }

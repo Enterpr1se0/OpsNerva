@@ -254,6 +254,17 @@ export interface AgentEvent {
   retry_max?: number
 	context_tokens?: number
 	context_window?: number
+	input_tokens?: number
+	output_tokens?: number
+	total_tokens?: number
+}
+
+export interface ChatTokenUsage {
+	input_tokens: number
+	output_tokens: number
+	total_tokens: number
+	cached_tokens?: number
+	reasoning_tokens?: number
 }
 
 export interface ChatSession {
@@ -275,6 +286,7 @@ export interface ChatMessage {
 	tool_call_id?: string
 	run_id?: string
 	tool_status?: ChatToolCallStatus
+	token_usage?: ChatTokenUsage
   status: 'pending' | 'completed' | 'failed'
 	attachments?: ChatAttachment[]
   created_at: string
