@@ -144,7 +144,7 @@ const en = {
     hostsCount: '{{count}} hosts: {{names}}', noHosts: 'No hosts available to Agent', switchHosts: 'Switch Agent hosts', switchModel: 'Switch model', workspaceSelected: 'Workspace: {{id}}', noWorkspace: 'No Workspace', noModel: 'No active model',
     configureModel: 'Configure and activate a model provider', loadingConversation: 'Loading conversation...',
     busyPlaceholder: 'Agent is running...', prompt: 'Message...',
-    approvalCount: '{{count}} approval', runningBadge: 'running', messageCount: '{{count}} messages', deleteConversation: 'Delete conversation',
+    approvalCount: '{{count}} approval', runningBadge: 'running', messageCount: '{{count}} messages', renameConversation: 'Rename conversation', sessionTitle: 'Conversation title', deleteConversation: 'Delete conversation',
     deleteTitle: 'Delete conversation “{{title}}”?', cannotDelete: 'Agent is still running', stopFailed: 'Unable to stop Agent: {{message}}',
     stopped: 'Agent run stopped by the operator before completion.', agentError: 'Agent error',
     operator: 'Operator', responseFailed: 'response failed', processing: 'processing', blockedImage: '[Blocked image: {{alt}}]',

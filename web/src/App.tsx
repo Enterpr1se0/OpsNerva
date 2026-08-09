@@ -132,12 +132,16 @@ function updateToolStatusByRunID(entries:ChatEntry[],status:string,runID?:string
 }
 
 
-function settledTurnEntries(messages:ChatMessage[],sessionID:string,current:ChatEntry[],_active:boolean){
+function settledTurnEntries(messages:ChatMessage[],sessionID:string,current:ChatEntry[],active:boolean){
 	const persisted=historyEntries(messages,sessionID)
 	const persistedCalls=new Set(persisted.filter(item=>item.kind==='tool').map(item=>item.toolCallId).filter(Boolean))
+	let latestUser=-1
+	for(let index=messages.length-1;index>=0;index--){if(messages[index].role==='user'){latestUser=index;break}}
+	const latestTurnCompleted=latestUser>=0&&messages.slice(latestUser+1).some(item=>item.role==='assistant'&&item.status==='completed')
+	const keepErrors=active||!latestTurnCompleted
 	return[
 		...persisted,
-		...current.filter(item=>item.kind==='error'||item.kind==='tool'&&item.transient&&(!item.toolCallId||!persistedCalls.has(item.toolCallId))),
+		...current.filter(item=>item.kind==='error'?keepErrors:item.kind==='tool'&&item.transient&&(!item.toolCallId||!persistedCalls.has(item.toolCallId))),
 	]
 }
 
@@ -1137,6 +1141,14 @@ function SFTPNameDialog({mode,initialName,busy,onCancel,onConfirm}:{mode:'create
 	return createPortal(<div className="connection-dialog-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget&&!busy)onCancel()}}><form className="connection-dialog compact panel" noValidate onSubmit={event=>{event.preventDefault();if(valid)onConfirm(name)}}><header><span><FolderOpen size={19}/><span><small>SFTP</small><h2>{t(mode==='create'?'sshWorkspace.newDirectory':'sshWorkspace.rename')}</h2></span></span><button type="button" disabled={busy} onClick={onCancel}><X size={15}/></button></header><div className="connection-dialog-fields single"><label><span>{t('sshWorkspace.name')}</span><input value={name} onChange={event=>setName(event.target.value)} autoFocus/></label></div><footer><button type="button" disabled={busy} onClick={onCancel}>{t('common.cancel')}</button><button className="primary" disabled={busy||!valid}>{busy?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {t('common.save')}</button></footer></form></div>,document.body)
 }
 
+function SessionRenameDialog({session,busy,error,onCancel,onConfirm}:{session:ChatSession;busy:boolean;error:string;onCancel:()=>void;onConfirm:(title:string)=>void}){
+	const {t}=useTranslation()
+	const [title,setTitle]=useState(session.title)
+	const normalized=title.trim()
+	useEffect(()=>{const close=(event:KeyboardEvent)=>{if(event.key==='Escape'&&!busy)onCancel()};window.addEventListener('keydown',close);return()=>window.removeEventListener('keydown',close)},[busy,onCancel])
+	return createPortal(<div className="connection-dialog-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget&&!busy)onCancel()}}><form className="connection-dialog compact panel session-rename-dialog" noValidate onSubmit={event=>{event.preventDefault();if(normalized&&normalized!==session.title)onConfirm(normalized)}}><header><span><Edit3 size={19}/><span><h2>{t('chat.renameConversation')}</h2></span></span><button type="button" disabled={busy} onClick={onCancel}><X size={15}/></button></header><div className="connection-dialog-fields single"><label><span>{t('chat.sessionTitle')}</span><input value={title} maxLength={80} onChange={event=>setTitle(event.target.value)} autoFocus/></label></div>{error&&<div className="connection-dialog-error"><ShieldAlert size={14}/><span>{error}</span></div>}<footer><button type="button" disabled={busy} onClick={onCancel}>{t('common.cancel')}</button><button className="primary" disabled={busy||!normalized||normalized===session.title}>{busy?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {t('common.save')}</button></footer></form></div>,document.body)
+}
+
 function SFTPOverwriteDialog({path,busy,onCancel,onConfirm}:{path:string;busy:boolean;onCancel:()=>void;onConfirm:()=>void}){
 	const {t}=useTranslation()
 	return createPortal(<div className="connection-dialog-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget&&!busy)onCancel()}}><section className="sftp-overwrite-dialog panel"><header><FileText size={19}/><h2>{t('sshWorkspace.overwriteTitle')}</h2></header><code>{path}</code><footer><button type="button" disabled={busy} onClick={onCancel}>{t('common.cancel')}</button><button type="button" className="primary" disabled={busy} onClick={onConfirm}>{busy?<LoaderCircle className="spin" size={13}/>:<UploadCloud size={13}/>} {t('sshWorkspace.overwrite')}</button></footer></section></div>,document.body)
@@ -1644,6 +1656,9 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
   const [historyError, setHistoryError] = useState('')
   const [sessionDeleteCandidate,setSessionDeleteCandidate]=useState<ChatSession|null>(null)
   const [deletingSession,setDeletingSession]=useState(false)
+	const [sessionRenameCandidate,setSessionRenameCandidate]=useState<ChatSession|null>(null)
+	const [renamingSession,setRenamingSession]=useState(false)
+	const [sessionRenameError,setSessionRenameError]=useState('')
   const [loadingSession, setLoadingSession] = useState('')
   const [workspacePanelCollapsed,setWorkspacePanelCollapsed]=useState(recalledWorkspacePanelCollapsed)
   const [running, setRunning] = useState(false)
@@ -1825,6 +1840,17 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
     finally { setDeletingSession(false); setSessionDeleteCandidate(null) }
   }
 
+	const renameSession=async(title:string)=>{
+		if(!sessionRenameCandidate)return
+		setRenamingSession(true);setSessionRenameError('')
+		try{
+			const renamed=await api.renameChatSession(sessionRenameCandidate.id,title)
+			setSessions(current=>current.map(item=>item.id===renamed.id?{...item,title:renamed.title}:item))
+			setSessionRenameCandidate(null)
+		}catch(err){setSessionRenameError(errorText(err))}
+		finally{setRenamingSession(false)}
+	}
+
 	const handleAgentFrame=useCallback((frame:AgentEvent,userEntryID='',workspace='')=>{
 		const updateUser=(item:ChatEntry,status:'completed'|'failed')=>item.kind==='user'&&(userEntryID?item.id===userEntryID:item.status==='pending')?{...item,status}:item
 		if(frame.session_id){
@@ -1833,6 +1859,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			if(workspace)setBoundWorkspaceID(workspace)
 			rememberSession(frame.session_id)
 		}
+		if(frame.type==='session'||frame.type==='title')void refreshSessions()
 		if(frame.type==='retry'){
 			const now=Date.now()
 			setRetryClock(now)
@@ -1890,7 +1917,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			setEntries(old=>[...old.map(item=>updateUser(deactivateReasoning(item),'failed')),{id:clientId(),kind:'assistant',content:frame.content||t('chat.stopped'),lifecycle:'committed'}])
 		}
 		if(frame.type==='model_error'||frame.type==='error')setEntries(old=>[...old.map(item=>updateUser(item,'failed')),{id:clientId(),kind:'error',content:frame.error||t('chat.agentError')}])
-	},[activeContextWindow,onWorkspaceShellStarted,refresh,refreshApprovals,refreshConnections,t])
+	},[activeContextWindow,onWorkspaceShellStarted,refresh,refreshApprovals,refreshConnections,refreshSessions,t])
 
 	useEffect(()=>{
 		if(!sessionId||running||!detachedRunning)return
@@ -1970,7 +1997,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		reconnectErrorRef.current=''
 		setApprovalNotice('');setReasoningSeen(false);setStopping(false);setModelRetry(null);setConnectionRetry(null);setRunning(true)
 	    const entryImages=queryImages.map(image=>({id:image.id,name:image.file.name,mimeType:image.file.type,sizeBytes:image.file.size,url:image.url}))
-	    setEntries((old) => [...old, { id: userEntryID, kind: 'user', content: query, images:entryImages, status:'pending' }])
+	    setEntries((old) => [...old.filter(item=>item.kind!=='error'), { id: userEntryID, kind: 'user', content: query, images:entryImages, status:'pending' }])
 	    try {
 			await streamChat(querySessionID,workspace,query,queryImages.map(image=>image.file),(frame:AgentEvent)=>{
 				if(!isAttached())return
@@ -2025,6 +2052,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
   }):''
 	const connectionRetryDelay=connectionRetry?Math.max(0,Math.ceil((connectionRetry.readyAt-retryClock)/1000)):0
 	const connectionRetryLabel=connectionRetry?t('chat.reconnecting',{attempt:connectionRetry.attempt,delay:connectionRetryDelay}):''
+	const activeSessionTitle=sessions.find(session=>session.id===sessionId)?.title
 	const setWorkspaceCollapsed=(collapsed:boolean)=>{
 		rememberWorkspacePanelCollapsed(collapsed)
 		setWorkspacePanelCollapsed(collapsed)
@@ -2034,14 +2062,14 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		<div className="session-list">
 			{historyError&&<div className="history-error">{historyError}</div>}
 			{!sessions.length&&!historyError&&<div className="history-empty">{t('chat.noSaved')}</div>}
-			{sessions.map(session=>{const pending=approvals.filter(item=>item.session_id===session.id).length;const active=session.active||(session.id===sessionId&&(sessionBusy||toolsRunning));return <div className={`session-item ${session.id===sessionId?'active':''}`} key={session.id}><button className="session-open" onClick={()=>switchSession(session.id)} disabled={workspaceSwitching||loadingSession===session.id}><b>{session.title}{pending>0&&<em className="session-approval-count">{t('chat.approvalCount',{count:pending})}</em>}{active&&<em className="session-running-count">{t('chat.runningBadge')}</em>}</b><span>{new Date(session.updated_at).toLocaleString(localeFor(instance.language))} · {t('chat.messageCount',{count:session.message_count})}</span></button><button className="session-delete" onClick={()=>{if(!active)setSessionDeleteCandidate(session)}} disabled={active||workspaceSwitching} title={active?t('chat.cannotDelete'):t('chat.deleteConversation')}><Trash2 size={13}/></button></div>})}
+			{sessions.map(session=>{const pending=approvals.filter(item=>item.session_id===session.id).length;const active=session.active||(session.id===sessionId&&(sessionBusy||toolsRunning));return <div className={`session-item ${session.id===sessionId?'active':''}`} key={session.id}><button className="session-open" onClick={()=>switchSession(session.id)} disabled={workspaceSwitching||loadingSession===session.id}><b>{session.title}{pending>0&&<em className="session-approval-count">{t('chat.approvalCount',{count:pending})}</em>}{active&&<em className="session-running-count">{t('chat.runningBadge')}</em>}</b><span>{new Date(session.updated_at).toLocaleString(localeFor(instance.language))} · {t('chat.messageCount',{count:session.message_count})}</span></button><div className="session-actions"><button className="session-edit" onClick={()=>{setSessionRenameError('');setSessionRenameCandidate(session)}} disabled={workspaceSwitching} title={t('chat.renameConversation')} aria-label={t('chat.renameConversation')}><Edit3 size={13}/></button><button className="session-delete" onClick={()=>{if(!active)setSessionDeleteCandidate(session)}} disabled={active||workspaceSwitching} title={active?t('chat.cannotDelete'):t('chat.deleteConversation')}><Trash2 size={13}/></button></div></div>})}
 		</div>
 	</>,sidebarTarget)
 
   return <>{sessionSidebar}<div className={`chat-layout ${workspacePanelCollapsed?'workspace-panel-collapsed ':''}${visible?'':'page-hidden'}`}>
 		<ChatWorkspacePanel key={selectedWorkspace?.id||''} workspaces={capabilities.workspaces} workspaceID={selectedWorkspace?.id||''} shells={workspaceShells} switching={workspaceSwitching} disabled={sessionBusy||!!loadingSession} bound={!!selectedWorkspace&&boundWorkspaceID===selectedWorkspace.id} onSelect={id=>void switchWorkspace(id)} onCreateShell={onCreateWorkspaceShell} onOpenShell={onOpenWorkspaceShell} onCollapse={()=>setWorkspaceCollapsed(true)}/>
     <div className="chat-main panel">
-	  <div className="panel-header"><div><Bot size={18}/><span>{t('chat.session')}</span>{workspacePanelCollapsed&&<button className="chat-panel-open-button" onClick={()=>setWorkspaceCollapsed(false)} title={t('workspace.expandPanel')} aria-label={t('workspace.expandPanel')}><PanelLeftOpen size={15}/></button>}</div><div className="chat-header-actions"><span className="session-id">{sessionId ? sessionId.slice(0, 20) : t('chat.newSession')}</span></div></div>
+	  <div className="panel-header"><div><Bot size={18}/><span>{t('chat.session')}</span>{workspacePanelCollapsed&&<button className="chat-panel-open-button" onClick={()=>setWorkspaceCollapsed(false)} title={t('workspace.expandPanel')} aria-label={t('workspace.expandPanel')}><PanelLeftOpen size={15}/></button>}</div><div className="chat-header-actions"><span className="session-id" title={sessionId}>{activeSessionTitle||t('chat.newSession')}</span></div></div>
       <div className="session-approval-slot">{currentApprovals.length>0&&<ApprovalDialog key={currentApprovals[0].id} approval={currentApprovals[0]} pendingCount={currentApprovals.length} hosts={hosts} running={sessionBusy} stopping={stopping} onStop={()=>void stopAgent()} refresh={refresh} refreshApprovals={refreshApprovals} onApproved={result=>{setEntries(old=>updateToolRunStatus(old,result.run_id,result.status==='running'?'in_progress':result.status));if(result.shell?.kind==='workspace')onWorkspaceShellStarted(result.shell)}} onNotice={setApprovalNotice}/>} {approvalNotice&&currentApprovals.length===0&&<div className="approval-toast"><ShieldCheck size={14}/><span>{approvalNotice}</span><button onClick={()=>setApprovalNotice('')}><X size={13}/></button></div>}</div>
 	      <div className="session-task-slot">{tasks&&<SessionTasks tasks={tasks} expanded={tasksExpanded} onExpanded={setTasksExpanded}/>}</div>
 		<div className="conversation-view">
@@ -2063,6 +2091,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		  </form>
     </div>
 	{sessionDeleteCandidate&&<DestructiveConfirmDialog title={t('chat.deleteTitle',{title:sessionDeleteCandidate.title})} busy={deletingSession} onCancel={()=>setSessionDeleteCandidate(null)} onConfirm={()=>void removeSession()}/>}
+	{sessionRenameCandidate&&<SessionRenameDialog key={sessionRenameCandidate.id} session={sessionRenameCandidate} busy={renamingSession} error={sessionRenameError} onCancel={()=>{if(!renamingSession)setSessionRenameCandidate(null)}} onConfirm={title=>void renameSession(title)}/>}
   </div></>
 }
 

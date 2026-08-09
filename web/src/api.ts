@@ -125,6 +125,7 @@ export const api = {
   chatSessions: () => requestList<ChatSession>('/api/v1/chat/sessions?limit=50'),
   chatState: (id: string) => request<ChatState>(`/api/v1/chat/${encodeURIComponent(id)}/state`),
 	setChatSessionWorkspace: (id:string,workspaceId:string) => request<ChatSession>(`/api/v1/chat/${encodeURIComponent(id)}/workspace`, { method:'PUT', body:JSON.stringify({workspace_id:workspaceId}) }),
+	renameChatSession: (id:string,title:string) => request<ChatSession>(`/api/v1/chat/${encodeURIComponent(id)}/title`, { method:'PUT', body:JSON.stringify({title}) }),
 	cancelChatSession: (id: string) => request<{cancelled:boolean;cancelled_tools:number;rejected_approvals:number}>(`/api/v1/chat/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: '{}' }),
   deleteChatSession: (id: string) => request<void>(`/api/v1/chat/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 }

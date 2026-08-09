@@ -241,6 +241,7 @@ export interface AgentEvent {
   content?: string
   segment_id?: string
   session_id?: string
+	title?: string
   run_id?: string
   stream?: 'stdout' | 'stderr' | 'progress'
   sequence?: number

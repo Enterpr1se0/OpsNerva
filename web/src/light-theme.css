@@ -329,9 +329,14 @@
   background: var(--light-accent-soft);
 }
 
-:root[data-theme='light'] :where(.session-open, .session-delete) {
+:root[data-theme='light'] :where(.session-open, .session-edit, .session-delete) {
   background: transparent;
   color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] .session-edit:hover {
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
 }
 
 :root[data-theme='light'] .session-open b {

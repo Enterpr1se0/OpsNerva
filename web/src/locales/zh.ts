@@ -145,7 +145,7 @@ const zh = {
     hostsCount: '{{count}} 台主机：{{names}}', noHosts: 'Agent 无可用主机', switchHosts: '切换 Agent 主机', switchModel: '切换模型', workspaceSelected: 'Workspace：{{id}}', noWorkspace: '未选择 Workspace', noModel: '没有活动模型',
     configureModel: '请配置并启用模型提供商', loadingConversation: '正在加载会话...',
     busyPlaceholder: 'Agent 正在运行...', prompt: '输入消息...',
-    approvalCount: '{{count}} 个审批', runningBadge: '运行中', messageCount: '{{count}} 条消息', deleteConversation: '删除会话',
+    approvalCount: '{{count}} 个审批', runningBadge: '运行中', messageCount: '{{count}} 条消息', renameConversation: '重命名会话', sessionTitle: '会话标题', deleteConversation: '删除会话',
     deleteTitle: '删除会话“{{title}}”？', cannotDelete: 'Agent 仍在运行', stopFailed: '无法停止 Agent：{{message}}',
     stopped: '操作员已在完成前停止 Agent 运行。', agentError: 'Agent 错误',
     operator: '操作员', responseFailed: '回复生成失败', processing: '处理中', blockedImage: '[已阻止图片：{{alt}}]',

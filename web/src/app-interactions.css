@@ -210,6 +210,10 @@ body {
   transform: translateX(2px);
 }
 
+.session-actions {
+  transition: opacity var(--motion-fast) var(--motion-ease);
+}
+
 :where(.ssh-shell-popover, .ssh-tunnel-popover, .approval-mode-menu, .composer-selector-menu) {
   transform-origin: top right;
   animation: app-popover-in var(--motion-fast) var(--motion-ease);
