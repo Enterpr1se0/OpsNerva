@@ -35,7 +35,7 @@ OpsNerva 是一个使用 **Go 与 Eino** 构建的个人 AI 运维 Agent：LLM �
 
 它解决的不是"能不能让 AI 敲命令"，而是**如何让 AI 在危险运维环境中安全地敲命令**——所有执行都收敛到唯一受信的 `service.Service` 入口，模型、Skill、远端输出和 MCP Client 都被严格隔离在可信计算基之外。
 
-- **真正会干活的 Agent** — 不止于对话：SSH 执行、脚本、文件读写与编辑、隧道转发、后台长任务、计划编排
+- **真正会干活的 Agent** — 不止于对话：SSH 执行、脚本、文件读写与编辑、隧道转发、后台长任务、任务编排
 - **默认安全的执行模型** — Manual / Auto / Full access 三种审批模式统一收敛，所有模式共用输入校验、连接绑定与加密审计
 - **一个二进制多处交付** — Go 后端 + 内嵌 React 前端，可 Docker 部署，也可打包为 Windows / Linux 桌面 App
 
@@ -83,7 +83,7 @@ OpsNerva 是一个使用 **Go 与 Eino** 构建的个人 AI 运维 Agent：LLM �
 
 ### 💾 可恢复会话
 
-- 会话、工具结果、任务计划和审批状态持久化（SQLite + Eino Checkpoint）
+- 会话、工具结果、Agent 任务和审批状态持久化（SQLite + Eino Checkpoint）
 - 页面刷新或网络中断不中断正在运行的 Agent；断线后通过 Chat state 轮询同步恢复
 
 ### 📦 多形态交付

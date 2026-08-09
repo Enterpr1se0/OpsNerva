@@ -243,13 +243,13 @@ Eino Agent 的 `ssh_tunnel` 支持 `start`、`list` 和 `stop`。`start` 把目�
 - `Auto`：无 Tool 的独立审批 Agent 对照当前用户请求审查精确操作。允许时立即执行，明确拒绝时终止；要求人工判断、缺少用户请求、模型不可用、超时或响应无效时回退人工审批。
 - `Full access`：主 Agent 和 MCP Client 的请求直接执行。
 
-三种模式都保留参数校验、主机与 Workspace 授权、SSH 认证与 Host Key、文件版本绑定、凭据脱敏、系统权限和审计。人工审批说明 Agent 与 Auto Approval Agent 分别使用独立 Runner、Prompt、Service 接口、并发槽和模型选择，仅共用超时设置。Auto Approval Agent 只接收由控制面绑定的当前用户请求、标准化操作、目标主机能力、当前计划目标/步骤和请求摘要；没有 Tool，也不调用批准 API。Tool reason 和计划不能扩大用户授权。Auto 审查结果随 Run 持久化。Manual 下开启“人工审批说明”时，原有说明 Agent 在后台生成操作与风险说明，建议不代替用户决定。MCP Client 不提供用户原始请求，因此 Auto 会回退人工审批。
+三种模式都保留参数校验、主机与 Workspace 授权、SSH 认证与 Host Key、文件版本绑定、凭据脱敏、系统权限和审计。人工审批说明 Agent 与 Auto Approval Agent 分别使用独立 Runner、Prompt、Service 接口、并发槽和模型选择，仅共用超时设置。Auto Approval Agent 只接收由控制面绑定的当前用户请求、标准化操作、目标主机能力、当前任务和请求摘要；没有 Tool，也不调用批准 API。Tool reason 和任务不能扩大用户授权。Auto 审查结果随 Run 持久化。Manual 下开启“人工审批说明”时，原有说明 Agent 在后台生成操作与风险说明，建议不代替用户决定。MCP Client 不提供用户原始请求，因此 Auto 会回退人工审批。
 
 人工审批绑定主机、目录、命令/脚本、参数、环境和文件内容的 SHA-256。审批后任何修改都会使摘要失效。Web 审批框只提供“允许本次”和“拒绝并说明”，不保存会话级授权。主 Agent 的原始 Tool 调用会在 Service 层真正暂停；刷新页面或临时断网不会取消 Agent Loop。批准并执行完成后，真实结果返回同一个 Tool Call。拒绝时填写的内容会作为 `operator_instruction` 返回被暂停的 Tool。
 
-如果主 Agent 已产生 Tool 结果却以空正文结束，Runtime 不会重跑原 Agent Loop。它会把本轮已持久化的脱敏 Tool 结果和最新计划交给一个 `MaxIterations=1`、无 Tool、无 checkpoint 的独立总结 Agent，仅补生成最终回复；该路径不能再次执行操作。总结仍失败时会返回明确错误，并保留原 Tool 结果供下一轮继续。
+如果主 Agent 已产生 Tool 结果却以空正文结束，Runtime 不会重跑原 Agent Loop。它会把本轮已持久化的脱敏 Tool 结果和最新任务状态交给一个 `MaxIterations=1`、无 Tool、无 checkpoint 的独立总结 Agent，仅补生成最终回复；该路径不能再次执行操作。总结仍失败时会返回明确错误，并保留原 Tool 结果供下一轮继续。
 
-部署、修复、迁移和多组件诊断等复杂任务会先调用 `ops_plan_create` 创建 2–8 个可验证步骤。`ops_plan_step_update` 只接收步骤编号和目标状态，可完成、阻塞、跳过当前步骤或恢复已阻塞步骤；完成和跳过都会自动启动下一步，越级更新仍会被拒绝。顺序或范围变化时，`ops_plan_revise` 可替换全部未完成步骤，已完成和已跳过的历史保持不变。计划存储在 SQLite 并由会话 state 返回，Web 持续显示当前状态；刷新、断网或达到 Agent 迭代上限后可从原步骤继续。
+部署、修复、迁移和多组件诊断等复杂工作使用 Eino `plantask` 中间件提供的 `TaskCreate`、`TaskGet`、`TaskUpdate` 和 `TaskList`。任务支持 `pending`、`in_progress`、`completed` 状态、依赖关系、负责人和元数据；状态由 SQLite Backend 按可信会话 context 隔离。Chat state 与 Web 展示当前任务列表，刷新、断网或达到 Agent 迭代上限后可继续；全部任务完成时框架会清空本轮列表。
 
 CLI 审批示例：
 

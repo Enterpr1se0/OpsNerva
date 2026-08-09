@@ -16,7 +16,7 @@ Eino Tool、MCP Tool、HTTP 和 CLI 都是这个 Service 的适配器。模型�
 
 App 控制面通过 loopback HTTP API 连接本地 Sidecar，不提供管理员登录。MCP HTTP 使用独立 Bearer Token；MCP stdio 与 CLI 仍属于本机进程边界。
 
-人工审批说明使用原有 `ApprovalAgent`；Auto 决策使用新增的 `AutoApprovalAgent`。两者都是 `MaxIterations=1`、无 Tool 的独立 Eino `ChatModelAgent`，各自拥有 Runner、Prompt、Service 接口、并发槽和可用状态，互不复用。`ApprovalAgent` 仅异步生成人工审批页的操作与风险说明，不参与自动决定。`AutoApprovalAgent` 接收由 Go context 绑定的当前用户请求、精确操作、目标能力、当前计划目标/步骤和请求摘要；Tool reason 与计划不能扩大用户授权。它结构化返回 `allow/reject/manual`。Auto 仅在完整 `allow` 时执行，明确 `reject` 时终止，`manual`、缺少当前用户请求、不可用、超时或格式无效时回退用户审批。
+人工审批说明使用原有 `ApprovalAgent`；Auto 决策使用新增的 `AutoApprovalAgent`。两者都是 `MaxIterations=1`、无 Tool 的独立 Eino `ChatModelAgent`，各自拥有 Runner、Prompt、Service 接口、并发槽和可用状态，互不复用。`ApprovalAgent` 仅异步生成人工审批页的操作与风险说明，不参与自动决定。`AutoApprovalAgent` 接收由 Go context 绑定的当前用户请求、精确操作、目标能力、当前任务和请求摘要；Tool reason 与任务不能扩大用户授权。它结构化返回 `allow/reject/manual`。Auto 仅在完整 `allow` 时执行，明确 `reject` 时终止，`manual`、缺少当前用户请求、不可用、超时或格式无效时回退用户审批。
 
 ## Packages
 
@@ -96,15 +96,13 @@ Eino Agent 请求会在 context 中启用 blocking approval。Service 创建审�
 
 HTTP Chat Handler 使用保留 request logger/value、但移除浏览器取消信号的后台 context，并额外施加 30 分钟上限。浏览器断开后只停止 SSE 写入，原 Agent/Tool goroutine 继续等待审批；Runtime 按 session ID 记录 active 状态并拒绝同会话并发运行。Web 刷新后通过 `GET /api/v1/chat/{id}/state` 同步 active 状态和持久化消息，直到原循环完成。活动会话不能删除。该机制覆盖页面刷新和临时网络中断，不承诺跨服务进程重启恢复内存中的 Agent Loop。独立 SSH Task 的元数据与有界输出会持久化；重启时仍处于活动态的旧进程无法重新附着，会被恢复流程明确标记为 `interrupted`。
 
-主 Agent 已产生 Tool 结果但终止正文为空时，不允许重跑带 Tool 的 Runner。Runtime 改用独立的 `FinalAnswerAgent`，仅将当前用户请求、本轮已持久化的脱敏 Tool 结果和最新计划作为不可信 JSON 数据交给同一模型。该 Agent 为 `MaxIterations=1`、无 Tool、无 checkpoint，只能补生成最终用户回复；结果成功后按正常 Assistant 消息持久化，失败则保留原轮次和 Tool 结果并返回明确错误。
+主 Agent 已产生 Tool 结果但终止正文为空时，不允许重跑带 Tool 的 Runner。Runtime 改用独立的 `FinalAnswerAgent`，仅将当前用户请求、本轮已持久化的脱敏 Tool 结果和最新任务状态作为不可信 JSON 数据交给同一模型。该 Agent 为 `MaxIterations=1`、无 Tool、无 checkpoint，只能补生成最终用户回复；结果成功后按正常 Assistant 消息持久化，失败则保留原轮次和 Tool 结果并返回明确错误。
 
-## Task plans
+## Agent tasks
 
-`ops_plan_step_update` 只接收步骤编号和目标状态，不再保存运行摘要或额外说明。
+复杂工作直接使用 `github.com/cloudwego/eino/adk/middlewares/plantask`。中间件在 `BeforeAgent` 注入 `TaskCreate`、`TaskGet`、`TaskUpdate` 和 `TaskList`，框架负责字段 schema、任务依赖、环检测、状态更新和全部完成后的清理。
 
-复杂任务通过 Eino 专用的 `ops_plan_create`、`ops_plan_step_update` 和 `ops_plan_revise` 三个强类型 Tool 编排。计划和步骤分别写入 `agent_plans`、`agent_plan_steps`，session ID 只取可信 Go context，模型不能为其他会话读写计划。创建时只允许 2–8 个不重复步骤，第一步自动进入 `in_progress`。Store 在单个 SQLite 事务中处理当前步骤的完成、阻塞、跳过和恢复；完成或跳过后自动激活下一步。修订只删除当前及待处理步骤，再按新顺序插入，已完成和已跳过记录保持不变。数据库层始终最多只有一个进行中步骤。
-
-计划创建与每次状态转移均写入审计。Chat state 同时返回消息、后台运行状态和最新计划，Web 使用同一恢复轮询展示总进度、当前步骤与完成证据。每次模型请求前，Runtime 按可信 session ID 读取计划，并在当前用户消息前注入临时 System message；状态字段可信，目标、步骤标题和证据文本按不可信数据处理。Agent Loop 达到迭代上限不会删除计划，下一条 `continue` 会直接收到当前状态。没有计划时不注入任何计划消息。计划是编排状态而非额外权限，所有 SSH Tool 仍独立通过输入校验、审批模式和加密审计。
+项目实现 `plantask.Backend`，将框架任务文件写入 `agent_task_files`。Backend 只从可信 Go context 读取 session ID，模型参数不能跨会话访问任务。Chat state 返回当前任务列表，Web 展示进度、当前任务和依赖；Runtime 在后续模型请求前注入现存任务状态，并把它作为不可信文本处理。任务状态不扩大权限，所有 SSH Tool 仍独立通过输入校验、审批模式和加密审计。
 
 ## Audit storage
 
