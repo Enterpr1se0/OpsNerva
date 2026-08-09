@@ -2682,6 +2682,13 @@ func TestChatSessionsCanBeListedLoadedAndDeleted(t *testing.T) {
 	if len(sessions) != 2 || sessions[0].ID != "session-two" || sessions[1].Title != "Investigate disk usage" || sessions[1].MessageCount != 4 {
 		t.Fatalf("unexpected sessions %#v", sessions)
 	}
+	renamed, err := svc.RenameChatSession(ctx, "session-one", "Disk health", "test")
+	if err != nil || renamed.Title != "Disk health" {
+		t.Fatalf("renamed session = %#v, err=%v", renamed, err)
+	}
+	if _, err := svc.RenameChatSession(ctx, "session-one", "", "test"); err == nil {
+		t.Fatal("empty conversation title was accepted")
+	}
 	messages, err := svc.ListChatMessages(ctx, "session-one", 10)
 	if err != nil || len(messages) != 4 || messages[1].Role != "assistant" || messages[2].Role != "reasoning" || messages[3].Role != "tool" || messages[3].ToolName != "ssh_exec" {
 		t.Fatalf("unexpected messages %#v err=%v", messages, err)

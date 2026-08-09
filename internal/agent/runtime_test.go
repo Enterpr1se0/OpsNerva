@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	goruntime "runtime"
@@ -381,9 +382,17 @@ func TestRuntimeReloadAppliesCompleteSystemPromptToExistingConversation(t *testi
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
-		requests <- request.Messages
+		responseContent := "done"
+		for _, message := range request.Messages {
+			if message.Role == "system" && message.Content == sessionTitleInstruction {
+				responseContent = `{"title":"Prompt test"}`
+			} else if message.Role == "system" {
+				requests <- request.Messages
+			}
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-prompt\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"done\"},\"finish_reason\":null}]}\n\n"))
+		responseData, _ := json.Marshal(responseContent)
+		_, _ = fmt.Fprintf(w, "data: {\"id\":\"chatcmpl-prompt\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":%s},\"finish_reason\":null}]}\n\n", responseData)
 		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-prompt\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
 		_, _ = w.Write([]byte("data: [DONE]\n\n"))
 	}))

@@ -258,6 +258,60 @@ func (s *Service) GetChatSession(ctx context.Context, sessionID string) (domain.
 	return s.store.GetChatSession(ctx, strings.TrimSpace(sessionID))
 }
 
+const maxChatSessionTitleRunes = 80
+
+func normalizeChatSessionTitle(title string) (string, error) {
+	title = strings.Join(strings.Fields(title), " ")
+	if title == "" {
+		return "", fmt.Errorf("conversation title is required")
+	}
+	if len([]rune(title)) > maxChatSessionTitleRunes {
+		return "", fmt.Errorf("conversation title must not exceed %d characters", maxChatSessionTitleRunes)
+	}
+	return title, nil
+}
+
+func (s *Service) RenameChatSession(ctx context.Context, sessionID, title, actor string) (domain.ChatSession, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return domain.ChatSession{}, fmt.Errorf("session id is required")
+	}
+	title, err := normalizeChatSessionTitle(title)
+	if err != nil {
+		return domain.ChatSession{}, err
+	}
+	current, err := s.store.GetChatSession(ctx, sessionID)
+	if err != nil {
+		return domain.ChatSession{}, err
+	}
+	if current.TitleSet && current.Title == title {
+		return current, nil
+	}
+	session, err := s.store.SetChatSessionTitle(ctx, sessionID, title)
+	if err != nil {
+		return domain.ChatSession{}, err
+	}
+	s.audit(ctx, "", "chat_session_renamed", actor, map[string]any{"session_id": sessionID, "title": title})
+	return session, nil
+}
+
+func (s *Service) SetGeneratedChatSessionTitle(ctx context.Context, sessionID, title string) (domain.ChatSession, bool, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return domain.ChatSession{}, false, fmt.Errorf("session id is required")
+	}
+	title, err := normalizeChatSessionTitle(title)
+	if err != nil {
+		return domain.ChatSession{}, false, err
+	}
+	session, changed, err := s.store.SetChatSessionTitleIfEmpty(ctx, sessionID, title)
+	if err != nil || !changed {
+		return session, changed, err
+	}
+	s.audit(ctx, "", "chat_session_title_generated", "agent", map[string]any{"session_id": sessionID, "title": title})
+	return session, true, nil
+}
+
 func (s *Service) SetChatSessionWorkspace(ctx context.Context, sessionID, workspaceID, actor string) (domain.ChatSession, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	workspaceID = strings.TrimSpace(workspaceID)

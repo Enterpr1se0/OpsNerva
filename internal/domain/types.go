@@ -404,6 +404,7 @@ type MCPTestResult struct {
 type ChatSession struct {
 	ID            string    `json:"id"`
 	Title         string    `json:"title"`
+	TitleSet      bool      `json:"-"`
 	WorkspaceID   string    `json:"workspace_id"`
 	ContextTokens int       `json:"context_tokens"`
 	ContextWindow int       `json:"context_window"`

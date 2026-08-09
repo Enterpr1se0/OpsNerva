@@ -169,6 +169,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/chat/{id}/events", s.chatEventsStream)
 	s.mux.HandleFunc("POST /api/v1/chat/{id}/cancel", s.cancelChatSession)
 	s.mux.HandleFunc("PUT /api/v1/chat/{id}/workspace", s.setChatSessionWorkspace)
+	s.mux.HandleFunc("PUT /api/v1/chat/{id}/title", s.renameChatSession)
 	s.mux.HandleFunc("DELETE /api/v1/chat/{id}", s.deleteChatSession)
 	s.mux.HandleFunc("GET /api/v1/chat/{id}/messages", s.chatMessages)
 	s.mux.HandleFunc("GET /api/v1/chat/{id}/state", s.chatState)
@@ -1839,6 +1840,17 @@ func (s *Server) setChatSessionWorkspace(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	session, err := s.service.SetChatSessionWorkspace(r.Context(), sessionID, input.WorkspaceID, actor(r))
+	respond(w, session, err)
+}
+
+func (s *Server) renameChatSession(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Title string `json:"title"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	session, err := s.service.RenameChatSession(r.Context(), r.PathValue("id"), input.Title, actor(r))
 	respond(w, session, err)
 }
 

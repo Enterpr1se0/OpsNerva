@@ -188,6 +188,7 @@ type Event struct {
 	Content          string `json:"content,omitempty"`
 	SegmentID        string `json:"segment_id,omitempty"`
 	SessionID        string `json:"session_id,omitempty"`
+	Title            string `json:"title,omitempty"`
 	RunID            string `json:"run_id,omitempty"`
 	Stream           string `json:"stream,omitempty"`
 	Sequence         uint64 `json:"sequence,omitempty"`
@@ -210,6 +211,7 @@ type Runtime struct {
 	baseCtx             context.Context
 	runner              agentRunner
 	finalizer           agentRunner
+	titleGenerator      agentRunner
 	store               *store.Store
 	service             *service.Service
 	fallback            config.Model
@@ -342,6 +344,7 @@ func (r *Runtime) Reload(ctx context.Context) error {
 			r.resetContextDetectionLocked()
 			r.runner = nil
 			r.finalizer = nil
+			r.titleGenerator = nil
 			r.modelKind = ""
 			r.contextWindow = 0
 			r.status = status
@@ -376,6 +379,7 @@ func (r *Runtime) Reload(ctx context.Context) error {
 		r.resetContextDetectionLocked()
 		r.runner = nil
 		r.finalizer = nil
+		r.titleGenerator = nil
 		r.modelKind = ""
 		r.contextWindow = 0
 		r.status = status
@@ -398,6 +402,7 @@ func (r *Runtime) Reload(ctx context.Context) error {
 		r.resetContextDetectionLocked()
 		r.runner = nil
 		r.finalizer = nil
+		r.titleGenerator = nil
 		r.modelKind = ""
 		r.contextWindow = 0
 		r.status = status
@@ -408,6 +413,29 @@ func (r *Runtime) Reload(ctx context.Context) error {
 		r.service.SetAutomaticApprovalReviewer(nil)
 		observability.FromContext(ctx).ErrorContext(ctx, "final answer Agent unavailable", "component", "agent", "provider_id", status.ProviderID, "model", cfg.Name, "error", err)
 		return fmt.Errorf("build final answer Agent: %w", err)
+	}
+	titleGenerator, err := buildReadOnlySubagent(
+		r.baseCtx, cfg, sessionTitleTimeout, "conversation_title",
+		"Names a conversation without tools or operational side effects.",
+		sessionTitleInstruction,
+	)
+	if err != nil {
+		status.Error = err.Error()
+		r.mu.Lock()
+		r.resetContextDetectionLocked()
+		r.runner = nil
+		r.finalizer = nil
+		r.titleGenerator = nil
+		r.modelKind = ""
+		r.contextWindow = 0
+		r.status = status
+		r.tools = nil
+		r.toolsAt = ""
+		r.mu.Unlock()
+		r.service.SetApprovalReviewer(nil)
+		r.service.SetAutomaticApprovalReviewer(nil)
+		observability.FromContext(ctx).ErrorContext(ctx, "conversation title Agent unavailable", "component", "agent", "provider_id", status.ProviderID, "model", cfg.Name, "error", err)
+		return fmt.Errorf("build conversation title Agent: %w", err)
 	}
 	explanationCfg := cfg
 	automaticApprovalCfg := cfg
@@ -481,6 +509,7 @@ func (r *Runtime) Reload(ctx context.Context) error {
 	revision := r.resetContextDetectionLocked()
 	r.runner = runner
 	r.finalizer = finalizer
+	r.titleGenerator = titleGenerator
 	r.status = status
 	r.modelKind = cfg.Kind
 	r.contextWindow = cfg.ContextWindow
@@ -737,6 +766,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 	r.mu.RLock()
 	runner := r.runner
 	finalizer := r.finalizer
+	titleGenerator := r.titleGenerator
 	modelKind := r.modelKind
 	contextWindow := r.contextWindow
 	contextRevision := r.contextRevision
@@ -893,6 +923,15 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 	userMessageID, err := r.store.AppendPendingChatMessageWithAttachments(ctx, sessionID, "user", query, attachments)
 	if err != nil {
 		return "", err
+	}
+	var titleCancel context.CancelFunc
+	var titleDone <-chan struct{}
+	if !chatSession.TitleSet && titleGenerator != nil {
+		titleCancel, titleDone = r.startSessionTitleGeneration(ctx, titleGenerator, sessionID, firstSessionTitleInput(history, query, attachments), emit)
+		defer func() {
+			titleCancel()
+			<-titleDone
+		}()
 	}
 	lastContextTokens := chatSession.ContextTokens
 	lastEmittedContextTokens := -1
@@ -1432,6 +1471,9 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 			return answer, err
 		}
 		commitAssistantMessage(answerMessageID, string(schema.Assistant))
+	}
+	if titleDone != nil {
+		<-titleDone
 	}
 	emit(Event{Type: "done", SessionID: sessionID, Content: answer})
 	return answer, nil

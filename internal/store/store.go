@@ -292,6 +292,7 @@ CREATE TABLE IF NOT EXISTS audit_events (
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_events(created_at DESC);
 CREATE TABLE IF NOT EXISTS chat_sessions (
   session_id TEXT PRIMARY KEY,
+  title TEXT NOT NULL DEFAULT '',
   workspace_id TEXT NOT NULL DEFAULT '',
 	context_tokens INTEGER NOT NULL DEFAULT 0,
 	context_window INTEGER NOT NULL DEFAULT 0,
@@ -513,6 +514,9 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
 		return err
 	}
 	if err := s.ensureColumn(ctx, "chat_sessions", "context_window", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "chat_sessions", "title", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "chat_messages", "model_extra_json", "TEXT NOT NULL DEFAULT '{}'"); err != nil {
@@ -1891,16 +1895,52 @@ func (s *Store) CreateChatSession(ctx context.Context, sessionID, workspaceID st
 
 func (s *Store) GetChatSession(ctx context.Context, sessionID string) (domain.ChatSession, error) {
 	var session domain.ChatSession
-	var updated string
-	err := s.db.QueryRowContext(ctx, `SELECT session_id,workspace_id,context_tokens,context_window,updated_at FROM chat_sessions WHERE session_id=?`, sessionID).Scan(&session.ID, &session.WorkspaceID, &session.ContextTokens, &session.ContextWindow, &updated)
+	var storedTitle, updated string
+	err := s.db.QueryRowContext(ctx, `SELECT sessions.session_id,sessions.title,
+  COALESCE(NULLIF(trim(sessions.title),''),NULLIF((SELECT trim(substr(first.content,1,80)) FROM chat_messages AS first
+    WHERE first.session_id=sessions.session_id AND first.role='user'
+    ORDER BY first.created_at ASC LIMIT 1),''),'New conversation'),
+  sessions.workspace_id,sessions.context_tokens,sessions.context_window,
+  (SELECT count(*) FROM chat_messages AS messages WHERE messages.session_id=sessions.session_id),sessions.updated_at
+FROM chat_sessions AS sessions WHERE sessions.session_id=?`, sessionID).Scan(
+		&session.ID, &storedTitle, &session.Title, &session.WorkspaceID, &session.ContextTokens, &session.ContextWindow, &session.MessageCount, &updated,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.ChatSession{}, ErrNotFound
 	}
 	if err != nil {
 		return domain.ChatSession{}, err
 	}
+	session.TitleSet = strings.TrimSpace(storedTitle) != ""
 	session.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
 	return session, nil
+}
+
+func (s *Store) SetChatSessionTitle(ctx context.Context, sessionID, title string) (domain.ChatSession, error) {
+	result, err := s.db.ExecContext(ctx, `UPDATE chat_sessions SET title=? WHERE session_id=?`, title, sessionID)
+	if err != nil {
+		return domain.ChatSession{}, err
+	}
+	if count, _ := result.RowsAffected(); count == 0 {
+		return domain.ChatSession{}, ErrNotFound
+	}
+	return s.GetChatSession(ctx, sessionID)
+}
+
+func (s *Store) SetChatSessionTitleIfEmpty(ctx context.Context, sessionID, title string) (domain.ChatSession, bool, error) {
+	result, err := s.db.ExecContext(ctx, `UPDATE chat_sessions SET title=? WHERE session_id=? AND trim(title)=''`, title, sessionID)
+	if err != nil {
+		return domain.ChatSession{}, false, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return domain.ChatSession{}, false, err
+	}
+	session, err := s.GetChatSession(ctx, sessionID)
+	if err != nil {
+		return domain.ChatSession{}, false, err
+	}
+	return session, changed == 1, nil
 }
 
 func (s *Store) SetChatSessionWorkspace(ctx context.Context, sessionID, workspaceID string) (domain.ChatSession, error) {
@@ -1931,9 +1971,10 @@ func (s *Store) ListChatSessions(ctx context.Context, limit int) ([]domain.ChatS
 	}
 	rows, err := s.db.QueryContext(ctx, `
 SELECT sessions.session_id,
-  COALESCE(NULLIF((SELECT trim(substr(first.content,1,80)) FROM chat_messages AS first
+  sessions.title,
+  COALESCE(NULLIF(trim(sessions.title),''),NULLIF((SELECT trim(substr(first.content,1,80)) FROM chat_messages AS first
     WHERE first.session_id=sessions.session_id AND first.role='user'
-    ORDER BY first.created_at ASC LIMIT 1),''),'New conversation') AS title,
+    ORDER BY first.created_at ASC LIMIT 1),''),'New conversation') AS display_title,
   sessions.workspace_id,
 	sessions.context_tokens,
 	sessions.context_window,
@@ -1949,10 +1990,11 @@ LIMIT ?`, limit)
 	result := make([]domain.ChatSession, 0)
 	for rows.Next() {
 		var session domain.ChatSession
-		var updated string
-		if err := rows.Scan(&session.ID, &session.Title, &session.WorkspaceID, &session.ContextTokens, &session.ContextWindow, &session.MessageCount, &updated); err != nil {
+		var storedTitle, updated string
+		if err := rows.Scan(&session.ID, &storedTitle, &session.Title, &session.WorkspaceID, &session.ContextTokens, &session.ContextWindow, &session.MessageCount, &updated); err != nil {
 			return nil, err
 		}
+		session.TitleSet = strings.TrimSpace(storedTitle) != ""
 		session.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
 		result = append(result, session)
 	}
