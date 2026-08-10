@@ -336,6 +336,8 @@ function App() {
 	const [mcpServers,setMCPServers]=useState<MCPServer[]>([])
   const [approvals, setApprovals] = useState<Approval[]>([])
   const [runs, setRuns] = useState<Run[]>([])
+	const [auditSessions,setAuditSessions]=useState<ChatSession[]>([])
+	const [auditReady,setAuditReady]=useState(false)
   const [sshTunnels,setSSHTunnels]=useState<SSHTunnel[]>([])
   const [sshShells,setSSHShells]=useState<SSHShell[]>([])
   const [selectedShell,setSelectedShell]=useState<SSHShell|null>(null)
@@ -383,6 +385,10 @@ function App() {
 		try{setRuns(await api.runs())}
 		catch(err){notify(errorText(err),'error')}
 	},[notify])
+	const refreshAuditSessions=useCallback(async()=>{
+		try{setAuditSessions(await api.chatSessions())}
+		catch(err){notify(errorText(err),'error')}
+	},[notify])
 	const refreshHealth=useCallback(async()=>{
 		try{setHealth(await api.health())}
 		catch(err){notify(errorText(err),'error')}
@@ -419,6 +425,10 @@ function App() {
 	const refreshConfiguration=useCallback(async()=>{
 		await Promise.all([refreshHealth(),refreshHosts(),refreshProviders(),refreshProxies(),refreshSettings(),refreshCapabilities()])
 	},[refreshCapabilities,refreshHealth,refreshHosts,refreshProviders,refreshProxies,refreshSettings])
+	const refreshAudit=useCallback(async()=>{
+		await Promise.all([refreshRuns(),refreshHosts(),refreshAuditSessions()])
+		setAuditReady(true)
+	},[refreshAuditSessions,refreshHosts,refreshRuns])
 	const refreshChat=useCallback(async()=>{
 		await Promise.all([refreshHealth(),refreshHosts(),refreshProviders(),refreshSettings(),refreshCapabilities(),refreshApprovals()])
 	},[refreshApprovals,refreshCapabilities,refreshHealth,refreshHosts,refreshProviders,refreshSettings])
@@ -464,10 +474,10 @@ function App() {
 	useEffect(() => { void refreshBootstrap();void refreshConnections() }, [refreshBootstrap,refreshConnections])
 	useEffect(()=>{
 		if(page==='extensions')void refreshExtensions()
-		else if(page==='audit')void Promise.all([refreshRuns(),refreshHosts()])
+		else if(page==='audit')void refreshAudit()
 		else if(page==='ssh')void Promise.all([refreshHosts(),refreshConnections()])
 		else if(page==='config')void refreshConfiguration()
-	},[page,refreshConfiguration,refreshConnections,refreshExtensions,refreshHosts,refreshRuns])
+	},[page,refreshAudit,refreshConfiguration,refreshConnections,refreshExtensions,refreshHosts])
 	const pollConnections=page==='ssh'||openConnectionPanel!==null||sshTunnels.some(tunnel=>['running','retrying','stopping'].includes(tunnel.status))||sshShells.some(shell=>sshShellActive(shell.status))
 	useEffect(()=>{
 		if(!pollConnections)return
@@ -508,7 +518,7 @@ function App() {
 		setRefreshing(true)
 		try{
 			if(page==='extensions')await refreshExtensions()
-			else if(page==='audit')await Promise.all([refreshRuns(),refreshHosts()])
+			else if(page==='audit')await refreshAudit()
 			else if(page==='ssh')await Promise.all([refreshHosts(),refreshConnections()])
 			else if(page==='config')await refreshConfiguration()
 			else if(page==='chat')await refreshChat()
@@ -590,7 +600,7 @@ function App() {
 			/>}
 		{page === 'config' && <ConfigurationPage hosts={hosts} providers={providers} proxies={proxies} settings={settings} capabilities={capabilities} health={health} refreshModels={refreshModels} refreshHosts={refreshHosts} refreshProxies={refreshProxies} refreshCapabilities={refreshCapabilities} refreshHealth={refreshHealth} onSettingsChanged={setSettings}/>}
 		{page === 'extensions' && <ExtensionsPage skills={skills} mcpServers={mcpServers} toolCatalog={toolCatalog} refreshSkills={refreshSkills} refreshMCPServers={refreshMCPServers} refreshToolCatalog={refreshToolCatalog} onToolCatalogChanged={setToolCatalog}/>}
-        {page === 'audit' && <AuditPage runs={runs} hosts={hosts}/>}
+		{page === 'audit' && <AuditPage runs={runs} hosts={hosts} sessions={auditSessions} ready={auditReady}/>}
         {page === 'logs' && <LogsPage/>}
       </section>
 	      {selectedShell&&<SSHShellTerminal
@@ -3390,11 +3400,9 @@ function auditOperationSummary(req:JsonRecord,run:Run,hosts:Host[],t:TFunction){
 	}
 }
 
-function AuditPage({runs,hosts}:{runs:Run[];hosts:Host[]}) {
+function AuditPage({runs,hosts,sessions,ready}:{runs:Run[];hosts:Host[];sessions:ChatSession[];ready:boolean}) {
 	const {t,i18n:instance}=useTranslation()
   const [query,setQuery]=useState('')
-  const [sessions,setSessions]=useState<ChatSession[]>([])
-  useEffect(()=>{let active=true;void api.chatSessions().then(items=>{if(active)setSessions(items)}).catch(()=>{});return()=>{active=false}},[])
   const filtered=useMemo(()=>{const needle=query.toLowerCase();return runs.filter(run=>{const req=requestFromRun(run);const requestText=req?Object.values(req).flat().filter(value=>typeof value==='string').join('\n'):run.request_json;return(requestText+run.stdout_redacted+run.stderr_redacted).toLowerCase().includes(needle)})},[query,runs])
   const groups=useMemo(()=>{
     const titles=new Map(sessions.map(session=>[session.id,session.title]))
@@ -3402,6 +3410,7 @@ function AuditPage({runs,hosts}:{runs:Run[];hosts:Host[]}) {
     for(const run of filtered){const key=run.session_id||'__direct__';grouped.set(key,[...(grouped.get(key)||[]),run])}
 	return [...grouped.entries()].map(([id,items])=>{items.sort((a,b)=>Date.parse(b.started_at)-Date.parse(a.started_at));return{id,title:id==='__direct__'?t('audit.direct'):titles.get(id)||t('audit.missingConversation'),runs:items,latest:items[0]?.started_at,pending:items.filter(run=>run.status==='approval_required').length}}).sort((a,b)=>Date.parse(b.latest||'')-Date.parse(a.latest||''))
 	},[filtered,sessions,t,instance.language])
+	if(!ready)return <div className="audit-loading panel" role="status"><LoaderCircle className="spin" size={16}/><span>{t('common.loading')}</span></div>
 	return <div className="page-stack"><div className="audit-toolbar"><div className="search-box"><Search size={16}/><input aria-label={t('common.search')} value={query} onChange={event=>setQuery(event.target.value)}/></div><span>{t('audit.counts',{sessions:groups.length,runs:filtered.length})}</span></div><div className="audit-groups">{groups.map(group=><details className="audit-session panel" key={group.id}><summary className="audit-session-summary"><div className="audit-session-glyph"><History size={17}/></div><div className="audit-session-name"><b>{group.title}</b><span>{group.id==='__direct__'?t('audit.noSession'):group.id} · {t('audit.lastRun',{date:new Date(group.latest).toLocaleString(localeFor(instance.language))})}</span></div><div className="audit-session-stats"><span><b>{group.runs.length}</b> {t('audit.runs')}</span>{group.pending>0&&<span className="pending-count"><b>{group.pending}</b> {t('audit.pending')}</span>}</div><ChevronRight className="audit-session-chevron" size={17}/></summary><div className="audit-table"><div className="audit-row audit-head"><span>{t('audit.columns.time')}</span><span>{t('audit.columns.operation')}</span><span>{t('audit.columns.status')}</span><span>{t('audit.columns.host')}</span><span>{t('audit.columns.exit')}</span><span aria-hidden="true"/></div>{group.runs.map(run=>{let req:Record<string,unknown>={};try{req=JSON.parse(run.request_json)}catch{req={request:run.request_json}};const auditHost=hostIdentity(hosts,run.host_id);const workspaceID=textValue(req.workspace_id);const target=auditHost.name||(run.host_id.startsWith('workspace_')?workspaceID:run.host_id)||'—';const operation=auditOperationSummary(req,run,hosts,t);return <details key={run.id}><summary className="audit-row"><span>{new Date(run.started_at).toLocaleString(localeFor(instance.language))}</span><span className="command">{operation}</span><span className="audit-run-status"><span className={`run-status ${run.status}`}>{t(`statusLabels.${run.status}`,{defaultValue:run.status})}</span>{runAutoApproved(run)&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}</span><span title={run.host_id}>{target}</span><span>{run.exit_code}</span><ChevronRight className="audit-run-chevron" size={15}/></summary><div className="run-detail"><AuditRunDetail run={run} req={req} hosts={hosts}/></div></details>})}</div></details>)}</div>{!runs.length&&<Empty icon={<History/>} title={t('audit.emptyTitle')}/>} {runs.length>0&&!groups.length&&<Empty icon={<Search/>} title={t('audit.noMatch')}/>}</div>
 }
 
