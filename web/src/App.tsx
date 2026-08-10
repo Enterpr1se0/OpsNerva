@@ -494,7 +494,10 @@ function App() {
 		const transition=(document as Document&{startViewTransition?:(update:()=>void)=>unknown}).startViewTransition
 		const extensionEdge=page==='extensions'||next==='extensions'
 		if(transition&&!reduced&&!extensionEdge)transition.call(document,()=>setPage(next))
-		else setPage(next)
+		else{
+			setPage(next)
+			if(!reduced)window.requestAnimationFrame(()=>document.querySelector<HTMLElement>('.workspace')?.animate([{opacity:.35,transform:'translateY(5px)'},{opacity:1,transform:'translateY(0)'}],{duration:180,easing:'cubic-bezier(.2,.8,.2,1)'}))
+		}
 	},[page])
 	useEffect(()=>{
 		if(!desktopRuntime)return
@@ -1007,12 +1010,12 @@ function SSHShellTerminal({initialShell,relatedShells=[],onSelect,onClose,onChan
 	const stop=async()=>{setClosing(true);try{setShell(await api.closeSSHShell(shell.id));onChanged()}catch(err){onError(errorText(err))}finally{setClosing(false)}}
 	const titleID=`ssh-shell-terminal-title-${shell.id}`
 	const workspaceShell=shell.kind==='workspace'
-	const terminal=<section className={`ssh-shell-terminal-dialog ${embedded?'embedded':''}`} role={embedded?undefined:'dialog'} aria-modal={embedded?undefined:true} aria-labelledby={titleID}>
-			<header>
+		const terminal=<section className={`ssh-shell-terminal-dialog ${embedded?'embedded':''}`} role={embedded?undefined:'dialog'} aria-modal={embedded?undefined:true} aria-labelledby={embedded?undefined:titleID}>
+			{!embedded&&<header>
 				<div><TerminalSquare size={20}/><span><small>{workspaceShell?t('workspace.terminal'):t('sshShell.interactive')}</small><h2 id={titleID}>{workspaceShell?shell.workspace_id:shell.host_name||shell.host_id}</h2></span></div>
 				<div className="ssh-shell-terminal-state">{workspaceShell&&relatedShells.length>1&&<AppSelect className="terminal-session-select" value={shell.id} ariaLabel={t('workspace.switchTerminal')} onChange={value=>{const selected=relatedShells.find(item=>item.id===value);if(selected)onSelect?.(selected)}} options={relatedShells.map(item=>({value:item.id,label:`${t(item.surface==='workspace_agent'?'workspace.agent':'workspace.operator')} · ${item.cwd||'.'}`}))}/>}<em className={shell.status}>{t(`statusLabels.${shell.status}`,{defaultValue:shell.status})}</em><code>{shell.elevated?'root':shell.user}</code>{!embedded&&<button type="button" onClick={onClose} title={t('common.close')}><X size={16}/></button>}</div>
-			</header>
-			<div className="ssh-shell-terminal-meta"><span>{workspaceShell?shell.backend:shell.host_id}</span><span>{shell.cwd||(workspaceShell?'.':'~')}</span>{workspaceShell&&<span className="workspace-shell-owner">{t(shell.surface==='workspace_agent'?'workspace.agent':'workspace.operator')}</span>}{workspaceShell&&inputSource&&<span>{t('workspace.inputBy',{source:t(inputSource==='agent'?'workspace.agent':'workspace.operator')})}</span>}{shell.termination_reason&&<span>{t(`sshShell.termination.${shell.termination_reason}`,{defaultValue:shell.termination_reason})}</span>}<code>{shell.id}</code></div>
+			</header>}
+			{!embedded&&<div className="ssh-shell-terminal-meta"><span>{workspaceShell?shell.backend:shell.host_id}</span><span>{shell.cwd||(workspaceShell?'.':'~')}</span>{workspaceShell&&<span className="workspace-shell-owner">{t(shell.surface==='workspace_agent'?'workspace.agent':'workspace.operator')}</span>}{workspaceShell&&inputSource&&<span>{t('workspace.inputBy',{source:t(inputSource==='agent'?'workspace.agent':'workspace.operator')})}</span>}{shell.termination_reason&&<span>{t(`sshShell.termination.${shell.termination_reason}`,{defaultValue:shell.termination_reason})}</span>}<code>{shell.id}</code></div>}
 			<div className="ssh-shell-terminal-screen" ref={terminalElement}/>
 			<footer>
 				<form onSubmit={sendSecret}><LockKeyhole size={14}/><PasswordInput value={secret} onChange={event=>setSecret(event.target.value)} disabled={!active||sendingSecret} placeholder={t('sshShell.sensitivePlaceholder')} autoComplete="off"/><button className="primary" disabled={!secret||!active||sendingSecret}>{sendingSecret?<LoaderCircle className="spin" size={13}/>:<Send size={13}/>} {t('sshShell.sendSensitive')}</button></form>
