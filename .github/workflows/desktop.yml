@@ -33,6 +33,8 @@ jobs:
           - name: Linux x64
             os: ubuntu-22.04
             run_tests: true
+            goos: linux
+            goarch: amd64
             artifact: opsnerva-linux-x64
             paths: |
               web/src-tauri/target/release/bundle/appimage/*.AppImage
@@ -40,6 +42,8 @@ jobs:
           - name: Linux ARM64
             os: ubuntu-24.04-arm
             run_tests: false
+            goos: linux
+            goarch: arm64
             artifact: opsnerva-linux-arm64
             paths: |
               web/src-tauri/target/release/bundle/appimage/*.AppImage
@@ -47,6 +51,8 @@ jobs:
           - name: Windows x64
             os: windows-latest
             run_tests: false
+            goos: windows
+            goarch: amd64
             artifact: opsnerva-windows-x64
             paths: web/src-tauri/target/release/bundle/nsis/*-setup.exe
     runs-on: ${{ matrix.os }}
@@ -99,10 +105,25 @@ jobs:
         run: npm run desktop:build
         working-directory: web
 
+      - name: Build server binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build -buildvcs=false -trimpath -ldflags="-s -w" \
+            -o dist/opsnerva-server-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }} \
+            ./cmd/ops-agent
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.paths }}
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opsnerva-server-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/opsnerva-server-*
           if-no-files-found: error
 
   release:
