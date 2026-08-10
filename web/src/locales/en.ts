@@ -37,7 +37,7 @@ const en = {
     termination: { requested_close: 'Closed by request', service_stopped: 'Service stopped', remote_exit: 'Remote shell exited', remote_signal: 'Stopped by remote signal', connection_lost: 'SSH connection lost', process_exit: 'Process exited', process_signal: 'Process stopped', process_lost: 'Process disconnected', start_failed: 'Shell start failed' },
   },
   sshWorkspace: {
-    newTerminal: 'New terminal', noTerminal: 'No terminal is open', remotePath: 'Remote path',
+    newTerminal: 'New terminal', noTerminal: 'No terminal is open', remotePath: 'Remote path', hostCount: '{{count}} hosts',
     newDirectory: 'New directory', rename: 'Rename', name: 'Name',
     uploaded: '{{count}} file(s) uploaded', directoryCreated: 'Directory created', renamed: 'Renamed', deleted: 'Deleted', saved: 'Saved · {{path}}',
     deleteTitle: 'Delete “{{name}}”?',

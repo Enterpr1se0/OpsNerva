@@ -1239,8 +1239,53 @@
   color: var(--light-accent);
 }
 
+:root[data-theme='light'] .ssh-terminal-tab.active {
+  border-color: var(--light-accent-border);
+  background: var(--light-accent-soft);
+}
+
+:root[data-theme='light'] .ssh-terminal-tab-select {
+  color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] .ssh-terminal-tab.active .ssh-terminal-tab-select {
+  color: var(--light-accent);
+}
+
+:root[data-theme='light'] .ssh-terminal-tab-close {
+  color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] .ssh-terminal-tab-close:hover {
+  background: var(--light-danger-soft);
+  color: var(--light-danger);
+}
+
 :root[data-theme='light'] .sftp-host {
   color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] .ssh-host-home-list > button {
+  color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] .ssh-host-home-list > button:hover {
+  border-color: var(--light-accent-border);
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
+}
+
+:root[data-theme='light'] .ssh-host-home-list b {
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] .ssh-host-home-list small {
+  color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] .ssh-host-home-icon {
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
 }
 
 /* ANSI terminal canvases remain dark by design; their chrome is light. */

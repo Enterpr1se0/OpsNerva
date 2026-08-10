@@ -37,7 +37,7 @@ const zh = {
     termination: { requested_close: '已主动关闭', service_stopped: '服务停止', remote_exit: '远端 Shell 已退出', remote_signal: '远端信号终止', connection_lost: 'SSH 连接异常断开', process_exit: '进程已退出', process_signal: '进程被终止', process_lost: '进程异常断开', start_failed: 'Shell 启动失败' },
   },
   sshWorkspace: {
-    newTerminal: '新建终端', noTerminal: '没有打开的终端', remotePath: '远程路径',
+    newTerminal: '新建终端', noTerminal: '没有打开的终端', remotePath: '远程路径', hostCount: '{{count}} 台主机',
     newDirectory: '新建目录', rename: '重命名', name: '名称',
     uploaded: '已上传 {{count}} 个文件', directoryCreated: '目录已创建', renamed: '已重命名', deleted: '已删除', saved: '已保存 · {{path}}',
     deleteTitle: '删除“{{name}}”？',

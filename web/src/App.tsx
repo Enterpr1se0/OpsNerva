@@ -9,7 +9,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import '@xterm/xterm/css/xterm.css'
 import {
-  Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronLeft, ChevronRight, CircleDot, Copy, Cpu, Edit3, Eye, EyeOff, FileText, FolderOpen, FolderOutput, FunctionSquare, History, ImagePlus, KeyRound, LockKeyhole, Maximize2, Minimize2, Minus, Monitor, Moon, PanelLeftClose, PanelLeftOpen, Sun,
+  Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronLeft, ChevronRight, CircleDot, Copy, Cpu, Edit3, Eye, EyeOff, FileText, FolderOpen, FolderOutput, FunctionSquare, History, Home, ImagePlus, KeyRound, LockKeyhole, Maximize2, Minimize2, Minus, Monitor, Moon, PanelLeftClose, PanelLeftOpen, Sun,
   Cable, Download, ListChecks, LoaderCircle, LogOut, Plus, Power, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, Square, TerminalSquare, Trash2, UploadCloud, UserRound, X, Zap,
 } from 'lucide-react'
 import { api, chatAttachmentURL, reconnectChatStream, sftpDownloadURL, sshShellEventsURL, streamChat, workspaceDownloadURL, workspaceFileEventsURL } from './api'
@@ -1027,18 +1027,37 @@ function SSHWorkspacePage({hosts,shells,onCreated,refresh,onError}:{hosts:Host[]
 	const {t}=useTranslation()
 	const [selectedShellID,setSelectedShellID]=useState(shells[0]?.id||'')
 	const [creating,setCreating]=useState(false)
+	const [connectingHostID,setConnectingHostID]=useState('')
+	const [closingShellID,setClosingShellID]=useState('')
 	useEffect(()=>{
-		if(!shells.some(shell=>shell.id===selectedShellID))setSelectedShellID(shells[0]?.id||'')
+		if(selectedShellID&&!shells.some(shell=>shell.id===selectedShellID))setSelectedShellID('')
 	},[selectedShellID,shells])
 	const selectedShell=shells.find(shell=>shell.id===selectedShellID)
 	const selectedHost=hosts.find(host=>host.id===selectedShell?.host_id)
 	const created=(shell:SSHShell)=>{onCreated(shell);setSelectedShellID(shell.id);setCreating(false)}
+	const connect=async(host:Host)=>{
+		if(connectingHostID)return
+		setConnectingHostID(host.id)
+		try{created(await api.startSSHShell({host_id:host.id,surface:'workspace'}))}
+		catch(err){onError(errorText(err))}
+		finally{setConnectingHostID('')}
+	}
+	const close=async(shell:SSHShell)=>{
+		if(closingShellID)return
+		setClosingShellID(shell.id)
+		try{
+			await api.closeSSHShell(shell.id)
+			if(selectedShellID===shell.id)setSelectedShellID('')
+			await refresh()
+		}catch(err){onError(errorText(err))}
+		finally{setClosingShellID('')}
+	}
 	if(!hosts.length)return <div className="ssh-workspace-empty panel"><Server size={28}/><b>{t('connections.noHosts')}</b></div>
 	return <div className="ssh-workspace">
-		<SFTPBrowser key={selectedHost?.id||'disconnected'} host={selectedHost}/>
+		{selectedHost?<SFTPBrowser key={selectedHost.id} host={selectedHost}/>:<SSHHostHome hosts={hosts} connectingHostID={connectingHostID} onConnect={connect}/>}
 		<section className="ssh-workspace-terminal panel">
 			<header className="ssh-terminal-tabs">
-				<div>{shells.map(shell=><button type="button" className={shell.id===selectedShellID?'active':''} onClick={()=>setSelectedShellID(shell.id)} key={shell.id}><i className={shell.status}/><span>{shell.host_name||shell.host_id}</span><small>{shell.elevated?'root':shell.user}</small></button>)}</div>
+				<div><button type="button" className={`ssh-home-tab ${selectedShellID?'':'active'}`} onClick={()=>setSelectedShellID('')} title="Home" aria-label="Home"><Home size={16}/></button>{shells.map(shell=><div className={`ssh-terminal-tab ${shell.id===selectedShellID?'active':''}`} key={shell.id}><button type="button" className="ssh-terminal-tab-select" disabled={closingShellID===shell.id} onClick={()=>setSelectedShellID(shell.id)}><i className={shell.status}/><span>{shell.host_name||shell.host_id}</span><small>{shell.elevated?'root':shell.user}</small></button><button type="button" className="ssh-terminal-tab-close" disabled={!!closingShellID} onClick={()=>void close(shell)} title={t('sshShell.closeSession')} aria-label={t('sshShell.closeSession')}>{closingShellID===shell.id?<LoaderCircle className="spin" size={11}/>:<X size={12}/>}</button></div>)}</div>
 				<button type="button" className="ssh-new-terminal" onClick={()=>setCreating(true)}><Plus size={14}/> {t('sshWorkspace.newTerminal')}</button>
 			</header>
 			<div className="ssh-terminal-stage">
@@ -1047,6 +1066,17 @@ function SSHWorkspacePage({hosts,shells,onCreated,refresh,onError}:{hosts:Host[]
 		</section>
 		{creating&&<SSHShellCreateDialog hosts={hosts} surface="workspace" onCancel={()=>setCreating(false)} onCreated={created}/>}
 	</div>
+}
+
+function SSHHostHome({hosts,connectingHostID,onConnect}:{hosts:Host[];connectingHostID:string;onConnect:(host:Host)=>void}){
+	const {t}=useTranslation()
+	return <aside className="sftp-browser ssh-host-home panel">
+		<header><div><Server size={17}/><b>{t('config.tabs.hosts')}</b></div><span className="sftp-host">{t('sshWorkspace.hostCount',{count:hosts.length})}</span></header>
+		<div className="ssh-host-home-list">{hosts.map(host=>{
+			const connecting=connectingHostID===host.id
+			return <button type="button" disabled={!!connectingHostID} onClick={()=>onConnect(host)} key={host.id}><span className="ssh-host-home-icon">{connecting?<LoaderCircle className="spin" size={16}/>:<Server size={16}/>}</span><span><b>{host.name}</b><small>{host.user}@{host.address}:{host.port}</small></span><ChevronRight size={15}/></button>
+		})}</div>
+	</aside>
 }
 
 type SFTPNameEditor={mode:'create'}|{mode:'rename';entry:SFTPFileEntry}
