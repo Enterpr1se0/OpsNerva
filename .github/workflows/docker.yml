@@ -72,8 +72,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: docker/setup-qemu-action@v3
+        with:
+          fetch-depth: 0
 
       - uses: docker/setup-buildx-action@v3
 
@@ -89,11 +89,8 @@ jobs:
         id: meta
         run: |
           IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/opsnerva"
-          TAGS="$IMAGE:main"
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            TAG_NAME="${GITHUB_REF#refs/tags/}"
-            TAGS="$IMAGE:$TAG_NAME,$IMAGE:latest"
-          fi
+          VERSION="$(git describe --tags --always)"
+          TAGS="$IMAGE:latest,$IMAGE:$VERSION"
           echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
 
       - name: Build and push Docker image
@@ -101,7 +98,7 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha
