@@ -1,4 +1,4 @@
-name: Docker image and ARM server binaries
+name: Docker image
 
 on:
   workflow_dispatch:
@@ -27,46 +27,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  binaries:
-    name: Build linux/${{ matrix.arch }} server
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-
-      - name: Build web frontend
-        run: |
-          npm ci
-          npm run build
-        working-directory: web
-
-      - name: Cross-compile Go server for linux/${{ matrix.arch }}
-        run: |
-          mkdir -p dist
-          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} \
-            go build -buildvcs=false -trimpath -ldflags="-s -w" \
-            -o dist/server-linux-${{ matrix.arch }} ./cmd/ops-agent
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: server-linux-${{ matrix.arch }}
-          path: dist/server-linux-${{ matrix.arch }}
-          if-no-files-found: error
-
   docker:
     name: Build and push multi-arch Docker image
     runs-on: ubuntu-latest
