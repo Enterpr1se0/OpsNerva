@@ -51,8 +51,6 @@ jobs:
           - name: Windows x64
             os: windows-latest
             run_tests: false
-            goos: windows
-            goarch: amd64
             artifact: opsnerva-windows-x64
             paths: web/src-tauri/target/release/bundle/nsis/*-setup.exe
     runs-on: ${{ matrix.os }}
@@ -106,12 +104,12 @@ jobs:
         working-directory: web
 
       - name: Build server binary
-        shell: bash
+        if: runner.os == 'Linux'
         run: |
           mkdir -p dist
           CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
             go build -buildvcs=false -trimpath -ldflags="-s -w" \
-            -o dist/opsnerva-server-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }} \
+            -o dist/opsnerva-server-${{ matrix.goos }}-${{ matrix.goarch }} \
             ./cmd/ops-agent
 
       - uses: actions/upload-artifact@v4
@@ -121,6 +119,7 @@ jobs:
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
         with:
           name: opsnerva-server-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/opsnerva-server-*
