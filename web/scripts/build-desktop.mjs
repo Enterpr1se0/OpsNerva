@@ -8,8 +8,16 @@ const tauriCli = join(webDir, 'node_modules', '@tauri-apps', 'cli', 'tauri.js')
 const bundles = process.platform === 'win32' ? 'nsis' : process.platform === 'linux' ? 'appimage,deb' : ''
 if (!bundles) throw new Error(`Unsupported desktop build platform: ${process.platform}`)
 
+// Optional cross-compilation target triple, e.g. --target aarch64-unknown-linux-gnu.
+// When set it is forwarded to `tauri build --target`, which sets
+// TAURI_ENV_TARGET_TRIPLE so prepare-sidecar.mjs builds the matching sidecar.
+const targetArg = process.argv[2] === '--target' ? process.argv[3] : undefined
+if (targetArg) console.log(`Cross-compiling for target triple: ${targetArg}`)
+
 const env = process.platform === 'linux' ? linuxBuildEnvironment() : process.env
-const result = spawnSync(process.execPath, [tauriCli, 'build', '--bundles', bundles], { cwd: webDir, env, stdio: 'inherit' })
+const args = [tauriCli, 'build', '--bundles', bundles]
+if (targetArg) args.push('--target', targetArg)
+const result = spawnSync(process.execPath, args, { cwd: webDir, env, stdio: 'inherit' })
 if (result.error) throw result.error
 process.exit(result.status ?? 1)
 
