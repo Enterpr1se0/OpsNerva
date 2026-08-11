@@ -1610,7 +1610,9 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 				}
 				return
 			}
-			next, ok := s.chatQueue.nextOrFinish(sessionID)
+			// QueryWithAttachments owns one complete Agent turn, including every
+			// model/tool iteration. Only inject queued input after it returns.
+			next, ok := s.chatQueue.nextAfterTurn(sessionID)
 			if !ok {
 				if completed == nil {
 					completed = &agent.Event{Type: "done", SessionID: sessionID}

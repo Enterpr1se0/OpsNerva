@@ -8,7 +8,7 @@ import (
 	"eino-ops-agent/internal/domain"
 )
 
-func TestChatMessageQueueConsumesMessagesInOrder(t *testing.T) {
+func TestChatMessageQueueAdvancesAfterTurnsInOrder(t *testing.T) {
 	queue := newChatMessageQueue()
 	queueCtx, started := queue.begin("session-test")
 	if !started {
@@ -28,15 +28,15 @@ func TestChatMessageQueueConsumesMessagesInOrder(t *testing.T) {
 	if snapshot := queue.snapshot("session-test"); len(snapshot) != 2 || snapshot[0].ID != first.ID || snapshot[1].ID != second.ID {
 		t.Fatalf("queue snapshot = %#v", snapshot)
 	}
-	next, ok := queue.nextOrFinish("session-test")
+	next, ok := queue.nextAfterTurn("session-test")
 	if !ok || next.ID != first.ID || string(next.Attachments[0].Data) != "png" {
 		t.Fatalf("first consumed message = %#v, ok = %t", next, ok)
 	}
-	next, ok = queue.nextOrFinish("session-test")
+	next, ok = queue.nextAfterTurn("session-test")
 	if !ok || next.ID != second.ID {
 		t.Fatalf("second consumed message = %#v, ok = %t", next, ok)
 	}
-	if _, ok := queue.nextOrFinish("session-test"); ok || !queue.active("session-test") {
+	if _, ok := queue.nextAfterTurn("session-test"); ok || !queue.active("session-test") {
 		t.Fatal("draining queue did not retain its driver until the terminal event")
 	}
 	if _, _, err := queue.enqueue("session-test", "late", nil); !errors.Is(err, errChatQueueInactive) {

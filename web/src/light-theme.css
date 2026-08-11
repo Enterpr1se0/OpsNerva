@@ -447,6 +447,10 @@
   color: var(--light-text-muted);
 }
 
+:root[data-theme='light'] .assistant-message-footer {
+  border-top-color: var(--light-border);
+}
+
 :root[data-theme='light'] .token-usage-line :where(em, span b) {
   color: var(--light-text-secondary);
 }

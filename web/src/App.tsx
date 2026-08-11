@@ -1032,11 +1032,21 @@ function SSHWorkspacePage({hosts,shells,onCreated,refresh,onError}:{hosts:Host[]
 	const [selectedShellID,setSelectedShellID]=useState(shells[0]?.id||'')
 	const [creating,setCreating]=useState(false)
 	const [connectingHostID,setConnectingHostID]=useState('')
-	const [closingShellID,setClosingShellID]=useState('')
+	const closingShellIDsRef=useRef(new Set<string>())
+	const [closingShellIDs,setClosingShellIDs]=useState<Set<string>>(new Set())
+	const [dismissedShellIDs,setDismissedShellIDs]=useState<Set<string>>(new Set())
+	const visibleShells=useMemo(()=>shells.filter(shell=>!dismissedShellIDs.has(shell.id)),[dismissedShellIDs,shells])
 	useEffect(()=>{
-		if(selectedShellID&&!shells.some(shell=>shell.id===selectedShellID))setSelectedShellID('')
-	},[selectedShellID,shells])
-	const selectedShell=shells.find(shell=>shell.id===selectedShellID)
+		if(selectedShellID&&!visibleShells.some(shell=>shell.id===selectedShellID))setSelectedShellID('')
+	},[selectedShellID,visibleShells])
+	useEffect(()=>{
+		setDismissedShellIDs(current=>{
+			const listed=new Set(shells.map(shell=>shell.id))
+			const next=new Set([...current].filter(id=>listed.has(id)))
+			return next.size===current.size?current:next
+		})
+	},[shells])
+	const selectedShell=visibleShells.find(shell=>shell.id===selectedShellID)
 	const selectedHost=hosts.find(host=>host.id===selectedShell?.host_id)
 	const created=(shell:SSHShell)=>{onCreated(shell);setSelectedShellID(shell.id);setCreating(false)}
 	const connect=async(host:Host)=>{
@@ -1047,21 +1057,31 @@ function SSHWorkspacePage({hosts,shells,onCreated,refresh,onError}:{hosts:Host[]
 		finally{setConnectingHostID('')}
 	}
 	const close=async(shell:SSHShell)=>{
-		if(closingShellID)return
-		setClosingShellID(shell.id)
+		if(closingShellIDsRef.current.has(shell.id))return
+		closingShellIDsRef.current.add(shell.id)
+		setClosingShellIDs(new Set(closingShellIDsRef.current))
+		const dismiss=()=>{
+			setDismissedShellIDs(current=>new Set(current).add(shell.id))
+			setSelectedShellID(current=>current===shell.id?'':current)
+		}
 		try{
 			await api.closeSSHShell(shell.id)
-			if(selectedShellID===shell.id)setSelectedShellID('')
-			await refresh()
-		}catch(err){onError(errorText(err))}
-		finally{setClosingShellID('')}
+			dismiss()
+			void refresh()
+		}catch(err){
+			if(errorStatus(err)===404){dismiss();void refresh()}
+			else onError(errorText(err))
+		}finally{
+			closingShellIDsRef.current.delete(shell.id)
+			setClosingShellIDs(new Set(closingShellIDsRef.current))
+		}
 	}
 	if(!hosts.length)return <div className="ssh-workspace-empty panel"><Server size={28}/><b>{t('connections.noHosts')}</b></div>
 	return <div className="ssh-workspace">
 		{selectedHost?<SFTPBrowser key={selectedHost.id} host={selectedHost}/>:<SSHHostHome hosts={hosts} connectingHostID={connectingHostID} onConnect={connect}/>}
 		<section className="ssh-workspace-terminal panel">
 			<header className="ssh-terminal-tabs">
-				<div><button type="button" className={`ssh-home-tab ${selectedShellID?'':'active'}`} onClick={()=>setSelectedShellID('')} title="Home" aria-label="Home"><Home size={16}/></button>{shells.map(shell=><div className={`ssh-terminal-tab ${shell.id===selectedShellID?'active':''}`} key={shell.id}><button type="button" className="ssh-terminal-tab-select" disabled={closingShellID===shell.id} onClick={()=>setSelectedShellID(shell.id)}><i className={shell.status}/><span>{shell.host_name||shell.host_id}</span><small>{shell.elevated?'root':shell.user}</small></button><button type="button" className="ssh-terminal-tab-close" disabled={!!closingShellID} onClick={()=>void close(shell)} title={t('sshShell.closeSession')} aria-label={t('sshShell.closeSession')}>{closingShellID===shell.id?<LoaderCircle className="spin" size={11}/>:<X size={12}/>}</button></div>)}</div>
+				<div><button type="button" className={`ssh-home-tab ${selectedShellID?'':'active'}`} onClick={()=>setSelectedShellID('')} title="Home" aria-label="Home"><Home size={16}/></button>{visibleShells.map(shell=>{const closing=closingShellIDs.has(shell.id);return <div className={`ssh-terminal-tab ${shell.id===selectedShellID?'active':''}`} key={shell.id}><button type="button" className="ssh-terminal-tab-select" disabled={closing} onClick={()=>setSelectedShellID(shell.id)}><i className={shell.status}/><span>{shell.host_name||shell.host_id}</span><small>{shell.elevated?'root':shell.user}</small></button><button type="button" className="ssh-terminal-tab-close" disabled={closing} onClick={event=>{event.stopPropagation();void close(shell)}} title={t('sshShell.closeSession')} aria-label={t('sshShell.closeSession')}>{closing?<LoaderCircle className="spin" size={11}/>:<X size={12}/>}</button></div>})}</div>
 				<button type="button" className="ssh-new-terminal" onClick={()=>setCreating(true)}><Plus size={14}/> {t('sshWorkspace.newTerminal')}</button>
 			</header>
 			<div className="ssh-terminal-stage">
@@ -1812,6 +1832,13 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	const pendingExplanationID=currentApprovals.find(item=>item.ai_review?.status==='pending')?.id||''
 	const sessionBusy=running||detachedRunning
 	const toolsRunning=entries.some(item=>item.kind==='tool'&&item.transient)
+	const latestAssistantEntryID=useMemo(()=>{
+		for(let index=entries.length-1;index>=0;index--){
+			const entry=entries[index]
+			if(entry.kind==='assistant'&&entry.lifecycle==='committed'&&entry.content)return entry.id
+		}
+		return ''
+	},[entries])
 	const selectedWorkspace=capabilities.workspaces.find(workspace=>workspace.id===workspaceID)||capabilities.workspaces[0]
 	useEffect(()=>{
 		if(!sessionBusy&&!toolsRunning){setWorkStatusIndex(0);return}
@@ -2243,7 +2270,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		<div className="conversation-view">
 			<div className="messages" ref={messagesRef} onWheel={trackUserScroll} onTouchMove={trackUserScroll} onPointerUp={trackUserScroll}>
 				{entries.length === 0 && <div className="empty-chat"><div className="radar"><Activity size={35}/></div><h2>{t('chat.emptyTitle')}</h2></div>}
-				{entries.map((entry) => <ChatBubble key={entry.id} entry={entry} runs={runs} hosts={hosts} onToolDisclosure={preserveToolDisclosurePosition}/>) }
+				{entries.map((entry) => <ChatBubble key={entry.id} entry={entry} showActions={entry.id===latestAssistantEntryID} runs={runs} hosts={hosts} onToolDisclosure={preserveToolDisclosurePosition}/>) }
 				{(sessionBusy||toolsRunning)&&<div className={`model-activity ${stopping?'stopping':''}`} role="status" aria-live="polite"><span className="model-activity-mark" aria-hidden="true">✻</span><b key={stopping||connectionRetry||modelRetry?'priority':workStatusIndex}>{workStatusLabel}</b></div>}
 			</div>
 			{tasks&&tasksExpanded&&<SessionTaskItems tasks={tasks}/>}
@@ -2424,12 +2451,12 @@ function SessionTaskItems({tasks}:{tasks:AgentTaskList}){
 	return <section className={`session-task-view ${blocked?'blocked':'active'}`}><ol className="session-task-items">{tasks.items.map(task=>{const blockers=unresolvedTaskDependencies(task,tasks.items);const taskBlocked=task.status==='pending'&&blockers.length>0;const status=taskBlocked?'blocked':task.status;return <li className={status} key={task.id}><span className="task-item-marker">{task.status==='completed'?<Check size={12}/>:task.status==='in_progress'?<LoaderCircle size={12}/>:taskBlocked?<ShieldAlert size={12}/>:task.id}</span><div title={task.description}><b>{task.subject}</b>{taskBlocked&&<small>#{blockers.join(', #')}</small>}</div><em>{task.owner||t(`statusLabels.${status}`,{defaultValue:status.replace('_',' ')})}</em></li>})}</ol></section>
 }
 
-const ChatBubble=memo(function ChatBubble({ entry, runs, hosts, onToolDisclosure }: {entry: ChatEntry;runs:Run[];hosts:Host[];onToolDisclosure:(summary:HTMLElement)=>void}) {
+const ChatBubble=memo(function ChatBubble({ entry, showActions, runs, hosts, onToolDisclosure }: {entry:ChatEntry;showActions:boolean;runs:Run[];hosts:Host[];onToolDisclosure:(summary:HTMLElement)=>void}) {
 	const {t}=useTranslation()
   if (entry.kind === 'tool') return <ToolEventCard entry={entry} runs={runs} hosts={hosts} onDisclosure={onToolDisclosure}/>
   if (entry.kind === 'reasoning') return <ReasoningCard content={entry.content} active={!!entry.active}/>
   if (entry.kind === 'assistant' && !entry.content) return null
-	return <div className={`bubble ${entry.kind} ${entry.status||''}`}><div className="avatar">{entry.kind === 'user' ? <UserRound size={17}/> : entry.kind === 'error' ? '!' : <Bot size={17}/>}</div><div><span className="bubble-label">{entry.kind === 'user' ? <>{t('chat.operator')}{entry.status==='failed'&&<em>{t('chat.responseFailed')}</em>}{entry.status==='pending'&&<em>{t('chat.processing')}</em>}</> : entry.kind === 'error' ? t('common.error') : 'OpsNerva'}</span>{entry.images&&entry.images.length>0&&<div className="message-images">{entry.images.map(image=><a href={image.url} target="_blank" rel="noopener noreferrer" title={`${image.name} · ${formatFileSize(image.sizeBytes)}`} key={image.id}><img src={image.url} alt={image.name}/><span>{image.name}</span></a>)}</div>}{entry.content&&<div className={`bubble-copy ${entry.kind==='assistant'&&entry.lifecycle!=='streaming'?'markdown-body':''}`}>{entry.kind==='assistant'&&entry.lifecycle!=='streaming'?<Markdown skipHtml remarkPlugins={[remarkGfm]} components={{a:({href,children})=><a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,img:({alt})=><span className="markdown-image-blocked">{t('chat.blockedImage',{alt:alt||t('common.image')})}</span>,pre:({children})=><CopyablePre>{children}</CopyablePre>}}>{entry.content}</Markdown>:entry.content}</div>}{entry.kind==='assistant'&&entry.lifecycle==='committed'&&entry.tokenUsage&&<TokenUsageLine usage={entry.tokenUsage}/>}</div></div>
+	return <div className={`bubble ${entry.kind} ${entry.status||''}`}><div className="avatar">{entry.kind === 'user' ? <UserRound size={17}/> : entry.kind === 'error' ? '!' : <Bot size={17}/>}</div><div><span className="bubble-label">{entry.kind === 'user' ? <>{t('chat.operator')}{entry.status==='failed'&&<em>{t('chat.responseFailed')}</em>}{entry.status==='pending'&&<em>{t('chat.processing')}</em>}</> : entry.kind === 'error' ? t('common.error') : 'OpsNerva'}</span>{entry.images&&entry.images.length>0&&<div className="message-images">{entry.images.map(image=><a href={image.url} target="_blank" rel="noopener noreferrer" title={`${image.name} · ${formatFileSize(image.sizeBytes)}`} key={image.id}><img src={image.url} alt={image.name}/><span>{image.name}</span></a>)}</div>}{entry.content&&<div className={`bubble-copy ${entry.kind==='assistant'&&entry.lifecycle!=='streaming'?'markdown-body':''}`}>{entry.kind==='assistant'&&entry.lifecycle!=='streaming'?<Markdown skipHtml remarkPlugins={[remarkGfm]} components={{a:({href,children})=><a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,img:({alt})=><span className="markdown-image-blocked">{t('chat.blockedImage',{alt:alt||t('common.image')})}</span>,pre:({children})=><CopyablePre>{children}</CopyablePre>}}>{entry.content}</Markdown>:entry.content}</div>}{showActions&&<div className="assistant-message-footer"><CopyButton value={entry.content} className="message-copy-button"/>{entry.tokenUsage&&<TokenUsageLine usage={entry.tokenUsage}/>}</div>}</div></div>
 })
 
 function TokenUsageLine({usage}:{usage:ChatTokenUsage}){

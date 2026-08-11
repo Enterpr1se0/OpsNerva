@@ -78,7 +78,9 @@ func (q *chatMessageQueue) enqueue(sessionID, message string, attachments []doma
 	return publicQueuedChatMessage(item), len(state.items), nil
 }
 
-func (q *chatMessageQueue) nextOrFinish(sessionID string) (queuedChatMessage, bool) {
+// nextAfterTurn advances the queue only after the current Agent turn has
+// returned. Enqueueing never mutates or preempts the in-flight ReAct loop.
+func (q *chatMessageQueue) nextAfterTurn(sessionID string) (queuedChatMessage, bool) {
 	if q == nil {
 		return queuedChatMessage{}, false
 	}
