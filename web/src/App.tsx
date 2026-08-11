@@ -2391,6 +2391,15 @@ function ReasoningCard({content,active}:{content:string;active:boolean}){
 }
 
 type JsonRecord = Record<string,unknown>
+const toolValuePreviewChars=8<<10
+const toolOutputPreviewChars=128<<10
+const toolDiffPreviewChars=128<<10
+const toolCollectionPreviewItems=100
+function previewText(value:string,limit=toolValuePreviewChars){
+	if(value.length<=limit)return value
+	const edge=Math.max(1,Math.floor(limit/2))
+	return `${value.slice(0,edge)}\n… ${i18n.t('tool.previewOmitted',{count:value.length-edge*2})} …\n${value.slice(-edge)}`
+}
 function toolLabel(value:string){return i18n.t(`toolNames.${value}`,{defaultValue:value})}
 function toolSummaryIcon(name:string|undefined){
 	if(name?.startsWith('Task'))return <ListChecks size={15}/>
@@ -2403,14 +2412,47 @@ function toolSummaryIcon(name:string|undefined){
 	return <FunctionSquare size={15}/>
 }
 function jsonRecord(value:unknown):JsonRecord|undefined{return value!==null&&typeof value==='object'&&!Array.isArray(value)?value as JsonRecord:undefined}
+function limitedRecordEntries(value:JsonRecord,limit=toolCollectionPreviewItems){
+	const entries:Array<[string,unknown]>=[]
+	let truncated=false
+	for(const key in value){
+		if(!Object.prototype.hasOwnProperty.call(value,key))continue
+		if(entries.length>=limit){truncated=true;break}
+		entries.push([key,value[key]])
+	}
+	return{entries,truncated}
+}
+function hasRecordEntries(value:JsonRecord){for(const key in value)if(Object.prototype.hasOwnProperty.call(value,key))return true;return false}
+function previewStructuredValue(value:unknown,depth=0):unknown{
+	if(typeof value==='string')return previewText(value)
+	if(value===null||typeof value!=='object')return value
+	if(depth>=4)return'…'
+	if(Array.isArray(value)){
+		const visible=value.slice(0,toolCollectionPreviewItems).map(item=>previewStructuredValue(item,depth+1))
+		if(value.length>visible.length)visible.push(i18n.t('tool.previewItemsOmitted',{count:value.length-visible.length}))
+		return visible
+	}
+	const {entries,truncated}=limitedRecordEntries(value as JsonRecord)
+	const result=Object.fromEntries(entries.map(([key,item])=>[key,previewStructuredValue(item,depth+1)]))
+	if(truncated)result['…']=i18n.t('tool.moreItemsOmitted')
+	return result
+}
 function parseRecord(value:string):JsonRecord{try{return jsonRecord(JSON.parse(value))||{value:JSON.parse(value)}}catch{return{value}}}
 function requestFromRun(run?:Run):JsonRecord|undefined{if(!run)return;try{return jsonRecord(JSON.parse(run.request_json))}catch{return}}
 function runAutoApproved(run?:Run){return run?.ai_review?.kind==='automatic_approval'&&run.ai_review.status==='completed'&&run.ai_review.decision==='allow'}
 function textValue(value:unknown){return typeof value==='string'?value:''}
 function shellArg(value:string){return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value)?value:JSON.stringify(value)}
-function fullProgram(request:JsonRecord){const program=textValue(request.program);const args=Array.isArray(request.args)?request.args.map(value=>String(value)):[];return [program,...args].filter(Boolean).map(shellArg).join(' ')}
-function compactScript(script:string){const lines=script.split(/\r?\n/).map(line=>line.trim()).filter(Boolean);if(!lines.length)return i18n.t('tool.bashScript');return lines.length===1?lines[0]:i18n.t('tool.moreLines',{line:lines[0],count:lines.length-1})}
-function latestOutput(value:string,limit=3){return value.trimEnd().split(/\r?\n/).filter(line=>line.trim()!=='').slice(-limit).map(line=>Array.from(line).length>180?`${Array.from(line).slice(0,180).join('')}…`:line).join('\n')}
+function fullProgram(request:JsonRecord,full=false){
+	const program=full?textValue(request.program):previewText(textValue(request.program))
+	const source=Array.isArray(request.args)?request.args:[]
+	const selected=full?source:source.slice(0,toolCollectionPreviewItems)
+	const args=selected.map(value=>full?String(value):previewText(String(value)))
+	if(!full&&source.length>selected.length)args.push(i18n.t('tool.previewItemsOmitted',{count:source.length-selected.length}))
+	const command=[program,...args].filter(Boolean).map(shellArg).join(' ')
+	return full?command:previewText(command,toolOutputPreviewChars)
+}
+function compactScript(script:string){const source=script.length>toolOutputPreviewChars?script.slice(0,toolOutputPreviewChars):script,lines=source.split(/\r?\n/).map(line=>line.trim()).filter(Boolean);if(!lines.length)return i18n.t('tool.bashScript');const first=previewText(lines[0],180);return lines.length===1&&source.length===script.length?first:i18n.t('tool.moreLines',{line:first,count:Math.max(1,lines.length-1)})}
+function latestOutput(value:string,limit=3){const tail=value.length>toolOutputPreviewChars?value.slice(-toolOutputPreviewChars):value;return tail.trimEnd().split(/\r?\n/).filter(line=>line.trim()!=='').slice(-limit).map(line=>previewText(line,180)).join('\n')}
 function formatDuration(value:unknown,run?:Run){if(typeof value==='number'&&Number.isFinite(value))return value>=1e9?`${(value/1e9).toFixed(2)} s`:`${(value/1e6).toFixed(1)} ms`;if(run?.completed_at){const ms=Date.parse(run.completed_at)-Date.parse(run.started_at);if(Number.isFinite(ms))return ms>=1000?`${(ms/1000).toFixed(2)} s`:`${ms} ms`}return'—'}
 function numberValue(value:unknown){return typeof value==='number'&&Number.isFinite(value)?value:0}
 function sshTunnelRoute(host:string,remoteHost:string,remotePort:number,localPort:number,automatic='auto'){
@@ -2423,7 +2465,17 @@ function hostIdentity(hosts:Host[],hostID:string){
 	const host=hosts.find(item=>item.id===hostID||item.name===hostID)
 	return {name:host?.name||'',id:host?.id||hostID}
 }
-function recordArray(value:unknown){return Array.isArray(value)?value.map(jsonRecord).filter((item):item is JsonRecord=>!!item):[]}
+function recordArray(value:unknown,fromEnd=false){
+	if(!Array.isArray(value))return[]
+	const selected=fromEnd?value.slice(-toolCollectionPreviewItems):value.slice(0,toolCollectionPreviewItems)
+	return selected.map(jsonRecord).filter((item):item is JsonRecord=>!!item)
+}
+function recordTableRows(value:JsonRecord){
+	const {entries,truncated}=limitedRecordEntries(value,toolCollectionPreviewItems-1)
+	const rows:Array<Array<unknown>>=entries.map(([key,item])=>[key,item])
+	if(truncated)rows.push(['…',i18n.t('tool.moreItemsOmitted')])
+	return rows
+}
 
 type DiffRow={kind:'header'|'hunk'|'add'|'delete'|'context'|'meta';oldLine?:number;newLine?:number;text:string}
 function parseDiffRows(diff:string):DiffRow[]{
@@ -2440,7 +2492,7 @@ function parseDiffRows(diff:string):DiffRow[]{
 }
 
 function DiffViewer({change}:{change:JsonRecord}){
-	const {t}=useTranslation(),diff=textValue(change.diff),rows=parseDiffRows(diff)
+	const {t}=useTranslation(),diff=textValue(change.diff),rows=parseDiffRows(previewText(diff,toolDiffPreviewChars))
 	return <section className="diff-viewer"><header><span><FileText size={14}/>{t('tool.fileEdit')}</span><div><em className="add">+{numberValue(change.additions)}</em><em className="delete">-{numberValue(change.deletions)}</em><CopyButton value={diff}/></div></header><div className="diff-scroll" role="table" aria-label={t('tool.diff')}><div className="diff-lines">{rows.map((row,index)=><div className={`diff-line ${row.kind}`} role="row" key={index}><span className="old-line">{row.oldLine??''}</span><span className="new-line">{row.newLine??''}</span><code>{row.text||' '}</code></div>)}</div></div></section>
 }
 
@@ -2483,15 +2535,17 @@ function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run
 	const shellAction=textValue(toolArguments?.action)||(requestMode==='ssh_shell_start'||requestMode==='workspace_shell_start'?'start':requestMode==='workspace_shell'?'run':'')
 	const shellOperation=shellTool&&shellAction!=='run'
 	const shellID=textValue(toolArguments?.shell_id)||textValue(shellPayload?.id)
-	const shellEvents=[...recordArray(payload.events),...recordArray(resultPayload?.events)]
-	const shellChunks=[...recordArray(payload.chunks),...recordArray(resultPayload?.chunks)]
-	const shellChunkStdout=shellChunks.filter(chunk=>textValue(chunk.stream)==='stdout').map(chunk=>textValue(chunk.content)).join('')
-	const shellChunkStderr=shellChunks.filter(chunk=>textValue(chunk.stream)==='stderr').map(chunk=>textValue(chunk.content)).join('')
-	const shellChunkOutput=shellChunks.map(chunk=>textValue(chunk.content)).join('')
+	const shellEvents=[...recordArray(payload.events,true),...recordArray(resultPayload?.events,true)]
+	const shellChunks=[...recordArray(payload.chunks,true),...recordArray(resultPayload?.chunks,true)]
+	const recentShellChunks=shellChunks.slice(-toolCollectionPreviewItems)
+	const shellChunkStdout=recentShellChunks.filter(chunk=>textValue(chunk.stream)==='stdout').map(chunk=>previewText(textValue(chunk.content),toolOutputPreviewChars)).join('')
+	const shellChunkStderr=recentShellChunks.filter(chunk=>textValue(chunk.stream)==='stderr').map(chunk=>previewText(textValue(chunk.content),toolOutputPreviewChars)).join('')
+	const shellChunkOutput=recentShellChunks.map(chunk=>previewText(textValue(chunk.content),toolOutputPreviewChars)).join('')
 	const shellHasMore=payload.has_more===true||resultPayload?.has_more===true
 	const shellOutput=shellChunkOutput||textValue(payload.output)||textValue(resultPayload?.output)||textValue(payload.recent_output)||textValue(resultPayload?.recent_output)||shellEvents
 		.filter(event=>['stdout','stderr'].includes(textValue(event.stream)))
-		.map(event=>textValue(event.content))
+		.slice(-toolCollectionPreviewItems)
+		.map(event=>previewText(textValue(event.content),toolOutputPreviewChars))
 		.join('')||entry.liveStdout||''
 	const shellInput=textValue(toolArguments?.input)
 	const shellInputDisplay=`${shellInput}${toolArguments?.submit===true&&!/[\r\n]$/.test(shellInput)?' ↵':''}`
@@ -2531,7 +2585,7 @@ function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run
 	const fileTarget=`${workspaceID?`${workspaceID}:`:''}${filePath}`
 	const eventToolLabel=shellOperation?shellActionLabel:structuredFileOperation?t(fileSearchMode?(workspaceID?'toolNames.workspace_file_search_mode':'toolNames.ssh_file_search_mode'):(workspaceID?'toolNames.workspace_file_read':'toolNames.ssh_file_read')):toolLabel(entry.tool||'')
 	const transferSummary=tunnelRoute||shellSummary||(workspaceUpload?`${workspaceID}:${relativePath} → ${hostName}:${remotePath}`:workspaceDownload?`${hostName}:${remotePath} → ${workspaceID}:${relativePath}`:sshTransfer?`${sourceHostName}:${sourcePath} → ${hostName}:${remotePath}`:'')
-  const planSteps=Array.isArray(payload.steps)?payload.steps.map(jsonRecord).filter((step):step is JsonRecord=>!!step):[]
+  const planSteps=Array.isArray(payload.steps)?payload.steps.slice(0,toolCollectionPreviewItems).map(jsonRecord).filter((step):step is JsonRecord=>!!step):[]
   const planSummary=textValue(payload.goal)||textValue(planSteps.find(step=>textValue(step.status)==='in_progress'||textValue(step.status)==='blocked')?.title)
 	const genericArgumentSummary=executionTool?'':toolArgumentSummary(entry.tool,toolArguments)
 	const operation=filePath||(script?t('tool.bashScript'):program||genericArgumentSummary||eventToolLabel||t('tool.result'))
@@ -2552,9 +2606,9 @@ function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run
 	  const outputPreview=status==='in_progress'?latestOutput(previewContent,1):''
 		const commandSummary=transferSummary||(fileSearchMode?`${fileTarget} · ${searchMatchModeLabel} pattern=${JSON.stringify(searchPattern)}`:filePath)||program||(script?compactScript(script):'')||planSummary||genericArgumentSummary||operation
 	const summaryLabel=eventToolLabel||entry.tool||t('common.functions')
-	const historyRuns=[...recordArray(payload.runs),...recordArray(resultPayload?.runs)]
+	const historyRuns=[...recordArray(payload.runs),...recordArray(resultPayload?.runs)].slice(0,toolCollectionPreviewItems)
 	const historyHostIDs=[...new Set(historyRuns.map(item=>textValue(item.host_id)).filter(Boolean))]
-	const listedHosts=[...recordArray(payload.hosts),...recordArray(resultPayload?.hosts)]
+	const listedHosts=[...recordArray(payload.hosts),...recordArray(resultPayload?.hosts)].slice(0,toolCollectionPreviewItems)
 	const targets:ToolTarget[]=[]
 	if(sshTransfer){
 		if(sourceHost.id)targets.push({kind:'host',label:t('tool.sourceHost'),name:sourceHost.name,id:sourceHost.id})
@@ -2596,17 +2650,17 @@ function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run
 	const duration=formatDuration(payload.duration??resultPayload?.duration,run)
 	const autoApproved=payload.auto_approved===true||resultPayload?.auto_approved===true||runAutoApproved(run)
 		  return <details className={`tool-event tool-event-rich ${status}`} open={expanded}>
-			<summary onClick={event=>{event.preventDefault();onDisclosure(event.currentTarget);setExpanded(value=>!value)}}><div className="tool-summary-icon">{toolSummaryIcon(entry.tool)}</div><div className="tool-summary-copy"><div className="tool-summary-heading"><b>{summaryLabel}</b>{targets.length>0&&<div className="tool-summary-targets">{targets.map((target,index)=><span className={`tool-target-chip tool-target-${target.kind}`} title={`${target.label}: ${[target.name,target.id].filter(Boolean).join(' · ')}`} key={`${target.kind}_${target.id||target.name}_${index}`}>{target.kind==='host'?<Server size={11}/>:target.kind==='workspace'?<FolderOpen size={11}/>:<ListChecks size={11}/>} {(targets.length>1||target.kind==='scope')&&<em>{target.label}</em>}<b>{target.name||target.id}</b></span>)}</div>}</div>{commandSummary!==summaryLabel&&<code title={commandSummary}>{commandSummary}</code>}</div><div className="tool-summary-statuses">{autoApproved&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}<span className={`tool-status ${status}`} key={status}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight size={14}/>{status==='in_progress'&&<div className={`tool-live-progress ${transferTotal>0?'determinate':''}`} role="progressbar" aria-valuemin={transferTotal>0?0:undefined} aria-valuemax={transferTotal>0?transferTotal:undefined} aria-valuenow={transferTotal>0?transferred:undefined}><i><em style={transferTotal>0?{width:`${transferPercent}%`}:undefined}/></i><span>{transferTotal>0?`${formatFileSize(transferred)} / ${formatFileSize(transferTotal)}`:entry.liveOutputStream?.toUpperCase()||''}</span><time>{elapsed}</time></div>}{outputPreview&&<div className={`tool-summary-preview ${previewStream==='stderr'?'stderr':''}`}><span>{shellAction==='output'?shellActionLabel:(previewStream||'stdout').toUpperCase()}</span><pre>{outputPreview}</pre></div>}</summary>
-    <div className="tool-event-body">
-		  {shellPrimaryAction&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellPrimaryContent||'—'}/><pre>{shellPrimaryContent||'—'}</pre></div></section>}
-		  {shellOutputAction&&!shellChunks.length&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellOutput||'—'}/><pre>{shellOutput||'—'}</pre></div></section>}
-		  {!executionTool&&toolArguments&&Object.keys(toolArguments).length>0&&<CompactTable title={t('tool.actualParameters')} columns={[t('tool.parameter'),t('tool.value')]} rows={Object.entries(toolArguments).map(([key,value])=>[key,safeToolArgument(value,key)])}/>}
+			<summary onClick={event=>{event.preventDefault();onDisclosure(event.currentTarget);setExpanded(value=>!value)}}><div className="tool-summary-icon">{toolSummaryIcon(entry.tool)}</div><div className="tool-summary-copy"><div className="tool-summary-heading"><b>{summaryLabel}</b>{targets.length>0&&<div className="tool-summary-targets">{targets.map((target,index)=><span className={`tool-target-chip tool-target-${target.kind}`} title={`${target.label}: ${[target.name,target.id].filter(Boolean).join(' · ')}`} key={`${target.kind}_${target.id||target.name}_${index}`}>{target.kind==='host'?<Server size={11}/>:target.kind==='workspace'?<FolderOpen size={11}/>:<ListChecks size={11}/>} {(targets.length>1||target.kind==='scope')&&<em>{target.label}</em>}<b>{target.name||target.id}</b></span>)}</div>}</div>{commandSummary!==summaryLabel&&<code title={previewText(commandSummary)}>{previewText(commandSummary)}</code>}</div><div className="tool-summary-statuses">{autoApproved&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}<span className={`tool-status ${status}`} key={status}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight size={14}/>{status==='in_progress'&&<div className={`tool-live-progress ${transferTotal>0?'determinate':''}`} role="progressbar" aria-valuemin={transferTotal>0?0:undefined} aria-valuemax={transferTotal>0?transferTotal:undefined} aria-valuenow={transferTotal>0?transferred:undefined}><i><em style={transferTotal>0?{width:`${transferPercent}%`}:undefined}/></i><span>{transferTotal>0?`${formatFileSize(transferred)} / ${formatFileSize(transferTotal)}`:entry.liveOutputStream?.toUpperCase()||''}</span><time>{elapsed}</time></div>}{outputPreview&&<div className={`tool-summary-preview ${previewStream==='stderr'?'stderr':''}`}><span>{shellAction==='output'?shellActionLabel:(previewStream||'stdout').toUpperCase()}</span><pre>{outputPreview}</pre></div>}</summary>
+		{expanded&&<div className="tool-event-body">
+		  {shellPrimaryAction&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellPrimaryContent||'—'}/><pre>{previewText(shellPrimaryContent||'—',toolOutputPreviewChars)}</pre></div></section>}
+		  {shellOutputAction&&!shellChunks.length&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellOutput||'—'}/><pre>{previewText(shellOutput||'—',toolOutputPreviewChars)}</pre></div></section>}
+		  {!executionTool&&toolArguments&&hasRecordEntries(toolArguments)&&<CompactTable title={t('tool.actualParameters')} columns={[t('tool.parameter'),t('tool.value')]} rows={limitedRecordEntries(toolArguments).entries.map(([key,value])=>[key,safeToolArgument(value,key)])}/>}
       {request?<div className="tool-execution-layout">
         <section className="tool-command-pane">
 		  <div className="tool-command-head"><span>{shellOperation?t('sshShell.interactive'):tunnelOperation?t('tunnels.forwarding'):structuredFileOperation?t(fileSearchMode?'tool.searchOperation':'tool.readOperation'):filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}{request.elevated===true&&<em><ShieldAlert size={12}/>sudo / root</em>}</div>
-			  <div className="tool-command-block"><CopyButton value={script||program||commandSummary}/>{shellOperation?<pre>{shellSummary}</pre>:tunnelOperation?<pre>{tunnelRoute||requestMode}</pre>:workspaceUpload?<pre>workspace_upload {workspaceID}:{relativePath} → {hostName}:{remotePath}</pre>:workspaceDownload?<pre>workspace_download {hostName}:{remotePath} → {workspaceID}:{relativePath}</pre>:sshTransfer?<pre>{sourceHostName}:{sourcePath} → {hostName}:{remotePath}</pre>:structuredFileOperation?<pre>{fileSearchMode?'search':'read'} {fileTarget}</pre>:filePath?<pre>{requestMode} {workspaceID?`${workspaceID}:`:''}{filePath}</pre>:script?<pre>{script}</pre>:program?<pre><span className="prompt-sign">$</span> {program}</pre>:<pre>{requestMode} {remotePath}</pre>}</div>
+			  <div className="tool-command-block"><CopyButton value={script||(program?()=>fullProgram(request,true):commandSummary)}/>{shellOperation?<pre>{shellSummary}</pre>:tunnelOperation?<pre>{tunnelRoute||requestMode}</pre>:workspaceUpload?<pre>workspace_upload {workspaceID}:{relativePath} → {hostName}:{remotePath}</pre>:workspaceDownload?<pre>workspace_download {hostName}:{remotePath} → {workspaceID}:{relativePath}</pre>:sshTransfer?<pre>{sourceHostName}:{sourcePath} → {hostName}:{remotePath}</pre>:structuredFileOperation?<pre>{fileSearchMode?'search':'read'} {fileTarget}</pre>:filePath?<pre>{requestMode} {workspaceID?`${workspaceID}:`:''}{filePath}</pre>:script?<pre>{previewText(script,toolOutputPreviewChars)}</pre>:program?<pre><span className="prompt-sign">$</span> {previewText(program)}</pre>:<pre>{requestMode} {remotePath}</pre>}</div>
 		  {change&&textValue(change.diff)&&<DiffViewer change={change}/>}
-		  {env&&Object.keys(env).length>0&&<CompactTable title={t('tool.environment')} columns={[t('tool.key'),t('tool.value')]} rows={Object.entries(env).map(([key,value])=>[key,String(value)])}/>}
+		  {env&&hasRecordEntries(env)&&<CompactTable title={t('tool.environment')} columns={[t('tool.key'),t('tool.value')]} rows={recordTableRows(env)}/>}
         </section>
         <aside className="tool-context-pane">
 		  <dl className="tool-context-grid"><div><dt>{t('tool.permission')}</dt><dd>{workspaceShellBackend==='host'?t('tool.hostAuthority'):workspaceShellBackend==='sandbox'?t('tool.sandbox'):request.elevated===true?t('tool.managedSudo'):t('tool.normalUser')}</dd></div>{exitCode!=='—'&&<div><dt>{t('tool.exitCode')}</dt><dd>{exitCode}</dd></div>}{duration!=='—'&&<div><dt>{t('tool.duration')}</dt><dd>{duration}</dd></div>}{(waitDeadlineReached||shellHasMore)&&<div><dt>{t('common.status')}</dt><dd>{waitDeadlineReached?t('tool.waitDeadline'):t('tool.moreOutput')}</dd></div>}</dl>
@@ -2619,27 +2673,36 @@ function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run
 	  {instruction&&<div className="tool-instruction"><ShieldAlert size={15}/><div><b>{t('tool.operatorInstruction')}</b><p>{instruction}</p></div></div>}
 	  {sshTransfer&&transferTotal>0&&<div className="file-transfer-progress" role="progressbar" aria-valuemin={0} aria-valuemax={transferTotal} aria-valuenow={transferred}><div><span>{t('tool.transferProgress')}</span><b>{formatFileSize(transferred)} / {formatFileSize(transferTotal)}</b></div><i><em style={{width:`${transferPercent}%`}}/></i></div>}
 	  {shellOperation&&shellChunks.length>0?<ShellOutputChunks chunks={shellChunks} live={status==='in_progress'}/>:((stdout&&(!shellOutputAction||shellChunks.length>0))||stderr)&&<div className="tool-output-grid">{stdout&&(!shellOutputAction||shellChunks.length>0)&&<ToolOutputPanel kind="stdout" label={outputLabel('STDOUT',stdoutOmitted)} content={stdout} live={status==='in_progress'}/>} {stderr&&<ToolOutputPanel kind="stderr" label={outputLabel(t('tool.stderrResult'),stderrOmitted)} content={stderr} live={status==='in_progress'}/>}</div>}
-	  <details className="tool-raw"><summary>{t('tool.rawJson')}</summary><CopyablePre>{JSON.stringify(rawPayload,null,2)}</CopyablePre></details>
-    </div>
+	  <LazyJSONDetails value={rawPayload}/>
+    </div>}
   </details>
 }
 
 function ToolOutputPanel({kind,label,content,live}:{kind:'stdout'|'stderr';label:string;content:string;live:boolean}){
 	const outputRef=useRef<HTMLPreElement>(null)
 	const stickToBottom=useRef(true)
+	const preview=previewText(content,toolOutputPreviewChars)
 	useEffect(()=>{
 		const output=outputRef.current
 		if(live&&output&&stickToBottom.current)output.scrollTop=output.scrollHeight
-	},[content,live])
-	return <div className={`tool-output ${kind} ${live?'live':''}`}><span>{label}</span><CopyButton value={content}/><pre ref={outputRef} onScroll={event=>{const output=event.currentTarget;stickToBottom.current=output.scrollHeight-output.scrollTop-output.clientHeight<32}}>{content}</pre></div>
+	},[preview,live])
+	return <div className={`tool-output ${kind} ${live?'live':''}`}><span>{label}</span><CopyButton value={content}/><pre ref={outputRef} onScroll={event=>{const output=event.currentTarget;stickToBottom.current=output.scrollHeight-output.scrollTop-output.clientHeight<32}}>{preview}</pre></div>
 }
 
 function ShellOutputChunks({chunks,live}:{chunks:JsonRecord[];live:boolean}){
 	const {t}=useTranslation()
-	return <div className="shell-output-chunks">{chunks.map((chunk,index)=>{
+	const visible=chunks.slice(-toolCollectionPreviewItems)
+	return <div className="shell-output-chunks">{visible.map((chunk,index)=>{
 		const stream=textValue(chunk.stream)==='stderr'?'stderr':'stdout'
 		return <ToolOutputPanel key={`${numberValue(chunk.first_sequence)||numberValue(chunk.sequence)}_${index}`} kind={stream} label={stream==='stderr'?t('tool.stderrResult'):'STDOUT'} content={textValue(chunk.content)} live={live}/>
 	})}</div>
+}
+
+function LazyJSONDetails({value}:{value:JsonRecord}){
+	const {t}=useTranslation()
+	const [open,setOpen]=useState(false)
+	const formatted=open?JSON.stringify(previewStructuredValue(value),null,2):''
+	return <details className="tool-raw" open={open} onToggle={event=>setOpen(event.currentTarget.open)}><summary>{t('tool.rawJson')}</summary>{open&&<CopyablePre value={()=>JSON.stringify(value,null,2)}>{previewText(formatted,toolOutputPreviewChars)}</CopyablePre>}</details>
 }
 
 function FileMetadataPanel({file}:{file:JsonRecord}){
@@ -2649,22 +2712,44 @@ function FileMetadataPanel({file}:{file:JsonRecord}){
 }
 
 function CompactTable({title,columns,rows}:{title:string;columns:string[];rows:Array<Array<unknown>>}){
-  return <div className="tool-compact-table"><span>{title}</span><div className="tool-table-scroll"><table><thead><tr>{columns.map(column=><th key={column}>{column}</th>)}</tr></thead><tbody>{rows.map((row,index)=><tr key={index}>{row.map((value,column)=><td key={column}>{displayValue(value)}</td>)}</tr>)}</tbody></table></div></div>
+  const visibleRows=rows.slice(0,toolCollectionPreviewItems)
+  if(rows.length>visibleRows.length)visibleRows.push([i18n.t('tool.previewItemsOmitted',{count:rows.length-visibleRows.length})])
+  return <div className="tool-compact-table"><span>{title}</span><div className="tool-table-scroll"><table><thead><tr>{columns.map(column=><th key={column}>{column}</th>)}</tr></thead><tbody>{visibleRows.map((row,index)=><tr key={index}>{row.map((value,column)=><td key={column}>{displayValue(value)}</td>)}</tr>)}</tbody></table></div></div>
 }
 
-function displayValue(value:unknown):string{
+function displayValue(value:unknown,depth=0):string{
   if(value===null||value===undefined||value==='')return'—'
-  if(Array.isArray(value))return value.map(item=>displayValue(item)).join(', ')
+	if(typeof value==='string')return previewText(value)
+	if(depth>=4)return'…'
+  if(Array.isArray(value)){
+		const visible=value.slice(0,toolCollectionPreviewItems).map(item=>displayValue(item,depth+1))
+		if(value.length>visible.length)visible.push(i18n.t('tool.previewItemsOmitted',{count:value.length-visible.length}))
+		return previewText(visible.join(', '))
+	}
   const record=jsonRecord(value)
-  if(record)return Object.entries(record).map(([key,item])=>`${key}=${displayValue(item)}`).join(' · ')
+  if(record){
+		const {entries,truncated}=limitedRecordEntries(record),visible=entries.map(([key,item])=>`${key}=${displayValue(item,depth+1)}`)
+		if(truncated)visible.push(i18n.t('tool.moreItemsOmitted'))
+		return previewText(visible.join(' · '))
+	}
   return String(value)
 }
 
-function safeToolArgument(value:unknown,key=''):unknown{
+function safeToolArgument(value:unknown,key='',depth=0):unknown{
 	if(/(?:api[_-]?key|private[_-]?key|authorization|cookie|credential|passphrase|password|secret|token)/i.test(key))return'********'
-	if(Array.isArray(value))return value.map(item=>safeToolArgument(item))
+	if(typeof value==='string')return previewText(value)
+	if(depth>=4)return'…'
+	if(Array.isArray(value)){
+		const visible=value.slice(0,toolCollectionPreviewItems).map(item=>safeToolArgument(item,'',depth+1))
+		if(value.length>visible.length)visible.push(i18n.t('tool.previewItemsOmitted',{count:value.length-visible.length}))
+		return visible
+	}
 	const record=jsonRecord(value)
-	if(record)return Object.fromEntries(Object.entries(record).map(([childKey,item])=>[childKey,safeToolArgument(item,childKey)]))
+	if(record){
+		const {entries,truncated}=limitedRecordEntries(record),visible:Array<[string,unknown]>=entries.map(([childKey,item])=>[childKey,safeToolArgument(item,childKey,depth+1)])
+		if(truncated)visible.push(['…',i18n.t('tool.moreItemsOmitted')])
+		return Object.fromEntries(visible)
+	}
 	return value
 }
 
@@ -2695,7 +2780,7 @@ function formatLiveDuration(seconds:number){
 
 function GenericToolResult({payload}:{payload:JsonRecord}){
   const hidden=new Set(['_display','stdout','stderr','operator_instruction','ok','status','code','message','next_action','run_id','duration','exit_code','auto_approved','tasks'])
-  const entries=Object.entries(payload).filter(([key])=>!hidden.has(key))
+	const entries=limitedRecordEntries(payload).entries.filter(([key])=>!hidden.has(key))
 	if(!entries.length)return null
   const scalars=entries.filter(([,value])=>value===null||typeof value==='string'||typeof value==='number'||typeof value==='boolean')
   const arrays=entries.filter(([,value])=>Array.isArray(value))
@@ -2708,13 +2793,15 @@ function GenericToolResult({payload}:{payload:JsonRecord}){
 }
 
 function StructuredArray({label,values}:{label:string;values:unknown[]}){
-  const records=values.map(jsonRecord).filter((item):item is JsonRecord=>!!item)
-  if(records.length===values.length&&records.length>0){const columns=[...new Set(records.flatMap(record=>Object.keys(record)))].slice(0,10);return <CompactTable title={`${label.replaceAll('_',' ')} · ${records.length} ITEMS`} columns={columns.map(column=>column.replaceAll('_',' '))} rows={records.map(record=>columns.map(column=>record[column]))}/>} 
-  return <div className="tool-array-section"><span>{label.replaceAll('_',' ')}</span><div>{values.map((value,index)=><code key={index}>{displayValue(value)}</code>)}</div></div>
+	const visible=values.slice(0,toolCollectionPreviewItems)
+  const records=visible.map(jsonRecord).filter((item):item is JsonRecord=>!!item)
+	if(records.length===visible.length&&records.length>0){const columns=[...new Set(records.flatMap(record=>Object.keys(record)))].slice(0,10);return <CompactTable title={`${label.replaceAll('_',' ')} · ${values.length} ITEMS`} columns={columns.map(column=>column.replaceAll('_',' '))} rows={records.map(record=>columns.map(column=>record[column]))}/>}
+	return <div className="tool-array-section"><span>{label.replaceAll('_',' ')}</span><div>{visible.map((value,index)=><code key={index}>{displayValue(value)}</code>)}{values.length>visible.length&&<code>{i18n.t('tool.previewItemsOmitted',{count:values.length-visible.length})}</code>}</div></div>
 }
 
 function StructuredObject({label,value}:{label:string;value:JsonRecord}){
-  return <section className="tool-object-section"><h4>{label.replaceAll('_',' ')}</h4><dl className="tool-generic-grid">{Object.entries(value).map(([key,item])=><div key={key}><dt>{key.replaceAll('_',' ')}</dt><dd>{displayValue(item)}</dd></div>)}</dl></section>
+	const {entries,truncated}=limitedRecordEntries(value)
+  return <section className="tool-object-section"><h4>{label.replaceAll('_',' ')}</h4><dl className="tool-generic-grid">{entries.map(([key,item])=><div key={key}><dt>{key.replaceAll('_',' ')}</dt><dd>{displayValue(item)}</dd></div>)}{truncated&&<div><dt>…</dt><dd>{i18n.t('tool.moreItemsOmitted')}</dd></div>}</dl></section>
 }
 
 function ReviewList({title,items,tone}:{title:string;items?:string[];tone?:string}){
@@ -2758,6 +2845,7 @@ function ApprovalDialog({
   >("");
   const [explanationBusy, setExplanationBusy] = useState(false);
   const [error, setError] = useState("");
+  const [requestExpanded, setRequestExpanded] = useState(false);
   let request: Record<string, unknown> = {};
   try {
     request = JSON.parse(approval.request_json);
@@ -2765,6 +2853,7 @@ function ApprovalDialog({
     request = { request: approval.request_json };
   }
   const script = textValue(request.script);
+  const program = fullProgram(request);
   const change = jsonRecord(request.change);
   const workspaceID = textValue(request.workspace_id);
   const filePath =
@@ -2868,7 +2957,7 @@ function ApprovalDialog({
       ? `${workspaceID}:${relativePath} → ${targetHost}:${remotePath}`
     : workspaceDownload
       ? `${targetHost}:${remotePath} → ${workspaceID}:${relativePath}`
-    : fullProgram(request) ||
+    : program ||
       script ||
       `${requestMode} ${filePath}${fileSearchApproval ? ` · ${searchMatchModeLabel} pattern=${JSON.stringify(textValue(request.search_pattern))}` : ""}`.trim() ||
       t("approval.pendingOperation");
@@ -3045,7 +3134,7 @@ function ApprovalDialog({
               rows={fileApprovalParameters}
             />
           )}
-          {change&&textValue(change.diff)?<DiffViewer change={change}/>:<CopyablePre value={script||operation} preClassName="approval-command-preview">{script || `${tunnelApproval||interactiveShellApproval?'':'$ '}${operation}`}</CopyablePre>}
+          {change&&textValue(change.diff)?<DiffViewer change={change}/>:<CopyablePre value={script||(program&&operation===program?()=>fullProgram(request,true):operation)} preClassName="approval-command-preview">{previewText(script || `${tunnelApproval||interactiveShellApproval?'':'$ '}${operation}`,toolOutputPreviewChars)}</CopyablePre>}
           <dl>
             <div>
               <dt>
@@ -3128,9 +3217,9 @@ function ApprovalDialog({
             {error}
           </div>
         )}
-        <details className="approval-request-detail">
+        <details className="approval-request-detail" open={requestExpanded} onToggle={event=>setRequestExpanded(event.currentTarget.open)}>
           <summary>{t("approval.requestDetails")}</summary>
-          <CopyablePre>{JSON.stringify(request, null, 2)}</CopyablePre>
+          {requestExpanded&&<CopyablePre value={()=>JSON.stringify(request,null,2)}>{JSON.stringify(previewStructuredValue(request),null,2)}</CopyablePre>}
         </details>
         <div className="approval-choice-grid">
           <button
@@ -3347,6 +3436,7 @@ function ModelsPage({providers,proxies,showAddresses,onToggleAddresses,refresh}:
 
 function AuditRunDetail({run,req,hosts}:{run:Run;req:JsonRecord;hosts:Host[]}){
 	const {t}=useTranslation()
+	const [requestExpanded,setRequestExpanded]=useState(false)
 	const script=textValue(req.script)
 	const program=textValue(req.program)?fullProgram(req):''
 	const mode=textValue(req.mode)
@@ -3372,12 +3462,12 @@ function AuditRunDetail({run,req,hosts}:{run:Run;req:JsonRecord;hosts:Host[]}){
 	const tunnelRoute=tunnelMode?sshTunnelRoute(destinationHost.name||destinationHost.id,textValue(req.remote_host),numberValue(req.remote_port),numberValue(req.local_port),t('tunnels.automaticPort')):''
 	const shellTarget=`${mode==='workspace_shell_start'?`${workspaceID}:${textValue(req.cwd)||'.'}`:destinationHost.name||destinationHost.id} · PTY`
 	const fileTarget=`${workspaceID?`${workspaceID}:`:''}${filePath}`
-	const commandText=shellMode?shellTarget:tunnelMode?tunnelRoute:workspaceUpload?`workspace_upload ${workspaceID}:${relativePath} → ${destinationHost.name||destinationHost.id}:${remotePath}`:workspaceDownload?`workspace_download ${destinationHost.name||destinationHost.id}:${remotePath} → ${workspaceID}:${relativePath}`:sshTransfer?`${[sourceHost.name||sourceHost.id,sourcePath].filter(Boolean).join(':')} → ${destinationHost.name||destinationHost.id}:${remotePath}`:searchMode||readMode?`${searchMode?'search':'read'} ${fileTarget}`:script?script:program?program:filePath?`${mode} ${fileTarget}`:JSON.stringify(req,null,2)
+	const commandText=shellMode?shellTarget:tunnelMode?tunnelRoute:workspaceUpload?`workspace_upload ${workspaceID}:${relativePath} → ${destinationHost.name||destinationHost.id}:${remotePath}`:workspaceDownload?`workspace_download ${destinationHost.name||destinationHost.id}:${remotePath} → ${workspaceID}:${relativePath}`:sshTransfer?`${[sourceHost.name||sourceHost.id,sourcePath].filter(Boolean).join(':')} → ${destinationHost.name||destinationHost.id}:${remotePath}`:searchMode||readMode?`${searchMode?'search':'read'} ${fileTarget}`:script?script:program?program:filePath?`${mode} ${fileTarget}`:toolLabel(run.tool_name||'')
 	return <div className="audit-run-detail">
 		<div className="audit-run-primary">
 			<section className="audit-operation-pane">
 				<div className="tool-command-head"><span>{shellMode?shellModeLabel:tunnelMode?t('tunnels.forwarding'):searchMode?t('tool.searchOperation'):readMode?t('tool.readOperation'):workspaceTransfer||sshTransfer||filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{(workspaceShellBackend||req.elevated===true)&&<div className="audit-operation-badges">{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}{req.elevated===true&&<em><ShieldAlert size={12}/>sudo / root</em>}</div>}</div>
-				<div className="tool-command-block"><CopyButton value={commandText}/><pre>{program&&commandText===program?<><span className="prompt-sign">$</span> {program}</>:commandText}</pre></div>
+				<div className="tool-command-block"><CopyButton value={program&&commandText===program?()=>fullProgram(req,true):commandText}/><pre>{program&&commandText===program?<><span className="prompt-sign">$</span> {previewText(program)}</>:previewText(commandText,toolOutputPreviewChars)}</pre></div>
 				{change&&textValue(change.diff)&&<DiffViewer change={change}/>}
 			</section>
 			<aside className="audit-run-context">
@@ -3392,13 +3482,13 @@ function AuditRunDetail({run,req,hosts}:{run:Run;req:JsonRecord;hosts:Host[]}){
 			</aside>
 		</div>
 		{(run.stdout_redacted||run.stderr_redacted||run.error)&&<div className="tool-output-grid">{run.stdout_redacted&&<ToolOutputPanel kind="stdout" label="STDOUT · REDACTED" content={run.stdout_redacted} live={false}/>} {run.stderr_redacted&&<ToolOutputPanel kind="stderr" label="STDERR · REDACTED" content={run.stderr_redacted} live={false}/>} {run.error&&!run.stderr_redacted&&<ToolOutputPanel kind="stderr" label={t('common.error')} content={run.error} live={false}/>}</div>}
-		<details className="audit-request-detail">
+		<details className="audit-request-detail" open={requestExpanded} onToggle={event=>setRequestExpanded(event.currentTarget.open)}>
 			<summary><Braces size={14}/><span>{t('tool.normalizedRequest')}</span><ChevronRight size={14}/></summary>
-			<div className="audit-request-detail-body">
+			{requestExpanded&&<div className="audit-request-detail-body">
 				<dl className="audit-request-meta"><div><dt>{t('common.operation')}</dt><dd>{toolLabel(run.tool_name||'')}</dd></div><div><dt>{t('tool.runId')}</dt><dd>{run.id}</dd></div></dl>
-				{env&&Object.keys(env).length>0&&<CompactTable title={t('tool.environment')} columns={[t('tool.key'),t('tool.value')]} rows={Object.entries(env).map(([key,value])=>[key,String(value)])}/>}
-				<CopyablePre>{JSON.stringify(req,null,2)}</CopyablePre>
-			</div>
+				{env&&hasRecordEntries(env)&&<CompactTable title={t('tool.environment')} columns={[t('tool.key'),t('tool.value')]} rows={recordTableRows(env)}/>}
+				<CopyablePre value={()=>JSON.stringify(req,null,2)}>{JSON.stringify(previewStructuredValue(req),null,2)}</CopyablePre>
+			</div>}
 		</details>
 	</div>
 }

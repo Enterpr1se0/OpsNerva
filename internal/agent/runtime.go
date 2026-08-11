@@ -25,9 +25,10 @@ import (
 )
 
 var (
-	ErrUnavailable   = errors.New("agent is unavailable: configure and activate a model provider in the Web UI or set OPENAI_API_KEY")
-	ErrSessionBusy   = errors.New("an agent run is already active for this session")
-	ErrEmptyResponse = errors.New("model returned an empty response")
+	ErrUnavailable     = errors.New("agent is unavailable: configure and activate a model provider in the Web UI or set OPENAI_API_KEY")
+	ErrSessionBusy     = errors.New("an agent run is already active for this session")
+	ErrEmptyResponse   = errors.New("model returned an empty response")
+	ErrRequestTooLarge = errors.New("model request was too large; oversized context was reduced for later turns, so continue with a smaller request")
 )
 
 const interruptedRunMessage = domain.AgentInterruptedMessage
@@ -321,6 +322,10 @@ func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st
 		// "" for chunk-concat stability; restore them before tool invocation.
 		middlewares = append([]compose.ToolMiddleware{{Invokable: normalizeEmptyToolArguments}}, middlewares...)
 	}
+	toolReductionMiddleware, err := newToolReductionMiddleware(ctx, descriptors)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build Eino tool reduction middleware: %w", err)
+	}
 	agentInstance, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name: "ops-nerva", Description: "Operate registered Linux hosts and the current Workspace.",
 		Instruction: hostPlatformSystemPrompt(systemPrompt, goruntime.GOOS, goruntime.GOARCH), Model: chatModel, MaxIterations: maxIterations,
@@ -329,7 +334,7 @@ func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st
 			Tools: tools, ExecuteSequentially: true, UnknownToolsHandler: unknownToolResult,
 			ToolCallMiddlewares: middlewares,
 		}},
-		Handlers: []adk.ChatModelAgentMiddleware{plantaskMiddleware, skillMiddleware},
+		Handlers: []adk.ChatModelAgentMiddleware{toolReductionMiddleware, plantaskMiddleware, skillMiddleware},
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("create Eino agent: %w", err)
@@ -1155,7 +1160,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 				emitModelRetry(retryErr)
 				continue
 			}
-			return "", event.Err
+			return "", normalizeModelRequestError(event.Err)
 		}
 		if event.Action != nil {
 			markActivity()
@@ -1216,7 +1221,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 						resetAssistantMessage(assistantMessageID, role)
 					}
 					stream.Close()
-					return "", recvErr
+					return "", normalizeModelRequestError(recvErr)
 				}
 				if message == nil {
 					continue

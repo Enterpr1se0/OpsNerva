@@ -1712,7 +1712,7 @@ func TestBuildModelContextPreservesTurnBoundaries(t *testing.T) {
 	}
 }
 
-func TestBuildModelContextPreservesCompleteToolResults(t *testing.T) {
+func TestBuildModelContextCompactsOversizedToolResults(t *testing.T) {
 	first := "first-start\n" + strings.Repeat("甲", 50_000) + "\nfirst-end"
 	second := "second-start\n" + strings.Repeat("乙", 50_000) + "\nsecond-end"
 	history := []domain.ChatMessage{
@@ -1725,13 +1725,32 @@ func TestBuildModelContextPreservesCompleteToolResults(t *testing.T) {
 		t.Fatalf("model messages = %#v", messages)
 	}
 	results := messages[1].Content
-	for _, expected := range []string{first, second} {
+	if len(results) >= len(first)+len(second) {
+		t.Fatalf("oversized tool results were not compacted: result_bytes=%d", len(results))
+	}
+	for _, expected := range []string{"first-start", "first-end", "second-start", "second-end", `"_context_reduced":true`} {
 		if !strings.Contains(results, expected) {
-			t.Fatalf("complete tool results were not preserved: result_bytes=%d expected_bytes=%d", len(results), len(expected))
+			t.Fatalf("compacted tool results omitted %q: %s", expected, results)
 		}
 	}
 	if stats.ToolResults != 2 || stats.IncludedTurns != 1 {
 		t.Fatalf("context stats = %#v", stats)
+	}
+}
+
+func TestBuildModelContextUsesBoundedRecentHistory(t *testing.T) {
+	history := []domain.ChatMessage{
+		{Role: "user", Content: "old request", Status: "completed"},
+		{Role: "assistant", Content: strings.Repeat("o", modelHistoryMaxBytes/2), Status: "completed"},
+		{Role: "user", Content: "recent request", Status: "completed"},
+		{Role: "assistant", Content: strings.Repeat("r", modelHistoryMaxBytes/2), Status: "completed"},
+	}
+	messages, stats := buildModelContext(history, "continue")
+	if len(messages) != 3 || messages[0].Content != "recent request" || messages[2].Content != "continue" {
+		t.Fatalf("bounded model history = %#v", messages)
+	}
+	if stats.StoredTurns != 2 || stats.IncludedTurns != 1 || stats.Bytes > modelHistoryMaxBytes+len("continue") {
+		t.Fatalf("bounded context stats = %#v", stats)
 	}
 }
 

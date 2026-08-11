@@ -67,6 +67,27 @@ func isRetryableModelRequestError(err error) bool {
 	return false
 }
 
+func isModelRequestTooLargeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *modelopenai.APIError
+	if errors.As(err, &apiErr) && apiErr.HTTPStatusCode == 413 {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "status code: 413") || strings.Contains(message, "status: 413") ||
+		strings.Contains(message, "http 413") || strings.Contains(message, "request entity too large") ||
+		strings.Contains(message, "request payload is too large")
+}
+
+func normalizeModelRequestError(err error) error {
+	if isModelRequestTooLargeError(err) {
+		return ErrRequestTooLarge
+	}
+	return err
+}
+
 func generateModelWithRetry(ctx context.Context, chatModel model.ToolCallingChatModel, messages []*schema.Message) (*schema.Message, error) {
 	agentInstance, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name:             "model-connection-test",

@@ -139,7 +139,17 @@ func buildMultimodalModelContextForProvider(history []domain.ChatMessage, curren
 			prepared = append(prepared, item)
 		}
 	}
-	selected := prepared
+	selectedStart := len(prepared)
+	selectedBytes := 0
+	for index := len(prepared) - 1; index >= 0; index-- {
+		turnBytes := preparedModelTurnBytes(prepared[index])
+		if selectedBytes+turnBytes > modelHistoryMaxBytes {
+			break
+		}
+		selectedStart = index
+		selectedBytes += turnBytes
+	}
+	selected := prepared[selectedStart:]
 
 	stats.Images = len(current.Attachments)
 	for _, attachment := range current.Attachments {
@@ -319,10 +329,24 @@ func formatPersistedToolResults(tools []domain.ChatMessage) (string, int) {
 			toolName = "unknown"
 		}
 		content := strings.TrimSpace(stripToolContextMetadata(toolResult.ToolName, toolResult.Content))
+		content = compactModelPayload(content, modelStoredToolResultMaxBytes, true)
 		record := fmt.Sprintf("Tool: %s\nResult:\n%s", toolName, content)
 		records = append(records, record)
 	}
 	return persistedToolResultsHeader + "\n\n" + strings.Join(records, "\n\n") + "\n\n" + persistedToolResultsTrailer, len(records)
+}
+
+func preparedModelTurnBytes(turn preparedModelTurn) int {
+	total := len(turn.user) + len(turn.assistant) + len(turn.reasoning)
+	for _, message := range turn.providerReasoning {
+		if message != nil {
+			total += len(message.Content) + len(message.ReasoningContent)
+		}
+	}
+	for _, attachment := range turn.attachments {
+		total += (len(attachment.Data)*4 + 2) / 3
+	}
+	return total
 }
 
 func containsInternalContextMarker(content string) bool {

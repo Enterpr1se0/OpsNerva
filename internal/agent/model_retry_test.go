@@ -85,6 +85,19 @@ func TestModelRequestRetryPolicy(t *testing.T) {
 	}
 }
 
+func TestModelRequestTooLargeIsActionableAndNotRetryable(t *testing.T) {
+	err := errors.New("[NodeRunError] error, status code: 413, status: 413 Request Entity Too Large, message: Request payload is too large")
+	if isRetryableModelRequestError(err) {
+		t.Fatal("HTTP 413 was marked retryable")
+	}
+	if normalized := normalizeModelRequestError(err); !errors.Is(normalized, ErrRequestTooLarge) {
+		t.Fatalf("normalized error = %v", normalized)
+	}
+	if !isModelRequestTooLargeError(&modelopenai.APIError{HTTPStatusCode: 413}) {
+		t.Fatal("structured HTTP 413 was not detected")
+	}
+}
+
 func TestModelRequestRetryConfigUsesEinoBackoff(t *testing.T) {
 	config := modelRequestRetryConfig()
 	if config.MaxRetries != modelRequestMaxRetries || config.ShouldRetry == nil {
