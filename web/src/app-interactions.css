@@ -374,7 +374,7 @@ body {
 .tool-live-progress,
 .tool-summary-preview,
 .file-transfer-progress,
-.llm-work-status {
+.model-activity {
   animation: app-inline-status-in var(--motion-view) var(--motion-ease) both;
 }
 

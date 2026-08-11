@@ -2624,6 +2624,18 @@ func (s *Service) SearchRunsMatching(ctx context.Context, filter domain.RunSearc
 	}
 }
 
+func (s *Service) SearchRunSummariesMatchingPage(ctx context.Context, filter domain.RunSearchFilter, matchMode domain.FileSearchMatchMode) (domain.RunSearchPage, error) {
+	filter.SessionID = SessionIDFromContext(ctx)
+	switch matchMode {
+	case "", domain.FileSearchLiteral:
+		return s.store.SearchRunSummariesFilteredPage(ctx, filter)
+	case domain.FileSearchRegex:
+		return s.store.SearchRunSummariesRegexFilteredPage(ctx, filter.Query, filter)
+	default:
+		return domain.RunSearchPage{}, fmt.Errorf("invalid history match_mode: use literal or regex")
+	}
+}
+
 // RetryApprovalExplanation reruns the tool-free command explainer for an
 // existing pending approval. It never decides the approval or
 // executes the operation.

@@ -1,4 +1,4 @@
-import type { AgentEvent, Approval, ApprovalExecutionResult, ChatContextCompressionResult, ChatSession, ChatState, Health, Host, HostInput, LLMToolCatalog, ManagedSkill, MCPOAuthStart, MCPServer, MCPServerInput, MCPTestResult, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestJob, ModelTestResult, Proxy, ProxyInput, ProxyTestResult, Run, ServerLogResponse, SFTPFileList, SFTPMutationResult, SSHShell, SSHShellList, SSHShellSnapshot, SSHShellStartInput, SSHTunnel, SSHTunnelList, SSHTunnelStartInput, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchResponse, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceInput, WorkspaceUploadResult } from './types'
+import type { AgentEvent, Approval, ApprovalExecutionResult, ChatContextCompressionResult, ChatSession, ChatState, Health, Host, HostInput, LLMToolCatalog, ManagedSkill, MCPOAuthStart, MCPServer, MCPServerInput, MCPTestResult, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestJob, ModelTestResult, Proxy, ProxyInput, ProxyTestResult, QueuedChatMessage, Run, ServerLogResponse, SFTPFileList, SFTPMutationResult, SSHShell, SSHShellList, SSHShellSnapshot, SSHShellStartInput, SSHTunnel, SSHTunnelList, SSHTunnelStartInput, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchResponse, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceInput, WorkspaceUploadResult } from './types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	const multipart=typeof FormData!=='undefined'&&init?.body instanceof FormData
@@ -124,11 +124,12 @@ export const api = {
     return request<ServerLogResponse>(`/api/v1/logs?${params}`)
   },
   chatSessions: () => requestList<ChatSession>('/api/v1/chat/sessions?limit=50'),
-  chatState: (id: string) => request<ChatState>(`/api/v1/chat/${encodeURIComponent(id)}/state`),
+	chatState: (id: string) => request<ChatState>(`/api/v1/chat/${encodeURIComponent(id)}/state`),
+	queueChatMessage: (id:string,message:string,images:File[]) => {const body=new FormData();body.set('message',message);for(const image of images)body.append('images',image,image.name);return request<{item:QueuedChatMessage;position:number}>(`/api/v1/chat/${encodeURIComponent(id)}/queue`,{method:'POST',body})},
 	compressChatContext: (id:string) => request<ChatContextCompressionResult>(`/api/v1/chat/${encodeURIComponent(id)}/context/compress`, {method:'POST',body:'{}'}),
 	setChatSessionWorkspace: (id:string,workspaceId:string) => request<ChatSession>(`/api/v1/chat/${encodeURIComponent(id)}/workspace`, { method:'PUT', body:JSON.stringify({workspace_id:workspaceId}) }),
 	renameChatSession: (id:string,title:string) => request<ChatSession>(`/api/v1/chat/${encodeURIComponent(id)}/title`, { method:'PUT', body:JSON.stringify({title}) }),
-	cancelChatSession: (id: string) => request<{cancelled:boolean;cancelled_tools:number;rejected_approvals:number}>(`/api/v1/chat/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: '{}' }),
+	cancelChatSession: (id: string) => request<{cancelled:boolean;cancelled_tools:number;cancelled_queued:number;rejected_approvals:number}>(`/api/v1/chat/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: '{}' }),
   deleteChatSession: (id: string) => request<void>(`/api/v1/chat/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 }
 

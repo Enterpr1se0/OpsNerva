@@ -90,6 +90,17 @@ func TestChatEventHubReplaysMessageLifecycleWithStableID(t *testing.T) {
 	}
 }
 
+func TestQueuedTurnCompletionDoesNotCloseChatEventStream(t *testing.T) {
+	hub := newChatEventHub()
+	hub.publish("session_test", agent.Event{Type: "turn_done"})
+	hub.publish("session_test", agent.Event{Type: "queue_started", MessageID: "queue_1"})
+	replay, _, done, unsubscribe := hub.subscribe("session_test", 0)
+	defer unsubscribe()
+	if done || len(replay) != 2 {
+		t.Fatalf("queued turn replay = %#v, done = %t", replay, done)
+	}
+}
+
 func TestChatEventsStreamReturnsReplayWithSSEEventIDs(t *testing.T) {
 	hub := newChatEventHub()
 	hub.publish("session_test", agent.Event{Type: "session"})

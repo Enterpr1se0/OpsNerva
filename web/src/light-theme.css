@@ -455,21 +455,16 @@
   color: var(--light-border-strong);
 }
 
-:root[data-theme='light'] :where(.thinking, .thinking.background-agent) {
+:root[data-theme='light'] .model-activity {
   color: var(--light-text-muted);
 }
 
-:root[data-theme='light'] .thinking span {
-  background: var(--light-accent);
+:root[data-theme='light'] .model-activity-mark {
+  color: var(--light-accent);
 }
 
-:root[data-theme='light'] .llm-work-status {
-  border-color: var(--light-info-border);
-  background: var(--light-info-soft);
-  color: var(--light-info);
-}
-
-:root[data-theme='light'] .agent-stop-button {
+:root[data-theme='light'] .input-row > button.composer-stop-button,
+:root[data-theme='light'] .input-row > button.composer-stop-button:hover:not(:disabled) {
   border-color: var(--light-danger-border);
   background: var(--light-danger-soft);
   color: var(--light-danger);

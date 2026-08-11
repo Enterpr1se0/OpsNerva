@@ -10,17 +10,18 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import '@xterm/xterm/css/xterm.css'
 import {
   Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronLeft, ChevronRight, CircleDot, Copy, Cpu, Edit3, Eye, EyeOff, FileText, FolderOpen, FolderOutput, FunctionSquare, History, Home, ImagePlus, KeyRound, LockKeyhole, Maximize2, Minimize2, Minus, Monitor, Moon, PanelLeftClose, PanelLeftOpen, Sun,
-  Cable, Download, ListChecks, LoaderCircle, LogOut, Plus, Power, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, Square, TerminalSquare, Trash2, UploadCloud, UserRound, X, Zap,
+  Cable, Download, ListChecks, ListPlus, LoaderCircle, LogOut, Plus, Power, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, Square, TerminalSquare, Trash2, UploadCloud, UserRound, X, Zap,
 } from 'lucide-react'
 import { api, chatAttachmentURL, reconnectChatStream, sftpDownloadURL, sshShellEventsURL, streamChat, workspaceDownloadURL, workspaceFileEventsURL } from './api'
 import { CopyButton, CopyablePre } from './CopyButton'
 import { AppSelect, ModelCombobox } from './Controls'
 import i18n, { localeFor, type SupportedLanguage } from './i18n'
 import { TextFileEditor } from './TextFileEditor'
-import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, ChatMessage, ChatSession, ChatTokenUsage, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, Run, ServerLogEntry, SFTPFileEntry, SSHShell, SSHShellEvent, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
+import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, ChatMessage, ChatSession, ChatTokenUsage, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, QueuedChatMessage, Run, ServerLogEntry, SFTPFileEntry, SSHShell, SSHShellEvent, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
 
 type Page = 'chat' | 'ssh' | 'config' | 'extensions' | 'audit' | 'logs'
 type ChatEntryImage = {id:string;name:string;mimeType:string;sizeBytes:number;url:string}
+const workStatusKeys=['chat.cooking','chat.pondering','chat.brewing','chat.weaving','chat.polishing','chat.crunching'] as const
 type PendingChatImage = {id:string;file:File;url:string}
 type ChatEntry = { id: string; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; tool?: string; toolCallId?:string; runId?:string; transient?:boolean; startedAt?:number; liveStdout?:string; liveStderr?:string; liveOutput?:string; liveOutputStream?:'stdout'|'stderr'; transferredBytes?:number; transferTotalBytes?:number; images?:ChatEntryImage[]; tokenUsage?:ChatTokenUsage; active?: boolean; lifecycle?:'streaming'|'committed'; status?: 'pending' | 'completed' | 'failed' }
 type ModelRetryState = {attempt:number;max:number}
@@ -1783,12 +1784,14 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
   const [workspacePanelCollapsed,setWorkspacePanelCollapsed]=useState(recalledWorkspacePanelCollapsed)
   const [running, setRunning] = useState(false)
   const [detachedRunning,setDetachedRunning]=useState(false)
+	const [queuedMessages,setQueuedMessages]=useState<QueuedChatMessage[]>([])
+	const [queueingMessage,setQueueingMessage]=useState(false)
 	const [stopping,setStopping]=useState(false)
 	const [compressingContext,setCompressingContext]=useState(false)
 	const [modelRetry,setModelRetry]=useState<ModelRetryState|null>(null)
 	const [connectionRetry,setConnectionRetry]=useState<ConnectionRetryState|null>(null)
 	const [retryClock,setRetryClock]=useState(0)
-  const [reasoningSeen, setReasoningSeen] = useState(false)
+	const [workStatusIndex,setWorkStatusIndex]=useState(0)
 		const [contextUsage,setContextUsage]=useState<ContextUsage>({tokens:0,window:activeContextWindow})
 		useEffect(()=>setContextUsage(current=>current.tokens===0?{...current,window:activeContextWindow}:current),[activeContextWindow])
   const [tasks,setTasks]=useState<AgentTaskList|null>(null)
@@ -1810,6 +1813,11 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	const sessionBusy=running||detachedRunning
 	const toolsRunning=entries.some(item=>item.kind==='tool'&&item.transient)
 	const selectedWorkspace=capabilities.workspaces.find(workspace=>workspace.id===workspaceID)||capabilities.workspaces[0]
+	useEffect(()=>{
+		if(!sessionBusy&&!toolsRunning){setWorkStatusIndex(0);return}
+		const timer=window.setInterval(()=>setWorkStatusIndex(current=>(current+1)%workStatusKeys.length),2600)
+		return()=>window.clearInterval(timer)
+	},[sessionBusy,toolsRunning])
 	useEffect(()=>{if(!sessionId)setContextUsage({tokens:0,window:activeContextWindow})},[activeContextWindow,sessionId])
 	useEffect(()=>{if(!selectedWorkspace)return;if(workspaceID!==selectedWorkspace.id)setWorkspaceID(selectedWorkspace.id);rememberWorkspace(selectedWorkspace.id)},[selectedWorkspace,workspaceID])
 	useEffect(()=>{if(!tasks)setTasksExpanded(false);else setTasksExpanded(true)},[tasks?.session_id,!!tasks])
@@ -1855,7 +1863,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
     try {
       const state = await api.chatState(id)
       if(sessionLoadRef.current!==requestID)return
-	      setEntries(historyEntries(state.messages||[],id));setDetachedRunning(!!state.active);setStopping(false);setModelRetry(null);setConnectionRetry(null);setTasks(state.tasks?.items?.length?state.tasks:null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setWorkspaceID(state.workspace_id||'');setBoundWorkspaceID(state.workspace_id||'')
+	      setEntries(historyEntries(state.messages||[],id));setDetachedRunning(!!state.active);setQueuedMessages(state.queued_messages||[]);setQueueingMessage(false);setStopping(false);setModelRetry(null);setConnectionRetry(null);setTasks(state.tasks?.items?.length?state.tasks:null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setWorkspaceID(state.workspace_id||'');setBoundWorkspaceID(state.workspace_id||'')
       setSessionId(id); rememberSession(id); setHistoryError('')
 	} catch (err) { if(sessionLoadRef.current===requestID)setHistoryError(errorText(err)) }
 	finally { if(sessionLoadRef.current===requestID)setLoadingSession('') }
@@ -1915,7 +1923,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
     detachActiveStream()
     sessionLoadRef.current=''
     setLoadingSession('')
-	    stickToLatest.current=true;setSessionId('');setBoundWorkspaceID('');setEntries([]); setMessage('');clearPendingImages(); setHistoryError(''); setReasoningSeen(false);setContextUsage({tokens:0,window:activeContextWindow});setDetachedRunning(false);setStopping(false);setCompressingContext(false);setModelRetry(null);setConnectionRetry(null);setTasks(null); rememberSession(newSessionMarker)
+	    stickToLatest.current=true;setSessionId('');setBoundWorkspaceID('');setEntries([]); setMessage('');clearPendingImages(); setHistoryError('');setContextUsage({tokens:0,window:activeContextWindow});setDetachedRunning(false);setQueuedMessages([]);setQueueingMessage(false);setStopping(false);setCompressingContext(false);setModelRetry(null);setConnectionRetry(null);setTasks(null); rememberSession(newSessionMarker)
     void refreshSessions()
   }
 
@@ -1927,7 +1935,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
       return
     }
     detachActiveStream()
-		setDetachedRunning(false);setStopping(false);setConnectionRetry(null)
+		setDetachedRunning(false);setQueuedMessages([]);setQueueingMessage(false);setStopping(false);setConnectionRetry(null)
     void loadSession(id)
     void refreshSessions()
   }
@@ -1980,7 +1988,15 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		if(frame.type==='session'||frame.type==='title')void refreshSessions()
 		if(frame.type==='retry'){
 			setModelRetry({attempt:frame.retry_attempt||1,max:frame.retry_max||1})
-		}else if(['approval','reasoning','tool','tool_output','message_start','message','message_commit','message_reset','done','interrupted','model_error','error'].includes(frame.type))setModelRetry(null)
+		}else if(['approval','reasoning','tool','tool_output','message_start','message','message_commit','message_reset','queued','queue_started','turn_done','done','interrupted','model_error','error'].includes(frame.type))setModelRetry(null)
+		if(frame.type==='queued'&&frame.message_id){
+			setQueuedMessages(current=>current.some(item=>item.id===frame.message_id)?current:[...current,{id:frame.message_id!,message:frame.content||'',attachment_count:frame.attachment_count||0,created_at:new Date().toISOString()}])
+		}
+		if(frame.type==='queue_started'&&frame.message_id){
+			setQueuedMessages(current=>current.filter(item=>item.id!==frame.message_id))
+			setEntries(old=>[...old.map(deactivateReasoning),{id:`queued_${frame.message_id}`,kind:'user',content:frame.content||'',status:'pending'}])
+		}
+		if(frame.type==='turn_done')setEntries(old=>old.map(item=>item.kind==='user'&&item.status==='pending'?{...deactivateReasoning(item),status:'completed' as const}:deactivateReasoning(item)))
 		if(frame.type==='approval'){
 			setEntries(old=>updateToolStatusByRunID(old.map(item=>updateUser(item,'completed')),'approval_required',frame.run_id))
 			setApprovalNotice('')
@@ -1997,7 +2013,6 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			setEntries(old=>old.map(item=>item.id===frame.message_id?{...item,tokenUsage:usage}:item))
 		}
 		if(frame.type==='reasoning'&&frame.content){
-			setReasoningSeen(true)
 			const reasoningID=`reasoning_${frame.segment_id||'current'}`
 			setEntries(old=>{
 				const existing=old.find(item=>item.id===reasoningID)
@@ -2034,13 +2049,15 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		if(frame.type==='message_reset'&&frame.message_id)setEntries(old=>resetAssistantLifecycle(old,frame.message_id!))
 		if(frame.type==='done'){
 			setStopping(false)
-			setEntries(old=>old.map(item=>updateUser(item,'completed')))
+			setQueuedMessages([])
+			setEntries(old=>old.map(item=>item.kind==='user'&&item.status==='pending'?{...item,status:'completed' as const}:item))
 		}
 		if(frame.type==='interrupted'){
 			setStopping(false)
-			setEntries(old=>[...old.map(item=>updateUser(deactivateReasoning(item),'failed')),{id:clientId(),kind:'assistant',content:frame.content||t('chat.stopped'),lifecycle:'committed'}])
+			setQueuedMessages([])
+			setEntries(old=>[...old.map(item=>{const next=deactivateReasoning(item);return next.kind==='user'&&next.status==='pending'?{...next,status:'failed' as const}:next}),{id:clientId(),kind:'assistant',content:frame.content||t('chat.stopped'),lifecycle:'committed'}])
 		}
-		if(frame.type==='model_error'||frame.type==='error')setEntries(old=>[...old.map(item=>updateUser(item,'failed')),{id:clientId(),kind:'error',content:frame.error||t('chat.agentError')}])
+		if(frame.type==='model_error'||frame.type==='error'){setQueuedMessages([]);setEntries(old=>[...old.map(item=>item.kind==='user'&&item.status==='pending'?{...item,status:'failed' as const}:item),{id:clientId(),kind:'error',content:frame.error||t('chat.agentError')}])}
 	},[activeContextWindow,onWorkspaceShellStarted,refreshApprovals,refreshConnections,refreshSessions,t])
 
 	useEffect(()=>{
@@ -2060,6 +2077,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 					const state=await api.chatState(sessionId)
 					if(!active)return
 					setTasks(state.tasks?.items?.length?state.tasks:null)
+					setQueuedMessages(state.queued_messages||[])
 					setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)})
 					setBoundWorkspaceID(state.workspace_id||'')
 					if(!state.active){
@@ -2069,7 +2087,6 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 						return
 					}
 					setEntries(reconnectBaseEntries(state.messages||[],sessionId))
-					setReasoningSeen(false)
 					setConnectionRetry(null)
 					setHistoryError('')
 					await reconnectChatStream(sessionId,0,frame=>{if(active)handleAgentFrame(frame)},controller.signal)
@@ -2097,6 +2114,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 				const state=await api.chatState(sessionId)
 				if(!active)return
 				setEntries(old=>mergePersistedToolEntries(state.messages||[],sessionId,old))
+				setQueuedMessages(state.queued_messages||[])
 				setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)})
 				if(state.active&&!running)setDetachedRunning(true)
 				if(!state.active&&!(state.tool_calls||[]).some(call=>call.status==='running'))setStopping(false)
@@ -2119,7 +2137,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
     stickToLatest.current=true
 		setSessionId(querySessionID);rememberSession(querySessionID)
 		reconnectErrorRef.current=''
-		setApprovalNotice('');setReasoningSeen(false);setStopping(false);setCompressingContext(false);setModelRetry(null);setConnectionRetry(null);setRunning(true)
+		setApprovalNotice('');setStopping(false);setCompressingContext(false);setModelRetry(null);setConnectionRetry(null);setRunning(true)
 	    const entryImages=queryImages.map(image=>({id:image.id,name:image.file.name,mimeType:image.file.type,sizeBytes:image.file.size,url:image.url}))
 	    setEntries((old) => [...old.filter(item=>item.kind!=='error'), { id: userEntryID, kind: 'user', content: query, images:entryImages, status:'pending' }])
 	    try {
@@ -2148,14 +2166,29 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
       setRunning(false)
 		setStopping(false)
 		setCompressingContext(false)
-		if(querySessionID){try{const state=await api.chatState(querySessionID);if(!isAttached())return;setDetachedRunning(!!state.active);setTasks(state.tasks?.items?.length?state.tasks:null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setBoundWorkspaceID(state.workspace_id||'');setEntries(old=>settledTurnEntries(state.messages||[],querySessionID,old,!!state.active));for(const image of queryImages){URL.revokeObjectURL(image.url);imageURLsRef.current.delete(image.url)}}catch{/* polling or the next reload will recover state */}}
+		if(querySessionID){try{const state=await api.chatState(querySessionID);if(!isAttached())return;setDetachedRunning(!!state.active);setQueuedMessages(state.queued_messages||[]);setTasks(state.tasks?.items?.length?state.tasks:null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setBoundWorkspaceID(state.workspace_id||'');setEntries(old=>settledTurnEntries(state.messages||[],querySessionID,old,!!state.active));for(const image of queryImages){URL.revokeObjectURL(image.url);imageURLsRef.current.delete(image.url)}}catch{/* polling or the next reload will recover state */}}
       if(!isAttached())return
       activeStreamRef.current=null
 	  void refreshSessions()
     }
-  }
+	  }
 
-	  const submit = (event: FormEvent) => {event.preventDefault();const query=message.trim();if((!query&&!pendingImages.length)||sessionBusy||loadingSession||workspaceSwitching)return;const images=pendingImages;setMessage('');setPendingImages([]);setImageInputKey(value=>value+1);setImageNotice('');void sendQuery(query,images)}
+	const queueQuery=async(query:string,queryImages:PendingChatImage[])=>{
+		if(!sessionId||(!query&&!queryImages.length)||!sessionBusy||stopping||queueingMessage)return
+		setQueueingMessage(true)
+		try{
+			const result=await api.queueChatMessage(sessionId,query,queryImages.map(image=>image.file))
+			setQueuedMessages(current=>current.some(item=>item.id===result.item.id)?current:[...current,result.item])
+			setMessage(current=>current.trim()===query?'':current)
+			const submitted=new Set(queryImages.map(image=>image.id))
+			setPendingImages(current=>current.filter(image=>!submitted.has(image.id)))
+			for(const image of queryImages){URL.revokeObjectURL(image.url);imageURLsRef.current.delete(image.url)}
+			setImageInputKey(value=>value+1);setImageNotice('')
+		}catch(err){notify(errorText(err),'error')}
+		finally{setQueueingMessage(false)}
+	}
+
+	  const submit = (event: FormEvent) => {event.preventDefault();const query=message.trim();if((!query&&!pendingImages.length)||loadingSession||workspaceSwitching||stopping||queueingMessage)return;const images=pendingImages;if(sessionBusy){void queueQuery(query,images);return}setMessage('');setPendingImages([]);setImageInputKey(value=>value+1);setImageNotice('');void sendQuery(query,images)}
 	const stopAgent = async () => {
 		const targetSessionID=activeStreamRef.current?.sessionId||sessionId
 		if(!targetSessionID||(!sessionBusy&&!toolsRunning)||stopping)return
@@ -2164,7 +2197,8 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		try{
 			const result=await api.cancelChatSession(targetSessionID)
 			requested=result.cancelled
-			if(!result.cancelled){const state=await api.chatState(targetSessionID);setDetachedRunning(!!state.active);setTasks(state.tasks?.items?.length?state.tasks:null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setEntries(historyEntries(state.messages||[],targetSessionID));void refreshSessions()}
+			if(result.cancelled)setQueuedMessages([])
+			if(!result.cancelled){const state=await api.chatState(targetSessionID);setDetachedRunning(!!state.active);setQueuedMessages(state.queued_messages||[]);setTasks(state.tasks?.items?.length?state.tasks:null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setEntries(historyEntries(state.messages||[],targetSessionID));void refreshSessions()}
 		}catch(err){setEntries(old=>[...old,{id:clientId(),kind:'error',content:t('chat.stopFailed',{message:errorText(err)})}])}
 		finally{if(!requested)setStopping(false)}
   }
@@ -2178,13 +2212,15 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		}catch(err){notify(errorText(err),'error')}
 		finally{setCompressingContext(false)}
 	}
-	const streamingResponseStarted=entries.some((item)=>item.kind==='assistant'&&item.lifecycle==='streaming'&&item.content!=='')
 	const modelRetryLabel=modelRetry?t('chat.retryingModel',{
 	  attempt:modelRetry.attempt,
 	  max:modelRetry.max,
   }):''
 	const connectionRetryDelay=connectionRetry?Math.max(0,Math.ceil((connectionRetry.readyAt-retryClock)/1000)):0
 	const connectionRetryLabel=connectionRetry?t('chat.reconnecting',{attempt:connectionRetry.attempt,delay:connectionRetryDelay}):''
+	const composerEmpty=!message.trim()&&!pendingImages.length
+	const showComposerStop=(sessionBusy||toolsRunning)&&composerEmpty
+	const workStatusLabel=stopping?t('chat.stopping'):connectionRetryLabel||modelRetryLabel||t(workStatusKeys[workStatusIndex])
 	const setWorkspaceCollapsed=(collapsed:boolean)=>{
 		rememberWorkspacePanelCollapsed(collapsed)
 		setWorkspacePanelCollapsed(collapsed)
@@ -2208,18 +2244,16 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			<div className="messages" ref={messagesRef} onWheel={trackUserScroll} onTouchMove={trackUserScroll} onPointerUp={trackUserScroll}>
 				{entries.length === 0 && <div className="empty-chat"><div className="radar"><Activity size={35}/></div><h2>{t('chat.emptyTitle')}</h2></div>}
 				{entries.map((entry) => <ChatBubble key={entry.id} entry={entry} runs={runs} hosts={hosts} onToolDisclosure={preserveToolDisclosurePosition}/>) }
-				{running&&modelRetry&&<div className="thinking"><span/><span/><span/> {modelRetryLabel}</div>}
-				{running&&!modelRetry&&!reasoningSeen&&!streamingResponseStarted&&<div className="thinking"><span/><span/><span/> {t('chat.waitingModel')}</div>}
-				{detachedRunning&&!running&&connectionRetry&&<div className="thinking background-agent"><span/><span/><span/> {connectionRetryLabel}</div>}
+				{(sessionBusy||toolsRunning)&&<div className={`model-activity ${stopping?'stopping':''}`} role="status" aria-live="polite"><span className="model-activity-mark" aria-hidden="true">✻</span><b key={stopping||connectionRetry||modelRetry?'priority':workStatusIndex}>{workStatusLabel}</b></div>}
 			</div>
 			{tasks&&tasksExpanded&&<SessionTaskItems tasks={tasks}/>}
 		</div>
 		  <form className="composer" onSubmit={submit}>
-			  {(sessionBusy||toolsRunning)&&<div className="llm-work-status" role="status" aria-live="polite"><LoaderCircle className="spin" size={13}/><b>{stopping?t('chat.stopping'):connectionRetryLabel||modelRetryLabel||t(sessionBusy?'chat.running':'chat.toolsRunning')}</b><button type="button" className="agent-stop-button" onClick={()=>void stopAgent()} disabled={stopping||!(activeStreamRef.current?.sessionId||sessionId)} title={t('chat.stopTitle')}><Square size={11} fill="currentColor"/>{t('chat.stop')}</button></div>}
-			  <div className="context-line"><ApprovalModeStatus settings={settings} onChanged={onSettingsChanged} onError={onError}/><ComposerHostSelector hosts={hosts} disabled={sessionBusy} onChanged={onHostChanged} onError={onError}/><div className="composer-model-controls"><ContextUsageRing usage={contextUsage}/><button type="button" className="context-compress-button" disabled={!sessionId||sessionBusy||!!loadingSession||compressingContext} onClick={()=>void compressContext()} title={t('chat.compressContext')} aria-label={t('chat.compressContext')}>{compressingContext?<LoaderCircle className="spin" size={13}/>:<Minimize2 size={13}/>}</button><ComposerReasoningSelector providers={providers} disabled={sessionBusy} onChanged={onModelChanged} onError={onError}/><ComposerModelSelector providers={providers} fallbackModel={modelName} disabled={sessionBusy} onChanged={onModelChanged} onError={onError}/></div></div>
+			  {queuedMessages.length>0&&<div className="message-queue" role="status"><header><ListPlus size={13}/><b>{t('chat.queueCount',{count:queuedMessages.length})}</b></header><div>{queuedMessages.map((item,index)=>{const imageCount=item.attachments?.length||item.attachment_count||0;return <span key={item.id}><em>{index+1}</em><b>{item.message||t('chat.queuedImages',{count:imageCount})}</b>{imageCount>0&&item.message&&<small>{t('chat.imageCount',{count:imageCount})}</small>}</span>})}</div></div>}
+			  <div className="context-line"><ApprovalModeStatus settings={settings} onChanged={onSettingsChanged} onError={onError}/><ComposerHostSelector hosts={hosts} disabled={sessionBusy} onChanged={onHostChanged} onError={onError}/><div className="composer-model-controls"><button type="button" className="context-compress-button" disabled={!sessionId||sessionBusy||!!loadingSession||compressingContext} onClick={()=>void compressContext()} title={t('chat.compressContext')} aria-label={t('chat.compressContext')}>{compressingContext?<LoaderCircle className="spin" size={13}/>:<Minimize2 size={13}/>}</button><ContextUsageRing usage={contextUsage}/><ComposerReasoningSelector providers={providers} disabled={sessionBusy} onChanged={onModelChanged} onError={onError}/><ComposerModelSelector providers={providers} fallbackModel={modelName} disabled={sessionBusy} onChanged={onModelChanged} onError={onError}/></div></div>
 			  {pendingImages.length>0&&<div className="composer-images">{pendingImages.map(image=><div key={image.id}><img src={image.url} alt={image.file.name}/><span title={image.file.name}>{image.file.name}</span><button type="button" onClick={()=>removePendingImage(image.id)} title={t('chat.removeImage')}><X size={11}/></button></div>)}</div>}
 			  {imageNotice&&<div className="composer-image-notice">{imageNotice}<button type="button" onClick={()=>setImageNotice('')}><X size={11}/></button></div>}
-			  <div className="input-row"><label className="image-attach-button" title={t('chat.addImages')}><ImagePlus size={18}/><input key={imageInputKey} type="file" accept={imageTypes.join(',')} multiple disabled={!agentAvailable||sessionBusy||workspaceSwitching||!!loadingSession} onChange={event=>addImages(Array.from(event.target.files||[]))}/></label><textarea value={message} onChange={(event) => setMessage(event.target.value)} onPaste={event=>{const files=Array.from(event.clipboardData.files).filter(file=>file.type.startsWith('image/'));if(files.length)addImages(files)}} placeholder={!agentAvailable?t('chat.configureModel'):loadingSession?t('chat.loadingConversation'):sessionBusy?t('chat.busyPlaceholder'):t('chat.prompt')} disabled={!agentAvailable||sessionBusy||workspaceSwitching||!!loadingSession} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }}/><button aria-label={t('common.next')} disabled={!agentAvailable || sessionBusy || workspaceSwitching || !!loadingSession || (!message.trim()&&!pendingImages.length)}><Send size={18}/></button></div>
+			  <div className="input-row"><label className="image-attach-button" title={t('chat.addImages')}><ImagePlus size={18}/><input key={imageInputKey} type="file" accept={imageTypes.join(',')} multiple disabled={!agentAvailable||stopping||workspaceSwitching||!!loadingSession} onChange={event=>addImages(Array.from(event.target.files||[]))}/></label><textarea value={message} onChange={(event) => setMessage(event.target.value)} onPaste={event=>{const files=Array.from(event.clipboardData.files).filter(file=>file.type.startsWith('image/'));if(files.length)addImages(files)}} placeholder={!agentAvailable?t('chat.configureModel'):loadingSession?t('chat.loadingConversation'):sessionBusy?t('chat.queuePlaceholder'):t('chat.prompt')} disabled={!agentAvailable||stopping||workspaceSwitching||!!loadingSession} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }}/>{showComposerStop?<button type="button" className="composer-stop-button" onClick={()=>void stopAgent()} disabled={stopping||!(activeStreamRef.current?.sessionId||sessionId)} title={t('chat.stopTitle')} aria-label={t('chat.stopTitle')}><Square size={15} fill="currentColor"/></button>:<button aria-label={t(sessionBusy?'chat.queueMessage':'common.next')} title={sessionBusy?t('chat.queueMessage'):undefined} disabled={!agentAvailable || stopping || queueingMessage || workspaceSwitching || !!loadingSession || composerEmpty}>{queueingMessage?<LoaderCircle className="spin" size={18}/>:sessionBusy?<ListPlus size={18}/>:<Send size={18}/>}</button>}</div>
 		  </form>
     </div>
 	{sessionDeleteCandidate&&<DestructiveConfirmDialog title={t('chat.deleteTitle',{title:sessionDeleteCandidate.title})} busy={deletingSession} onCancel={()=>setSessionDeleteCandidate(null)} onConfirm={()=>void removeSession()}/>}
@@ -2426,6 +2460,7 @@ const toolValuePreviewChars=8<<10
 const toolOutputPreviewChars=128<<10
 const toolDiffPreviewChars=128<<10
 const toolCollectionPreviewItems=100
+const toolStructuredParseChars=512<<10
 function previewText(value:string,limit=toolValuePreviewChars){
 	if(value.length<=limit)return value
 	const edge=Math.max(1,Math.floor(limit/2))
@@ -2468,7 +2503,15 @@ function previewStructuredValue(value:unknown,depth=0):unknown{
 	if(truncated)result['…']=i18n.t('tool.moreItemsOmitted')
 	return result
 }
-function parseRecord(value:string):JsonRecord{try{return jsonRecord(JSON.parse(value))||{value:JSON.parse(value)}}catch{return{value}}}
+function parseRecord(value:string):JsonRecord{
+	if(value.length>toolStructuredParseChars){
+		const envelope=value.slice(0,toolValuePreviewChars)
+		const runID=envelope.match(/"run_id"\s*:\s*"([^"\\]+)"/)?.[1]
+		const status=envelope.match(/"status"\s*:\s*"([^"\\]+)"/)?.[1]
+		return{...(runID?{run_id:runID}:{}),...(status?{status}:{}),output_limited:true,original_chars:value.length,preview:previewText(value,toolOutputPreviewChars)}
+	}
+	try{const parsed=JSON.parse(value);return jsonRecord(parsed)||{value:parsed}}catch{return{value:previewText(value,toolOutputPreviewChars)}}
+}
 function requestFromRun(run?:Run):JsonRecord|undefined{if(!run)return;try{return jsonRecord(JSON.parse(run.request_json))}catch{return}}
 function runAutoApproved(run?:Run){return run?.ai_review?.kind==='automatic_approval'&&run.ai_review.status==='completed'&&run.ai_review.decision==='allow'}
 function textValue(value:unknown){return typeof value==='string'?value:''}

@@ -202,6 +202,9 @@ type Event struct {
 	InputTokens      int    `json:"input_tokens,omitempty"`
 	OutputTokens     int    `json:"output_tokens,omitempty"`
 	TotalTokens      int    `json:"total_tokens,omitempty"`
+	QueuePosition    int    `json:"queue_position,omitempty"`
+	QueueCount       int    `json:"queue_count,omitempty"`
+	AttachmentCount  int    `json:"attachment_count,omitempty"`
 	TransferredBytes int64  `json:"transferred_bytes,omitempty"`
 	TotalBytes       int64  `json:"total_bytes,omitempty"`
 }

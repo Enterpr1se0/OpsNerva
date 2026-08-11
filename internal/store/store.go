@@ -265,6 +265,7 @@ CREATE TABLE IF NOT EXISTS runs (
   FOREIGN KEY(host_id) REFERENCES hosts(id)
 );
 CREATE INDEX IF NOT EXISTS idx_runs_host_started ON runs(host_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_runs_session_started_id ON runs(session_id, started_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_digest ON runs(request_digest);
 CREATE TABLE IF NOT EXISTS approvals (
   id TEXT PRIMARY KEY,
@@ -1245,6 +1246,227 @@ FROM runs WHERE (?='' OR session_id=?) AND (?='' OR host_id=?) AND (?='' OR tool
 	return result, rows.Err()
 }
 
+func runSearchWhere(filter domain.RunSearchFilter, literalQuery bool) (string, []any, error) {
+	statement := " WHERE 1=1"
+	arguments := make([]any, 0, 16)
+	if filter.SessionID != "" {
+		statement += " AND session_id=?"
+		arguments = append(arguments, filter.SessionID)
+	}
+	if filter.HostID != "" {
+		statement += " AND host_id=?"
+		arguments = append(arguments, filter.HostID)
+	}
+	if filter.ToolName != "" {
+		statement += " AND tool_name=?"
+		arguments = append(arguments, filter.ToolName)
+	}
+	if filter.Status != "" {
+		statement += " AND status=?"
+		arguments = append(arguments, filter.Status)
+	}
+	if !filter.StartedAfter.IsZero() {
+		statement += " AND started_at>=?"
+		arguments = append(arguments, formatTime(filter.StartedAfter.UTC()))
+	}
+	if !filter.StartedBefore.IsZero() {
+		statement += " AND started_at<=?"
+		arguments = append(arguments, formatTime(filter.StartedBefore.UTC()))
+	}
+	if filter.CursorStarted.IsZero() != (filter.CursorID == "") {
+		return "", nil, fmt.Errorf("invalid history cursor boundary")
+	}
+	if !filter.CursorStarted.IsZero() {
+		cursorTime := formatTime(filter.CursorStarted.UTC())
+		statement += " AND (started_at<? OR (started_at=? AND id<?))"
+		arguments = append(arguments, cursorTime, cursorTime, filter.CursorID)
+	}
+	if literalQuery && filter.Query != "" {
+		pattern := likePattern(filter.Query)
+		switch filter.QueryScope {
+		case "", "all":
+			statement += ` AND (search_text LIKE ? ESCAPE '\' OR request_json LIKE ? ESCAPE '\' OR tool_arguments_json LIKE ? ESCAPE '\'
+				OR stdout_redacted LIKE ? ESCAPE '\' OR stderr_redacted LIKE ? ESCAPE '\')`
+			arguments = append(arguments, pattern, pattern, pattern, pattern, pattern)
+		case "request":
+			statement += ` AND (search_text LIKE ? ESCAPE '\' OR request_json LIKE ? ESCAPE '\' OR tool_arguments_json LIKE ? ESCAPE '\')`
+			arguments = append(arguments, pattern, pattern, pattern)
+		case "output":
+			statement += ` AND (stdout_redacted LIKE ? ESCAPE '\' OR stderr_redacted LIKE ? ESCAPE '\')`
+			arguments = append(arguments, pattern, pattern)
+		default:
+			return "", nil, fmt.Errorf("invalid history query_scope: use all, request, or output")
+		}
+	}
+	return statement, arguments, nil
+}
+
+// SearchRunSummariesFilteredPage is the model-facing literal history search.
+// It only selects fields needed for summaries and always requires a bounded
+// page size; audit and CLI callers continue to use SearchRunsFiltered.
+func (s *Store) SearchRunSummariesFilteredPage(ctx context.Context, filter domain.RunSearchFilter) (domain.RunSearchPage, error) {
+	if filter.Limit <= 0 {
+		return domain.RunSearchPage{}, fmt.Errorf("history page limit must be positive")
+	}
+	where, arguments, err := runSearchWhere(filter, true)
+	if err != nil {
+		return domain.RunSearchPage{}, err
+	}
+	statement := `SELECT id,session_id,host_id,tool_name,request_json,status,exit_code,started_at,completed_at
+FROM runs` + where + " ORDER BY started_at DESC,id DESC LIMIT ?"
+	arguments = append(arguments, filter.Limit+1)
+	rows, err := s.db.QueryContext(ctx, statement, arguments...)
+	if err != nil {
+		return domain.RunSearchPage{}, err
+	}
+	defer rows.Close()
+	runs := make([]domain.Run, 0, filter.Limit+1)
+	for rows.Next() {
+		run, err := scanRunSummary(rows)
+		if err != nil {
+			return domain.RunSearchPage{}, err
+		}
+		runs = append(runs, run)
+	}
+	if err := rows.Err(); err != nil {
+		return domain.RunSearchPage{}, err
+	}
+	page := domain.RunSearchPage{Runs: runs}
+	if len(page.Runs) > filter.Limit {
+		page.HasMore = true
+		page.Runs = page.Runs[:filter.Limit]
+	}
+	if page.HasMore && len(page.Runs) > 0 {
+		last := page.Runs[len(page.Runs)-1]
+		page.NextStartedAt, page.NextID = last.StartedAt, last.ID
+	}
+	return page, nil
+}
+
+func scanRunSummary(row scanner) (domain.Run, error) {
+	var run domain.Run
+	var started string
+	var completed sql.NullString
+	err := row.Scan(&run.ID, &run.SessionID, &run.HostID, &run.ToolName, &run.RequestJSON,
+		&run.Status, &run.ExitCode, &started, &completed)
+	if err != nil {
+		return domain.Run{}, err
+	}
+	run.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
+	if completed.Valid {
+		run.CompletedAt, _ = time.Parse(time.RFC3339Nano, completed.String)
+	}
+	return run, nil
+}
+
+func scanRunRegexCandidate(row scanner) (domain.Run, error) {
+	var run domain.Run
+	var started string
+	var completed sql.NullString
+	err := row.Scan(&run.ID, &run.SessionID, &run.HostID, &run.ToolName, &run.ToolArgumentsJSON,
+		&run.RequestJSON, &run.Status, &run.ExitCode, &run.StdoutRedacted, &run.StderrRedacted,
+		&started, &completed)
+	if err != nil {
+		return domain.Run{}, err
+	}
+	run.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
+	if completed.Valid {
+		run.CompletedAt, _ = time.Parse(time.RFC3339Nano, completed.String)
+	}
+	return run, nil
+}
+
+func runMatchesHistoryRegex(expression *regexp.Regexp, run domain.Run, queryScope string) (bool, error) {
+	var parts []string
+	switch queryScope {
+	case "", "all":
+		parts = []string{run.RequestJSON, run.ToolArgumentsJSON, run.StdoutRedacted, run.StderrRedacted}
+	case "request":
+		parts = []string{run.RequestJSON, run.ToolArgumentsJSON}
+	case "output":
+		parts = []string{run.StdoutRedacted, run.StderrRedacted}
+	default:
+		return false, fmt.Errorf("invalid history query_scope: use all, request, or output")
+	}
+	if queryScope != "output" {
+		var request domain.ExecRequest
+		if json.Unmarshal([]byte(run.RequestJSON), &request) == nil {
+			parts = append(parts, request.SearchText())
+		}
+	}
+	return expression.MatchString(strings.Join(parts, "\n")), nil
+}
+
+// SearchRunSummariesRegexFilteredPage streams regex candidates instead of
+// materializing every complete Run. ScanLimit bounds work even when matches
+// are rare; NextStartedAt/NextID then point after the last inspected row.
+func (s *Store) SearchRunSummariesRegexFilteredPage(ctx context.Context, pattern string, filter domain.RunSearchFilter) (domain.RunSearchPage, error) {
+	if filter.Limit <= 0 {
+		return domain.RunSearchPage{}, fmt.Errorf("history page limit must be positive")
+	}
+	expression, err := regexp.CompilePOSIX(pattern)
+	if err != nil {
+		return domain.RunSearchPage{}, fmt.Errorf("invalid POSIX history regex: %w", err)
+	}
+	where, arguments, err := runSearchWhere(filter, false)
+	if err != nil {
+		return domain.RunSearchPage{}, err
+	}
+	statement := `SELECT id,session_id,host_id,tool_name,tool_arguments_json,request_json,status,exit_code,
+stdout_redacted,stderr_redacted,started_at,completed_at FROM runs` + where + " ORDER BY started_at DESC,id DESC"
+	rows, err := s.db.QueryContext(ctx, statement, arguments...)
+	if err != nil {
+		return domain.RunSearchPage{}, err
+	}
+	defer rows.Close()
+	page := domain.RunSearchPage{Runs: make([]domain.Run, 0, filter.Limit+1)}
+	var lastScanned domain.Run
+	scanned := 0
+	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return domain.RunSearchPage{}, err
+		}
+		run, err := scanRunRegexCandidate(rows)
+		if err != nil {
+			return domain.RunSearchPage{}, err
+		}
+		lastScanned = run
+		scanned++
+		matched, err := runMatchesHistoryRegex(expression, run, filter.QueryScope)
+		if err != nil {
+			return domain.RunSearchPage{}, err
+		}
+		if matched {
+			// Search output is a summary; discard candidate-only large fields.
+			run.ToolArgumentsJSON = ""
+			run.StdoutRedacted = ""
+			run.StderrRedacted = ""
+			page.Runs = append(page.Runs, run)
+			if len(page.Runs) > filter.Limit {
+				page.HasMore = true
+				page.Runs = page.Runs[:filter.Limit]
+				last := page.Runs[len(page.Runs)-1]
+				page.NextStartedAt, page.NextID = last.StartedAt, last.ID
+				return page, nil
+			}
+		}
+		if filter.ScanLimit > 0 && scanned >= filter.ScanLimit {
+			if rows.Next() {
+				page.HasMore = true
+				page.ScanLimited = true
+				page.NextStartedAt, page.NextID = lastScanned.StartedAt, lastScanned.ID
+			} else if err := rows.Err(); err != nil {
+				return domain.RunSearchPage{}, err
+			}
+			return page, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return domain.RunSearchPage{}, err
+	}
+	return page, nil
+}
+
 func (s *Store) SearchRunsRegex(ctx context.Context, pattern, hostID, sessionID string, limit int) ([]domain.Run, error) {
 	return s.SearchRunsRegexFiltered(ctx, pattern, domain.RunSearchFilter{
 		QueryScope: "all", HostID: hostID, SessionID: sessionID, Limit: limit,
@@ -1265,24 +1487,11 @@ func (s *Store) SearchRunsRegexFiltered(ctx context.Context, pattern string, fil
 	}
 	matched := make([]domain.Run, 0)
 	for _, run := range runs {
-		var parts []string
-		switch filter.QueryScope {
-		case "", "all":
-			parts = []string{run.RequestJSON, run.ToolArgumentsJSON, run.StdoutRedacted, run.StderrRedacted}
-		case "request":
-			parts = []string{run.RequestJSON, run.ToolArgumentsJSON}
-		case "output":
-			parts = []string{run.StdoutRedacted, run.StderrRedacted}
-		default:
-			return nil, fmt.Errorf("invalid history query_scope: use all, request, or output")
+		matches, err := runMatchesHistoryRegex(expression, run, filter.QueryScope)
+		if err != nil {
+			return nil, err
 		}
-		if filter.QueryScope != "output" {
-			var request domain.ExecRequest
-			if json.Unmarshal([]byte(run.RequestJSON), &request) == nil {
-				parts = append(parts, request.SearchText())
-			}
-		}
-		if !expression.MatchString(strings.Join(parts, "\n")) {
+		if !matches {
 			continue
 		}
 		matched = append(matched, run)

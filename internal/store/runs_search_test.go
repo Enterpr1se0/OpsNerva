@@ -232,3 +232,58 @@ func TestSearchRunsFiltersBySession(t *testing.T) {
 		t.Fatalf("global audit search lost runs: %#v", allRuns)
 	}
 }
+
+func TestSearchRunSummaryPagesUseStableCursorAndLightProjection(t *testing.T) {
+	st, ctx := newSearchStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, id := range []string{"run-a", "run-b", "run-c"} {
+		run := domain.Run{ID: id, SessionID: "session-page", HostID: "host-a", ToolName: "ssh_exec",
+			ToolArgumentsJSON: `{"program":"printf"}`, RequestJSON: `{"mode":"program","program":"printf"}`,
+			RequestCipher: "request-cipher", RequestDigest: "digest-" + id, Status: "completed",
+			StdoutRedacted: "needle output", StdoutCipher: "stdout-cipher", AIReviewJSON: `{"status":"completed"}`, StartedAt: now}
+		if err := st.CreateRun(ctx, run); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.UpdateRun(ctx, run); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := st.SearchRunSummariesFilteredPage(ctx, domain.RunSearchFilter{
+		SessionID: "session-page", Query: "needle", QueryScope: "output", Limit: 2,
+	})
+	if err != nil || len(first.Runs) != 2 || !first.HasMore || first.Runs[0].ID != "run-c" || first.Runs[1].ID != "run-b" {
+		t.Fatalf("first summary page = %#v, err=%v", first, err)
+	}
+	for _, run := range first.Runs {
+		if run.RequestCipher != "" || run.StdoutCipher != "" || run.StdoutRedacted != "" || run.AIReviewJSON != "" {
+			t.Fatalf("summary page loaded full run fields: %#v", run)
+		}
+	}
+	second, err := st.SearchRunSummariesFilteredPage(ctx, domain.RunSearchFilter{
+		SessionID: "session-page", Query: "needle", QueryScope: "output", Limit: 2,
+		CursorStarted: first.NextStartedAt, CursorID: first.NextID,
+	})
+	if err != nil || len(second.Runs) != 1 || second.HasMore || second.Runs[0].ID != "run-a" {
+		t.Fatalf("second summary page = %#v, err=%v", second, err)
+	}
+}
+
+func TestSearchRunSummaryRegexPageBoundsCandidateScan(t *testing.T) {
+	st, ctx := newSearchStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, id := range []string{"run-a", "run-b", "run-c"} {
+		insertRunForRequest(t, st, ctx, id, "host-a", domain.ExecRequest{
+			HostID: "host-a", Mode: domain.ExecProgram, Program: "printf", Args: []string{id},
+		}, now)
+	}
+	page, err := st.SearchRunSummariesRegexFilteredPage(ctx, "absent", domain.RunSearchFilter{Limit: 2, ScanLimit: 2})
+	if err != nil || len(page.Runs) != 0 || !page.HasMore || !page.ScanLimited || page.NextID != "run-b" {
+		t.Fatalf("bounded regex scan = %#v, err=%v", page, err)
+	}
+	next, err := st.SearchRunSummariesRegexFilteredPage(ctx, "run-a", domain.RunSearchFilter{
+		Limit: 2, ScanLimit: 2, CursorStarted: page.NextStartedAt, CursorID: page.NextID,
+	})
+	if err != nil || len(next.Runs) != 1 || next.Runs[0].ID != "run-a" || next.HasMore {
+		t.Fatalf("continued regex scan = %#v, err=%v", next, err)
+	}
+}

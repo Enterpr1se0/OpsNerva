@@ -257,6 +257,9 @@ export interface AgentEvent {
 	input_tokens?: number
 	output_tokens?: number
 	total_tokens?: number
+	queue_position?: number
+	queue_count?: number
+	attachment_count?: number
 }
 
 export interface ChatTokenUsage {
@@ -344,7 +347,16 @@ export interface ChatState {
   messages: ChatMessage[]
 	tool_calls: ChatToolCall[]
   tasks: AgentTaskList
+	queued_messages: QueuedChatMessage[]
 	context_summary?: ChatContextSummary
+}
+
+export interface QueuedChatMessage {
+	id: string
+	message: string
+	attachments?: ChatAttachment[]
+	attachment_count?: number
+	created_at: string
 }
 
 export interface ChatContextSummary {

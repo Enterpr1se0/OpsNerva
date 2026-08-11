@@ -2,10 +2,12 @@ package agent
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -317,6 +319,9 @@ func fileSearchSchemaOption() toolutils.Option {
 		if jsonTagName == "query_scope" {
 			schema.Enum = []any{"all", "request", "output"}
 		}
+		if jsonTagName == "output_view" {
+			schema.Enum = []any{"head", "tail", "head_tail"}
+		}
 	})
 }
 
@@ -418,8 +423,8 @@ func invalidWorkspaceShellValue(input WorkspaceShellInput, action, message strin
 }
 
 type HistorySearchInput struct {
-	RunID         string                     `json:"run_id,omitempty" jsonschema:"exact run ID; exclusive with filters"`
-	Query         string                     `json:"query,omitempty" jsonschema:"literal or POSIX regex over request/redacted output"`
+	RunID         string                     `json:"run_id,omitempty" jsonschema:"exact run ID; combine with query for bounded excerpts"`
+	Query         string                     `json:"query,omitempty" jsonschema:"list search, or bounded matching excerpts when run_id is set"`
 	MatchMode     domain.FileSearchMatchMode `json:"match_mode,omitempty" jsonschema:"literal (default) or regex"`
 	QueryScope    string                     `json:"query_scope,omitempty" jsonschema:"all (default), request, or output"`
 	HostID        string                     `json:"host_id,omitempty" jsonschema:"SSH host ID"`
@@ -427,7 +432,12 @@ type HistorySearchInput struct {
 	Status        string                     `json:"status,omitempty" jsonschema:"exact run status"`
 	StartedAfter  string                     `json:"started_after,omitempty" jsonschema:"inclusive RFC3339 lower bound"`
 	StartedBefore string                     `json:"started_before,omitempty" jsonschema:"inclusive RFC3339 upper bound"`
-	Limit         int                        `json:"limit,omitempty" jsonschema:"maximum results; omit for all"`
+	Limit         int                        `json:"limit,omitempty" jsonschema:"list results, or run_id query matches per stream; default 20, maximum 100"`
+	Cursor        string                     `json:"cursor,omitempty" jsonschema:"search continuation cursor from next_cursor"`
+	AfterStdout   int                        `json:"after_stdout_bytes,omitempty" jsonschema:"run_id detail: stdout byte offset"`
+	AfterStderr   int                        `json:"after_stderr_bytes,omitempty" jsonschema:"run_id detail: stderr byte offset"`
+	MaxOutput     int                        `json:"max_output_bytes,omitempty" jsonschema:"run_id detail/excerpts: per-stream bytes, 1024-65536, default 16384"`
+	OutputView    string                     `json:"output_view,omitempty" jsonschema:"run_id detail: head, tail, or head_tail (default)"`
 }
 
 type WebSearchInput struct {
@@ -457,21 +467,246 @@ type HistoryRunSummary struct {
 
 type HistoryRunDetail struct {
 	HistoryRunSummary
-	ToolArguments any    `json:"tool_arguments,omitempty"`
-	Request       any    `json:"request"`
-	Stdout        string `json:"stdout_redacted,omitempty"`
-	Stderr        string `json:"stderr_redacted,omitempty"`
-	Error         string `json:"error,omitempty"`
+	ToolArguments      any    `json:"tool_arguments,omitempty"`
+	Request            any    `json:"request"`
+	Stdout             string `json:"stdout_redacted,omitempty"`
+	Stderr             string `json:"stderr_redacted,omitempty"`
+	Error              string `json:"error,omitempty"`
+	OutputView         string `json:"output_view,omitempty"`
+	OutputLimited      bool   `json:"output_limited,omitempty"`
+	StdoutTotalBytes   int    `json:"stdout_total_bytes,omitempty"`
+	StderrTotalBytes   int    `json:"stderr_total_bytes,omitempty"`
+	StdoutOmittedBytes int    `json:"stdout_omitted_bytes,omitempty"`
+	StderrOmittedBytes int    `json:"stderr_omitted_bytes,omitempty"`
+	StdoutOffsetBytes  int    `json:"stdout_offset_bytes,omitempty"`
+	StderrOffsetBytes  int    `json:"stderr_offset_bytes,omitempty"`
+	StdoutNextOffset   int    `json:"stdout_next_offset_bytes,omitempty"`
+	StderrNextOffset   int    `json:"stderr_next_offset_bytes,omitempty"`
+	ErrorLimited       bool   `json:"error_limited,omitempty"`
+	ErrorTotalBytes    int    `json:"error_total_bytes,omitempty"`
 }
 
 type HistoryOutput struct {
-	Runs *[]HistoryRunSummary `json:"runs,omitempty"`
-	Run  *HistoryRunDetail    `json:"run,omitempty"`
+	Runs        *[]HistoryRunSummary `json:"runs,omitempty"`
+	Run         *HistoryRunDetail    `json:"run,omitempty"`
+	Match       *HistoryRunMatch     `json:"match,omitempty"`
+	HasMore     bool                 `json:"has_more,omitempty"`
+	NextCursor  string               `json:"next_cursor,omitempty"`
+	ScanLimited bool                 `json:"scan_limited,omitempty"`
+}
+
+type HistoryRunMatch struct {
+	HistoryRunSummary
+	MatchMode            domain.FileSearchMatchMode `json:"match_mode"`
+	QueryScope           string                     `json:"query_scope"`
+	Found                bool                       `json:"found"`
+	RequestMatched       bool                       `json:"request_matched,omitempty"`
+	ToolArgumentsMatched bool                       `json:"tool_arguments_matched,omitempty"`
+	StdoutExcerpt        string                     `json:"stdout_excerpt,omitempty"`
+	StderrExcerpt        string                     `json:"stderr_excerpt,omitempty"`
+	OutputLimited        bool                       `json:"output_limited,omitempty"`
+	MatchLimit           int                        `json:"match_limit"`
+}
+
+const (
+	defaultHistorySearchLimit = 20
+	maxHistorySearchLimit     = 100
+	defaultHistoryOutputBytes = 16 << 10
+	maxHistoryOutputBytes     = 64 << 10
+	maxHistoryStructuredBytes = 8 << 10
+	maxHistoryErrorBytes      = 4 << 10
+	maxHistoryRegexBytes      = 512
+	maxHistoryQueryBytes      = 4 << 10
+	historyRegexScanLimit     = 2000
+	maxHistoryOperationBytes  = 512
+)
+
+type historySearchCursor struct {
+	StartedAt string `json:"started_at"`
+	ID        string `json:"id"`
+}
+
+func encodeHistoryCursor(startedAt time.Time, id string) string {
+	if startedAt.IsZero() || id == "" {
+		return ""
+	}
+	encoded, _ := json.Marshal(historySearchCursor{StartedAt: startedAt.UTC().Format(time.RFC3339Nano), ID: id})
+	return base64.RawURLEncoding.EncodeToString(encoded)
+}
+
+func decodeHistoryCursor(value string) (time.Time, string, error) {
+	if strings.TrimSpace(value) == "" {
+		return time.Time{}, "", nil
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(value))
+	if err != nil {
+		return time.Time{}, "", fmt.Errorf("invalid history cursor: %w", err)
+	}
+	var cursor historySearchCursor
+	if err := json.Unmarshal(decoded, &cursor); err != nil {
+		return time.Time{}, "", fmt.Errorf("invalid history cursor: %w", err)
+	}
+	startedAt, err := time.Parse(time.RFC3339Nano, cursor.StartedAt)
+	if err != nil || strings.TrimSpace(cursor.ID) == "" {
+		return time.Time{}, "", fmt.Errorf("invalid history cursor boundary")
+	}
+	return startedAt.UTC(), strings.TrimSpace(cursor.ID), nil
+}
+
+func normalizeHistoryMatch(query string, matchMode domain.FileSearchMatchMode, queryScope string) (domain.FileSearchMatchMode, string, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		if matchMode != "" || strings.TrimSpace(queryScope) != "" {
+			return "", "", fmt.Errorf("invalid history input: query is required with match_mode or query_scope")
+		}
+		return domain.FileSearchLiteral, "all", nil
+	}
+	if len(query) > maxHistoryQueryBytes {
+		return "", "", fmt.Errorf("invalid history input: query must not exceed %d bytes", maxHistoryQueryBytes)
+	}
+	if matchMode == "" {
+		matchMode = domain.FileSearchLiteral
+	}
+	if matchMode != domain.FileSearchLiteral && matchMode != domain.FileSearchRegex {
+		return "", "", fmt.Errorf("invalid history input: match_mode must be literal or regex")
+	}
+	if matchMode == domain.FileSearchRegex && len(query) > maxHistoryRegexBytes {
+		return "", "", fmt.Errorf("invalid history input: regex query must not exceed %d bytes", maxHistoryRegexBytes)
+	}
+	queryScope = strings.TrimSpace(queryScope)
+	if queryScope == "" {
+		queryScope = "all"
+	}
+	if queryScope != "all" && queryScope != "request" && queryScope != "output" {
+		return "", "", fmt.Errorf("invalid history input: query_scope must be all, request, or output")
+	}
+	return matchMode, queryScope, nil
+}
+
+func compileHistoryMatcher(query string, matchMode domain.FileSearchMatchMode) (*regexp.Regexp, error) {
+	if matchMode == domain.FileSearchRegex {
+		expression, err := regexp.CompilePOSIX(query)
+		if err != nil {
+			return nil, fmt.Errorf("invalid POSIX history regex: %w", err)
+		}
+		return expression, nil
+	}
+	return regexp.Compile(regexp.QuoteMeta(query))
+}
+
+func historyMatchWindow(value string, matchStart, matchEnd, maxBytes int) string {
+	if len(value) <= maxBytes {
+		return value
+	}
+	windowStart := matchStart - maxBytes/3
+	if windowStart < 0 {
+		windowStart = 0
+	}
+	windowEnd := windowStart + maxBytes
+	if windowEnd < matchEnd {
+		windowEnd = matchEnd
+		windowStart = max(0, windowEnd-maxBytes)
+	}
+	if windowEnd > len(value) {
+		windowEnd = len(value)
+		windowStart = max(0, windowEnd-maxBytes)
+	}
+	for windowStart < len(value) && !utf8.RuneStart(value[windowStart]) {
+		windowStart++
+	}
+	for windowEnd > windowStart && windowEnd < len(value) && !utf8.RuneStart(value[windowEnd]) {
+		windowEnd--
+	}
+	prefix, suffix := "", ""
+	if windowStart > 0 {
+		prefix = "..."
+	}
+	if windowEnd < len(value) {
+		suffix = "..."
+	}
+	return prefix + value[windowStart:windowEnd] + suffix
+}
+
+func historyMatchExcerpt(value string, expression *regexp.Regexp, maxBytes, maxMatches int) (string, bool, bool) {
+	if value == "" {
+		return "", false, false
+	}
+	matches := expression.FindAllStringIndex(value, maxMatches+1)
+	if len(matches) == 0 {
+		return "", false, false
+	}
+	var result strings.Builder
+	limited := len(matches) > maxMatches
+	if limited {
+		matches = matches[:maxMatches]
+	}
+	lastStart, lastEnd := -1, -1
+	lastIncludedWholeLine := false
+	for _, match := range matches {
+		matchStart, matchEnd := match[0], match[1]
+		lineStart := strings.LastIndex(value[:matchStart], "\n") + 1
+		lineEnd := len(value)
+		if newline := strings.IndexByte(value[matchEnd:], '\n'); newline >= 0 {
+			lineEnd = matchEnd + newline
+		}
+		if lineStart != lastStart || lineEnd != lastEnd || !lastIncludedWholeLine {
+			remaining := maxBytes - result.Len()
+			separator := ""
+			if result.Len() > 0 {
+				separator = "\n"
+				remaining--
+			}
+			if remaining <= 0 {
+				limited = true
+				break
+			}
+			excerpt := historyMatchWindow(value[lineStart:lineEnd], matchStart-lineStart, matchEnd-lineStart, remaining)
+			if len(excerpt) > remaining {
+				excerpt = validUTF8Prefix(excerpt, remaining)
+				limited = true
+			}
+			result.WriteString(separator)
+			result.WriteString(excerpt)
+			lastStart, lastEnd = lineStart, lineEnd
+			lastIncludedWholeLine = lineEnd-lineStart <= remaining
+		}
+	}
+	return result.String(), true, limited
+}
+
+func historyRunMatches(run domain.Run, query string, matchMode domain.FileSearchMatchMode, queryScope string, maxBytes, matchLimit int) (HistoryRunMatch, error) {
+	expression, err := compileHistoryMatcher(query, matchMode)
+	if err != nil {
+		return HistoryRunMatch{}, err
+	}
+	result := HistoryRunMatch{HistoryRunSummary: historyRunSummary(run), MatchMode: matchMode, QueryScope: queryScope, MatchLimit: matchLimit}
+	if queryScope != "output" {
+		var request domain.ExecRequest
+		_ = json.Unmarshal([]byte(run.RequestJSON), &request)
+		result.RequestMatched = expression.MatchString(run.RequestJSON) || expression.MatchString(request.SearchText())
+		result.ToolArgumentsMatched = expression.MatchString(run.ToolArgumentsJSON)
+	}
+	if queryScope != "request" {
+		stdout, stdoutFound, stdoutLimited := historyMatchExcerpt(run.StdoutRedacted, expression, maxBytes, matchLimit)
+		stderr, stderrFound, stderrLimited := historyMatchExcerpt(run.StderrRedacted, expression, maxBytes, matchLimit)
+		result.StdoutExcerpt, result.StderrExcerpt = stdout, stderr
+		result.OutputLimited = stdoutLimited || stderrLimited
+		result.Found = stdoutFound || stderrFound
+	}
+	result.Found = result.Found || result.RequestMatched || result.ToolArgumentsMatched
+	return result, nil
 }
 
 func historyJSON(raw string) any {
 	if strings.TrimSpace(raw) == "" {
 		return nil
+	}
+	if len(raw) > maxHistoryStructuredBytes {
+		return map[string]any{
+			"output_limited": true,
+			"original_bytes": len(raw),
+			"preview":        selectOutputView(raw, maxHistoryStructuredBytes, "head_tail"),
+		}
 	}
 	var value any
 	if json.Unmarshal([]byte(raw), &value) == nil {
@@ -531,18 +766,50 @@ func historyRunSummary(run domain.Run) HistoryRunSummary {
 	if !run.CompletedAt.IsZero() && !run.StartedAt.IsZero() && !run.CompletedAt.Before(run.StartedAt) {
 		duration = run.CompletedAt.Sub(run.StartedAt).Milliseconds()
 	}
+	operation := historyOperation(run, request)
+	if len(operation) > maxHistoryOperationBytes {
+		operation = validUTF8Prefix(operation, maxHistoryOperationBytes-3) + "..."
+	}
 	return HistoryRunSummary{
 		ID: run.ID, HostID: run.HostID, ToolName: run.ToolName, Mode: string(request.Mode),
-		Operation: historyOperation(run, request), Status: run.Status, ExitCode: run.ExitCode,
+		Operation: operation, Status: run.Status, ExitCode: run.ExitCode,
 		DurationMS: duration, StartedAt: run.StartedAt, CompletedAt: run.CompletedAt,
 	}
 }
 
-func historyRunDetail(run domain.Run) HistoryRunDetail {
-	return HistoryRunDetail{
-		HistoryRunSummary: historyRunSummary(run), ToolArguments: historyJSON(run.ToolArgumentsJSON),
-		Request: historyJSON(run.RequestJSON), Stdout: run.StdoutRedacted, Stderr: run.StderrRedacted, Error: run.Error,
+func historyRunDetail(run domain.Run, stdoutOffset, stderrOffset, maxBytes int, view string) (HistoryRunDetail, error) {
+	selected, err := selectExecResultOutput(domain.ExecResult{Stdout: run.StdoutRedacted, Stderr: run.StderrRedacted},
+		stdoutOffset, stderrOffset, maxBytes, view, true)
+	if err != nil {
+		return HistoryRunDetail{}, err
 	}
+	errorText := run.Error
+	errorLimited := false
+	if len(errorText) > maxHistoryErrorBytes {
+		errorText = selectOutputView(errorText, maxHistoryErrorBytes, "head_tail")
+		errorLimited = true
+	}
+	detail := HistoryRunDetail{
+		HistoryRunSummary: historyRunSummary(run), ToolArguments: historyJSON(run.ToolArgumentsJSON),
+		Request: historyJSON(run.RequestJSON), Stdout: selected.Stdout, Stderr: selected.Stderr, Error: errorText,
+		OutputView: selected.OutputView, OutputLimited: selected.OutputLimited,
+		StdoutTotalBytes: selected.StdoutTotalBytes, StderrTotalBytes: selected.StderrTotalBytes,
+		StdoutOmittedBytes: selected.StdoutOmittedBytes, StderrOmittedBytes: selected.StderrOmittedBytes,
+		StdoutOffsetBytes: selected.StdoutOffsetBytes, StderrOffsetBytes: selected.StderrOffsetBytes,
+		ErrorLimited: errorLimited,
+	}
+	if errorLimited {
+		detail.ErrorTotalBytes = len(run.Error)
+	}
+	if selected.OutputView == "head" {
+		if next := stdoutOffset + len(selected.Stdout); next < selected.StdoutTotalBytes {
+			detail.StdoutNextOffset = next
+		}
+		if next := stderrOffset + len(selected.Stderr); next < selected.StderrTotalBytes {
+			detail.StderrNextOffset = next
+		}
+	}
+	return detail, nil
 }
 
 func historyRunSummaries(runs []domain.Run) []HistoryRunSummary {
@@ -915,32 +1182,77 @@ func RunWorkspaceFileReadTool(ctx context.Context, svc *service.Service, input W
 func ReadHistoryTool(ctx context.Context, svc *service.Service, input HistorySearchInput) (HistoryOutput, error) {
 	runID := strings.TrimSpace(input.RunID)
 	if runID != "" {
-		if input.Query != "" || input.MatchMode != "" || input.QueryScope != "" || input.HostID != "" || input.ToolName != "" || input.Status != "" || input.StartedAfter != "" || input.StartedBefore != "" || input.Limit != 0 {
-			return HistoryOutput{}, fmt.Errorf("invalid history input: run_id is mutually exclusive with search filters")
+		if input.HostID != "" || input.ToolName != "" || input.Status != "" || input.StartedAfter != "" || input.StartedBefore != "" || input.Cursor != "" {
+			return HistoryOutput{}, fmt.Errorf("invalid history input: run_id cannot be combined with list filters or cursor")
+		}
+		if input.AfterStdout < 0 || input.AfterStderr < 0 {
+			return HistoryOutput{}, fmt.Errorf("invalid history input: output byte offsets must be non-negative")
+		}
+		maxOutput := input.MaxOutput
+		if maxOutput == 0 {
+			maxOutput = defaultHistoryOutputBytes
+		}
+		if maxOutput < 1024 || maxOutput > maxHistoryOutputBytes {
+			return HistoryOutput{}, fmt.Errorf("invalid history input: max_output_bytes must be between 1024 and %d", maxHistoryOutputBytes)
+		}
+		matchMode, queryScope, err := normalizeHistoryMatch(input.Query, input.MatchMode, input.QueryScope)
+		if err != nil {
+			return HistoryOutput{}, err
+		}
+		if strings.TrimSpace(input.Query) != "" {
+			if input.AfterStdout != 0 || input.AfterStderr != 0 || input.OutputView != "" {
+				return HistoryOutput{}, fmt.Errorf("invalid history input: run_id query cannot be combined with output offsets or output_view")
+			}
+			matchLimit := input.Limit
+			if matchLimit == 0 {
+				matchLimit = defaultHistorySearchLimit
+			}
+			if matchLimit < 1 || matchLimit > maxHistorySearchLimit {
+				return HistoryOutput{}, fmt.Errorf("invalid history input: limit must be between 1 and %d", maxHistorySearchLimit)
+			}
+			result, err := svc.GetRun(ctx, runID, false)
+			if err != nil {
+				return HistoryOutput{}, err
+			}
+			matched, err := historyRunMatches(result.Run, input.Query, matchMode, queryScope, maxOutput, matchLimit)
+			if err != nil {
+				return HistoryOutput{}, err
+			}
+			return HistoryOutput{Match: &matched}, nil
+		}
+		if input.Limit != 0 {
+			return HistoryOutput{}, fmt.Errorf("invalid history input: limit requires query when run_id is set")
+		}
+		outputView := strings.ToLower(strings.TrimSpace(input.OutputView))
+		if outputView == "" && (input.AfterStdout > 0 || input.AfterStderr > 0) {
+			outputView = "head"
+		}
+		if (input.AfterStdout > 0 || input.AfterStderr > 0) && outputView != "head" {
+			return HistoryOutput{}, fmt.Errorf("invalid history input: output byte offsets require output_view=head")
 		}
 		result, err := svc.GetRun(ctx, runID, false)
 		if err != nil {
 			return HistoryOutput{}, err
 		}
-		detail := historyRunDetail(result.Run)
+		detail, err := historyRunDetail(result.Run, input.AfterStdout, input.AfterStderr, maxOutput, outputView)
+		if err != nil {
+			return HistoryOutput{}, fmt.Errorf("invalid history input: %w", err)
+		}
 		return HistoryOutput{Run: &detail}, nil
 	}
-	if input.Limit < 0 {
-		return HistoryOutput{}, fmt.Errorf("invalid history input: limit must be non-negative")
+	if input.AfterStdout != 0 || input.AfterStderr != 0 || input.MaxOutput != 0 || input.OutputView != "" {
+		return HistoryOutput{}, fmt.Errorf("invalid history input: output paging fields require run_id")
 	}
-	matchMode := input.MatchMode
-	if matchMode == "" {
-		matchMode = domain.FileSearchLiteral
+	limit := input.Limit
+	if limit == 0 {
+		limit = defaultHistorySearchLimit
 	}
-	if strings.TrimSpace(input.Query) == "" && (input.MatchMode != "" || input.QueryScope != "") {
-		return HistoryOutput{}, fmt.Errorf("invalid history input: query is required with match_mode or query_scope")
+	if limit < 1 || limit > maxHistorySearchLimit {
+		return HistoryOutput{}, fmt.Errorf("invalid history input: limit must be between 1 and %d", maxHistorySearchLimit)
 	}
-	queryScope := strings.TrimSpace(input.QueryScope)
-	if queryScope == "" {
-		queryScope = "all"
-	}
-	if queryScope != "all" && queryScope != "request" && queryScope != "output" {
-		return HistoryOutput{}, fmt.Errorf("invalid history input: query_scope must be all, request, or output")
+	matchMode, queryScope, err := normalizeHistoryMatch(input.Query, input.MatchMode, input.QueryScope)
+	if err != nil {
+		return HistoryOutput{}, err
 	}
 	parseBound := func(name, value string) (time.Time, error) {
 		if strings.TrimSpace(value) == "" {
@@ -963,13 +1275,22 @@ func ReadHistoryTool(ctx context.Context, svc *service.Service, input HistorySea
 	if !startedAfter.IsZero() && !startedBefore.IsZero() && startedAfter.After(startedBefore) {
 		return HistoryOutput{}, fmt.Errorf("invalid history input: started_after must not be later than started_before")
 	}
-	runs, err := svc.SearchRunsMatching(ctx, domain.RunSearchFilter{
+	cursorStarted, cursorID, err := decodeHistoryCursor(input.Cursor)
+	if err != nil {
+		return HistoryOutput{}, err
+	}
+	page, err := svc.SearchRunSummariesMatchingPage(ctx, domain.RunSearchFilter{
 		Query: input.Query, QueryScope: queryScope, HostID: strings.TrimSpace(input.HostID),
 		ToolName: strings.TrimSpace(input.ToolName), Status: strings.TrimSpace(input.Status), StartedAfter: startedAfter,
-		StartedBefore: startedBefore, Limit: input.Limit,
+		StartedBefore: startedBefore, CursorStarted: cursorStarted, CursorID: cursorID,
+		Limit: limit, ScanLimit: historyRegexScanLimit,
 	}, matchMode)
-	summaries := historyRunSummaries(runs)
-	return HistoryOutput{Runs: &summaries}, err
+	if err != nil {
+		return HistoryOutput{}, err
+	}
+	summaries := historyRunSummaries(page.Runs)
+	return HistoryOutput{Runs: &summaries, HasMore: page.HasMore,
+		NextCursor: encodeHistoryCursor(page.NextStartedAt, page.NextID), ScanLimited: page.ScanLimited}, nil
 }
 
 func taskStartToolResult(svc *service.Service, task domain.Task, startErr error) (domain.ExecResult, error) {
@@ -1689,7 +2010,7 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_history", "Search this conversation's audited runs, or get full redacted details by run_id.", func(ctx context.Context, input HistorySearchInput) (any, error) {
+	if err := appendTool(toolutils.InferTool("ssh_history", "Search this conversation's audited run summaries with literal or POSIX regex matching and cursor pagination. Use run_id for a bounded redacted detail page; combine run_id and query for bounded matching excerpts, with limit as the per-stream match cap.", func(ctx context.Context, input HistorySearchInput) (any, error) {
 		result, err := ReadHistoryTool(ctx, svc, input)
 		return normalizeValueToolResult(ctx, "ssh_history", result, err)
 	}, fileSearchSchemaOption())); err != nil {

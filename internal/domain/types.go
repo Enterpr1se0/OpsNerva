@@ -878,7 +878,20 @@ type RunSearchFilter struct {
 	Status        string
 	StartedAfter  time.Time
 	StartedBefore time.Time
+	CursorStarted time.Time
+	CursorID      string
 	Limit         int
+	ScanLimit     int
+}
+
+// RunSearchPage is the bounded, cursor-based projection used by Agent tools.
+// The existing audit and CLI search paths retain their legacy limit semantics.
+type RunSearchPage struct {
+	Runs          []Run
+	HasMore       bool
+	ScanLimited   bool
+	NextStartedAt time.Time
+	NextID        string
 }
 
 type Approval struct {

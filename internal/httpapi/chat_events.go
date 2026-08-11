@@ -169,7 +169,7 @@ func (s *Server) chatEventsStream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if done || !s.agent.IsSessionActive(sessionID) {
+	if done || !s.chatSessionActive(sessionID) {
 		return
 	}
 	heartbeat := time.NewTicker(10 * time.Second)

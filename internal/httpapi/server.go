@@ -19,6 +19,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"eino-ops-agent/internal/agent"
@@ -42,6 +43,7 @@ type Server struct {
 	service    *service.Service
 	agent      *agent.Runtime
 	chatEvents *chatEventHub
+	chatQueue  *chatMessageQueue
 	modelTests *modelTestJobs
 	mux        *http.ServeMux
 	mcpHTTP    http.Handler
@@ -63,7 +65,7 @@ func New(svc *service.Service, agentRuntime *agent.Runtime, options Options) *Se
 	}
 	s := &Server{
 		service: svc, agent: agentRuntime, mux: http.NewServeMux(),
-		mcpHTTP: mcpserver.New(svc, options.Version).HTTPHandler(), chatEvents: newChatEventHub(), modelTests: newModelTestJobs(), options: options,
+		mcpHTTP: mcpserver.New(svc, options.Version).HTTPHandler(), chatEvents: newChatEventHub(), chatQueue: newChatMessageQueue(), modelTests: newModelTestJobs(), options: options,
 	}
 	s.routes()
 	return s
@@ -71,6 +73,10 @@ func New(svc *service.Service, agentRuntime *agent.Runtime, options Options) *Se
 
 func (s *Server) Handler() http.Handler {
 	return requestLogMiddleware(recoverMiddleware(corsMiddleware(s.mux)), slog.Default())
+}
+
+func (s *Server) chatSessionActive(sessionID string) bool {
+	return s.chatQueue.active(sessionID) || s.agent != nil && s.agent.IsSessionActive(sessionID)
 }
 
 func (s *Server) routes() {
@@ -168,6 +174,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/chat", s.chat)
 	s.mux.HandleFunc("GET /api/v1/chat/sessions", s.chatSessions)
 	s.mux.HandleFunc("GET /api/v1/chat/{id}/events", s.chatEventsStream)
+	s.mux.HandleFunc("POST /api/v1/chat/{id}/queue", s.queueChatMessage)
 	s.mux.HandleFunc("POST /api/v1/chat/{id}/cancel", s.cancelChatSession)
 	s.mux.HandleFunc("POST /api/v1/chat/{id}/context/compress", s.compressChatContext)
 	s.mux.HandleFunc("PUT /api/v1/chat/{id}/workspace", s.setChatSessionWorkspace)
@@ -1560,27 +1567,105 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		writeErrorStatus(w, err, http.StatusBadRequest)
 		return
 	}
-	streamAgentEvents(w, r, 10*time.Second, func(emit func(agent.Event)) {
+	queueCtx, queueStarted := s.chatQueue.begin(sessionID)
+	if !queueStarted {
+		writeErrorStatus(w, agent.ErrSessionBusy, http.StatusConflict)
+		return
+	}
+	streamStarted := streamAgentEvents(w, r, 10*time.Second, func(emit func(agent.Event)) {
+		defer s.chatQueue.finish(sessionID)
 		queryCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Minute)
+		stopQueueCancel := context.AfterFunc(queueCtx, cancel)
+		defer stopQueueCancel()
 		defer cancel()
-		started := false
-		publish := func(event agent.Event) {
+		var started atomic.Bool
+		broadcast := func(event agent.Event) {
 			if event.Type == "session" {
-				started = true
+				started.Store(true)
 			}
 			event = s.chatEvents.publish(sessionID, event)
 			emit(event)
 		}
-		_, err := s.agent.QueryWithAttachments(queryCtx, sessionID, message, attachments, publish)
-		if err != nil && !errors.Is(err, context.Canceled) {
-			event := agent.Event{Type: "model_error", Error: err.Error(), SessionID: sessionID}
-			if started {
-				publish(event)
-			} else {
-				emit(event)
+		currentMessage, currentAttachments := message, attachments
+		for {
+			var completed *agent.Event
+			publish := func(event agent.Event) {
+				if event.Type == "done" {
+					copy := event
+					completed = &copy
+					return
+				}
+				broadcast(event)
 			}
+			_, err := s.agent.QueryWithAttachments(queryCtx, sessionID, currentMessage, currentAttachments, publish)
+			if err != nil {
+				_, _ = s.chatQueue.clear(sessionID)
+				if !errors.Is(err, context.Canceled) {
+					event := agent.Event{Type: "model_error", Error: err.Error(), SessionID: sessionID}
+					if started.Load() {
+						broadcast(event)
+					} else {
+						emit(event)
+					}
+				}
+				return
+			}
+			next, ok := s.chatQueue.nextOrFinish(sessionID)
+			if !ok {
+				if completed == nil {
+					completed = &agent.Event{Type: "done", SessionID: sessionID}
+				}
+				broadcast(*completed)
+				return
+			}
+			broadcast(agent.Event{Type: "turn_done", SessionID: sessionID, Content: completedContent(completed)})
+			broadcast(agent.Event{
+				Type: "queue_started", MessageID: next.ID, SessionID: sessionID, Content: next.Message,
+				Status: "in_progress", QueueCount: len(s.chatQueue.snapshot(sessionID)), AttachmentCount: len(next.Attachments),
+			})
+			currentMessage, currentAttachments = next.Message, next.Attachments
 		}
 	})
+	if !streamStarted {
+		s.chatQueue.finish(sessionID)
+	}
+}
+
+func completedContent(event *agent.Event) string {
+	if event == nil {
+		return ""
+	}
+	return event.Content
+}
+
+func (s *Server) queueChatMessage(w http.ResponseWriter, r *http.Request) {
+	if s.agent == nil || !s.agent.Available() {
+		writeErrorStatus(w, agent.ErrUnavailable, http.StatusServiceUnavailable)
+		return
+	}
+	sessionID := strings.TrimSpace(r.PathValue("id"))
+	if sessionID == "" {
+		writeErrorStatus(w, fmt.Errorf("session id is required"), http.StatusBadRequest)
+		return
+	}
+	_, _, message, attachments, ok := s.decodeChatInput(w, r)
+	if !ok {
+		return
+	}
+	if strings.TrimSpace(message) == "" && len(attachments) == 0 {
+		writeErrorStatus(w, fmt.Errorf("message or image is required"), http.StatusBadRequest)
+		return
+	}
+	item, position, err := s.chatQueue.enqueue(sessionID, message, attachments)
+	if err != nil {
+		writeErrorStatus(w, err, http.StatusConflict)
+		return
+	}
+	s.chatEvents.publish(sessionID, agent.Event{
+		Type: "queued", MessageID: item.ID, SessionID: sessionID, Content: item.Message,
+		Status: "pending", QueuePosition: position, QueueCount: position, AttachmentCount: len(item.Attachments),
+	})
+	writeJSON(w, http.StatusAccepted, map[string]any{"item": item, "position": position})
 }
 
 func (s *Server) decodeChatInput(w http.ResponseWriter, r *http.Request) (string, string, string, []domain.ChatAttachment, bool) {
@@ -1659,7 +1744,7 @@ func (s *Server) decodeChatInput(w http.ResponseWriter, r *http.Request) (string
 // streamAgentEvents keeps the ResponseWriter owned by the HTTP goroutine while
 // the Agent continues independently. This makes heartbeats and disconnects safe:
 // a browser or proxy disappearing stops only the SSE writer, not the Agent loop.
-func streamAgentEvents(w http.ResponseWriter, r *http.Request, heartbeatInterval time.Duration, run func(func(agent.Event))) {
+func streamAgentEvents(w http.ResponseWriter, r *http.Request, heartbeatInterval time.Duration, run func(func(agent.Event))) (started bool) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("X-Accel-Buffering", "no")
@@ -1703,6 +1788,7 @@ func streamAgentEvents(w http.ResponseWriter, r *http.Request, heartbeatInterval
 		}()
 		run(publish)
 	}()
+	started = true
 
 	heartbeat := time.NewTicker(heartbeatInterval)
 	defer heartbeat.Stop()
@@ -1782,7 +1868,7 @@ func (s *Server) chatState(w http.ResponseWriter, r *http.Request) {
 		writeError(w, taskErr)
 		return
 	}
-	active := s.agent != nil && s.agent.IsSessionActive(sessionID)
+	active := s.chatSessionActive(sessionID)
 	contextSummary, summaryErr := s.service.GetChatContextSummary(r.Context(), sessionID)
 	if summaryErr != nil && !errors.Is(summaryErr, store.ErrNotFound) {
 		writeError(w, summaryErr)
@@ -1792,6 +1878,7 @@ func (s *Server) chatState(w http.ResponseWriter, r *http.Request) {
 		"active": active, "workspace_id": session.WorkspaceID,
 		"context_tokens": session.ContextTokens, "context_window": session.ContextWindow,
 		"messages": messages, "tool_calls": toolCalls, "tasks": tasks,
+		"queued_messages": s.chatQueue.snapshot(sessionID),
 	}
 	if summaryErr == nil {
 		state["context_summary"] = contextSummary
@@ -1802,6 +1889,10 @@ func (s *Server) chatState(w http.ResponseWriter, r *http.Request) {
 func (s *Server) compressChatContext(w http.ResponseWriter, r *http.Request) {
 	if s.agent == nil || !s.agent.Available() {
 		writeErrorStatus(w, agent.ErrUnavailable, http.StatusServiceUnavailable)
+		return
+	}
+	if s.chatSessionActive(r.PathValue("id")) {
+		writeErrorStatus(w, agent.ErrSessionBusy, http.StatusConflict)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
@@ -1828,7 +1919,7 @@ func (s *Server) chatSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.agent != nil {
 		for index := range result {
-			result[index].Active = s.agent.IsSessionActive(result[index].ID)
+			result[index].Active = s.chatSessionActive(result[index].ID)
 		}
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -1845,6 +1936,7 @@ func (s *Server) cancelChatSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cancelled := s.agent.CancelSession(sessionID)
+	cancelledQueued, cancelledDriver := s.chatQueue.clear(sessionID)
 	cancelledTools := 0
 	rejectedApprovals := 0
 	if s.service != nil {
@@ -1860,7 +1952,7 @@ func (s *Server) cancelChatSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"cancelled": cancelled || cancelledTools > 0, "cancelled_tools": cancelledTools, "rejected_approvals": rejectedApprovals})
+	writeJSON(w, http.StatusOK, map[string]any{"cancelled": cancelled || cancelledDriver || cancelledTools > 0 || cancelledQueued > 0, "cancelled_tools": cancelledTools, "cancelled_queued": cancelledQueued, "rejected_approvals": rejectedApprovals})
 }
 
 func (s *Server) setChatSessionWorkspace(w http.ResponseWriter, r *http.Request) {
@@ -1869,7 +1961,7 @@ func (s *Server) setChatSessionWorkspace(w http.ResponseWriter, r *http.Request)
 		writeErrorStatus(w, fmt.Errorf("session id is required"), http.StatusBadRequest)
 		return
 	}
-	if s.agent != nil && s.agent.IsSessionActive(sessionID) {
+	if s.chatSessionActive(sessionID) {
 		writeErrorStatus(w, fmt.Errorf("cannot switch Workspace while this conversation's Agent run is active"), http.StatusConflict)
 		return
 	}
@@ -1895,7 +1987,7 @@ func (s *Server) renameChatSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteChatSession(w http.ResponseWriter, r *http.Request) {
-	if s.agent != nil && s.agent.IsSessionActive(r.PathValue("id")) {
+	if s.chatSessionActive(r.PathValue("id")) {
 		writeErrorStatus(w, fmt.Errorf("cannot delete a conversation while its Agent run is active"), http.StatusConflict)
 		return
 	}

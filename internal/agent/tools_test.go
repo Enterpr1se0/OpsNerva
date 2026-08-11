@@ -260,7 +260,9 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 			schema := string(descriptor.InputSchema)
 			if descriptor.Category != "history" || !strings.Contains(schema, `"match_mode"`) || !strings.Contains(schema, `"literal"`) || !strings.Contains(schema, `"regex"`) ||
 				!strings.Contains(schema, `"query_scope"`) || !strings.Contains(schema, `"tool_name"`) || !strings.Contains(schema, `"status"`) ||
-				!strings.Contains(schema, `"started_after"`) || !strings.Contains(schema, `"started_before"`) {
+				!strings.Contains(schema, `"started_after"`) || !strings.Contains(schema, `"started_before"`) || !strings.Contains(schema, `"cursor"`) ||
+				!strings.Contains(schema, `"after_stdout_bytes"`) || !strings.Contains(schema, `"max_output_bytes"`) || !strings.Contains(schema, `"output_view"`) ||
+				!strings.Contains(schema, `"head_tail"`) {
 				t.Fatalf("ssh_history metadata is incomplete: %#v", descriptor)
 			}
 		}
@@ -1247,6 +1249,17 @@ func TestUnifiedHistoryToolSearchesAndReadsExactRun(t *testing.T) {
 	if !ok || request["remote_path"] != "/var/log/disk" {
 		t.Fatalf("exact history request is not structured: %#v", exact.Run.Request)
 	}
+	matchedRun, err := ReadHistoryTool(ctx, svc, HistorySearchInput{
+		RunID: "run-disk", Query: `disk[[:space:]]+full`, MatchMode: domain.FileSearchRegex,
+		QueryScope: "output", Limit: 5, MaxOutput: 1024,
+	})
+	if err != nil || matchedRun.Match == nil || matchedRun.Match.MatchLimit != 5 || !matchedRun.Match.Found || !strings.Contains(matchedRun.Match.StderrExcerpt, "disk full") {
+		t.Fatalf("run-scoped history match = %#v, err=%v", matchedRun, err)
+	}
+	requestMatch, err := ReadHistoryTool(ctx, svc, HistorySearchInput{RunID: "run-disk", Query: "/var/log/disk", QueryScope: "request"})
+	if err != nil || requestMatch.Match == nil || !requestMatch.Match.Found || !requestMatch.Match.RequestMatched {
+		t.Fatalf("run-scoped request match = %#v, err=%v", requestMatch, err)
+	}
 	sessionCtx := service.WithSessionID(ctx, "session-a")
 	sessionRuns, err := ReadHistoryTool(sessionCtx, svc, HistorySearchInput{Limit: 10})
 	if err != nil {
@@ -1281,7 +1294,18 @@ func TestUnifiedHistoryToolSearchesAndReadsExactRun(t *testing.T) {
 	if historyTool == nil {
 		t.Fatal("ssh_history was not registered")
 	}
-	failureJSON, err := historyTool.InvokableRun(ctx, `{"run_id":"run-disk","query":"df"}`)
+	matchedJSON, err := historyTool.InvokableRun(ctx, `{"run_id":"run-disk","query":"disk","limit":5}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var invokedMatch HistoryOutput
+	if err := json.Unmarshal([]byte(matchedJSON), &invokedMatch); err != nil {
+		t.Fatal(err)
+	}
+	if invokedMatch.Match == nil || !invokedMatch.Match.Found || invokedMatch.Match.MatchLimit != 5 {
+		t.Fatalf("run_id + query + limit was rejected: %s", matchedJSON)
+	}
+	failureJSON, err := historyTool.InvokableRun(ctx, `{"run_id":"run-disk","limit":1}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1289,8 +1313,99 @@ func TestUnifiedHistoryToolSearchesAndReadsExactRun(t *testing.T) {
 	if err := json.Unmarshal([]byte(failureJSON), &failure); err != nil {
 		t.Fatal(err)
 	}
-	if failure.OK || failure.Code != "validation_failed" || !strings.Contains(failure.Message, "mutually exclusive") {
+	if failure.OK || failure.Code != "validation_failed" || !strings.Contains(failure.Message, "limit requires query") {
 		t.Fatalf("history input conflict was not structured: %#v", failure)
+	}
+}
+
+func TestHistoryToolUsesStablePagesAndBoundsExactOutput(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/history-pages.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	host := domain.Host{ID: "host-pages", Name: "host-pages", Address: "127.0.0.1", Port: 22, User: "ops", AuthType: "agent", CreatedAt: now, UpdatedAt: now}
+	if _, err := st.UpsertHost(ctx, host); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 25; index++ {
+		reason := fmt.Sprintf("page operation %02d", index)
+		script := ""
+		toolArguments := ""
+		if index == 23 {
+			reason = strings.Repeat("r", 1000)
+		}
+		if index == 24 {
+			script = strings.Repeat("printf x\n", 2000)
+			toolArguments = `{"script":"` + strings.Repeat("x", 20<<10) + `"}`
+		}
+		requestJSON, err := json.Marshal(domain.ExecRequest{HostID: host.ID, Mode: domain.ExecScript, Script: script, Reason: reason})
+		if err != nil {
+			t.Fatal(err)
+		}
+		run := domain.Run{ID: fmt.Sprintf("run-page-%02d", index), SessionID: "session-pages", HostID: host.ID,
+			ToolName: "ssh_run_script", ToolArgumentsJSON: toolArguments, RequestJSON: string(requestJSON), RequestDigest: fmt.Sprintf("digest-%02d", index),
+			Status: "completed", StartedAt: now}
+		if err := st.CreateRun(ctx, run); err != nil {
+			t.Fatal(err)
+		}
+	}
+	largeOutput := strings.Repeat("a", 64<<10) + "TAIL"
+	if err := st.UpdateRun(ctx, domain.Run{ID: "run-page-24", Status: "completed", StdoutRedacted: largeOutput, CompletedAt: now.Add(time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	encryptor, err := security.NewEncryptor("", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := service.New(st, nil, encryptor, security.NewRedactor(), config.Default().Limits)
+	sessionCtx := service.WithSessionID(ctx, "session-pages")
+
+	first, err := ReadHistoryTool(sessionCtx, svc, HistorySearchInput{})
+	if err != nil || first.Runs == nil || len(*first.Runs) != defaultHistorySearchLimit || !first.HasMore || first.NextCursor == "" {
+		t.Fatalf("first history page = %#v, err=%v", first, err)
+	}
+	if (*first.Runs)[0].ID != "run-page-24" || (*first.Runs)[len(*first.Runs)-1].ID != "run-page-05" {
+		t.Fatalf("first history page order = %#v", *first.Runs)
+	}
+	for _, summary := range *first.Runs {
+		if len(summary.Operation) > maxHistoryOperationBytes {
+			t.Fatalf("history operation was not bounded: %d", len(summary.Operation))
+		}
+	}
+	second, err := ReadHistoryTool(sessionCtx, svc, HistorySearchInput{Cursor: first.NextCursor})
+	if err != nil || second.Runs == nil || len(*second.Runs) != 5 || second.HasMore || (*second.Runs)[0].ID != "run-page-04" || (*second.Runs)[4].ID != "run-page-00" {
+		t.Fatalf("second history page = %#v, err=%v", second, err)
+	}
+	if _, err := ReadHistoryTool(sessionCtx, svc, HistorySearchInput{Cursor: "not-a-cursor"}); err == nil || !strings.Contains(err.Error(), "cursor") {
+		t.Fatalf("invalid history cursor was accepted: %v", err)
+	}
+
+	exact, err := ReadHistoryTool(sessionCtx, svc, HistorySearchInput{RunID: "run-page-24"})
+	if err != nil || exact.Run == nil || len(exact.Run.Stdout) > defaultHistoryOutputBytes || !exact.Run.OutputLimited ||
+		exact.Run.StdoutTotalBytes != len(largeOutput) || exact.Run.OutputView != "head_tail" || !strings.HasSuffix(exact.Run.Stdout, "TAIL") {
+		t.Fatalf("bounded history detail = %#v, err=%v", exact, err)
+	}
+	requestPreview, requestLimited := exact.Run.Request.(map[string]any)
+	argumentPreview, argumentsLimited := exact.Run.ToolArguments.(map[string]any)
+	if !requestLimited || requestPreview["output_limited"] != true || !argumentsLimited || argumentPreview["output_limited"] != true {
+		t.Fatalf("history structured details were not bounded: request=%#v arguments=%#v", exact.Run.Request, exact.Run.ToolArguments)
+	}
+	if encoded, err := json.Marshal(exact); err != nil || len(encoded) > 128<<10 {
+		t.Fatalf("default history detail payload bytes=%d err=%v", len(encoded), err)
+	}
+	head, err := ReadHistoryTool(sessionCtx, svc, HistorySearchInput{RunID: "run-page-24", MaxOutput: 1024, OutputView: "head"})
+	if err != nil || head.Run == nil || len(head.Run.Stdout) != 1024 || head.Run.StdoutNextOffset != 1024 {
+		t.Fatalf("history detail head page = %#v, err=%v", head, err)
+	}
+	next, err := ReadHistoryTool(sessionCtx, svc, HistorySearchInput{RunID: "run-page-24", AfterStdout: head.Run.StdoutNextOffset, MaxOutput: 1024})
+	if err != nil || next.Run == nil || next.Run.StdoutOffsetBytes != 1024 || next.Run.StdoutNextOffset != 2048 || next.Run.OutputView != "head" {
+		t.Fatalf("history detail continuation = %#v, err=%v", next, err)
+	}
+	if _, err := ReadHistoryTool(sessionCtx, svc, HistorySearchInput{RunID: "run-page-24", MaxOutput: maxHistoryOutputBytes + 1}); err == nil {
+		t.Fatal("oversized history detail page was accepted")
 	}
 }
 
