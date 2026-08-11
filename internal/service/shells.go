@@ -62,6 +62,31 @@ func (s *Service) StartSSHShell(ctx context.Context, hostID, cwd string, elevate
 	}, actor)
 }
 
+// StartOperatorSSHShell opens a normal-user PTY directly from the authenticated
+// Web console. It is intentionally independent from an Agent conversation.
+func (s *Service) StartOperatorSSHShell(ctx context.Context, hostID, surface, actor string) (domain.SSHShell, error) {
+	surface = strings.TrimSpace(surface)
+	if surface == "" {
+		surface = domain.SSHShellSurfaceQuick
+	}
+	if surface != domain.SSHShellSurfaceQuick && surface != domain.SSHShellSurfaceWorkspace {
+		return domain.SSHShell{}, fmt.Errorf("invalid SSH shell surface %q", surface)
+	}
+	result, err := s.executeOperatorRun(ctx, domain.ExecRequest{
+		HostID:       strings.TrimSpace(hostID),
+		Mode:         domain.ExecSSHShellStart,
+		Reason:       webOperatorReason,
+		ShellSurface: surface,
+	}, actor)
+	if err != nil {
+		return domain.SSHShell{}, err
+	}
+	if result.Shell == nil {
+		return domain.SSHShell{}, fmt.Errorf("SSH shell start completed without shell state")
+	}
+	return *result.Shell, nil
+}
+
 func (s *Service) ListSSHShells(ctx context.Context, sessionID string, activeOnly bool, reason, actor string) (domain.SSHShellList, error) {
 	shells, err := s.store.ListSSHShells(ctx, strings.TrimSpace(sessionID), activeOnly)
 	if err != nil {

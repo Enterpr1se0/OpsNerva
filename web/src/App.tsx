@@ -1,5 +1,5 @@
 import { FormEvent, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
+import { createPortal, flushSync } from 'react-dom'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
@@ -20,6 +20,7 @@ import { TextFileEditor } from './TextFileEditor'
 import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, ChatMessage, ChatSession, ChatTokenUsage, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, QueuedChatMessage, Run, ServerLogEntry, SFTPFileEntry, SSHHostStatus, SSHShell, SSHShellEvent, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
 
 type Page = 'chat' | 'ssh' | 'config' | 'extensions' | 'audit' | 'logs'
+const pageVisualOrder:Page[]=['config','chat','ssh','extensions','audit','logs']
 type ChatEntryImage = {id:string;name:string;mimeType:string;sizeBytes:number;url:string}
 const workStatusKeys=['chat.cooking','chat.pondering','chat.brewing','chat.weaving','chat.polishing','chat.crunching'] as const
 type PendingChatImage = {id:string;file:File;url:string}
@@ -321,6 +322,11 @@ function NotificationCenter({notifications,onDismiss}:{notifications:AppNotifica
 function App() {
 	const {t}=useTranslation()
   const [page, setPage] = useState<Page>('chat')
+	const workspaceRef=useRef<HTMLElement>(null)
+	const pageTitleRef=useRef<HTMLHeadingElement>(null)
+	const previousPageRef=useRef<Page>(page)
+	const pageTransitionRef=useRef(false)
+	const pageDirectionRef=useRef(1)
 	const [themePreference,setThemePreference]=useState<ThemePreference>(initialThemePreference)
 	const [systemTheme,setSystemTheme]=useState<ColorTheme>(initialSystemTheme)
 	const colorTheme=resolvedColorTheme(themePreference,systemTheme)
@@ -489,16 +495,31 @@ function App() {
 		const timer=window.setInterval(()=>{if(document.visibilityState==='visible')void refreshHealth()},30000)
 		return()=>window.clearInterval(timer)
 	},[refreshHealth])
+	useLayoutEffect(()=>{
+		const previous=previousPageRef.current
+		previousPageRef.current=page
+		if(previous===page)return
+		if(pageTransitionRef.current){pageTransitionRef.current=false;return}
+		if(window.matchMedia('(prefers-reduced-motion: reduce)').matches)return
+		workspaceRef.current?.animate([
+			{opacity:.28,transform:`translate3d(${pageDirectionRef.current*12}px,4px,0)`,filter:'blur(2px)'},
+			{opacity:1,transform:'translate3d(0,0,0)',filter:'blur(0)'},
+		],{duration:240,easing:'cubic-bezier(.2,.8,.2,1)'})
+		pageTitleRef.current?.animate([
+			{opacity:0,transform:`translateX(${pageDirectionRef.current*5}px)`},
+			{opacity:1,transform:'translateX(0)'},
+		],{duration:180,easing:'cubic-bezier(.2,.8,.2,1)'})
+	},[page])
 	const navigate=useCallback((next:Page)=>{
 		if(next===page)return
 		const reduced=window.matchMedia('(prefers-reduced-motion: reduce)').matches
 		const transition=(document as Document&{startViewTransition?:(update:()=>void)=>unknown}).startViewTransition
 		const extensionEdge=page==='extensions'||next==='extensions'
-		if(transition&&!reduced&&!extensionEdge)transition.call(document,()=>setPage(next))
-		else{
-			setPage(next)
-			if(!reduced)window.requestAnimationFrame(()=>document.querySelector<HTMLElement>('.workspace')?.animate([{opacity:.35,transform:'translateY(5px)'},{opacity:1,transform:'translateY(0)'}],{duration:180,easing:'cubic-bezier(.2,.8,.2,1)'}))
-		}
+		pageDirectionRef.current=Math.sign(pageVisualOrder.indexOf(next)-pageVisualOrder.indexOf(page))||1
+		if(transition&&!reduced&&!extensionEdge){
+			pageTransitionRef.current=true
+			transition.call(document,()=>flushSync(()=>setPage(next)))
+		}else setPage(next)
 	},[page])
 	useEffect(()=>{
 		if(!desktopRuntime)return
@@ -549,12 +570,31 @@ function App() {
 	const registerSSHTunnel=(tunnel:SSHTunnel)=>{
 		setSSHTunnels(current=>[...current.filter(item=>item.id!==tunnel.id),tunnel])
 	}
+	const replaceSSHTunnel=(previousID:string,tunnel:SSHTunnel)=>{
+		setSSHTunnels(current=>[...current.filter(item=>item.id!==previousID&&item.id!==tunnel.id),tunnel])
+	}
 	const rememberSSHShell=(shell:SSHShell)=>{
 		setSSHShells(current=>[...current.filter(item=>item.id!==shell.id),shell])
 	}
 	const registerSSHShell=(shell:SSHShell)=>{
 		rememberSSHShell(shell)
 		setSelectedShell(shell)
+	}
+	const closeSSHShell=async(id:string)=>{
+		const dismiss=()=>{
+			setSSHShells(current=>current.filter(item=>item.id!==id))
+			setSelectedShell(current=>current?.id===id?null:current)
+		}
+		try{
+			await api.closeSSHShell(id)
+			dismiss()
+		}catch(err){
+			if(errorStatus(err)===404)dismiss()
+			else{
+				notify(errorText(err),'error')
+				void refreshConnections()
+			}
+		}
 	}
 	const createWorkspaceShell=async(workspaceID:string)=>{
 		try{registerSSHShell(await api.startSSHShell({workspace_id:workspaceID}))}
@@ -580,15 +620,15 @@ function App() {
       </div>
     </aside>
     <main>
-	      <header className="topbar"><div><h1>{title}</h1></div><div className="top-actions">
-        <SSHTunnelStatus tunnels={sshTunnels} hosts={hosts} open={openConnectionPanel==='tunnel'} onOpenChange={open=>setOpenConnectionPanel(current=>open?'tunnel':current==='tunnel'?null:current)} onRetry={retrySSHTunnel} onStop={stopSSHTunnel} onCreated={registerSSHTunnel}/>
-		<SSHShellStatus shells={sshShells.filter(topbarShell)} hosts={hosts} open={openConnectionPanel==='shell'} onOpenChange={open=>setOpenConnectionPanel(current=>open?'shell':current==='shell'?null:current)} onOpen={shell=>{setOpenConnectionPanel(null);setSelectedShell(shell)}} onCreated={registerSSHShell}/>
+	      <header className="topbar"><div><h1 ref={pageTitleRef}>{title}</h1></div><div className="top-actions">
+        <SSHTunnelStatus tunnels={sshTunnels} hosts={hosts} open={openConnectionPanel==='tunnel'} onOpenChange={open=>setOpenConnectionPanel(current=>open?'tunnel':current==='tunnel'?null:current)} onRetry={retrySSHTunnel} onStop={stopSSHTunnel} onCreated={registerSSHTunnel} onUpdated={replaceSSHTunnel} onRefresh={()=>void refreshConnections()}/>
+		<SSHShellStatus shells={sshShells.filter(topbarShell)} hosts={hosts} open={openConnectionPanel==='shell'} onOpenChange={open=>setOpenConnectionPanel(current=>open?'shell':current==='shell'?null:current)} onOpen={shell=>{setOpenConnectionPanel(null);setSelectedShell(shell)}} onClose={closeSSHShell} onCreated={registerSSHShell}/>
         <LanguageSwitch/>
 		<ThemeSwitch preference={themePreference} onChange={setThemePreference}/>
         <span className={`status ${health?.status === 'ok' ? 'online' : ''}`}><CircleDot size={14}/>{health?.status === 'ok' ? t('shell.online') : t('shell.disconnected')}</span>
         <button className={`icon-button ${refreshing?'refreshing':''}`} onClick={()=>void manualRefresh()} disabled={refreshing} title={t(refreshing?'common.refreshing':'shell.refresh')} aria-label={t(refreshing?'common.refreshing':'shell.refresh')}><RefreshCw size={17}/></button>
       </div></header>
-      <section className={`workspace workspace-${page}`}>
+      <section ref={workspaceRef} className={`workspace workspace-${page}`}>
 			<ChatPage visible={page==='chat'} onActivate={()=>navigate('chat')}
 				hosts={hosts} providers={providers} approvals={approvals} runs={runs} workspaceShells={sshShells.filter(shell=>shell.kind==='workspace')}
 				capabilities={capabilities} settings={settings} imageTypes={settings?.chat_image_allowed_types||defaultChatImageTypes}
@@ -787,11 +827,12 @@ function ComposerReasoningSelector({providers,disabled,onChanged,onError}:{provi
 	</details>
 }
 
-function SSHTunnelStatus({tunnels,hosts,open,onOpenChange,onRetry,onStop,onCreated}:{tunnels:SSHTunnel[];hosts:Host[];open:boolean;onOpenChange:(open:boolean)=>void;onRetry:(id:string)=>Promise<void>;onStop:(id:string)=>Promise<void>;onCreated:(tunnel:SSHTunnel)=>void}){
+function SSHTunnelStatus({tunnels,hosts,open,onOpenChange,onRetry,onStop,onCreated,onUpdated,onRefresh}:{tunnels:SSHTunnel[];hosts:Host[];open:boolean;onOpenChange:(open:boolean)=>void;onRetry:(id:string)=>Promise<void>;onStop:(id:string)=>Promise<void>;onCreated:(tunnel:SSHTunnel)=>void;onUpdated:(previousID:string,tunnel:SSHTunnel)=>void;onRefresh:()=>void}){
 	const {t,i18n:instance}=useTranslation()
 	const [retrying,setRetrying]=useState('')
 	const [stopping,setStopping]=useState('')
 	const [creating,setCreating]=useState(false)
+	const [editing,setEditing]=useState<SSHTunnel|null>(null)
 	const detailsRef=useAutoCollapseDetails(open,()=>onOpenChange(false))
 	return <>
 		<details ref={detailsRef} className="ssh-tunnel-status" open={open} onToggle={event=>onOpenChange(event.currentTarget.open)}>
@@ -799,70 +840,93 @@ function SSHTunnelStatus({tunnels,hosts,open,onOpenChange,onRetry,onStop,onCreat
 			<div className="ssh-tunnel-popover">
 				<header><span><Cable size={15}/><b>{t('tunnels.title')}</b></span><button type="button" disabled={!hosts.length} onClick={()=>{onOpenChange(false);setCreating(true)}}><Plus size={13}/>{t('tunnels.create')}</button></header>
 				<div>
-					{tunnels.map(tunnel=><section className={tunnel.status} key={tunnel.id}>
-						<div className="ssh-tunnel-route"><i/><code>{tunnel.host_name||tunnel.host_id}:{tunnel.remote_host}:{tunnel.remote_port}</code><span>→</span><code>localhost:{tunnel.local_port}</code></div>
+					{tunnels.map(tunnel=><section className={`${tunnel.status} ${stopping===tunnel.id?'closing':''}`} key={tunnel.id}>
+						<div className="ssh-tunnel-route"><i/><code>{sshTunnelRoute(tunnel.host_name||tunnel.host_id,tunnel.direction,tunnel.local_host,tunnel.local_port,tunnel.remote_host,tunnel.remote_port)}</code></div>
 						<dl><div><dt>{t('common.status')}</dt><dd>{t(`statusLabels.${tunnel.status}`,{defaultValue:tunnel.status})}</dd></div><div><dt>{t('tunnels.connections')}</dt><dd>{tunnel.active_connections} / {tunnel.total_connections}</dd></div><div><dt>{t('tunnels.traffic')}</dt><dd>↑ {formatFileSize(tunnel.bytes_sent)} · ↓ {formatFileSize(tunnel.bytes_received)}</dd></div><div><dt>{t('tunnels.started')}</dt><dd>{new Date(tunnel.started_at).toLocaleTimeString(localeFor(instance.language))}</dd></div></dl>
-						<div className="ssh-tunnel-meta"><span>{tunnel.proxy_used?t('tunnels.viaProxy'):t('tunnels.direct')}</span><code>{tunnel.id}</code>{tunnel.status==='failed'&&<button className="retry" type="button" disabled={retrying===tunnel.id||stopping===tunnel.id} onClick={async()=>{setRetrying(tunnel.id);try{await onRetry(tunnel.id)}finally{setRetrying('')}}}>{retrying===tunnel.id?<LoaderCircle className="spin" size={12}/>:<RefreshCw size={12}/>} {t('tunnels.retry')}</button>}<button type="button" disabled={stopping===tunnel.id||retrying===tunnel.id} onClick={async()=>{setStopping(tunnel.id);try{await onStop(tunnel.id)}finally{setStopping('')}}}>{stopping===tunnel.id?<LoaderCircle className="spin" size={12}/>:<Square size={10} fill="currentColor"/>}{t('tunnels.stop')}</button></div>
+						<div className="ssh-tunnel-meta"><span>{tunnel.direction==='reverse'?'-R':'-L'} · {tunnel.proxy_used?t('tunnels.viaProxy'):t('tunnels.direct')}</span><code>{tunnel.id}</code><button className="edit" type="button" disabled={stopping===tunnel.id||retrying===tunnel.id} onClick={()=>{onOpenChange(false);setEditing(tunnel)}}><Edit3 size={12}/>{t('common.edit')}</button>{tunnel.status==='failed'&&<button className="retry" type="button" disabled={retrying===tunnel.id||stopping===tunnel.id} onClick={async()=>{setRetrying(tunnel.id);try{await onRetry(tunnel.id)}finally{setRetrying('')}}}>{retrying===tunnel.id?<LoaderCircle className="spin" size={12}/>:<RefreshCw size={12}/>} {t('tunnels.retry')}</button>}<button type="button" disabled={stopping===tunnel.id||retrying===tunnel.id} onClick={async()=>{setStopping(tunnel.id);try{await onStop(tunnel.id)}finally{setStopping('')}}}>{stopping===tunnel.id?<LoaderCircle className="spin" size={12}/>:<Square size={10} fill="currentColor"/>}{t('tunnels.stop')}</button></div>
 						{tunnel.error&&<p><ShieldAlert size={12}/>{tunnel.error}</p>}
 					</section>)}
 					{!tunnels.length&&<div className="ssh-tunnel-empty">{hosts.length?t('tunnels.empty'):t('connections.noHosts')}</div>}
 				</div>
 			</div>
 		</details>
-		{creating&&<SSHTunnelCreateDialog hosts={hosts} onCancel={()=>setCreating(false)} onCreated={tunnel=>{onCreated(tunnel);setCreating(false)}}/>}
+		{creating&&<SSHTunnelEditorDialog hosts={hosts} onCancel={()=>setCreating(false)} onSaved={tunnel=>{onCreated(tunnel);setCreating(false)}}/>}
+		{editing&&<SSHTunnelEditorDialog hosts={hosts} tunnel={editing} onCancel={()=>setEditing(null)} onSaved={tunnel=>{onUpdated(editing.id,tunnel);setEditing(null)}} onFailed={onRefresh}/>}
 	</>
 }
 
-function SSHTunnelCreateDialog({hosts,onCancel,onCreated}:{hosts:Host[];onCancel:()=>void;onCreated:(tunnel:SSHTunnel)=>void}){
+function SSHTunnelEditorDialog({hosts,tunnel,onCancel,onSaved,onFailed}:{hosts:Host[];tunnel?:SSHTunnel;onCancel:()=>void;onSaved:(tunnel:SSHTunnel)=>void;onFailed?:()=>void}){
 	const {t}=useTranslation()
-	const [hostID,setHostID]=useState(hosts[0]?.id||'')
-	const [remoteHost,setRemoteHost]=useState('127.0.0.1')
-	const [remotePort,setRemotePort]=useState('')
-	const [localPort,setLocalPort]=useState('')
+	const [hostID,setHostID]=useState(tunnel?.host_id||hosts[0]?.id||'')
+	const [direction,setDirection]=useState<'local'|'reverse'>(tunnel?.direction||'local')
+	const [localHost,setLocalHost]=useState(tunnel?.local_host||'127.0.0.1')
+	const [localPort,setLocalPort]=useState(tunnel?String(tunnel.local_port):'')
+	const [remoteHost,setRemoteHost]=useState(tunnel?.remote_host||'127.0.0.1')
+	const [remotePort,setRemotePort]=useState(tunnel?String(tunnel.remote_port):'')
 	const [busy,setBusy]=useState(false)
 	const [error,setError]=useState('')
 	const submit=async(event:FormEvent)=>{
 		event.preventDefault()
-		const remote=Number(remotePort),local=localPort===''?0:Number(localPort)
-		if(!hostID||!remoteHost.trim()){setError(t('common.required'));return}
-		if(!Number.isInteger(remote)||remote<1||remote>65535||local!==0&&(!Number.isInteger(local)||local<1||local>65535)){setError(t('tunnels.portRange'));return}
+		const remote=remotePort===''?0:Number(remotePort),local=localPort===''?0:Number(localPort)
+		if(!hostID||!localHost.trim()||!remoteHost.trim()){setError(t('common.required'));return}
+		const localInvalid=!Number.isInteger(local)||local<0||local>65535||(direction==='reverse'&&local===0)
+		const remoteInvalid=!Number.isInteger(remote)||remote<0||remote>65535||(direction==='local'&&remote===0)
+		if(localInvalid||remoteInvalid){setError(t('tunnels.portRange'));return}
 		setBusy(true);setError('')
 		try{
-			const tunnel=await api.startSSHTunnel({host_id:hostID,remote_host:remoteHost.trim(),remote_port:remote,local_port:local})
-			onCreated(tunnel)
-		}catch(err){setError(errorText(err))}
+			const config={direction,local_host:localHost.trim(),local_port:local,remote_host:remoteHost.trim(),remote_port:remote}
+			const saved=tunnel?await api.updateSSHTunnel(tunnel.id,{host_id:hostID,...config}):await api.startSSHTunnel({host_id:hostID,...config})
+			onSaved(saved)
+		}catch(err){setError(errorText(err));onFailed?.()}
 		finally{setBusy(false)}
 	}
 	return createPortal(<div className="connection-dialog-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget&&!busy)onCancel()}}>
-		<form className="connection-dialog panel" role="dialog" aria-modal="true" aria-labelledby="new-tunnel-title" noValidate onSubmit={submit}>
-			<header><span><Cable size={20}/><span><small>{t('tunnels.title')}</small><h2 id="new-tunnel-title">{t('tunnels.create')}</h2></span></span><button type="button" disabled={busy} onClick={onCancel}><X size={16}/></button></header>
+		<form className="connection-dialog panel" role="dialog" aria-modal="true" aria-labelledby="tunnel-editor-title" noValidate onSubmit={submit}>
+			<header><span><Cable size={20}/><span><small>{t('tunnels.title')}</small><h2 id="tunnel-editor-title">{t(tunnel?'tunnels.edit':'tunnels.create')}</h2></span></span><button type="button" disabled={busy} onClick={onCancel}><X size={16}/></button></header>
 			<div className="connection-dialog-fields">
 				<label><span>{t('common.host')}</span><AppSelect value={hostID} ariaLabel={t('common.host')} onChange={setHostID} options={hosts.map(host=>({value:host.id,label:`${host.name} · ${host.user}@${host.address}:${host.port}`}))}/></label>
-				<label><span>{t('tunnels.remoteHost')}</span><input value={remoteHost} onChange={event=>setRemoteHost(event.target.value)}/></label>
-				<label><span>{t('tunnels.remotePort')}</span><input inputMode="numeric" value={remotePort} onChange={event=>setRemotePort(event.target.value.replace(/\D/g,'').slice(0,5))} autoFocus/></label>
-				<label><span>{t('tunnels.localPort')}</span><input inputMode="numeric" value={localPort} onChange={event=>setLocalPort(event.target.value.replace(/\D/g,'').slice(0,5))} placeholder={t('tunnels.automaticPort')}/></label>
+				<label><span>{t('tunnels.direction')}</span><AppSelect value={direction} ariaLabel={t('tunnels.direction')} onChange={value=>setDirection(value as 'local'|'reverse')} options={[{value:'local',label:t('tunnels.localForward')},{value:'reverse',label:t('tunnels.reverseForward')}]}/></label>
+				<label><span>{t(direction==='local'?'tunnels.localListenHost':'tunnels.localTargetHost')}</span><input value={localHost} onChange={event=>setLocalHost(event.target.value)}/></label>
+				<label><span>{t(direction==='local'?'tunnels.localListenPort':'tunnels.localTargetPort')}</span><input inputMode="numeric" value={localPort} onChange={event=>setLocalPort(event.target.value.replace(/\D/g,'').slice(0,5))} placeholder={direction==='local'?t('tunnels.automaticPort'):undefined} autoFocus={direction==='reverse'}/></label>
+				<label><span>{t(direction==='local'?'tunnels.remoteTargetHost':'tunnels.remoteListenHost')}</span><input value={remoteHost} onChange={event=>setRemoteHost(event.target.value)}/></label>
+				<label><span>{t(direction==='local'?'tunnels.remoteTargetPort':'tunnels.remoteListenPort')}</span><input inputMode="numeric" value={remotePort} onChange={event=>setRemotePort(event.target.value.replace(/\D/g,'').slice(0,5))} placeholder={direction==='reverse'?t('tunnels.automaticPort'):undefined} autoFocus={direction==='local'}/></label>
 			</div>
 			{error&&<p className="connection-dialog-error"><ShieldAlert size={14}/>{error}</p>}
-			<footer><button type="button" disabled={busy} onClick={onCancel}>{t('common.cancel')}</button><button className="primary" disabled={busy||!hostID}>{busy?<LoaderCircle className="spin" size={14}/>:<Plus size={14}/>} {busy?t('tunnels.starting'):t('tunnels.start')}</button></footer>
+			<footer><button type="button" disabled={busy} onClick={onCancel}>{t('common.cancel')}</button><button className="primary" disabled={busy||!hostID}>{busy?<LoaderCircle className="spin" size={14}/>:tunnel?<Save size={14}/>:<Plus size={14}/>} {busy?t(tunnel?'common.saving':'tunnels.starting'):t(tunnel?'common.save':'tunnels.start')}</button></footer>
 		</form>
 	</div>,document.body)
 }
 
-function SSHShellStatus({shells,hosts,open,onOpenChange,onOpen,onCreated}:{shells:SSHShell[];hosts:Host[];open:boolean;onOpenChange:(open:boolean)=>void;onOpen:(shell:SSHShell)=>void;onCreated:(shell:SSHShell)=>void}){
+function SSHShellStatus({shells,hosts,open,onOpenChange,onOpen,onClose,onCreated}:{shells:SSHShell[];hosts:Host[];open:boolean;onOpenChange:(open:boolean)=>void;onOpen:(shell:SSHShell)=>void;onClose:(id:string)=>Promise<void>;onCreated:(shell:SSHShell)=>void}){
 	const {t}=useTranslation()
 	const [creating,setCreating]=useState(false)
+	const closingShellIDsRef=useRef(new Set<string>())
+	const [closingShellIDs,setClosingShellIDs]=useState<Set<string>>(new Set())
 	const detailsRef=useAutoCollapseDetails(open,()=>onOpenChange(false))
+	const close=async(id:string)=>{
+		if(closingShellIDsRef.current.has(id))return
+		closingShellIDsRef.current.add(id)
+		setClosingShellIDs(new Set(closingShellIDsRef.current))
+		try{await onClose(id)}
+		finally{
+			closingShellIDsRef.current.delete(id)
+			setClosingShellIDs(new Set(closingShellIDsRef.current))
+		}
+	}
 	return <>
 		<details ref={detailsRef} className="ssh-shell-status" open={open} onToggle={event=>onOpenChange(event.currentTarget.open)}>
 			<summary title={t('sshShell.title')}><TerminalSquare size={14}/><span>{t('sshShell.short')}</span><em>{shells.length}</em></summary>
 			<div className="ssh-shell-popover">
 				<header><span><TerminalSquare size={15}/><b>{t('sshShell.title')}</b></span><button type="button" disabled={!hosts.length} onClick={()=>{onOpenChange(false);setCreating(true)}}><Plus size={13}/>{t('sshShell.create')}</button></header>
 				<div>
-					{shells.map(shell=><button type="button" className={shell.status} onClick={()=>onOpen(shell)} key={shell.id}>
-						<span><i/><b>{shell.kind==='workspace'?`${t('common.workspace')} · ${shell.workspace_id}`:shell.host_name||shell.host_id}</b><code>{shell.kind==='workspace'?t('workspace.agent'):shell.elevated?'root':shell.user}</code></span>
-						<small>{shell.cwd||(shell.kind==='workspace'?'.':'~')}</small>
-						<ChevronRight size={14}/>
-					</button>)}
+					{shells.map(shell=>{const closing=closingShellIDs.has(shell.id);return <section className={`ssh-shell-entry ${shell.status} ${closing?'closing':''}`} key={shell.id}>
+						<button type="button" className="ssh-shell-open" disabled={closing} onClick={()=>onOpen(shell)}>
+							<span><i/><b>{shell.kind==='workspace'?`${t('common.workspace')} · ${shell.workspace_id}`:shell.host_name||shell.host_id}</b><code>{shell.kind==='workspace'?t('workspace.agent'):shell.elevated?'root':shell.user}</code></span>
+							<small>{shell.cwd||(shell.kind==='workspace'?'.':'~')}</small>
+							<ChevronRight size={14}/>
+						</button>
+						<button type="button" className="ssh-shell-quick-close" disabled={closing} onClick={()=>void close(shell.id)} title={t('sshShell.closeSession')} aria-label={t('sshShell.closeSession')}>{closing?<LoaderCircle className="spin" size={12}/>:<Power size={13}/>}</button>
+					</section>})}
 					{!shells.length&&<div className="ssh-shell-empty">{hosts.length?t('sshShell.empty'):t('connections.noHosts')}</div>}
 				</div>
 			</div>
@@ -2640,8 +2704,10 @@ function compactScript(script:string){const source=script.length>toolOutputPrevi
 function latestOutput(value:string,limit=3){const tail=value.length>toolOutputPreviewChars?value.slice(-toolOutputPreviewChars):value;return tail.trimEnd().split(/\r?\n/).filter(line=>line.trim()!=='').slice(-limit).map(line=>previewText(line,180)).join('\n')}
 function formatDuration(value:unknown,run?:Run){if(typeof value==='number'&&Number.isFinite(value))return value>=1e9?`${(value/1e9).toFixed(2)} s`:`${(value/1e6).toFixed(1)} ms`;if(run?.completed_at){const ms=Date.parse(run.completed_at)-Date.parse(run.started_at);if(Number.isFinite(ms))return ms>=1000?`${(ms/1000).toFixed(2)} s`:`${ms} ms`}return'—'}
 function numberValue(value:unknown){return typeof value==='number'&&Number.isFinite(value)?value:0}
-function sshTunnelRoute(host:string,remoteHost:string,remotePort:number,localPort:number,automatic='auto'){
-	return `${host}:${remoteHost}:${remotePort} → localhost:${localPort||automatic}`
+function sshTunnelRoute(host:string,direction:string,localHost:string,localPort:number,remoteHost:string,remotePort:number,automatic='auto'){
+	const local=`${localHost||'127.0.0.1'}:${localPort||automatic}`
+	const remote=`${host}:${remoteHost||'127.0.0.1'}:${remotePort||automatic}`
+	return direction==='reverse'?`${local} → ${remote}`:`${local} ← ${remote}`
 }
 function cleanFileChangeOutput(value:string){const lines=value.split(/\r?\n/),result:string[]=[];for(let index=0;index<lines.length;index++){if(lines[index]==='__OPS_FILE_VALIDATION_OK__')continue;if(lines[index]==='__OPS_FILE_AFTER__'){index++;continue}result.push(lines[index])}return result.join('\n').trim()}
 
@@ -2712,10 +2778,12 @@ function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run
 	const tunnelOperation=entry.tool==='ssh_tunnel'
 	const tunnelAction=textValue(toolArguments?.action)||(requestMode==='ssh_tunnel_start'?'start':'')
 	const tunnel=jsonRecord(payload.tunnel)||jsonRecord(resultPayload?.tunnel)
+	const tunnelDirection=(request?textValue(request.direction):'')||textValue(tunnel?.direction)||textValue(toolArguments?.direction)||'local'
+	const tunnelLocalHost=(request?textValue(request.local_host):'')||textValue(tunnel?.local_host)||textValue(toolArguments?.local_host)||'127.0.0.1'
 	const tunnelRemoteHost=(request?textValue(request.remote_host):'')||textValue(tunnel?.remote_host)||textValue(toolArguments?.remote_host)
 	const tunnelRemotePort=(request?numberValue(request.remote_port):0)||numberValue(tunnel?.remote_port)||numberValue(toolArguments?.remote_port)
 	const tunnelLocalPort=(request?numberValue(request.local_port):0)||numberValue(tunnel?.local_port)||numberValue(toolArguments?.local_port)
-	const tunnelRoute=tunnelAction==='start'?sshTunnelRoute(hostName,tunnelRemoteHost,tunnelRemotePort,tunnelLocalPort,t('tunnels.automaticPort')):tunnelAction==='stop'?textValue(toolArguments?.tunnel_id):''
+	const tunnelRoute=tunnelAction==='start'?sshTunnelRoute(hostName,tunnelDirection,tunnelLocalHost,tunnelLocalPort,tunnelRemoteHost,tunnelRemotePort,t('tunnels.automaticPort')):tunnelAction==='stop'?textValue(toolArguments?.tunnel_id):''
 	const shellTool=entry.tool==='ssh_shell'||entry.tool==='workspace_shell'
 	const shellAction=textValue(toolArguments?.action)||(requestMode==='ssh_shell_start'||requestMode==='workspace_shell_start'?'start':requestMode==='workspace_shell'?'run':'')
 	const shellOperation=shellTool&&shellAction!=='run'
@@ -3126,10 +3194,12 @@ function ApprovalDialog({
   const targetHost = target?.name || approval.host_id;
   const source = hosts.find((host) => host.id === sourceHostID);
   const sourceHost = source?.name || sourceHostID;
+  const tunnelDirection = textValue(request.direction) || "local";
+  const tunnelLocalHost = textValue(request.local_host) || "127.0.0.1";
   const tunnelLocalPort = numberValue(request.local_port);
   const tunnelRemoteHost = textValue(request.remote_host);
   const tunnelRemotePort = numberValue(request.remote_port);
-  const tunnelOperation = sshTunnelRoute(targetHost,tunnelRemoteHost,tunnelRemotePort,tunnelLocalPort,t('tunnels.automaticPort'));
+  const tunnelOperation = sshTunnelRoute(targetHost,tunnelDirection,tunnelLocalHost,tunnelLocalPort,tunnelRemoteHost,tunnelRemotePort,t('tunnels.automaticPort'));
   const sshShellOperation = `${targetHost}:${textValue(request.cwd)||'~'} · PTY`;
 	const workspaceShellOperation = `${workspaceID}:${textValue(request.cwd)||'.'} · PTY`;
   const operation = tunnelApproval
@@ -3644,7 +3714,7 @@ function AuditRunDetail({run,req,hosts}:{run:Run;req:JsonRecord;hosts:Host[]}){
 	const tunnelMode=mode==='ssh_tunnel_start'
 	const shellMode=mode==='ssh_shell_start'||mode==='workspace_shell_start'
 	const shellModeLabel=mode==='ssh_shell_start'?`SSH Shell · ${t('sshShell.toolActions.start')}`:`Workspace Shell · ${t('sshShell.toolActions.start')}`
-	const tunnelRoute=tunnelMode?sshTunnelRoute(destinationHost.name||destinationHost.id,textValue(req.remote_host),numberValue(req.remote_port),numberValue(req.local_port),t('tunnels.automaticPort')):''
+	const tunnelRoute=tunnelMode?sshTunnelRoute(destinationHost.name||destinationHost.id,textValue(req.direction)||'local',textValue(req.local_host)||'127.0.0.1',numberValue(req.local_port),textValue(req.remote_host),numberValue(req.remote_port),t('tunnels.automaticPort')):''
 	const shellTarget=`${mode==='workspace_shell_start'?`${workspaceID}:${textValue(req.cwd)||'.'}`:destinationHost.name||destinationHost.id} · PTY`
 	const fileTarget=`${workspaceID?`${workspaceID}:`:''}${filePath}`
 	const commandText=shellMode?shellTarget:tunnelMode?tunnelRoute:workspaceUpload?`workspace_upload ${workspaceID}:${relativePath} → ${destinationHost.name||destinationHost.id}:${remotePath}`:workspaceDownload?`workspace_download ${destinationHost.name||destinationHost.id}:${remotePath} → ${workspaceID}:${relativePath}`:sshTransfer?`${[sourceHost.name||sourceHost.id,sourcePath].filter(Boolean).join(':')} → ${destinationHost.name||destinationHost.id}:${remotePath}`:searchMode||readMode?`${searchMode?'search':'read'} ${fileTarget}`:script?script:program?program:filePath?`${mode} ${fileTarget}`:toolLabel(run.tool_name||'')
@@ -3691,7 +3761,7 @@ function auditOperationSummary(req:JsonRecord,run:Run,hosts:Host[],t:TFunction){
 		case'script':return `${t('toolNames.ssh_run_script')} · ${compactScript(textValue(req.script))}`
 		case'ssh_shell_start':return `SSH Shell · ${t('sshShell.toolActions.start')}`
 		case'workspace_shell_start':return `Workspace Shell · ${t('sshShell.toolActions.start')} · ${workspaceID}:${textValue(req.cwd)||'.'}`
-		case'ssh_tunnel_start':return sshTunnelRoute(destinationName,textValue(req.remote_host),numberValue(req.remote_port),numberValue(req.local_port),t('tunnels.automaticPort'))
+		case'ssh_tunnel_start':return sshTunnelRoute(destinationName,textValue(req.direction)||'local',textValue(req.local_host)||'127.0.0.1',numberValue(req.local_port),textValue(req.remote_host),numberValue(req.remote_port),t('tunnels.automaticPort'))
 		case'remote_read':return `${t('toolNames.ssh_file_read')} · ${remotePath}`
 		case'remote_search':return `${t('toolNames.ssh_file_search_mode')} · ${remotePath} · ${textValue(req.search_pattern)}`
 		case'remote_edit':return `${t('toolNames.ssh_file_edit')} · ${remotePath}`

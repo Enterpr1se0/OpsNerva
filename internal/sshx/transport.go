@@ -91,6 +91,12 @@ type TunnelClient interface {
 	Close() error
 }
 
+// ReverseTunnelClient can request a listener from the SSH server for remote
+// (-R) port forwarding. Accepted connections arrive through the SSH channel.
+type ReverseTunnelClient interface {
+	Listen(network, address string) (net.Listener, error)
+}
+
 type TunnelTransport interface {
 	OpenTunnel(context.Context, ConnectionSpec) (TunnelClient, error)
 }

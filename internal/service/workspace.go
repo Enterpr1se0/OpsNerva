@@ -1115,12 +1115,12 @@ func (s *Service) StartWorkspaceShell(ctx context.Context, workspaceID, cwd stri
 // StartOperatorWorkspaceShell opens a PTY after an authenticated operator
 // explicitly selects a Workspace in the Web console.
 func (s *Service) StartOperatorWorkspaceShell(ctx context.Context, workspaceID, cwd, actor string) (domain.SSHShell, error) {
-	req, err := s.workspaceShellStartRequest(ctx, workspaceID, cwd, nil, 120, 32, operatorConnectionReason)
+	req, err := s.workspaceShellStartRequest(ctx, workspaceID, cwd, nil, 120, 32, webOperatorReason)
 	if err != nil {
 		return domain.SSHShell{}, err
 	}
 	req.ShellSurface = domain.WorkspaceShellSurfaceOperator
-	result, err := s.executeOperatorConnection(ctx, req, actor)
+	result, err := s.executeOperatorRun(ctx, req, actor)
 	if err != nil {
 		return domain.SSHShell{}, err
 	}

@@ -22,10 +22,12 @@ const zh = {
     online: '服务正常', disconnected: '连接已断开', refresh: '刷新',
   },
   tunnels: {
-    short: '隧道', title: 'SSH 端口转发', localOnly: '仅监听本机 127.0.0.1', empty: '当前没有 SSH 转发。',
+    short: '隧道', title: 'SSH 端口转发', empty: '当前没有 SSH 转发。',
     connections: '连接', traffic: '流量', started: '启动时间', viaProxy: '使用代理 / 跳板链路', direct: 'SSH 直连',
     retry: '重试', stop: '停止', automaticPort: '自动端口', forwarding: 'SSH 端口转发', remoteEndpoint: '远程端点',
-    create: '新建转发', start: '开始转发', starting: '正在连接...', remoteHost: '主机侧目标地址', remotePort: '主机侧目标端口', localPort: '本机端口', portRange: '端口必须在 1–65535 之间。',
+    create: '新建转发', edit: '编辑转发', start: '开始转发', starting: '正在连接...', direction: '方向', localForward: '本地 (-L)', reverseForward: '反向 (-R)',
+    localListenHost: '本地监听 IP', localListenPort: '本地监听端口', remoteTargetHost: '主机侧目标', remoteTargetPort: '主机侧目标端口',
+    remoteListenHost: '远端监听 IP', remoteListenPort: '远端监听端口', localTargetHost: '本地目标', localTargetPort: '本地目标端口', portRange: '端口必须在 1–65535 之间。',
   },
   sshShell: {
     short: 'Shell', title: 'Shell', empty: '当前没有活动 Shell。',
@@ -179,7 +181,7 @@ const zh = {
   approval: {
     actionScript: '脚本', actionCommand: '命令', sudoFileTitle: '是否允许 sudo 修改系统文件', sudoTitle: '是否允许 sudo 以 root 权限执行{{kind}}',
     readTitle: '是否允许读取这个文件', searchTitle: '是否允许搜索这个文件', sudoReadTitle: '是否允许以 root 权限读取这个文件', sudoSearchTitle: '是否允许以 root 权限搜索这个文件',
-    uploadTitle: '是否允许上传文件', downloadTitle: '是否允许下载文件', transferTitle: '是否允许在 SSH 主机间传输文件', tunnelTitle: '是否允许建立本机 SSH 端口转发', sshShellTitle: '是否允许 Agent 控制交互式 SSH Shell', hostShellTitle: '是否允许在宿主机执行脚本', fileTitle: '是否允许修改文件', executeTitle: '是否允许执行{{kind}}',
+    uploadTitle: '是否允许上传文件', downloadTitle: '是否允许下载文件', transferTitle: '是否允许在 SSH 主机间传输文件', tunnelTitle: '是否允许建立 SSH 端口转发', sshShellTitle: '是否允许 Agent 控制交互式 SSH Shell', hostShellTitle: '是否允许在宿主机执行脚本', fileTitle: '是否允许修改文件', executeTitle: '是否允许执行{{kind}}',
     uploadLabel: '将要上传的文件', downloadLabel: '将要下载的文件', transferLabel: '文件传输', tunnelLabel: '端口转发链路', sshShellLabel: '交互控制范围', rootFileLabel: '将以 root 权限修改的文件', rootCommandLabel: '将以 root 权限执行的完整{{kind}}', fileLabel: '将要修改的文件', commandLabel: '将要执行的完整{{kind}}',
     readLabel: '将要读取的文件', searchLabel: '将要搜索的文件', rootReadLabel: '将以 root 权限读取的文件', rootSearchLabel: '将以 root 权限搜索的文件',
     pendingOperation: '待审批操作', rootViaSudo: 'root（通过 sudo）', serviceUser: '当前服务用户', approved: '审批已通过 · {{status}} · {{run}}', autoApproved: 'Auto 允许',

@@ -1,4 +1,4 @@
-import type { AgentEvent, Approval, ApprovalExecutionResult, ChatContextCompressionResult, ChatSession, ChatState, Health, Host, HostInput, LLMToolCatalog, ManagedSkill, MCPOAuthStart, MCPServer, MCPServerInput, MCPTestResult, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestJob, ModelTestResult, Proxy, ProxyInput, ProxyTestResult, QueuedChatMessage, Run, ServerLogResponse, SFTPFileList, SFTPMutationResult, SSHHostStatus, SSHShell, SSHShellList, SSHShellSnapshot, SSHShellStartInput, SSHTunnel, SSHTunnelList, SSHTunnelStartInput, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchResponse, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceInput, WorkspaceUploadResult } from './types'
+import type { AgentEvent, Approval, ApprovalExecutionResult, ChatContextCompressionResult, ChatSession, ChatState, Health, Host, HostInput, LLMToolCatalog, ManagedSkill, MCPOAuthStart, MCPServer, MCPServerInput, MCPTestResult, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestJob, ModelTestResult, Proxy, ProxyInput, ProxyTestResult, QueuedChatMessage, Run, ServerLogResponse, SFTPFileList, SFTPMutationResult, SSHHostStatus, SSHShell, SSHShellList, SSHShellSnapshot, SSHShellStartInput, SSHTunnel, SSHTunnelList, SSHTunnelStartInput, SSHTunnelUpdateInput, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchResponse, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceInput, WorkspaceUploadResult } from './types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	const multipart=typeof FormData!=='undefined'&&init?.body instanceof FormData
@@ -85,6 +85,7 @@ export const api = {
   hosts: () => requestList<Host>('/api/v1/hosts'),
   sshTunnels: () => request<SSHTunnelList>('/api/v1/ssh-tunnels'),
   startSSHTunnel: (input:SSHTunnelStartInput) => request<SSHTunnel>('/api/v1/ssh-tunnels', { method:'POST', body:JSON.stringify(input) }),
+  updateSSHTunnel: (id:string,input:SSHTunnelUpdateInput) => request<SSHTunnel>(`/api/v1/ssh-tunnels/${encodeURIComponent(id)}`, { method:'PUT', body:JSON.stringify(input) }),
   retrySSHTunnel: (id:string) => request<SSHTunnel>(`/api/v1/ssh-tunnels/${encodeURIComponent(id)}/retry`, { method:'POST', body:'{}' }),
   stopSSHTunnel: (id:string) => request<SSHTunnel>(`/api/v1/ssh-tunnels/${encodeURIComponent(id)}`, { method:'DELETE' }),
   sshShells: (sessionId='') => request<SSHShellList>(`/api/v1/ssh-shells?session_id=${encodeURIComponent(sessionId)}`),

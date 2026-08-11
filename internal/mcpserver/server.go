@@ -68,7 +68,7 @@ func New(svc *service.Service, version string) *Server {
 			compact, err := agent.CompactExecToolResult(output, err)
 			return nil, compact, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_tunnel", Description: "Start, list, or stop local SSH port forwarding.", Annotations: changeAnnotations("Manage SSH tunnel", false)},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_tunnel", Description: "Start, list, or stop local and reverse SSH port forwarding.", Annotations: changeAnnotations("Manage SSH tunnel", false)},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.SSHTunnelInput) (*mcp.CallToolResult, any, error) {
 			output, err := agent.RunSSHTunnelTool(ctx, svc, input, "mcp-client")
 			return nil, output, err

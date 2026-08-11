@@ -22,10 +22,12 @@ const en = {
     online: 'Service online', disconnected: 'Disconnected', refresh: 'Refresh',
   },
   tunnels: {
-    short: 'Tunnels', title: 'SSH port forwarding', localOnly: 'Listens only on local 127.0.0.1', empty: 'No SSH forwarding is active.',
+    short: 'Tunnels', title: 'SSH port forwarding', empty: 'No SSH forwarding is active.',
     connections: 'Connections', traffic: 'Traffic', started: 'Started', viaProxy: 'Using proxy / jump chain', direct: 'Direct SSH',
     retry: 'Retry', stop: 'Stop', automaticPort: 'auto', forwarding: 'SSH port forwarding', remoteEndpoint: 'Remote endpoint',
-    create: 'New forward', start: 'Start forwarding', starting: 'Connecting...', remoteHost: 'Host-side target', remotePort: 'Host-side target port', localPort: 'Local port', portRange: 'Ports must be between 1–65535.',
+    create: 'New forward', edit: 'Edit forward', start: 'Start forwarding', starting: 'Connecting...', direction: 'Direction', localForward: 'Local (-L)', reverseForward: 'Reverse (-R)',
+    localListenHost: 'Local listen IP', localListenPort: 'Local listen port', remoteTargetHost: 'Host-side target', remoteTargetPort: 'Host-side target port',
+    remoteListenHost: 'Remote listen IP', remoteListenPort: 'Remote listen port', localTargetHost: 'Local target', localTargetPort: 'Local target port', portRange: 'Ports must be between 1–65535.',
   },
   sshShell: {
     short: 'Shells', title: 'Shell', empty: 'No shell is active.',
@@ -179,7 +181,7 @@ const en = {
   approval: {
     actionScript: 'script', actionCommand: 'command', sudoFileTitle: 'Allow sudo to modify this system file?', sudoTitle: 'Allow sudo to run this {{kind}} as root?',
     readTitle: 'Allow this file to be read?', searchTitle: 'Allow this file to be searched?', sudoReadTitle: 'Allow this file to be read as root?', sudoSearchTitle: 'Allow this file to be searched as root?',
-    uploadTitle: 'Allow this file upload?', downloadTitle: 'Allow this file download?', transferTitle: 'Allow this host-to-host file transfer?', tunnelTitle: 'Allow this local SSH port forward?', sshShellTitle: 'Allow the Agent to control an interactive SSH shell?', hostShellTitle: 'Allow this script to run on the host?', fileTitle: 'Allow this file change?', executeTitle: 'Allow this {{kind}} to run?',
+    uploadTitle: 'Allow this file upload?', downloadTitle: 'Allow this file download?', transferTitle: 'Allow this host-to-host file transfer?', tunnelTitle: 'Allow this SSH port forward?', sshShellTitle: 'Allow the Agent to control an interactive SSH shell?', hostShellTitle: 'Allow this script to run on the host?', fileTitle: 'Allow this file change?', executeTitle: 'Allow this {{kind}} to run?',
     uploadLabel: 'File to upload', downloadLabel: 'File to download', transferLabel: 'File transfer', tunnelLabel: 'Port forwarding route', sshShellLabel: 'Interactive control scope', rootFileLabel: 'File to modify as root', rootCommandLabel: 'Full {{kind}} to execute as root', fileLabel: 'File to modify', commandLabel: 'Full {{kind}} to execute',
     readLabel: 'File to read', searchLabel: 'File to search', rootReadLabel: 'File to read as root', rootSearchLabel: 'File to search as root',
     pendingOperation: 'Pending operation', rootViaSudo: 'root (via sudo)', serviceUser: 'Current service user', approved: 'Approved · {{status}} · {{run}}', autoApproved: 'Auto approved',

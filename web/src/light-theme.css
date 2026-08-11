@@ -1355,3 +1355,34 @@
 :root[data-theme='light'] *::-webkit-scrollbar-thumb:hover {
   background: #98a39d;
 }
+
+:root[data-theme='light'] .ssh-shell-entry {
+  border-color: var(--light-border);
+  background: var(--light-surface);
+}
+
+:root[data-theme='light'] .ssh-shell-open {
+  color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] .ssh-shell-open:hover {
+  background: var(--light-muted-surface);
+}
+
+:root[data-theme='light'] .ssh-shell-open b {
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] :where(.ssh-shell-open small, .ssh-shell-open > svg) {
+  color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] .ssh-shell-quick-close {
+  color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] .ssh-shell-quick-close:hover {
+  border-color: var(--light-danger-border);
+  background: var(--light-danger-soft);
+  color: var(--light-danger);
+}

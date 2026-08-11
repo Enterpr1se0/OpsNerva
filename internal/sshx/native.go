@@ -215,6 +215,10 @@ func (c *nativeTunnelClient) Dial(network, address string) (net.Conn, error) {
 	return c.client.client.Dial(network, address)
 }
 
+func (c *nativeTunnelClient) Listen(network, address string) (net.Listener, error) {
+	return c.client.client.Listen(network, address)
+}
+
 func (c *nativeTunnelClient) Wait() error {
 	return c.client.client.Wait()
 }

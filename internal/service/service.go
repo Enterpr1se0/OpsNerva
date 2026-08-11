@@ -2204,7 +2204,7 @@ func validateRequestLimits(req domain.ExecRequest, limits config.Limits, redacto
 			req.RelativePath != "" || req.Change != nil || req.TextEdit != nil {
 			return fmt.Errorf("SSH tunnel requests cannot include command, file, transfer, or Workspace fields")
 		}
-	} else if req.TunnelRemoteHost != "" || req.TunnelRemotePort != 0 || req.TunnelLocalPort != 0 {
+	} else if sshTunnelFieldsSet(req) {
 		return fmt.Errorf("SSH tunnel fields are only valid for ssh_tunnel_start requests")
 	}
 	if req.Mode == domain.ExecSSHShellStart {
@@ -2859,6 +2859,20 @@ func normalizeRequest(req *domain.ExecRequest, limits config.Limits) {
 	}
 	if req.Env == nil {
 		req.Env = map[string]string{}
+	}
+	if req.Mode == domain.ExecSSHTunnelStart {
+		req.TunnelDirection = domain.SSHTunnelDirection(strings.ToLower(strings.TrimSpace(string(req.TunnelDirection))))
+		if req.TunnelDirection == "" {
+			req.TunnelDirection = domain.SSHTunnelDirectionLocal
+		}
+		req.TunnelLocalHost = strings.Trim(strings.TrimSpace(req.TunnelLocalHost), "[]")
+		if req.TunnelLocalHost == "" {
+			req.TunnelLocalHost = sshTunnelDefaultHost
+		}
+		req.TunnelRemoteHost = strings.Trim(strings.TrimSpace(req.TunnelRemoteHost), "[]")
+		if req.TunnelRemoteHost == "" {
+			req.TunnelRemoteHost = sshTunnelDefaultHost
+		}
 	}
 	if req.Mode == domain.ExecSSHShellStart || req.Mode == domain.ExecWorkspaceShellStart {
 		if req.ShellCols == 0 {

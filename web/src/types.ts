@@ -90,6 +90,7 @@ export interface SSHTunnel {
   id: string
   host_id: string
   host_name: string
+  direction: 'local' | 'reverse'
   local_host: string
   local_port: number
   remote_host: string
@@ -111,10 +112,14 @@ export interface SSHTunnelList {
 
 export interface SSHTunnelStartInput {
   host_id: string
+  direction: 'local' | 'reverse'
+  local_host: string
+  local_port: number
   remote_host: string
   remote_port: number
-  local_port: number
 }
+
+export type SSHTunnelUpdateInput = SSHTunnelStartInput
 
 export interface SSHShell {
   id: string

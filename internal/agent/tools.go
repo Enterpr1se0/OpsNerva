@@ -156,9 +156,11 @@ type ScriptInput struct {
 type SSHTunnelInput struct {
 	Action     string `json:"action" jsonschema:"start, list, or stop"`
 	HostID     string `json:"host_id,omitempty" jsonschema:"start: SSH host ID"`
-	RemoteHost string `json:"remote_host,omitempty" jsonschema:"start: remote endpoint host; default 127.0.0.1"`
-	RemotePort int    `json:"remote_port,omitempty" jsonschema:"start: remote endpoint port"`
-	LocalPort  int    `json:"local_port,omitempty" jsonschema:"start: local port; 0 selects one"`
+	Direction  string `json:"direction,omitempty" jsonschema:"start: local (-L, default) or reverse (-R)"`
+	LocalHost  string `json:"local_host,omitempty" jsonschema:"start: local listener bind IP for local forwarding, or client-side target host for reverse forwarding; default 127.0.0.1"`
+	LocalPort  int    `json:"local_port,omitempty" jsonschema:"start: local listener port for local forwarding (0 selects one), or client-side target port for reverse forwarding"`
+	RemoteHost string `json:"remote_host,omitempty" jsonschema:"start: host-side target for local forwarding, or SSH-server bind IP for reverse forwarding; default 127.0.0.1"`
+	RemotePort int    `json:"remote_port,omitempty" jsonschema:"start: host-side target port for local forwarding, or SSH-server listener port for reverse forwarding (0 selects one)"`
 	TunnelID   string `json:"tunnel_id,omitempty" jsonschema:"stop: tunnel ID"`
 	Reason     string `json:"reason,omitempty" jsonschema:"start: one-sentence purpose"`
 }
@@ -746,7 +748,14 @@ func historyOperation(run domain.Run, request domain.ExecRequest) string {
 	case domain.ExecSSHFileTransfer:
 		return request.SourceHostID + ":" + request.SourcePath + " -> " + request.HostID + ":" + request.RemotePath
 	case domain.ExecSSHTunnelStart:
-		return fmt.Sprintf("%s:%d -> localhost:%d", request.TunnelRemoteHost, request.TunnelRemotePort, request.TunnelLocalPort)
+		localHost := request.TunnelLocalHost
+		if localHost == "" {
+			localHost = "127.0.0.1"
+		}
+		if request.TunnelDirection == domain.SSHTunnelDirectionReverse {
+			return fmt.Sprintf("%s:%d <- %s:%d", localHost, request.TunnelLocalPort, request.TunnelRemoteHost, request.TunnelRemotePort)
+		}
+		return fmt.Sprintf("%s:%d -> %s:%d", localHost, request.TunnelLocalPort, request.TunnelRemoteHost, request.TunnelRemotePort)
 	case domain.ExecSSHShellStart, domain.ExecWorkspaceShellStart:
 		return string(request.Mode)
 	}
@@ -1335,15 +1344,18 @@ func RunSSHTunnelTool(ctx context.Context, svc *service.Service, input SSHTunnel
 		if input.TunnelID != "" {
 			return normalizeValueToolResult(ctx, "ssh_tunnel", domain.SSHTunnel{}, invalidToolInput("tunnel_id is only valid with action=stop"))
 		}
-		result, err := svc.StartSSHTunnel(ctx, input.HostID, input.RemoteHost, input.RemotePort, input.LocalPort, input.Reason, actor)
+		result, err := svc.StartSSHTunnel(ctx, input.HostID, domain.SSHTunnelConfig{
+			Direction: domain.SSHTunnelDirection(input.Direction), LocalHost: input.LocalHost, LocalPort: input.LocalPort,
+			RemoteHost: input.RemoteHost, RemotePort: input.RemotePort,
+		}, input.Reason, actor)
 		return CompactExecToolResult(result, err)
 	case "list":
-		if input.HostID != "" || input.RemoteHost != "" || input.RemotePort != 0 || input.LocalPort != 0 || input.TunnelID != "" {
-			return normalizeValueToolResult(ctx, "ssh_tunnel", domain.SSHTunnelList{}, invalidToolInput("action=list does not accept host_id, remote_host, remote_port, local_port, or tunnel_id"))
+		if input.HostID != "" || input.Direction != "" || input.LocalHost != "" || input.LocalPort != 0 || input.RemoteHost != "" || input.RemotePort != 0 || input.TunnelID != "" {
+			return normalizeValueToolResult(ctx, "ssh_tunnel", domain.SSHTunnelList{}, invalidToolInput("action=list does not accept host_id, direction, local_host, local_port, remote_host, remote_port, or tunnel_id"))
 		}
 		return svc.ListSSHTunnels(), nil
 	case "stop":
-		if input.HostID != "" || input.RemoteHost != "" || input.RemotePort != 0 || input.LocalPort != 0 {
+		if input.HostID != "" || input.Direction != "" || input.LocalHost != "" || input.LocalPort != 0 || input.RemoteHost != "" || input.RemotePort != 0 {
 			return normalizeValueToolResult(ctx, "ssh_tunnel", domain.SSHTunnel{}, invalidToolInput("action=stop accepts tunnel_id and optional reason only"))
 		}
 		tunnel, err := svc.StopSSHTunnel(ctx, input.TunnelID, actor)
@@ -1888,7 +1900,7 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_tunnel", "Start, list, or stop process-local SSH port forwarding.", func(ctx context.Context, input SSHTunnelInput) (any, error) {
+	if err := appendTool(toolutils.InferTool("ssh_tunnel", "Start, list, or stop local (-L) and reverse (-R) SSH port forwarding with configurable listener addresses.", func(ctx context.Context, input SSHTunnelInput) (any, error) {
 		return RunSSHTunnelTool(ctx, svc, input, "eino-agent")
 	})); err != nil {
 		return nil, err

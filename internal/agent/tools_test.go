@@ -240,7 +240,7 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 		}
 		if descriptor.Name == "ssh_tunnel" {
 			schema := string(descriptor.InputSchema)
-			if descriptor.Guard != "approval_required" || !strings.Contains(schema, `"action"`) || !strings.Contains(schema, `"remote_host"`) || !strings.Contains(schema, `"remote_port"`) || !strings.Contains(schema, `"local_port"`) || !strings.Contains(schema, `"tunnel_id"`) {
+			if descriptor.Guard != "approval_required" || !strings.Contains(schema, `"action"`) || !strings.Contains(schema, `"direction"`) || !strings.Contains(schema, `"local_host"`) || !strings.Contains(schema, `"remote_host"`) || !strings.Contains(schema, `"remote_port"`) || !strings.Contains(schema, `"local_port"`) || !strings.Contains(schema, `"tunnel_id"`) {
 				t.Fatalf("ssh_tunnel metadata does not reflect its runtime schema: %#v", descriptor)
 			}
 		}

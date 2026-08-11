@@ -148,6 +148,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/hosts/{id}/sftp/directories", s.createSFTPDirectory)
 	s.mux.HandleFunc("GET /api/v1/ssh-tunnels", s.listSSHTunnels)
 	s.mux.HandleFunc("POST /api/v1/ssh-tunnels", s.startSSHTunnel)
+	s.mux.HandleFunc("PUT /api/v1/ssh-tunnels/{id}", s.updateSSHTunnel)
 	s.mux.HandleFunc("POST /api/v1/ssh-tunnels/{id}/retry", s.retrySSHTunnel)
 	s.mux.HandleFunc("DELETE /api/v1/ssh-tunnels/{id}", s.stopSSHTunnel)
 	s.mux.HandleFunc("GET /api/v1/ssh-shells", s.listSSHShells)
@@ -1281,22 +1282,46 @@ func (s *Server) listSSHTunnels(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.service.ListSSHTunnels())
 }
 
-func (s *Server) startSSHTunnel(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		HostID     string `json:"host_id"`
-		RemoteHost string `json:"remote_host"`
-		RemotePort int    `json:"remote_port"`
-		LocalPort  int    `json:"local_port"`
+type sshTunnelInput struct {
+	HostID     string                    `json:"host_id"`
+	Direction  domain.SSHTunnelDirection `json:"direction"`
+	LocalHost  string                    `json:"local_host"`
+	LocalPort  int                       `json:"local_port"`
+	RemoteHost string                    `json:"remote_host"`
+	RemotePort int                       `json:"remote_port"`
+}
+
+func (input sshTunnelInput) config() domain.SSHTunnelConfig {
+	return domain.SSHTunnelConfig{
+		Direction: input.Direction, LocalHost: input.LocalHost, LocalPort: input.LocalPort,
+		RemoteHost: input.RemoteHost, RemotePort: input.RemotePort,
 	}
+}
+
+func (s *Server) startSSHTunnel(w http.ResponseWriter, r *http.Request) {
+	var input sshTunnelInput
 	if !decode(w, r, &input) {
 		return
 	}
-	result, err := s.service.StartOperatorSSHTunnel(r.Context(), input.HostID, input.RemoteHost, input.RemotePort, input.LocalPort, actor(r))
+	result, err := s.service.StartOperatorSSHTunnel(r.Context(), input.HostID, input.config(), actor(r))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, result)
+}
+
+func (s *Server) updateSSHTunnel(w http.ResponseWriter, r *http.Request) {
+	var input sshTunnelInput
+	if !decode(w, r, &input) {
+		return
+	}
+	result, err := s.service.UpdateOperatorSSHTunnel(r.Context(), r.PathValue("id"), input.HostID, input.config(), actor(r))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) stopSSHTunnel(w http.ResponseWriter, r *http.Request) {

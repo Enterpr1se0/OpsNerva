@@ -56,6 +56,10 @@ func (client *fakeTunnelClient) Dial(_ string, address string) (net.Conn, error)
 	return net.DialTimeout("tcp", address, time.Second)
 }
 
+func (client *fakeTunnelClient) Listen(network, address string) (net.Listener, error) {
+	return net.Listen(network, address)
+}
+
 func (client *fakeTunnelClient) Wait() error {
 	<-client.closed
 	return nil
@@ -672,6 +676,17 @@ func newTestService(t *testing.T) (*Service, *fakeTransport, domain.Host) {
 		t.Fatal(err)
 	}
 	return svc, transport, host
+}
+
+func assertNoPendingApprovals(t *testing.T, svc *Service) {
+	t.Helper()
+	approvals, err := svc.ListApprovals(context.Background(), "pending", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(approvals) != 0 {
+		t.Fatalf("operator connection unexpectedly created approvals: %#v", approvals)
+	}
 }
 
 func TestHostsIncludeStoredHostKeyState(t *testing.T) {

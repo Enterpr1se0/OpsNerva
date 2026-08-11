@@ -548,6 +548,21 @@ const (
 	FileSearchRegex   FileSearchMatchMode = "regex"
 )
 
+type SSHTunnelDirection string
+
+const (
+	SSHTunnelDirectionLocal   SSHTunnelDirection = "local"
+	SSHTunnelDirectionReverse SSHTunnelDirection = "reverse"
+)
+
+type SSHTunnelConfig struct {
+	Direction  SSHTunnelDirection `json:"direction,omitempty"`
+	LocalHost  string             `json:"local_host,omitempty"`
+	LocalPort  int                `json:"local_port,omitempty"`
+	RemoteHost string             `json:"remote_host,omitempty"`
+	RemotePort int                `json:"remote_port,omitempty"`
+}
+
 type ExecRequest struct {
 	HostID                    string              `json:"host_id" jsonschema:"registered host identifier; never an address or credential"`
 	Mode                      ExecMode            `json:"mode,omitempty" jsonschema:"program for argv execution or script for a reviewed bash script"`
@@ -581,9 +596,11 @@ type ExecRequest struct {
 	TailLines                 int                 `json:"tail_lines,omitempty" jsonschema:"number of final remote file lines to return"`
 	OffsetBytes               int64               `json:"offset_bytes,omitempty" jsonschema:"file read offset; negative values count from the end"`
 	MaxBytes                  int                 `json:"max_bytes,omitempty" jsonschema:"bounded file read length"`
-	TunnelRemoteHost          string              `json:"remote_host,omitempty" jsonschema:"host reached from the SSH target"`
-	TunnelRemotePort          int                 `json:"remote_port,omitempty" jsonschema:"port reached from the SSH target"`
-	TunnelLocalPort           int                 `json:"local_port,omitempty" jsonschema:"local loopback port; zero selects an available port"`
+	TunnelDirection           SSHTunnelDirection  `json:"direction,omitempty" jsonschema:"SSH forwarding direction: local or reverse"`
+	TunnelLocalHost           string              `json:"local_host,omitempty" jsonschema:"local bind IP for local forwarding, or client-side target for reverse forwarding"`
+	TunnelLocalPort           int                 `json:"local_port,omitempty" jsonschema:"local listener port for local forwarding, or client-side target port for reverse forwarding"`
+	TunnelRemoteHost          string              `json:"remote_host,omitempty" jsonschema:"host-side target for local forwarding, or SSH-server bind IP for reverse forwarding"`
+	TunnelRemotePort          int                 `json:"remote_port,omitempty" jsonschema:"host-side target port for local forwarding, or SSH-server listener port for reverse forwarding"`
 	ShellCols                 int                 `json:"shell_cols,omitempty" jsonschema:"interactive shell terminal columns"`
 	ShellRows                 int                 `json:"shell_rows,omitempty" jsonschema:"interactive shell terminal rows"`
 	LocalPath                 string              `json:"-"`
@@ -599,7 +616,8 @@ func (r ExecRequest) SearchText() string {
 	parts := []string{r.Program}
 	parts = append(parts, r.Args...)
 	parts = append(parts, r.Script, r.Cwd, r.Reason,
-		r.RemotePath, r.SourcePath, r.WorkspaceID, r.RelativePath, r.SearchPattern, r.TunnelRemoteHost)
+		r.RemotePath, r.SourcePath, r.WorkspaceID, r.RelativePath, r.SearchPattern,
+		string(r.TunnelDirection), r.TunnelLocalHost, r.TunnelRemoteHost)
 	if r.TunnelRemotePort != 0 {
 		parts = append(parts, strconv.Itoa(r.TunnelRemotePort))
 	}
@@ -672,21 +690,22 @@ type ExecResult struct {
 }
 
 type SSHTunnel struct {
-	ID                string    `json:"id"`
-	HostID            string    `json:"host_id"`
-	HostName          string    `json:"host_name"`
-	LocalHost         string    `json:"local_host"`
-	LocalPort         int       `json:"local_port"`
-	RemoteHost        string    `json:"remote_host"`
-	RemotePort        int       `json:"remote_port"`
-	Status            string    `json:"status"`
-	ProxyUsed         bool      `json:"proxy_used"`
-	ActiveConnections int64     `json:"active_connections"`
-	TotalConnections  int64     `json:"total_connections"`
-	BytesSent         int64     `json:"bytes_sent"`
-	BytesReceived     int64     `json:"bytes_received"`
-	Error             string    `json:"error,omitempty"`
-	StartedAt         time.Time `json:"started_at"`
+	ID                string             `json:"id"`
+	HostID            string             `json:"host_id"`
+	HostName          string             `json:"host_name"`
+	Direction         SSHTunnelDirection `json:"direction"`
+	LocalHost         string             `json:"local_host"`
+	LocalPort         int                `json:"local_port"`
+	RemoteHost        string             `json:"remote_host"`
+	RemotePort        int                `json:"remote_port"`
+	Status            string             `json:"status"`
+	ProxyUsed         bool               `json:"proxy_used"`
+	ActiveConnections int64              `json:"active_connections"`
+	TotalConnections  int64              `json:"total_connections"`
+	BytesSent         int64              `json:"bytes_sent"`
+	BytesReceived     int64              `json:"bytes_received"`
+	Error             string             `json:"error,omitempty"`
+	StartedAt         time.Time          `json:"started_at"`
 }
 
 type SSHTunnelList struct {
