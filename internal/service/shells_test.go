@@ -26,6 +26,16 @@ type fakeShellSession struct {
 	outputDelay time.Duration
 }
 
+func (s *fakeShellSession) HostStatus(context.Context) (sshx.HostStatus, error) {
+	return sshx.HostStatus{
+		CPUTotal: 1000, CPUIdle: 250,
+		MemoryUsedBytes: 3 << 30, MemoryTotalBytes: 8 << 30,
+		DiskUsedBytes: 10 << 30, DiskTotalBytes: 50 << 30,
+		NetworkReceivedBytes: 123456, NetworkSentBytes: 654321,
+		UptimeSeconds: 93784, SampledAt: time.Now().UTC(),
+	}, nil
+}
+
 func (f *fakeTransport) OpenShell(_ context.Context, _ sshx.ConnectionSpec, _ domain.ExecRequest, cols, rows int, callback func(string, []byte)) (sshx.ShellSession, error) {
 	code := 0
 	session := &fakeShellSession{
@@ -102,6 +112,21 @@ func TestWriteSSHShellDelaysBeforeReadingOutput(t *testing.T) {
 	}
 	if output.String() != "echo delayed\r" {
 		t.Fatalf("delayed shell output was not returned with input: %q", output.String())
+	}
+}
+
+func TestGetSSHShellHostStatusUsesActiveConnection(t *testing.T) {
+	svc, _, host := newTestService(t)
+	shell, err := svc.StartOperatorSSHShell(context.Background(), host.ID, domain.SSHShellSurfaceWorkspace, "admin-web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := svc.GetSSHShellHostStatus(context.Background(), shell.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.CPUTotal != 1000 || status.MemoryTotalBytes != 8<<30 || status.NetworkSentBytes != 654321 || status.UptimeSeconds != 93784 {
+		t.Fatalf("unexpected host status: %#v", status)
 	}
 }
 

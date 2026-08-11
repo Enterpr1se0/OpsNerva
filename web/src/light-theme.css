@@ -1294,14 +1294,28 @@
   color: #d8e3dd;
 }
 
+:root[data-theme='light'] .ssh-host-status {
+  border-top-color: var(--light-border);
+  background: #f4f8f5;
+  color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] .ssh-host-status > span {
+  border-right-color: var(--light-border);
+}
+
+:root[data-theme='light'] .ssh-host-status > span > svg {
+  color: var(--light-accent);
+}
+
+:root[data-theme='light'] .ssh-host-status > span b {
+  color: var(--light-text);
+}
+
 :root[data-theme='light'] .ssh-shell-terminal-dialog {
   border-color: var(--light-border-strong);
   background: var(--light-surface);
   box-shadow: var(--light-shadow-high);
-}
-
-:root[data-theme='light'] .ssh-shell-terminal-meta {
-  color: var(--light-text-secondary);
 }
 
 :root[data-theme='light'] .ssh-shell-terminal-error {

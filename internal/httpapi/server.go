@@ -153,6 +153,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/ssh-shells", s.listSSHShells)
 	s.mux.HandleFunc("POST /api/v1/ssh-shells", s.startSSHShell)
 	s.mux.HandleFunc("GET /api/v1/ssh-shells/{id}", s.getSSHShell)
+	s.mux.HandleFunc("GET /api/v1/ssh-shells/{id}/host-status", s.sshShellHostStatus)
 	s.mux.HandleFunc("GET /api/v1/ssh-shells/{id}/events", s.sshShellEvents)
 	s.mux.HandleFunc("POST /api/v1/ssh-shells/{id}/input", s.sshShellInput)
 	s.mux.HandleFunc("POST /api/v1/ssh-shells/{id}/resize", s.resizeSSHShell)
@@ -722,6 +723,23 @@ func (s *Server) getSSHShell(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond(w, result, err)
+}
+
+func (s *Server) sshShellHostStatus(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.GetSSHShellHostStatus(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeErrorStatus(w, err, http.StatusNotFound)
+		return
+	}
+	if errors.Is(err, service.ErrSSHShellHostStatusUnavailable) {
+		writeErrorStatus(w, err, http.StatusConflict)
+		return
+	}
+	if err != nil {
+		writeErrorStatus(w, err, http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) sshShellInput(w http.ResponseWriter, r *http.Request) {

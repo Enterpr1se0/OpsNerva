@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -28,6 +29,8 @@ const (
 	defaultShellQueryDelay      = time.Duration(domain.DefaultShellQueryDelaySeconds) * time.Second
 	maxShellQueryDelay          = time.Duration(domain.MaxShellQueryDelaySeconds) * time.Second
 )
+
+var ErrSSHShellHostStatusUnavailable = errors.New("SSH shell host monitoring is unavailable")
 
 type sshShellState struct {
 	mu             sync.Mutex
@@ -78,6 +81,40 @@ func (s *Service) ListSSHShells(ctx context.Context, sessionID string, activeOnl
 func (s *Service) GetSSHShellSnapshot(ctx context.Context, id, expectedSessionID string, after uint64, wait time.Duration, coalesce bool, reason, actor string) (domain.SSHShellSnapshot, error) {
 	snapshot, _, err := s.getSSHShellSnapshotPage(ctx, id, expectedSessionID, after, wait, 0, coalesce, reason, actor)
 	return snapshot, err
+}
+
+func (s *Service) GetSSHShellHostStatus(ctx context.Context, id string) (sshx.HostStatus, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return sshx.HostStatus{}, fmt.Errorf("shell_id is required")
+	}
+	shell, err := s.store.GetSSHShell(ctx, id)
+	if err != nil {
+		return sshx.HostStatus{}, err
+	}
+	if shell.Kind != domain.SSHShellKindSSH {
+		return sshx.HostStatus{}, fmt.Errorf("%w: shell %q is not an SSH host shell", ErrSSHShellHostStatusUnavailable, id)
+	}
+	s.shellMu.RLock()
+	state := s.shells[id]
+	s.shellMu.RUnlock()
+	if state == nil {
+		return sshx.HostStatus{}, fmt.Errorf("%w: shell %q is not active", ErrSSHShellHostStatusUnavailable, id)
+	}
+	state.mu.Lock()
+	status := state.shell.Status
+	session := state.session
+	state.mu.Unlock()
+	if !shellStatusActive(status) || session == nil {
+		return sshx.HostStatus{}, fmt.Errorf("%w: shell %q is not running", ErrSSHShellHostStatusUnavailable, id)
+	}
+	monitor, ok := session.(sshx.HostStatusSession)
+	if !ok {
+		return sshx.HostStatus{}, fmt.Errorf("%w: SSH transport does not support monitoring", ErrSSHShellHostStatusUnavailable)
+	}
+	monitorCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return monitor.HostStatus(monitorCtx)
 }
 
 func (s *Service) getSSHShellSnapshotPage(ctx context.Context, id, expectedSessionID string, after uint64, wait time.Duration, maxOutputBytes int, coalesce bool, reason, actor string) (domain.SSHShellSnapshot, bool, error) {

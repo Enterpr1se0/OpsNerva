@@ -9,7 +9,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import '@xterm/xterm/css/xterm.css'
 import {
-  Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronLeft, ChevronRight, CircleDot, Copy, Cpu, Edit3, Eye, EyeOff, FileText, FolderOpen, FolderOutput, FunctionSquare, History, Home, ImagePlus, KeyRound, LockKeyhole, Maximize2, Minimize2, Minus, Monitor, Moon, PanelLeftClose, PanelLeftOpen, Sun,
+  Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronLeft, ChevronRight, CircleDot, Clock3, Copy, Cpu, Edit3, Eye, EyeOff, FileText, FolderOpen, FolderOutput, FunctionSquare, HardDrive, History, Home, ImagePlus, KeyRound, LockKeyhole, Maximize2, MemoryStick, Minimize2, Minus, Monitor, Moon, Network, PanelLeftClose, PanelLeftOpen, Sun,
   Cable, Download, ListChecks, ListPlus, LoaderCircle, LogOut, Plus, Power, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, Square, TerminalSquare, Trash2, UploadCloud, UserRound, X, Zap,
 } from 'lucide-react'
 import { api, chatAttachmentURL, reconnectChatStream, sftpDownloadURL, sshShellEventsURL, streamChat, workspaceDownloadURL, workspaceFileEventsURL } from './api'
@@ -17,7 +17,7 @@ import { CopyButton, CopyablePre } from './CopyButton'
 import { AppSelect, ModelCombobox } from './Controls'
 import i18n, { localeFor, type SupportedLanguage } from './i18n'
 import { TextFileEditor } from './TextFileEditor'
-import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, ChatMessage, ChatSession, ChatTokenUsage, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, QueuedChatMessage, Run, ServerLogEntry, SFTPFileEntry, SSHShell, SSHShellEvent, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
+import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, ChatMessage, ChatSession, ChatTokenUsage, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, QueuedChatMessage, Run, ServerLogEntry, SFTPFileEntry, SSHHostStatus, SSHShell, SSHShellEvent, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
 
 type Page = 'chat' | 'ssh' | 'config' | 'extensions' | 'audit' | 'logs'
 type ChatEntryImage = {id:string;name:string;mimeType:string;sizeBytes:number;url:string}
@@ -899,13 +899,98 @@ function SSHShellCreateDialog({hosts,surface,onCancel,onCreated}:{hosts:Host[];s
 
 function sshShellActive(status:string){return ['starting','running','stopping'].includes(status)}
 
+type SSHHostStatusView={sample:SSHHostStatus;cpuPercent:number|null;receivedPerSecond:number|null;sentPerSecond:number|null}
+
+function statusByteUnit(value:number){
+	if(value>=1024**4)return{size:1024**4,label:'TiB'}
+	if(value>=1024**3)return{size:1024**3,label:'GiB'}
+	if(value>=1024**2)return{size:1024**2,label:'MiB'}
+	if(value>=1024)return{size:1024,label:'KiB'}
+	return{size:1,label:'B'}
+}
+
+function formatStatusBytes(value:number){
+	const unit=statusByteUnit(value)
+	const scaled=value/unit.size
+	return `${scaled>=100?scaled.toFixed(0):scaled>=10?scaled.toFixed(1):scaled.toFixed(2)} ${unit.label}`
+}
+
+function formatStatusPair(used:number,total:number){
+	const unit=statusByteUnit(total)
+	const digits=total/unit.size>=100?0:1
+	return `${(used/unit.size).toFixed(digits)} / ${(total/unit.size).toFixed(digits)} ${unit.label}`
+}
+
+function formatHostUptime(seconds:number){
+	const days=Math.floor(seconds/86400)
+	const hours=Math.floor(seconds%86400/3600)
+	const minutes=Math.floor(seconds%3600/60)
+	return days>0?`${days}d ${hours}h`:hours>0?`${hours}h ${minutes}m`:`${minutes}m`
+}
+
+function SSHHostStatusBar({shell}:{shell:SSHShell}){
+	const {t}=useTranslation()
+	const [view,setView]=useState<SSHHostStatusView|null>(null)
+	const [unavailable,setUnavailable]=useState(false)
+	const previousRef=useRef<SSHHostStatus|null>(null)
+	useEffect(()=>{
+		let disposed=false
+		let monitoringEnded=false
+		let timer:number|undefined
+		previousRef.current=null
+		setView(null)
+		setUnavailable(false)
+		const sample=async()=>{
+			let nextDelay=3000
+			try{
+				const next=await api.sshShellHostStatus(shell.id)
+				if(disposed)return
+				const previous=previousRef.current
+				let cpuPercent:number|null=null
+				let receivedPerSecond:number|null=null
+				let sentPerSecond:number|null=null
+				if(previous){
+					const totalDelta=next.cpu_total-previous.cpu_total
+					const idleDelta=next.cpu_idle-previous.cpu_idle
+					if(totalDelta>0&&idleDelta>=0)cpuPercent=Math.max(0,Math.min(100,(totalDelta-idleDelta)/totalDelta*100))
+					const elapsed=(Date.parse(next.sampled_at)-Date.parse(previous.sampled_at))/1000
+					if(elapsed>0&&next.network_received_bytes>=previous.network_received_bytes&&next.network_sent_bytes>=previous.network_sent_bytes){
+						receivedPerSecond=(next.network_received_bytes-previous.network_received_bytes)/elapsed
+						sentPerSecond=(next.network_sent_bytes-previous.network_sent_bytes)/elapsed
+					}
+				}else nextDelay=1000
+				previousRef.current=next
+				setView({sample:next,cpuPercent,receivedPerSecond,sentPerSecond})
+				setUnavailable(false)
+			}catch(err){
+				if(errorStatus(err)===404||errorStatus(err)===409)monitoringEnded=true
+				if(!disposed)setUnavailable(true)
+			}finally{
+				if(!disposed&&!monitoringEnded&&sshShellActive(shell.status))timer=window.setTimeout(()=>void sample(),nextDelay)
+			}
+		}
+		if(sshShellActive(shell.status))void sample()
+		return()=>{disposed=true;if(timer!==undefined)window.clearTimeout(timer)}
+	},[shell.id,shell.status])
+	const sample=view?.sample
+	const memoryPercent=sample?.memory_total_bytes?sample.memory_used_bytes/sample.memory_total_bytes*100:0
+	const diskPercent=sample?.disk_total_bytes?sample.disk_used_bytes/sample.disk_total_bytes*100:0
+	const stateLabel=unavailable?t('common.unavailable'):view?t('common.status'):t('common.loading')
+	return <div className={`ssh-host-status ${unavailable?'unavailable':''}`} role="status" aria-label={stateLabel}>
+		<span aria-label={t('sshWorkspace.cpu')} title={`${t('sshWorkspace.cpu')} · ${view?.cpuPercent==null?'—':`${view.cpuPercent.toFixed(1)}%`}`}><Cpu size={13}/><b>{view?.cpuPercent==null?'—':`${view.cpuPercent.toFixed(1)}%`}</b></span>
+		<span aria-label={t('sshWorkspace.memory')} title={`${t('sshWorkspace.memory')} · ${sample?`${memoryPercent.toFixed(1)}%`:'—'}`}><MemoryStick size={13}/><b>{sample?formatStatusPair(sample.memory_used_bytes,sample.memory_total_bytes):'—'}</b></span>
+		<span aria-label={t('sshWorkspace.network')} title={`${t('sshWorkspace.network')} · ${view?.receivedPerSecond==null?'—':`↓ ${formatStatusBytes(view.receivedPerSecond)}/s · ↑ ${formatStatusBytes(view.sentPerSecond||0)}/s`}`}><Network size={13}/><b>{view?.receivedPerSecond==null?'—':`↓ ${formatStatusBytes(view.receivedPerSecond)}/s · ↑ ${formatStatusBytes(view.sentPerSecond||0)}/s`}</b></span>
+		<span aria-label={t('sshWorkspace.disk')} title={`${t('sshWorkspace.disk')} · ${sample?`${diskPercent.toFixed(1)}%`:'—'}`}><HardDrive size={13}/><b>{sample?formatStatusPair(sample.disk_used_bytes,sample.disk_total_bytes):'—'}</b></span>
+		<span aria-label={t('sshWorkspace.uptime')} title={`${t('sshWorkspace.uptime')} · ${sample?formatHostUptime(sample.uptime_seconds):'—'}`}><Clock3 size={13}/><b>{sample?formatHostUptime(sample.uptime_seconds):'—'}</b></span>
+	</div>
+}
+
 function SSHShellTerminal({initialShell,relatedShells=[],onSelect,onClose,onChanged,onError,embedded=false}:{initialShell:SSHShell;relatedShells?:SSHShell[];onSelect?:(shell:SSHShell)=>void;onClose:()=>void;onChanged:()=>void;onError:(message:string)=>void;embedded?:boolean}){
 	const {t}=useTranslation()
 	const [shell,setShell]=useState(initialShell)
 	const [secret,setSecret]=useState('')
 	const [sendingSecret,setSendingSecret]=useState(false)
 	const [closing,setClosing]=useState(false)
-	const [inputSource,setInputSource]=useState<'agent'|'operator'|''>('')
 	const terminalElement=useRef<HTMLDivElement>(null)
 	const terminalRef=useRef<XTermInstance|null>(null)
 	const lastSequence=useRef(0)
@@ -969,7 +1054,6 @@ function SSHShellTerminal({initialShell,relatedShells=[],onSelect,onClose,onChan
 					if(event.sequence<=lastSequence.current)return
 					lastSequence.current=event.sequence
 					if(event.content&&(event.stream==='stdout'||event.stream==='stderr'))terminal.write(event.content)
-					if(event.stream==='input'&&(event.source==='agent'||event.source==='operator'))setInputSource(event.source)
 					if(event.status&&event.stream==='status'){
 						setShell(current=>({...current,status:event.status as SSHShell['status'],last_sequence:event.sequence}))
 						if(!sshShellActive(event.status)){
@@ -1011,13 +1095,13 @@ function SSHShellTerminal({initialShell,relatedShells=[],onSelect,onClose,onChan
 	const stop=async()=>{setClosing(true);try{setShell(await api.closeSSHShell(shell.id));onChanged();onClose()}catch(err){onError(errorText(err))}finally{setClosing(false)}}
 	const titleID=`ssh-shell-terminal-title-${shell.id}`
 	const workspaceShell=shell.kind==='workspace'
-		const terminal=<section className={`ssh-shell-terminal-dialog ${embedded?'embedded':''}`} role={embedded?undefined:'dialog'} aria-modal={embedded?undefined:true} aria-labelledby={embedded?undefined:titleID}>
+		const terminal=<section className={`ssh-shell-terminal-dialog ${embedded?'embedded':''} ${workspaceShell?'':'monitored'}`} role={embedded?undefined:'dialog'} aria-modal={embedded?undefined:true} aria-labelledby={embedded?undefined:titleID}>
 			{!embedded&&<header>
-				<div><TerminalSquare size={20}/><span><small>{workspaceShell?t('workspace.terminal'):t('sshShell.interactive')}</small><h2 id={titleID}>{workspaceShell?shell.workspace_id:shell.host_name||shell.host_id}</h2></span></div>
+				<div><TerminalSquare size={20}/><span>{workspaceShell&&<small>{t('workspace.terminal')}</small>}<h2 id={titleID}>{workspaceShell?shell.workspace_id:shell.host_name||shell.host_id}</h2></span></div>
 				<div className="ssh-shell-terminal-state">{workspaceShell&&relatedShells.length>1&&<AppSelect className="terminal-session-select" value={shell.id} ariaLabel={t('workspace.switchTerminal')} onChange={value=>{const selected=relatedShells.find(item=>item.id===value);if(selected)onSelect?.(selected)}} options={relatedShells.map(item=>({value:item.id,label:`${t(item.surface==='workspace_agent'?'workspace.agent':'workspace.operator')} · ${item.cwd||'.'}`}))}/>}<em className={shell.status}>{t(`statusLabels.${shell.status}`,{defaultValue:shell.status})}</em><code>{shell.elevated?'root':shell.user}</code>{!embedded&&<button type="button" onClick={onClose} title={t('common.close')}><X size={16}/></button>}</div>
 			</header>}
-			{!embedded&&<div className="ssh-shell-terminal-meta"><span>{workspaceShell?shell.backend:shell.host_id}</span><span>{shell.cwd||(workspaceShell?'.':'~')}</span>{workspaceShell&&<span className="workspace-shell-owner">{t(shell.surface==='workspace_agent'?'workspace.agent':'workspace.operator')}</span>}{workspaceShell&&inputSource&&<span>{t('workspace.inputBy',{source:t(inputSource==='agent'?'workspace.agent':'workspace.operator')})}</span>}{shell.termination_reason&&<span>{t(`sshShell.termination.${shell.termination_reason}`,{defaultValue:shell.termination_reason})}</span>}<code>{shell.id}</code></div>}
 			<div className="ssh-shell-terminal-screen" ref={terminalElement}/>
+			{!workspaceShell&&<SSHHostStatusBar shell={shell}/>}
 			<footer>
 				<form onSubmit={sendSecret}><LockKeyhole size={14}/><PasswordInput value={secret} onChange={event=>setSecret(event.target.value)} disabled={!active||sendingSecret} placeholder={t('sshShell.sensitivePlaceholder')} autoComplete="off"/><button className="primary" disabled={!secret||!active||sendingSecret}>{sendingSecret?<LoaderCircle className="spin" size={13}/>:<Send size={13}/>} {t('sshShell.sendSensitive')}</button></form>
 				<div><button type="button" disabled={!active} onClick={()=>void interrupt()}><Square size={10}/>{t('sshShell.interrupt')}</button><button type="button" className="danger" disabled={!active||closing} onClick={()=>void stop()}>{closing?<LoaderCircle className="spin" size={13}/>:<Power size={13}/>} {t('sshShell.closeSession')}</button></div>
@@ -2758,7 +2842,7 @@ function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run
 		  {!executionTool&&toolArguments&&hasRecordEntries(toolArguments)&&<CompactTable title={t('tool.actualParameters')} columns={[t('tool.parameter'),t('tool.value')]} rows={limitedRecordEntries(toolArguments).entries.map(([key,value])=>[key,safeToolArgument(value,key)])}/>}
       {request?<div className="tool-execution-layout">
         <section className="tool-command-pane">
-		  <div className="tool-command-head"><span>{shellOperation?t('sshShell.interactive'):tunnelOperation?t('tunnels.forwarding'):structuredFileOperation?t(fileSearchMode?'tool.searchOperation':'tool.readOperation'):filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}{request.elevated===true&&<em><ShieldAlert size={12}/>sudo / root</em>}</div>
+		  <div className="tool-command-head"><span>{shellOperation?t('sshShell.title'):tunnelOperation?t('tunnels.forwarding'):structuredFileOperation?t(fileSearchMode?'tool.searchOperation':'tool.readOperation'):filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}{request.elevated===true&&<em><ShieldAlert size={12}/>sudo / root</em>}</div>
 			  <div className="tool-command-block"><CopyButton value={script||(program?()=>fullProgram(request,true):commandSummary)}/>{shellOperation?<pre>{shellSummary}</pre>:tunnelOperation?<pre>{tunnelRoute||requestMode}</pre>:workspaceUpload?<pre>workspace_upload {workspaceID}:{relativePath} → {hostName}:{remotePath}</pre>:workspaceDownload?<pre>workspace_download {hostName}:{remotePath} → {workspaceID}:{relativePath}</pre>:sshTransfer?<pre>{sourceHostName}:{sourcePath} → {hostName}:{remotePath}</pre>:structuredFileOperation?<pre>{fileSearchMode?'search':'read'} {fileTarget}</pre>:filePath?<pre>{requestMode} {workspaceID?`${workspaceID}:`:''}{filePath}</pre>:script?<pre>{previewText(script,toolOutputPreviewChars)}</pre>:program?<pre><span className="prompt-sign">$</span> {previewText(program)}</pre>:<pre>{requestMode} {remotePath}</pre>}</div>
 		  {change&&textValue(change.diff)&&<DiffViewer change={change}/>}
 		  {env&&hasRecordEntries(env)&&<CompactTable title={t('tool.environment')} columns={[t('tool.key'),t('tool.value')]} rows={recordTableRows(env)}/>}

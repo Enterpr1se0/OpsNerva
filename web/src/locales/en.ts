@@ -28,8 +28,8 @@ const en = {
     create: 'New forward', start: 'Start forwarding', starting: 'Connecting...', remoteHost: 'Host-side target', remotePort: 'Host-side target port', localPort: 'Local port', portRange: 'Ports must be between 1–65535.',
   },
   sshShell: {
-    short: 'Shells', title: 'Interactive shells', empty: 'No interactive shell is active.',
-    interactive: 'Interactive terminal', sensitivePlaceholder: 'Password or other sensitive input',
+    short: 'Shells', title: 'Shell', empty: 'No shell is active.',
+    sensitivePlaceholder: 'Password or other sensitive input',
     toolActions: { start: 'Open', input: 'Input', output: 'Output', list: 'List', interrupt: 'Interrupt', close: 'Close' },
     sendSensitive: 'Send privately', interrupt: 'Ctrl+C', closeSession: 'Close session',
     create: 'New shell', start: 'Open terminal', starting: 'Connecting...',
@@ -38,6 +38,7 @@ const en = {
   },
   sshWorkspace: {
     newTerminal: 'New terminal', noTerminal: 'No terminal is open', remotePath: 'Remote path', hostCount: '{{count}} hosts',
+    cpu: 'CPU', memory: 'Memory', network: 'Network', disk: 'Disk', uptime: 'Uptime',
     newDirectory: 'New directory', rename: 'Rename', name: 'Name',
     uploaded: '{{count}} file(s) uploaded', directoryCreated: 'Directory created', renamed: 'Renamed', deleted: 'Deleted', saved: 'Saved · {{path}}',
     deleteTitle: 'Delete “{{name}}”?',

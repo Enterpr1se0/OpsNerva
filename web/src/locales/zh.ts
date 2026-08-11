@@ -28,8 +28,8 @@ const zh = {
     create: '新建转发', start: '开始转发', starting: '正在连接...', remoteHost: '主机侧目标地址', remotePort: '主机侧目标端口', localPort: '本机端口', portRange: '端口必须在 1–65535 之间。',
   },
   sshShell: {
-    short: 'Shell', title: '交互式 Shell', empty: '当前没有活动 Shell。',
-    interactive: '交互终端', sensitivePlaceholder: '密码或其他敏感输入',
+    short: 'Shell', title: 'Shell', empty: '当前没有活动 Shell。',
+    sensitivePlaceholder: '密码或其他敏感输入',
     toolActions: { start: '开启', input: '输入', output: '输出', list: '列表', interrupt: '中断', close: '关闭' },
     sendSensitive: '私密发送', interrupt: 'Ctrl+C', closeSession: '关闭会话',
     create: '新建 Shell', start: '打开终端', starting: '正在连接...',
@@ -38,6 +38,7 @@ const zh = {
   },
   sshWorkspace: {
     newTerminal: '新建终端', noTerminal: '没有打开的终端', remotePath: '远程路径', hostCount: '{{count}} 台主机',
+    cpu: 'CPU', memory: '内存', network: '网络', disk: '硬盘', uptime: '在线',
     newDirectory: '新建目录', rename: '重命名', name: '名称',
     uploaded: '已上传 {{count}} 个文件', directoryCreated: '目录已创建', renamed: '已重命名', deleted: '已删除', saved: '已保存 · {{path}}',
     deleteTitle: '删除“{{name}}”？',

@@ -166,6 +166,19 @@ export interface SSHShellList {
   workspace_id?: string
 }
 
+export interface SSHHostStatus {
+  cpu_total: number
+  cpu_idle: number
+  memory_used_bytes: number
+  memory_total_bytes: number
+  disk_used_bytes: number
+  disk_total_bytes: number
+  network_received_bytes: number
+  network_sent_bytes: number
+  uptime_seconds: number
+  sampled_at: string
+}
+
 export interface SSHShellStartInput {
   host_id?: string
   workspace_id?: string
