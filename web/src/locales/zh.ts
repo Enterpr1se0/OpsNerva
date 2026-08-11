@@ -115,6 +115,7 @@ const zh = {
     runnerReady: '可用', modelUnavailable: '不可用', commandAgent: '人工审批说明', automaticApprovalAgent: 'Auto Approval Agent', explanationAgent: '说明', modelProvider: '模型', requestTimeout: '超时时间',
     subagentProvider: '审批模型',
     activeMain: '主模型', timeout: '超时时间', seconds: '{{count}} 秒',
+	contextCompression: '上下文压缩', autoCompression: '自动压缩', compressionThreshold: '触发阈值（%）', compressionOff: '已关闭',
 	chatImages: '会话图片格式',
     workspaceShell: 'Workspace Shell 执行',
     shellDisabled: '禁用', shellSandbox: 'Bubblewrap 沙盒', shellHost: '宿主机 Shell', shellUnsupported: '当前主机没有可用的 Bubblewrap。',
@@ -146,7 +147,7 @@ const zh = {
     stopped: '操作员已在完成前停止 Agent 运行。', agentError: 'Agent 错误',
     operator: '操作员', responseFailed: '回复生成失败', processing: '处理中', blockedImage: '[已阻止图片：{{alt}}]',
 	addImages: '添加图片', removeImage: '移除图片', imageTypeRejected: '部分图片格式未启用。',
-    reasoning: '思考过程', reasoningActive: '思考中', reasoningFallback: '正在思考...', contextUsage: '上下文 {{used}} / {{limit}} tokens', contextUsageUnknown: '上下文 {{used}} / -- tokens',
+    reasoning: '思考过程', reasoningActive: '思考中', reasoningFallback: '正在思考...', contextUsage: '上下文 {{used}} / {{limit}} tokens', contextUsageUnknown: '上下文 {{used}} / -- tokens', compressContext: '压缩上下文', contextCompressed: '上下文已压缩 · {{before}} → {{after}}',
     tokenInput: '输入', tokenOutput: '输出', tokenTotal: '总计',
   },
   workspace: {

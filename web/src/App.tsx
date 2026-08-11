@@ -1569,7 +1569,7 @@ function SettingsSectionFooter({dirty,busy,saving,onDiscard}:{dirty:boolean;busy
 	return <footer className="settings-section-footer"><button type="button" disabled={!dirty||busy} onClick={onDiscard}>{t('settings.discard')}</button><button type="submit" className="primary" disabled={!dirty||busy}>{saving?t('settings.applying'):t('settings.apply')}</button></footer>
 }
 
-type SystemSettingsSection='iterations'|'prompt'|'explanation'|'images'|'shell'
+type SystemSettingsSection='iterations'|'prompt'|'explanation'|'compression'|'images'|'shell'
 
 function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus,refreshCapabilities,refreshHealth,onSettingsChanged}:{settings:SystemSettings|null;providers:ModelProvider[];proxies:Proxy[];capabilities:ToolCapabilities;modelStatus?:Health['model'];refreshCapabilities:()=>Promise<void>;refreshHealth:()=>Promise<void>;onSettingsChanged:(settings:SystemSettings)=>void}) {
   const {t}=useTranslation()
@@ -1581,6 +1581,8 @@ function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus
 	  const savedSubagentProvider=settings?.subagent_model_provider_id??''
 	  const savedAutomaticApprovalProvider=settings?.automatic_approval_model_provider_id??''
 	  const savedSubagentTimeout=settings?.subagent_timeout_seconds??30
+	  const savedCompressionEnabled=settings?.context_compression_enabled??true
+	  const savedCompressionPercent=settings?.context_compression_threshold_percent??70
 	  const savedImageTypes=settings?.chat_image_allowed_types??defaultChatImageTypes
   const savedShellMode=settings?.workspace_shell_mode??(settings?.workspace_shell_platform==='windows'?'host':'sandbox')
   const [maxIterations,setMaxIterations]=useState(savedValue)
@@ -1589,17 +1591,21 @@ function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus
   const [subagentProvider,setSubagentProvider]=useState(savedSubagentProvider)
 	const [automaticApprovalProvider,setAutomaticApprovalProvider]=useState(savedAutomaticApprovalProvider)
 	  const [subagentTimeout,setSubagentTimeout]=useState(savedSubagentTimeout)
+	  const [compressionEnabled,setCompressionEnabled]=useState(savedCompressionEnabled)
+	  const [compressionPercent,setCompressionPercent]=useState(savedCompressionPercent)
 	  const [imageTypes,setImageTypes]=useState(savedImageTypes)
   const [shellMode,setShellMode]=useState<WorkspaceShellMode>(savedShellMode)
 	const [iterationsDirty,setIterationsDirty]=useState(false)
 	const [promptDirty,setPromptDirty]=useState(false)
 	const [explanationDirty,setExplanationDirty]=useState(false)
+	const [compressionDirty,setCompressionDirty]=useState(false)
 	const [imagesDirty,setImagesDirty]=useState(false)
 	const [shellDirty,setShellDirty]=useState(false)
 	const [savingSection,setSavingSection]=useState<SystemSettingsSection|''>('')
 	useEffect(()=>{if(!iterationsDirty)setMaxIterations(savedValue)},[savedValue,iterationsDirty])
 	useEffect(()=>{if(!promptDirty)setSystemPrompt(savedPrompt)},[savedPrompt,promptDirty])
 	useEffect(()=>{if(!explanationDirty){setExplanationEnabled(savedExplanation);setSubagentProvider(savedSubagentProvider);setAutomaticApprovalProvider(savedAutomaticApprovalProvider);setSubagentTimeout(savedSubagentTimeout)}},[savedExplanation,savedSubagentProvider,savedAutomaticApprovalProvider,savedSubagentTimeout,explanationDirty])
+	useEffect(()=>{if(!compressionDirty){setCompressionEnabled(savedCompressionEnabled);setCompressionPercent(savedCompressionPercent)}},[savedCompressionEnabled,savedCompressionPercent,compressionDirty])
 	useEffect(()=>{if(!imagesDirty)setImageTypes(savedImageTypes)},[savedImageTypes,imagesDirty])
 	useEffect(()=>{if(!shellDirty)setShellMode(savedShellMode)},[savedShellMode,shellDirty])
 	const update=(value:number)=>{setMaxIterations(Math.max(5,Math.min(100,value||5)));setIterationsDirty(true)}
@@ -1609,6 +1615,8 @@ function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus
 	const selectSubagentProvider=(value:string)=>{setSubagentProvider(value);setExplanationDirty(true)}
 	const selectAutomaticApprovalProvider=(value:string)=>{setAutomaticApprovalProvider(value);setExplanationDirty(true)}
 	const updateSubagentTimeout=(value:number)=>{setSubagentTimeout(Math.max(5,Math.min(120,value||5)));setExplanationDirty(true)}
+	const toggleCompression=(value:boolean)=>{setCompressionEnabled(value);setCompressionDirty(true)}
+	const updateCompressionPercent=(value:number)=>{setCompressionPercent(Math.max(50,Math.min(90,value||50)));setCompressionDirty(true)}
 	const toggleImageType=(value:string)=>{setImageTypes(current=>current.includes(value)?current.length===1?current:current.filter(item=>item!==value):[...current,value]);setImagesDirty(true)}
 	const selectShellMode=(value:WorkspaceShellMode)=>{setShellMode(value);setShellDirty(true)}
 	const discard=(section:SystemSettingsSection)=>{
@@ -1616,6 +1624,7 @@ function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus
 		case 'iterations':setMaxIterations(savedValue);setIterationsDirty(false);break
 		case 'prompt':setSystemPrompt(savedPrompt);setPromptDirty(false);break
 		case 'explanation':setExplanationEnabled(savedExplanation);setSubagentProvider(savedSubagentProvider);setAutomaticApprovalProvider(savedAutomaticApprovalProvider);setSubagentTimeout(savedSubagentTimeout);setExplanationDirty(false);break
+		case 'compression':setCompressionEnabled(savedCompressionEnabled);setCompressionPercent(savedCompressionPercent);setCompressionDirty(false);break
 		case 'images':setImageTypes(savedImageTypes);setImagesDirty(false);break
 		case 'shell':setShellMode(savedShellMode);setShellDirty(false);break
 		}
@@ -1625,6 +1634,7 @@ function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus
 		switch(section){
 		case 'prompt':input.system_prompt=systemPrompt;break
 		case 'explanation':input.approval_explanations_enabled=explanationEnabled;input.subagent_model_provider_id=subagentProvider;input.automatic_approval_model_provider_id=automaticApprovalProvider;input.subagent_timeout_seconds=subagentTimeout;break
+		case 'compression':input.context_compression_enabled=compressionEnabled;input.context_compression_threshold_percent=compressionPercent;break
 		case 'images':input.chat_image_allowed_types=imageTypes;break
 		case 'shell':input.workspace_shell_mode=shellMode;break
 		}
@@ -1635,6 +1645,7 @@ function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus
 			case 'iterations':setMaxIterations(result.agent_max_iterations);setIterationsDirty(false);break
 			case 'prompt':setSystemPrompt(result.system_prompt);setPromptDirty(false);break
 			case 'explanation':setExplanationEnabled(result.approval_explanations_enabled);setSubagentProvider(result.subagent_model_provider_id);setAutomaticApprovalProvider(result.automatic_approval_model_provider_id);setSubagentTimeout(result.subagent_timeout_seconds);setExplanationDirty(false);break
+			case 'compression':setCompressionEnabled(result.context_compression_enabled);setCompressionPercent(result.context_compression_threshold_percent);setCompressionDirty(false);break
 			case 'images':setImageTypes(result.chat_image_allowed_types);setImagesDirty(false);break
 			case 'shell':setShellMode(result.workspace_shell_mode);setShellDirty(false);break
 			}
@@ -1651,6 +1662,9 @@ function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus
 		<div className="settings-form">
 			<SettingsDisclosure icon={<SlidersHorizontal size={18}/>} title={t('settings.maxIterations')} meta={<strong>{maxIterations}</strong>}>
 				<form onSubmit={submit('iterations')}><div className="iteration-editor"><input aria-label={t('settings.maxIterations')} type="range" min="5" max="100" step="1" value={maxIterations} onChange={event=>update(Number(event.target.value))}/><label><span>{t('settings.rounds')}</span><input type="number" min="5" max="100" value={maxIterations} onChange={event=>update(Number(event.target.value))}/></label></div><div className="iteration-presets"><span>{t('settings.quickPresets')}</span>{[20,50,100].map(value=><button type="button" className={maxIterations===value?'active':''} onClick={()=>update(value)} key={value}><b>{value}</b></button>)}</div><SettingsSectionFooter dirty={iterationsDirty} busy={busy} saving={savingSection==='iterations'} onDiscard={()=>discard('iterations')}/></form>
+			</SettingsDisclosure>
+			<SettingsDisclosure icon={<Minimize2 size={18}/>} title={t('settings.contextCompression')} meta={compressionEnabled?`${compressionPercent}%`:t('settings.compressionOff')}>
+				<form onSubmit={submit('compression')}><div className="subagent-settings"><label className="subagent-toggle"><span><b>{t('settings.autoCompression')}</b></span><input type="checkbox" checked={compressionEnabled} onChange={event=>toggleCompression(event.target.checked)}/><i/></label><div className="iteration-editor"><input aria-label={t('settings.compressionThreshold')} type="range" min="50" max="90" step="5" value={compressionPercent} disabled={!compressionEnabled} onChange={event=>updateCompressionPercent(Number(event.target.value))}/><label><span>{t('settings.compressionThreshold')}</span><input type="number" min="50" max="90" step="5" value={compressionPercent} disabled={!compressionEnabled} onChange={event=>updateCompressionPercent(Number(event.target.value))}/></label></div></div><SettingsSectionFooter dirty={compressionDirty} busy={busy} saving={savingSection==='compression'} onDiscard={()=>discard('compression')}/></form>
 			</SettingsDisclosure>
 			<SettingsDisclosure icon={<Bot size={18}/>} title={t('settings.systemPrompt')} meta={systemPrompt.length?t('settings.systemPromptCharacters',{count:systemPrompt.length}):undefined}>
 				<form onSubmit={submit('prompt')}><div className="system-prompt-actions"><button type="button" disabled={systemPrompt===defaultPrompt} onClick={restoreDefaultPrompt}><RefreshCw size={13}/>{t('settings.restoreDefaultPrompt')}</button></div><textarea className="system-prompt-input" aria-label={t('settings.systemPrompt')} spellCheck={false} value={systemPrompt} onChange={event=>updateSystemPrompt(event.target.value)}/><small className="system-prompt-count">{systemPrompt.length?t('settings.systemPromptCharacters',{count:systemPrompt.length}):t('settings.emptySystemPrompt')}</small><SettingsSectionFooter dirty={promptDirty} busy={busy} saving={savingSection==='prompt'} onDiscard={()=>discard('prompt')}/></form>
@@ -1750,6 +1764,7 @@ function Nav({ active, icon, label, count, warn, onClick }: {active:boolean;icon
 
 function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, workspaceShells, capabilities, settings, imageTypes, agentAvailable, modelName, contextWindow, refreshConnections, refreshApprovals, onCreateWorkspaceShell, onOpenWorkspaceShell, onWorkspaceShellStarted, onSettingsChanged, onHostChanged, onModelChanged, sidebarTarget, onSessionDeleted, onError }: {visible:boolean;onActivate:()=>void;hosts:Host[];providers:ModelProvider[];approvals:Approval[];runs:Run[];workspaceShells:SSHShell[];capabilities:ToolCapabilities;settings:SystemSettings|null;imageTypes:string[];agentAvailable:boolean;modelName?:string;contextWindow:number;refreshConnections:()=>Promise<void>;refreshApprovals:(decidedID?:string)=>Promise<void>;onCreateWorkspaceShell:(workspaceID:string)=>Promise<void>;onOpenWorkspaceShell:(shell:SSHShell)=>void;onWorkspaceShellStarted:(shell:SSHShell)=>void;onSettingsChanged:(settings:SystemSettings)=>void;onHostChanged:(host:Host)=>void;onModelChanged:(provider:ModelProvider)=>void;sidebarTarget:HTMLDivElement|null;onSessionDeleted:(sessionID:string)=>void;onError:(message:string)=>void}) {
 		const {t,i18n:instance}=useTranslation()
+		const notify=useNotifier()
 		const activeContextWindow=contextWindow
   const [entries, setEntries] = useState<ChatEntry[]>([])
 	  const [message, setMessage] = useState('')
@@ -1769,6 +1784,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
   const [running, setRunning] = useState(false)
   const [detachedRunning,setDetachedRunning]=useState(false)
 	const [stopping,setStopping]=useState(false)
+	const [compressingContext,setCompressingContext]=useState(false)
 	const [modelRetry,setModelRetry]=useState<ModelRetryState|null>(null)
 	const [connectionRetry,setConnectionRetry]=useState<ConnectionRetryState|null>(null)
 	const [retryClock,setRetryClock]=useState(0)
@@ -1899,7 +1915,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
     detachActiveStream()
     sessionLoadRef.current=''
     setLoadingSession('')
-	    stickToLatest.current=true;setSessionId('');setBoundWorkspaceID('');setEntries([]); setMessage('');clearPendingImages(); setHistoryError(''); setReasoningSeen(false);setContextUsage({tokens:0,window:activeContextWindow});setDetachedRunning(false);setStopping(false);setModelRetry(null);setConnectionRetry(null);setTasks(null); rememberSession(newSessionMarker)
+	    stickToLatest.current=true;setSessionId('');setBoundWorkspaceID('');setEntries([]); setMessage('');clearPendingImages(); setHistoryError(''); setReasoningSeen(false);setContextUsage({tokens:0,window:activeContextWindow});setDetachedRunning(false);setStopping(false);setCompressingContext(false);setModelRetry(null);setConnectionRetry(null);setTasks(null); rememberSession(newSessionMarker)
     void refreshSessions()
   }
 
@@ -1972,6 +1988,10 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		}
 		if(frame.type==='tool_output')setEntries(old=>appendToolOutput(old,frame))
 		if(frame.type==='context_usage'&&frame.context_tokens!==undefined)setContextUsage({tokens:frame.context_tokens,window:frame.context_window||activeContextWindow})
+		if(frame.type==='context_compression'){
+			setCompressingContext(frame.status==='in_progress')
+			if(frame.status==='completed'&&frame.output_tokens!==undefined)setContextUsage(current=>({tokens:frame.output_tokens!,window:current.window}))
+		}
 		if(frame.type==='token_usage'&&frame.message_id&&frame.total_tokens){
 			const usage:ChatTokenUsage={input_tokens:frame.input_tokens||0,output_tokens:frame.output_tokens||0,total_tokens:frame.total_tokens}
 			setEntries(old=>old.map(item=>item.id===frame.message_id?{...item,tokenUsage:usage}:item))
@@ -2099,7 +2119,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
     stickToLatest.current=true
 		setSessionId(querySessionID);rememberSession(querySessionID)
 		reconnectErrorRef.current=''
-		setApprovalNotice('');setReasoningSeen(false);setStopping(false);setModelRetry(null);setConnectionRetry(null);setRunning(true)
+		setApprovalNotice('');setReasoningSeen(false);setStopping(false);setCompressingContext(false);setModelRetry(null);setConnectionRetry(null);setRunning(true)
 	    const entryImages=queryImages.map(image=>({id:image.id,name:image.file.name,mimeType:image.file.type,sizeBytes:image.file.size,url:image.url}))
 	    setEntries((old) => [...old.filter(item=>item.kind!=='error'), { id: userEntryID, kind: 'user', content: query, images:entryImages, status:'pending' }])
 	    try {
@@ -2127,6 +2147,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			setEntries((old) => old.map(deactivateReasoning))
       setRunning(false)
 		setStopping(false)
+		setCompressingContext(false)
 		if(querySessionID){try{const state=await api.chatState(querySessionID);if(!isAttached())return;setDetachedRunning(!!state.active);setTasks(state.tasks?.items?.length?state.tasks:null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setBoundWorkspaceID(state.workspace_id||'');setEntries(old=>settledTurnEntries(state.messages||[],querySessionID,old,!!state.active));for(const image of queryImages){URL.revokeObjectURL(image.url);imageURLsRef.current.delete(image.url)}}catch{/* polling or the next reload will recover state */}}
       if(!isAttached())return
       activeStreamRef.current=null
@@ -2147,6 +2168,16 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		}catch(err){setEntries(old=>[...old,{id:clientId(),kind:'error',content:t('chat.stopFailed',{message:errorText(err)})}])}
 		finally{if(!requested)setStopping(false)}
   }
+	const compressContext=async()=>{
+		if(!sessionId||sessionBusy||loadingSession||compressingContext)return
+		setCompressingContext(true)
+		try{
+			const result=await api.compressChatContext(sessionId)
+			setContextUsage(current=>({tokens:result.after_tokens,window:current.window}))
+			notify(t('chat.contextCompressed',{before:compactTokenCount(result.before_tokens),after:compactTokenCount(result.after_tokens)}))
+		}catch(err){notify(errorText(err),'error')}
+		finally{setCompressingContext(false)}
+	}
 	const streamingResponseStarted=entries.some((item)=>item.kind==='assistant'&&item.lifecycle==='streaming'&&item.content!=='')
 	const modelRetryLabel=modelRetry?t('chat.retryingModel',{
 	  attempt:modelRetry.attempt,
@@ -2185,7 +2216,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		</div>
 		  <form className="composer" onSubmit={submit}>
 			  {(sessionBusy||toolsRunning)&&<div className="llm-work-status" role="status" aria-live="polite"><LoaderCircle className="spin" size={13}/><b>{stopping?t('chat.stopping'):connectionRetryLabel||modelRetryLabel||t(sessionBusy?'chat.running':'chat.toolsRunning')}</b><button type="button" className="agent-stop-button" onClick={()=>void stopAgent()} disabled={stopping||!(activeStreamRef.current?.sessionId||sessionId)} title={t('chat.stopTitle')}><Square size={11} fill="currentColor"/>{t('chat.stop')}</button></div>}
-			  <div className="context-line"><ApprovalModeStatus settings={settings} onChanged={onSettingsChanged} onError={onError}/><ComposerHostSelector hosts={hosts} disabled={sessionBusy} onChanged={onHostChanged} onError={onError}/><div className="composer-model-controls"><ContextUsageRing usage={contextUsage}/><ComposerReasoningSelector providers={providers} disabled={sessionBusy} onChanged={onModelChanged} onError={onError}/><ComposerModelSelector providers={providers} fallbackModel={modelName} disabled={sessionBusy} onChanged={onModelChanged} onError={onError}/></div></div>
+			  <div className="context-line"><ApprovalModeStatus settings={settings} onChanged={onSettingsChanged} onError={onError}/><ComposerHostSelector hosts={hosts} disabled={sessionBusy} onChanged={onHostChanged} onError={onError}/><div className="composer-model-controls"><ContextUsageRing usage={contextUsage}/><button type="button" className="context-compress-button" disabled={!sessionId||sessionBusy||!!loadingSession||compressingContext} onClick={()=>void compressContext()} title={t('chat.compressContext')} aria-label={t('chat.compressContext')}>{compressingContext?<LoaderCircle className="spin" size={13}/>:<Minimize2 size={13}/>}</button><ComposerReasoningSelector providers={providers} disabled={sessionBusy} onChanged={onModelChanged} onError={onError}/><ComposerModelSelector providers={providers} fallbackModel={modelName} disabled={sessionBusy} onChanged={onModelChanged} onError={onError}/></div></div>
 			  {pendingImages.length>0&&<div className="composer-images">{pendingImages.map(image=><div key={image.id}><img src={image.url} alt={image.file.name}/><span title={image.file.name}>{image.file.name}</span><button type="button" onClick={()=>removePendingImage(image.id)} title={t('chat.removeImage')}><X size={11}/></button></div>)}</div>}
 			  {imageNotice&&<div className="composer-image-notice">{imageNotice}<button type="button" onClick={()=>setImageNotice('')}><X size={11}/></button></div>}
 			  <div className="input-row"><label className="image-attach-button" title={t('chat.addImages')}><ImagePlus size={18}/><input key={imageInputKey} type="file" accept={imageTypes.join(',')} multiple disabled={!agentAvailable||sessionBusy||workspaceSwitching||!!loadingSession} onChange={event=>addImages(Array.from(event.target.files||[]))}/></label><textarea value={message} onChange={(event) => setMessage(event.target.value)} onPaste={event=>{const files=Array.from(event.clipboardData.files).filter(file=>file.type.startsWith('image/'));if(files.length)addImages(files)}} placeholder={!agentAvailable?t('chat.configureModel'):loadingSession?t('chat.loadingConversation'):sessionBusy?t('chat.busyPlaceholder'):t('chat.prompt')} disabled={!agentAvailable||sessionBusy||workspaceSwitching||!!loadingSession} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }}/><button aria-label={t('common.next')} disabled={!agentAvailable || sessionBusy || workspaceSwitching || !!loadingSession || (!message.trim()&&!pendingImages.length)}><Send size={18}/></button></div>

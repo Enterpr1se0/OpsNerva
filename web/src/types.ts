@@ -344,6 +344,25 @@ export interface ChatState {
   messages: ChatMessage[]
 	tool_calls: ChatToolCall[]
   tasks: AgentTaskList
+	context_summary?: ChatContextSummary
+}
+
+export interface ChatContextSummary {
+	session_id: string
+	through_message_id: string
+	revision: number
+	trigger: 'auto' | 'manual'
+	source_tokens: number
+	summary_tokens: number
+	model?: string
+	created_at: string
+	updated_at: string
+}
+
+export interface ChatContextCompressionResult {
+	summary: ChatContextSummary
+	before_tokens: number
+	after_tokens: number
 }
 
 export type ModelProviderKind = 'openai' | 'deepseek' | 'anthropic' | 'openai_compatible' | 'ollama'
@@ -501,6 +520,8 @@ export interface SystemSettings {
   subagent_model_provider_id: string
   automatic_approval_model_provider_id: string
   subagent_timeout_seconds: number
+	context_compression_enabled: boolean
+	context_compression_threshold_percent: number
 	chat_image_allowed_types: string[]
   workspace_shell_mode: WorkspaceShellMode
   workspace_shell_platform: string
@@ -525,6 +546,8 @@ export interface SystemSettingsInput {
   subagent_model_provider_id?: string
   automatic_approval_model_provider_id?: string
   subagent_timeout_seconds?: number
+	context_compression_enabled?: boolean
+	context_compression_threshold_percent?: number
 	chat_image_allowed_types?: string[]
   workspace_shell_mode?: WorkspaceShellMode
   mcp_http_enabled?: boolean

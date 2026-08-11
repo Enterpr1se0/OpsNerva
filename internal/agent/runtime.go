@@ -207,25 +207,28 @@ type Event struct {
 }
 
 type Runtime struct {
-	mu                  sync.RWMutex
-	reloadMu            sync.Mutex
-	activeMu            sync.RWMutex
-	baseCtx             context.Context
-	runner              agentRunner
-	finalizer           agentRunner
-	titleGenerator      agentRunner
-	store               *store.Store
-	service             *service.Service
-	fallback            config.Model
-	status              Status
-	modelKind           string
-	contextWindow       int
-	contextRevision     uint64
-	contextDetectCancel context.CancelFunc
-	tools               []ToolDescriptor
-	toolsAt             string
-	active              map[string]*activeAgentSession
-	toolScopes          map[string]map[*toolExecutionScope]struct{}
+	mu                        sync.RWMutex
+	reloadMu                  sync.Mutex
+	activeMu                  sync.RWMutex
+	baseCtx                   context.Context
+	runner                    agentRunner
+	finalizer                 agentRunner
+	titleGenerator            agentRunner
+	store                     *store.Store
+	service                   *service.Service
+	fallback                  config.Model
+	status                    Status
+	modelKind                 string
+	contextWindow             int
+	contextRevision           uint64
+	contextDetectCancel       context.CancelFunc
+	contextSummarizer         *contextSummarizationMiddleware
+	contextCompressionEnabled bool
+	modelName                 string
+	tools                     []ToolDescriptor
+	toolsAt                   string
+	active                    map[string]*activeAgentSession
+	toolScopes                map[string]map[*toolExecutionScope]struct{}
 }
 
 type activeAgentSession struct {
@@ -271,30 +274,30 @@ func New(ctx context.Context, cfg config.Model, svc *service.Service, st *store.
 	return runtime, nil
 }
 
-func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st *store.Store, maxIterations int, systemPrompt string) (*adk.Runner, []ToolDescriptor, error) {
+func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st *store.Store, settings domain.SystemSettings) (*adk.Runner, []ToolDescriptor, *contextSummarizationMiddleware, error) {
 	chatModel, err := newChatModel(ctx, cfg, 90*time.Second, 0)
 	if err != nil {
-		return nil, nil, fmt.Errorf("create chat model: %w", err)
+		return nil, nil, nil, fmt.Errorf("create chat model: %w", err)
 	}
 	tools, descriptors, err := buildToolSet(ctx, svc)
 	if err != nil {
-		return nil, nil, fmt.Errorf("build Eino tools: %w", err)
+		return nil, nil, nil, fmt.Errorf("build Eino tools: %w", err)
 	}
 	toolStates, err := svc.AgentToolStates(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("load Agent tool settings: %w", err)
+		return nil, nil, nil, fmt.Errorf("load Agent tool settings: %w", err)
 	}
 	plantaskMiddleware, plantaskTools, err := newPlantaskMiddleware(ctx, st, toolStates)
 	if err != nil {
-		return nil, nil, fmt.Errorf("build Eino plantask middleware: %w", err)
+		return nil, nil, nil, fmt.Errorf("build Eino plantask middleware: %w", err)
 	}
 	skillMiddleware, skillTools, err := newSkillMiddleware(ctx, svc, toolStates)
 	if err != nil {
-		return nil, nil, fmt.Errorf("build Eino skill middleware: %w", err)
+		return nil, nil, nil, fmt.Errorf("build Eino skill middleware: %w", err)
 	}
 	plantaskDescriptors, err := DescribeTools(ctx, plantaskTools)
 	if err != nil {
-		return nil, nil, fmt.Errorf("describe Eino plantask tools: %w", err)
+		return nil, nil, nil, fmt.Errorf("describe Eino plantask tools: %w", err)
 	}
 	for index := range plantaskDescriptors {
 		plantaskDescriptors[index].Description = agentTaskCatalogDescriptions[plantaskDescriptors[index].Name]
@@ -304,7 +307,7 @@ func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st
 	}
 	skillDescriptors, err := DescribeTools(ctx, skillTools)
 	if err != nil {
-		return nil, nil, fmt.Errorf("describe Eino skill tools: %w", err)
+		return nil, nil, nil, fmt.Errorf("describe Eino skill tools: %w", err)
 	}
 	for index := range skillDescriptors {
 		if enabled, configured := toolStates[skillDescriptors[index].Name]; configured {
@@ -324,22 +327,27 @@ func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st
 	}
 	toolReductionMiddleware, err := newToolReductionMiddleware(ctx, descriptors)
 	if err != nil {
-		return nil, nil, fmt.Errorf("build Eino tool reduction middleware: %w", err)
+		return nil, nil, nil, fmt.Errorf("build Eino tool reduction middleware: %w", err)
+	}
+	contextSummarizer, err := newContextSummarizationMiddleware(ctx, chatModel, st,
+		autoContextCompressionTrigger(cfg.ContextWindow, settings.ContextCompressionPercent))
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("build Eino summarization middleware: %w", err)
 	}
 	agentInstance, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name: "ops-nerva", Description: "Operate registered Linux hosts and the current Workspace.",
-		Instruction: hostPlatformSystemPrompt(systemPrompt, goruntime.GOOS, goruntime.GOARCH), Model: chatModel, MaxIterations: maxIterations,
+		Instruction: hostPlatformSystemPrompt(settings.SystemPrompt, goruntime.GOOS, goruntime.GOARCH), Model: chatModel, MaxIterations: settings.AgentMaxIterations,
 		ModelRetryConfig: modelRequestRetryConfig(),
 		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
 			Tools: tools, ExecuteSequentially: true, UnknownToolsHandler: unknownToolResult,
 			ToolCallMiddlewares: middlewares,
 		}},
-		Handlers: []adk.ChatModelAgentMiddleware{toolReductionMiddleware, plantaskMiddleware, skillMiddleware},
+		Handlers: []adk.ChatModelAgentMiddleware{toolReductionMiddleware, contextSummarizer, plantaskMiddleware, skillMiddleware},
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("create Eino agent: %w", err)
+		return nil, nil, nil, fmt.Errorf("create Eino agent: %w", err)
 	}
-	return adk.NewRunner(ctx, adk.RunnerConfig{Agent: agentInstance, EnableStreaming: true, CheckPointStore: st}), descriptors, nil
+	return adk.NewRunner(ctx, adk.RunnerConfig{Agent: agentInstance, EnableStreaming: true, CheckPointStore: st}), descriptors, contextSummarizer, nil
 }
 
 func hostPlatformSystemPrompt(systemPrompt, goos, goarch string) string {
@@ -367,6 +375,9 @@ func (r *Runtime) Reload(ctx context.Context) error {
 			r.runner = nil
 			r.finalizer = nil
 			r.titleGenerator = nil
+			r.contextSummarizer = nil
+			r.contextCompressionEnabled = false
+			r.modelName = ""
 			r.modelKind = ""
 			r.contextWindow = 0
 			r.status = status
@@ -394,7 +405,7 @@ func (r *Runtime) Reload(ctx context.Context) error {
 		observability.FromContext(ctx).ErrorContext(ctx, "load system settings failed", "component", "agent", "error", err)
 		return err
 	}
-	runner, toolDescriptors, err := buildRunner(r.baseCtx, cfg, r.service, r.store, settings.AgentMaxIterations, settings.SystemPrompt)
+	runner, toolDescriptors, contextSummarizer, err := buildRunner(r.baseCtx, cfg, r.service, r.store, settings)
 	if err != nil {
 		status.Error = err.Error()
 		r.mu.Lock()
@@ -402,6 +413,9 @@ func (r *Runtime) Reload(ctx context.Context) error {
 		r.runner = nil
 		r.finalizer = nil
 		r.titleGenerator = nil
+		r.contextSummarizer = nil
+		r.contextCompressionEnabled = false
+		r.modelName = ""
 		r.modelKind = ""
 		r.contextWindow = 0
 		r.status = status
@@ -425,6 +439,9 @@ func (r *Runtime) Reload(ctx context.Context) error {
 		r.runner = nil
 		r.finalizer = nil
 		r.titleGenerator = nil
+		r.contextSummarizer = nil
+		r.contextCompressionEnabled = false
+		r.modelName = ""
 		r.modelKind = ""
 		r.contextWindow = 0
 		r.status = status
@@ -448,6 +465,9 @@ func (r *Runtime) Reload(ctx context.Context) error {
 		r.runner = nil
 		r.finalizer = nil
 		r.titleGenerator = nil
+		r.contextSummarizer = nil
+		r.contextCompressionEnabled = false
+		r.modelName = ""
 		r.modelKind = ""
 		r.contextWindow = 0
 		r.status = status
@@ -532,6 +552,9 @@ func (r *Runtime) Reload(ctx context.Context) error {
 	r.runner = runner
 	r.finalizer = finalizer
 	r.titleGenerator = titleGenerator
+	r.contextSummarizer = contextSummarizer
+	r.contextCompressionEnabled = settings.ContextCompressionEnabled
+	r.modelName = cfg.Name
 	r.status = status
 	r.modelKind = cfg.Kind
 	r.contextWindow = cfg.ContextWindow
@@ -781,6 +804,55 @@ func (r *Runtime) Query(ctx context.Context, sessionID, query string, emit func(
 	return r.QueryWithAttachments(ctx, sessionID, query, nil, emit)
 }
 
+func (r *Runtime) CompressContext(ctx context.Context, sessionID string) (domain.ChatContextCompressionResult, error) {
+	if r == nil || strings.TrimSpace(sessionID) == "" {
+		return domain.ChatContextCompressionResult{}, ErrUnavailable
+	}
+	r.mu.RLock()
+	summarizer := r.contextSummarizer
+	modelKind := r.modelKind
+	modelName := r.modelName
+	r.mu.RUnlock()
+	if summarizer == nil {
+		return domain.ChatContextCompressionResult{}, ErrUnavailable
+	}
+	ctx, started := r.beginSession(ctx, sessionID)
+	if !started {
+		return domain.ChatContextCompressionResult{}, ErrSessionBusy
+	}
+	defer r.endSession(sessionID)
+	ctx = service.WithSessionID(ctx, sessionID)
+	if _, err := r.store.GetChatSession(ctx, sessionID); err != nil {
+		return domain.ChatContextCompressionResult{}, err
+	}
+	history, err := r.store.ListChatContextMessages(ctx, sessionID)
+	if err != nil {
+		return domain.ChatContextCompressionResult{}, err
+	}
+	summary, err := r.store.GetChatContextSummary(ctx, sessionID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return domain.ChatContextCompressionResult{}, err
+	}
+	messages, stats := buildMultimodalModelContextWithSummaryForProvider(history, domain.ChatMessage{}, modelKind, summary)
+	if len(messages) > 0 {
+		messages = messages[:len(messages)-1]
+	}
+	if stats.CompressionBoundaryID == "" {
+		return domain.ChatContextCompressionResult{}, ErrNothingToCompress
+	}
+	messages = append([]*schema.Message{schema.SystemMessage("Compress completed conversation context.")}, messages...)
+	run := &contextCompressionRunState{
+		sessionID: sessionID, boundaryID: stats.CompressionBoundaryID,
+		trigger: "manual", model: modelName,
+	}
+	ctx = withContextCompressionState(ctx, run)
+	result, err := summarizer.Force(ctx, &adk.ChatModelAgentState{Messages: messages})
+	if err != nil {
+		return domain.ChatContextCompressionResult{}, normalizeModelRequestError(err)
+	}
+	return result, nil
+}
+
 func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query string, attachments []domain.ChatAttachment, emit func(Event)) (answer string, queryErr error) {
 	if r == nil {
 		return "", ErrUnavailable
@@ -792,6 +864,8 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 	modelKind := r.modelKind
 	contextWindow := r.contextWindow
 	contextRevision := r.contextRevision
+	contextCompressionEnabled := r.contextCompressionEnabled
+	modelName := r.modelName
 	inlineContext := modelKind == "anthropic"
 	r.mu.RUnlock()
 	if runner == nil {
@@ -914,7 +988,12 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 	if err != nil {
 		return "", fmt.Errorf("load Agent conversation: %w", err)
 	}
-	messages, contextStats := buildMultimodalModelContextForProvider(history, domain.ChatMessage{Role: "user", Content: query, Attachments: attachments}, modelKind)
+	contextSummary, summaryErr := r.store.GetChatContextSummary(ctx, sessionID)
+	if summaryErr != nil && !errors.Is(summaryErr, store.ErrNotFound) {
+		return "", fmt.Errorf("load Agent context summary: %w", summaryErr)
+	}
+	messages, contextStats := buildMultimodalModelContextWithSummaryForProvider(history,
+		domain.ChatMessage{Role: "user", Content: query, Attachments: attachments}, modelKind, contextSummary)
 	contextContents := make([]string, 0, 2)
 	workspaceState := modelWorkspaceState{ID: chatSession.WorkspaceID, Bound: chatSession.WorkspaceID != ""}
 	if workspaceState.Bound {
@@ -1092,6 +1171,12 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 	}
 	toolCalls := newToolCallTracker(workspaceState.ID, inlineContext)
 	runCtx := service.WithSessionID(ctx, sessionID)
+	if contextCompressionEnabled && contextStats.CompressionBoundaryID != "" {
+		runCtx = withContextCompressionState(runCtx, &contextCompressionRunState{
+			sessionID: sessionID, boundaryID: contextStats.CompressionBoundaryID,
+			trigger: "auto", model: modelName, hasCurrent: true, emit: emit,
+		})
+	}
 	runCtx = service.WithApprovalUserRequest(runCtx, query)
 	runCtx = service.WithBlockingApprovals(runCtx)
 	runCtx = withToolActivityNotifier(runCtx, func(activity toolCallActivity) {

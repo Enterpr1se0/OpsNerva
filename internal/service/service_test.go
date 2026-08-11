@@ -793,7 +793,7 @@ func TestSystemSettingsValidatePersistAndReturnDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settings.AgentMaxIterations != domain.DefaultAgentMaxIterations || settings.ApprovalMode != domain.ApprovalModeManual || !settings.ApprovalExplanationsEnabled || settings.SubagentModelProviderID != "" || settings.AutomaticApprovalModelProviderID != "" || settings.SubagentTimeoutSeconds != domain.DefaultSubagentTimeoutSeconds || settings.WorkspaceShellMode != domain.DefaultWorkspaceShellMode(runtime.GOOS) {
+	if settings.AgentMaxIterations != domain.DefaultAgentMaxIterations || settings.ApprovalMode != domain.ApprovalModeManual || !settings.ApprovalExplanationsEnabled || settings.SubagentModelProviderID != "" || settings.AutomaticApprovalModelProviderID != "" || settings.SubagentTimeoutSeconds != domain.DefaultSubagentTimeoutSeconds || !settings.ContextCompressionEnabled || settings.ContextCompressionPercent != domain.DefaultContextCompressionPercent || settings.WorkspaceShellMode != domain.DefaultWorkspaceShellMode(runtime.GOOS) {
 		t.Fatalf("unexpected default max iterations: %#v", settings)
 	}
 	if strings.Join(settings.ChatImageAllowedTypes, ",") != strings.Join(domain.DefaultChatImageAllowedTypes, ",") {
@@ -819,6 +819,10 @@ func TestSystemSettingsValidatePersistAndReturnDefault(t *testing.T) {
 	if _, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{AgentMaxIterations: 20, AutomaticApprovalModelProviderID: &missingProvider}, "test"); err == nil {
 		t.Fatal("expected missing Auto approval provider validation error")
 	}
+	invalidCompressionPercent := domain.MinContextCompressionPercent - 1
+	if _, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{AgentMaxIterations: 20, ContextCompressionPercent: &invalidCompressionPercent}, "test"); err == nil {
+		t.Fatal("expected context compression threshold validation error")
+	}
 	provider, err := svc.SaveModelProvider(ctx, domain.ModelProviderInput{
 		Name: "subagent", Kind: "ollama", BaseURL: "http://127.0.0.1:11434/v1", Model: "small-model",
 	}, "test")
@@ -837,23 +841,26 @@ func TestSystemSettingsValidatePersistAndReturnDefault(t *testing.T) {
 	imageTypes := []string{"image/png", "image/webp"}
 	systemPrompt := "You are my personal operations agent."
 	approvalMode := domain.ApprovalModeAuto
+	compressionEnabled := false
+	compressionPercent := 80
 	saved, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{
 		AgentMaxIterations: 30, ApprovalExplanationsEnabled: &explanationsEnabled,
 		ApprovalMode: &approvalMode,
 		SystemPrompt: &systemPrompt, SubagentModelProviderID: &provider.ID, AutomaticApprovalModelProviderID: &automaticProvider.ID, SubagentTimeoutSeconds: &timeoutSeconds,
 		ChatImageAllowedTypes: imageTypes, WorkspaceShellMode: &hostShell,
+		ContextCompressionEnabled: &compressionEnabled, ContextCompressionPercent: &compressionPercent,
 	}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if saved.AgentMaxIterations != 30 || saved.SystemPrompt != systemPrompt || saved.ApprovalMode != domain.ApprovalModeAuto || saved.ApprovalExplanationsEnabled || saved.SubagentModelProviderID != provider.ID || saved.AutomaticApprovalModelProviderID != automaticProvider.ID || saved.SubagentTimeoutSeconds != timeoutSeconds || strings.Join(saved.ChatImageAllowedTypes, ",") != strings.Join(imageTypes, ",") || saved.WorkspaceShellMode != domain.WorkspaceShellModeHost || saved.UpdatedAt.IsZero() {
+	if saved.AgentMaxIterations != 30 || saved.SystemPrompt != systemPrompt || saved.ApprovalMode != domain.ApprovalModeAuto || saved.ApprovalExplanationsEnabled || saved.SubagentModelProviderID != provider.ID || saved.AutomaticApprovalModelProviderID != automaticProvider.ID || saved.SubagentTimeoutSeconds != timeoutSeconds || saved.ContextCompressionEnabled || saved.ContextCompressionPercent != compressionPercent || strings.Join(saved.ChatImageAllowedTypes, ",") != strings.Join(imageTypes, ",") || saved.WorkspaceShellMode != domain.WorkspaceShellModeHost || saved.UpdatedAt.IsZero() {
 		t.Fatalf("unexpected saved settings: %#v", saved)
 	}
 	reloaded, err := svc.SystemSettings(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reloaded.AgentMaxIterations != 30 || reloaded.SystemPrompt != systemPrompt || reloaded.ApprovalMode != domain.ApprovalModeAuto || reloaded.ApprovalExplanationsEnabled || reloaded.SubagentModelProviderID != provider.ID || reloaded.AutomaticApprovalModelProviderID != automaticProvider.ID || reloaded.SubagentTimeoutSeconds != timeoutSeconds || strings.Join(reloaded.ChatImageAllowedTypes, ",") != strings.Join(imageTypes, ",") || reloaded.WorkspaceShellMode != domain.WorkspaceShellModeHost {
+	if reloaded.AgentMaxIterations != 30 || reloaded.SystemPrompt != systemPrompt || reloaded.ApprovalMode != domain.ApprovalModeAuto || reloaded.ApprovalExplanationsEnabled || reloaded.SubagentModelProviderID != provider.ID || reloaded.AutomaticApprovalModelProviderID != automaticProvider.ID || reloaded.SubagentTimeoutSeconds != timeoutSeconds || reloaded.ContextCompressionEnabled || reloaded.ContextCompressionPercent != compressionPercent || strings.Join(reloaded.ChatImageAllowedTypes, ",") != strings.Join(imageTypes, ",") || reloaded.WorkspaceShellMode != domain.WorkspaceShellModeHost {
 		t.Fatalf("system settings were not persisted: %#v", reloaded)
 	}
 	if _, err := svc.DeleteModelProvider(ctx, provider.ID, "test"); !errors.Is(err, ErrModelProviderInUse) || !strings.Contains(err.Error(), "selected for the approval Agent") {

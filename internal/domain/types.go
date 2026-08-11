@@ -193,12 +193,15 @@ type ModelMetadata struct {
 }
 
 const (
-	DefaultAgentMaxIterations     = 50
-	MinAgentMaxIterations         = 5
-	MaxAgentMaxIterations         = 100
-	DefaultSubagentTimeoutSeconds = 30
-	MinSubagentTimeoutSeconds     = 5
-	MaxSubagentTimeoutSeconds     = 120
+	DefaultAgentMaxIterations        = 50
+	MinAgentMaxIterations            = 5
+	MaxAgentMaxIterations            = 100
+	DefaultSubagentTimeoutSeconds    = 30
+	MinSubagentTimeoutSeconds        = 5
+	MaxSubagentTimeoutSeconds        = 120
+	DefaultContextCompressionPercent = 70
+	MinContextCompressionPercent     = 50
+	MaxContextCompressionPercent     = 90
 )
 
 const (
@@ -233,6 +236,8 @@ type SystemSettings struct {
 	SubagentModelProviderID          string    `json:"subagent_model_provider_id"`
 	AutomaticApprovalModelProviderID string    `json:"automatic_approval_model_provider_id"`
 	SubagentTimeoutSeconds           int       `json:"subagent_timeout_seconds"`
+	ContextCompressionEnabled        bool      `json:"context_compression_enabled"`
+	ContextCompressionPercent        int       `json:"context_compression_threshold_percent"`
 	ChatImageAllowedTypes            []string  `json:"chat_image_allowed_types"`
 	WorkspaceShellMode               string    `json:"workspace_shell_mode"`
 	WorkspaceShellPlatform           string    `json:"workspace_shell_platform,omitempty"`
@@ -255,6 +260,8 @@ type SystemSettingsInput struct {
 	SubagentModelProviderID          *string  `json:"subagent_model_provider_id,omitempty"`
 	AutomaticApprovalModelProviderID *string  `json:"automatic_approval_model_provider_id,omitempty"`
 	SubagentTimeoutSeconds           *int     `json:"subagent_timeout_seconds,omitempty"`
+	ContextCompressionEnabled        *bool    `json:"context_compression_enabled,omitempty"`
+	ContextCompressionPercent        *int     `json:"context_compression_threshold_percent,omitempty"`
 	ChatImageAllowedTypes            []string `json:"chat_image_allowed_types,omitempty"`
 	WorkspaceShellMode               *string  `json:"workspace_shell_mode,omitempty"`
 	MCPHTTPEnabled                   *bool    `json:"mcp_http_enabled,omitempty"`
@@ -411,6 +418,25 @@ type ChatSession struct {
 	MessageCount  int       `json:"message_count"`
 	UpdatedAt     time.Time `json:"updated_at"`
 	Active        bool      `json:"active"`
+}
+
+type ChatContextSummary struct {
+	SessionID        string    `json:"session_id"`
+	Summary          string    `json:"summary,omitempty"`
+	ThroughMessageID string    `json:"through_message_id"`
+	Revision         int       `json:"revision"`
+	Trigger          string    `json:"trigger"`
+	SourceTokens     int       `json:"source_tokens"`
+	SummaryTokens    int       `json:"summary_tokens"`
+	Model            string    `json:"model,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+type ChatContextCompressionResult struct {
+	Summary      ChatContextSummary `json:"summary"`
+	BeforeTokens int                `json:"before_tokens"`
+	AfterTokens  int                `json:"after_tokens"`
 }
 
 type ChatMessage struct {

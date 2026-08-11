@@ -115,6 +115,7 @@ const en = {
     runnerReady: 'Available', modelUnavailable: 'Unavailable', commandAgent: 'Human approval details', automaticApprovalAgent: 'Auto Approval Agent', explanationAgent: 'Details', modelProvider: 'Model', requestTimeout: 'Timeout',
     subagentProvider: 'Approval model',
     activeMain: 'Main model', timeout: 'Timeout', seconds: '{{count}} seconds',
+	contextCompression: 'Context compression', autoCompression: 'Automatic compression', compressionThreshold: 'Trigger threshold (%)', compressionOff: 'Off',
 	chatImages: 'Chat image formats',
     workspaceShell: 'Workspace Shell execution',
     shellDisabled: 'Disabled', shellSandbox: 'Bubblewrap sandbox', shellHost: 'Host shell', shellUnsupported: 'Bubblewrap is unavailable on this host.',
@@ -146,7 +147,7 @@ const en = {
     stopped: 'Agent run stopped by the operator before completion.', agentError: 'Agent error',
     operator: 'Operator', responseFailed: 'response failed', processing: 'processing', blockedImage: '[Blocked image: {{alt}}]',
 	addImages: 'Add images', removeImage: 'Remove image', imageTypeRejected: 'Some image formats are not enabled.',
-    reasoning: 'Reasoning', reasoningActive: 'Reasoning...', reasoningFallback: 'Thinking...', contextUsage: 'Context {{used}} / {{limit}} tokens', contextUsageUnknown: 'Context {{used}} / -- tokens',
+    reasoning: 'Reasoning', reasoningActive: 'Reasoning...', reasoningFallback: 'Thinking...', contextUsage: 'Context {{used}} / {{limit}} tokens', contextUsageUnknown: 'Context {{used}} / -- tokens', compressContext: 'Compress context', contextCompressed: 'Context compressed · {{before}} → {{after}}',
     tokenInput: 'Input', tokenOutput: 'Output', tokenTotal: 'Total',
   },
   workspace: {

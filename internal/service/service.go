@@ -258,6 +258,10 @@ func (s *Service) GetChatSession(ctx context.Context, sessionID string) (domain.
 	return s.store.GetChatSession(ctx, strings.TrimSpace(sessionID))
 }
 
+func (s *Service) GetChatContextSummary(ctx context.Context, sessionID string) (domain.ChatContextSummary, error) {
+	return s.store.GetChatContextSummary(ctx, strings.TrimSpace(sessionID))
+}
+
 const maxChatSessionTitleRunes = 80
 
 func normalizeChatSessionTitle(title string) (string, error) {
@@ -638,6 +642,15 @@ func (s *Service) SaveSystemSettings(ctx context.Context, input domain.SystemSet
 		}
 		current.SubagentTimeoutSeconds = *input.SubagentTimeoutSeconds
 	}
+	if input.ContextCompressionEnabled != nil {
+		current.ContextCompressionEnabled = *input.ContextCompressionEnabled
+	}
+	if input.ContextCompressionPercent != nil {
+		if *input.ContextCompressionPercent < domain.MinContextCompressionPercent || *input.ContextCompressionPercent > domain.MaxContextCompressionPercent {
+			return domain.SystemSettings{}, fmt.Errorf("context_compression_threshold_percent must be between %d and %d", domain.MinContextCompressionPercent, domain.MaxContextCompressionPercent)
+		}
+		current.ContextCompressionPercent = *input.ContextCompressionPercent
+	}
 	if input.ChatImageAllowedTypes != nil {
 		allowed := map[string]struct{}{
 			"image/png": {}, "image/jpeg": {}, "image/webp": {}, "image/gif": {},
@@ -701,11 +714,13 @@ func (s *Service) SaveSystemSettings(ctx context.Context, input domain.SystemSet
 		"approval_explanations_enabled": saved.ApprovalExplanationsEnabled,
 		"system_prompt_changed":         systemPromptChanged, "system_prompt_bytes": len(saved.SystemPrompt),
 		"subagent_model_provider_id": saved.SubagentModelProviderID, "subagent_timeout_seconds": saved.SubagentTimeoutSeconds,
-		"automatic_approval_model_provider_id": saved.AutomaticApprovalModelProviderID,
-		"chat_image_allowed_types":             saved.ChatImageAllowedTypes,
-		"workspace_shell_mode":                 saved.WorkspaceShellMode,
-		"mcp_http_enabled":                     saved.MCPHTTPEnabled,
-		"mcp_http_token_rotated":               rotatedMCPHTTPToken,
+		"automatic_approval_model_provider_id":  saved.AutomaticApprovalModelProviderID,
+		"context_compression_enabled":           saved.ContextCompressionEnabled,
+		"context_compression_threshold_percent": saved.ContextCompressionPercent,
+		"chat_image_allowed_types":              saved.ChatImageAllowedTypes,
+		"workspace_shell_mode":                  saved.WorkspaceShellMode,
+		"mcp_http_enabled":                      saved.MCPHTTPEnabled,
+		"mcp_http_token_rotated":                rotatedMCPHTTPToken,
 	})
 	saved.MCPHTTPToken = mcpHTTPToken
 	return s.decorateWorkspaceShellSettings(saved), nil

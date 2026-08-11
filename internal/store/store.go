@@ -310,6 +310,20 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_messages(session_id, created_at);
+CREATE TABLE IF NOT EXISTS chat_context_summaries (
+  session_id TEXT PRIMARY KEY,
+  summary TEXT NOT NULL,
+  through_message_id TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 1,
+  trigger TEXT NOT NULL,
+  source_tokens INTEGER NOT NULL DEFAULT 0,
+  summary_tokens INTEGER NOT NULL DEFAULT 0,
+  model TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(session_id) REFERENCES chat_sessions(session_id) ON DELETE CASCADE,
+  FOREIGN KEY(through_message_id) REFERENCES chat_messages(id)
+);
 CREATE TABLE IF NOT EXISTS chat_message_context_usage (
   message_id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
@@ -453,6 +467,8 @@ CREATE TABLE IF NOT EXISTS system_settings (
   approval_explanations_enabled INTEGER NOT NULL DEFAULT 1,
   subagent_model_provider_id TEXT NOT NULL DEFAULT '',
   subagent_timeout_seconds INTEGER NOT NULL DEFAULT 30,
+  context_compression_enabled INTEGER NOT NULL DEFAULT 1,
+  context_compression_threshold_percent INTEGER NOT NULL DEFAULT 70,
   chat_image_allowed_types_json TEXT NOT NULL DEFAULT '["image/png","image/jpeg","image/webp","image/gif"]',
   workspace_shell_mode TEXT NOT NULL DEFAULT 'sandbox',
   mcp_http_enabled INTEGER NOT NULL DEFAULT 0,
@@ -532,6 +548,12 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
 		return err
 	}
 	if err := s.ensureColumn(ctx, "chat_messages", "model_extra_json", "TEXT NOT NULL DEFAULT '{}'"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "system_settings", "context_compression_enabled", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "system_settings", "context_compression_threshold_percent", "INTEGER NOT NULL DEFAULT 70"); err != nil {
 		return err
 	}
 	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO system_settings(
@@ -886,14 +908,15 @@ func scanMCPServer(row scanner) (domain.MCPServer, error) {
 func (s *Store) GetSystemSettings(ctx context.Context) (domain.SystemSettings, error) {
 	var settings domain.SystemSettings
 	var explanationsEnabled int
+	var contextCompressionEnabled int
 	var mcpHTTPEnabled int
 	var imageTypesJSON string
 	var systemPrompt sql.NullString
 	var updated string
 	err := s.db.QueryRowContext(ctx, `SELECT agent_max_iterations,system_prompt,approval_mode,approval_explanations_enabled,subagent_model_provider_id,subagent_timeout_seconds,
-chat_image_allowed_types_json,workspace_shell_mode,mcp_http_enabled,mcp_http_token_hash,updated_at FROM system_settings WHERE id=1`).Scan(
+context_compression_enabled,context_compression_threshold_percent,chat_image_allowed_types_json,workspace_shell_mode,mcp_http_enabled,mcp_http_token_hash,updated_at FROM system_settings WHERE id=1`).Scan(
 		&settings.AgentMaxIterations, &systemPrompt, &settings.ApprovalMode, &explanationsEnabled, &settings.SubagentModelProviderID, &settings.SubagentTimeoutSeconds,
-		&imageTypesJSON, &settings.WorkspaceShellMode, &mcpHTTPEnabled, &settings.MCPHTTPTokenHash, &updated,
+		&contextCompressionEnabled, &settings.ContextCompressionPercent, &imageTypesJSON, &settings.WorkspaceShellMode, &mcpHTTPEnabled, &settings.MCPHTTPTokenHash, &updated,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.SystemSettings{
@@ -901,6 +924,7 @@ chat_image_allowed_types_json,workspace_shell_mode,mcp_http_enabled,mcp_http_tok
 			ApprovalMode: domain.ApprovalModeManual,
 			SystemPrompt: domain.DefaultSystemPrompt, DefaultSystemPrompt: domain.DefaultSystemPrompt,
 			SubagentTimeoutSeconds: domain.DefaultSubagentTimeoutSeconds, WorkspaceShellMode: domain.DefaultWorkspaceShellMode(runtime.GOOS),
+			ContextCompressionEnabled: true, ContextCompressionPercent: domain.DefaultContextCompressionPercent,
 			ChatImageAllowedTypes: append([]string(nil), domain.DefaultChatImageAllowedTypes...),
 		}, nil
 	}
@@ -915,6 +939,10 @@ chat_image_allowed_types_json,workspace_shell_mode,mcp_http_enabled,mcp_http_tok
 		settings.SystemPrompt = domain.DefaultSystemPrompt
 	}
 	settings.ApprovalExplanationsEnabled = explanationsEnabled != 0
+	settings.ContextCompressionEnabled = contextCompressionEnabled != 0
+	if settings.ContextCompressionPercent < domain.MinContextCompressionPercent || settings.ContextCompressionPercent > domain.MaxContextCompressionPercent {
+		settings.ContextCompressionPercent = domain.DefaultContextCompressionPercent
+	}
 	settings.MCPHTTPEnabled = mcpHTTPEnabled != 0
 	settings.MCPHTTPTokenConfigured = settings.MCPHTTPTokenHash != ""
 	switch settings.ApprovalMode {
@@ -946,20 +974,22 @@ func (s *Store) SaveSystemSettings(ctx context.Context, settings domain.SystemSe
 		return domain.SystemSettings{}, err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `INSERT INTO system_settings(id,agent_max_iterations,system_prompt,approval_mode,approval_explanations_enabled,subagent_model_provider_id,subagent_timeout_seconds,chat_image_allowed_types_json,workspace_shell_mode,mcp_http_enabled,mcp_http_token_hash,updated_at) VALUES(1,?,?,?,?,?,?,?,?,?,?,?)
+	_, err = tx.ExecContext(ctx, `INSERT INTO system_settings(id,agent_max_iterations,system_prompt,approval_mode,approval_explanations_enabled,subagent_model_provider_id,subagent_timeout_seconds,context_compression_enabled,context_compression_threshold_percent,chat_image_allowed_types_json,workspace_shell_mode,mcp_http_enabled,mcp_http_token_hash,updated_at) VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET agent_max_iterations=excluded.agent_max_iterations,
 system_prompt=excluded.system_prompt,
 approval_mode=excluded.approval_mode,
 approval_explanations_enabled=excluded.approval_explanations_enabled,
 subagent_model_provider_id=excluded.subagent_model_provider_id,
 subagent_timeout_seconds=excluded.subagent_timeout_seconds,
+context_compression_enabled=excluded.context_compression_enabled,
+context_compression_threshold_percent=excluded.context_compression_threshold_percent,
 chat_image_allowed_types_json=excluded.chat_image_allowed_types_json,
 workspace_shell_mode=excluded.workspace_shell_mode,
 mcp_http_enabled=excluded.mcp_http_enabled,
 mcp_http_token_hash=excluded.mcp_http_token_hash,
 updated_at=excluded.updated_at`,
 		settings.AgentMaxIterations, settings.SystemPrompt, settings.ApprovalMode, boolInt(settings.ApprovalExplanationsEnabled), settings.SubagentModelProviderID,
-		settings.SubagentTimeoutSeconds, string(imageTypesJSON), settings.WorkspaceShellMode, boolInt(settings.MCPHTTPEnabled), settings.MCPHTTPTokenHash, formatTime(settings.UpdatedAt))
+		settings.SubagentTimeoutSeconds, boolInt(settings.ContextCompressionEnabled), settings.ContextCompressionPercent, string(imageTypesJSON), settings.WorkspaceShellMode, boolInt(settings.MCPHTTPEnabled), settings.MCPHTTPTokenHash, formatTime(settings.UpdatedAt))
 	if err != nil {
 		return domain.SystemSettings{}, err
 	}
@@ -1814,6 +1844,58 @@ ORDER BY created_at`, sessionID)
 	return result, nil
 }
 
+func (s *Store) GetChatContextSummary(ctx context.Context, sessionID string) (domain.ChatContextSummary, error) {
+	var summary domain.ChatContextSummary
+	var created, updated string
+	err := s.db.QueryRowContext(ctx, `SELECT session_id,summary,through_message_id,revision,trigger,source_tokens,summary_tokens,model,created_at,updated_at
+FROM chat_context_summaries WHERE session_id=?`, sessionID).Scan(
+		&summary.SessionID, &summary.Summary, &summary.ThroughMessageID, &summary.Revision, &summary.Trigger,
+		&summary.SourceTokens, &summary.SummaryTokens, &summary.Model, &created, &updated,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.ChatContextSummary{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.ChatContextSummary{}, err
+	}
+	summary.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	summary.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	return summary, nil
+}
+
+func (s *Store) SaveChatContextSummary(ctx context.Context, summary domain.ChatContextSummary) (domain.ChatContextSummary, error) {
+	if strings.TrimSpace(summary.SessionID) == "" || strings.TrimSpace(summary.Summary) == "" || strings.TrimSpace(summary.ThroughMessageID) == "" {
+		return domain.ChatContextSummary{}, fmt.Errorf("context summary session, content, and boundary are required")
+	}
+	if summary.Trigger != "auto" && summary.Trigger != "manual" {
+		return domain.ChatContextSummary{}, fmt.Errorf("invalid context summary trigger %q", summary.Trigger)
+	}
+	now := time.Now().UTC()
+	_, err := s.db.ExecContext(ctx, `INSERT INTO chat_context_summaries(
+session_id,summary,through_message_id,revision,trigger,source_tokens,summary_tokens,model,created_at,updated_at)
+VALUES(?,?,?,1,?,?,?,?,?,?)
+ON CONFLICT(session_id) DO UPDATE SET summary=excluded.summary,through_message_id=excluded.through_message_id,
+revision=chat_context_summaries.revision+1,trigger=excluded.trigger,source_tokens=excluded.source_tokens,
+summary_tokens=excluded.summary_tokens,model=excluded.model,updated_at=excluded.updated_at`,
+		summary.SessionID, summary.Summary, summary.ThroughMessageID, summary.Trigger, max(summary.SourceTokens, 0),
+		max(summary.SummaryTokens, 0), summary.Model, formatTime(now), formatTime(now))
+	if err != nil {
+		return domain.ChatContextSummary{}, err
+	}
+	return s.GetChatContextSummary(ctx, summary.SessionID)
+}
+
+func (s *Store) DeleteChatContextSummary(ctx context.Context, sessionID string) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM chat_context_summaries WHERE session_id=?`, sessionID)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) listChatMessages(ctx context.Context, sessionID string, limit int, modelOnly bool) ([]domain.ChatMessage, error) {
 	filter := ""
 	if modelOnly {
@@ -2086,6 +2168,9 @@ WHERE run_id IN (SELECT id FROM runs WHERE session_id=?)
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM tasks WHERE run_id IN (SELECT id FROM runs WHERE session_id=?)`, sessionID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM chat_context_summaries WHERE session_id=?`, sessionID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM chat_messages WHERE session_id=?`, sessionID); err != nil {

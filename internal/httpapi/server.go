@@ -169,6 +169,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/chat/sessions", s.chatSessions)
 	s.mux.HandleFunc("GET /api/v1/chat/{id}/events", s.chatEventsStream)
 	s.mux.HandleFunc("POST /api/v1/chat/{id}/cancel", s.cancelChatSession)
+	s.mux.HandleFunc("POST /api/v1/chat/{id}/context/compress", s.compressChatContext)
 	s.mux.HandleFunc("PUT /api/v1/chat/{id}/workspace", s.setChatSessionWorkspace)
 	s.mux.HandleFunc("PUT /api/v1/chat/{id}/title", s.renameChatSession)
 	s.mux.HandleFunc("DELETE /api/v1/chat/{id}", s.deleteChatSession)
@@ -1782,11 +1783,40 @@ func (s *Server) chatState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	active := s.agent != nil && s.agent.IsSessionActive(sessionID)
-	writeJSON(w, http.StatusOK, map[string]any{
+	contextSummary, summaryErr := s.service.GetChatContextSummary(r.Context(), sessionID)
+	if summaryErr != nil && !errors.Is(summaryErr, store.ErrNotFound) {
+		writeError(w, summaryErr)
+		return
+	}
+	state := map[string]any{
 		"active": active, "workspace_id": session.WorkspaceID,
 		"context_tokens": session.ContextTokens, "context_window": session.ContextWindow,
 		"messages": messages, "tool_calls": toolCalls, "tasks": tasks,
-	})
+	}
+	if summaryErr == nil {
+		state["context_summary"] = contextSummary
+	}
+	writeJSON(w, http.StatusOK, state)
+}
+
+func (s *Server) compressChatContext(w http.ResponseWriter, r *http.Request) {
+	if s.agent == nil || !s.agent.Available() {
+		writeErrorStatus(w, agent.ErrUnavailable, http.StatusServiceUnavailable)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
+	defer cancel()
+	result, err := s.agent.CompressContext(ctx, strings.TrimSpace(r.PathValue("id")))
+	switch {
+	case errors.Is(err, agent.ErrSessionBusy), errors.Is(err, agent.ErrNothingToCompress):
+		writeErrorStatus(w, err, http.StatusConflict)
+	case errors.Is(err, store.ErrNotFound):
+		writeErrorStatus(w, err, http.StatusNotFound)
+	case err != nil:
+		writeError(w, err)
+	default:
+		writeJSON(w, http.StatusOK, result)
+	}
 }
 
 func (s *Server) chatSessions(w http.ResponseWriter, r *http.Request) {
