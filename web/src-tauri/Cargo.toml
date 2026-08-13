@@ -1,6 +1,6 @@
 [package]
 name = "opsnerva-desktop"
-version = "0.2.8"
+version = "0.2.9"
 description = "OpsNerva desktop application"
 authors = ["OpsNerva contributors"]
 edition = "2024"
