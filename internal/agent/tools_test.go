@@ -283,8 +283,20 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 		if descriptor.Name == "ssh_file_transfer" && (descriptor.Guard != "approval_required" || !strings.Contains(string(descriptor.InputSchema), `"source_host_id"`) || !strings.Contains(string(descriptor.InputSchema), `"destination_host_id"`) || strings.Contains(string(descriptor.InputSchema), `"overwrite"`)) {
 			t.Fatalf("ssh_file_transfer metadata does not reflect its create-or-versioned-replace schema: %#v", descriptor)
 		}
-		if descriptor.Name == "web_extract" && (descriptor.Guard != "read_only" || descriptor.Category != "web" || !strings.Contains(string(descriptor.InputSchema), `"urls"`)) {
-			t.Fatalf("web_extract metadata does not reflect its runtime schema: %#v", descriptor)
+		if descriptor.Name == "web_search" {
+			schema := string(descriptor.InputSchema)
+			if descriptor.Guard != "read_only" || descriptor.Category != "web" || !strings.Contains(schema, `"topic"`) || !strings.Contains(schema, `"search_depth"`) ||
+				!strings.Contains(schema, `"start_date"`) || !strings.Contains(schema, `"end_date"`) || !strings.Contains(schema, `"chunks_per_source"`) ||
+				!strings.Contains(descriptor.Description, "3-5") || !strings.Contains(descriptor.Description, "web_extract") {
+				t.Fatalf("web_search metadata does not reflect its runtime schema: %#v", descriptor)
+			}
+		}
+		if descriptor.Name == "web_extract" {
+			schema := string(descriptor.InputSchema)
+			if descriptor.Guard != "read_only" || descriptor.Category != "web" || !strings.Contains(schema, `"urls"`) || !strings.Contains(schema, `"query"`) ||
+				!strings.Contains(schema, `"extract_depth"`) || !strings.Contains(schema, `"chunks_per_source"`) || !strings.Contains(descriptor.Description, "cite") {
+				t.Fatalf("web_extract metadata does not reflect its runtime schema: %#v", descriptor)
+			}
 		}
 	}
 	for _, retired := range []string{"ssh_approval_status", "ssh_task_start", "ssh_task_status", "ssh_task_tail", "ssh_task_list", "ssh_task_get", "ssh_task_cancel", "ssh_file_write", "ssh_file_apply_patch", "ssh_file_restore", "ssh_file_create", "ssh_file_stat", "ssh_config_apply", "ssh_config_restore", "workspace_list", "workspace_file_apply_patch", "workspace_file_create", "ssh_file_search", "workspace_file_search", "ssh_history_search", "ssh_history_get"} {
@@ -600,6 +612,33 @@ func TestWebExtractToolResultExposesPartialAndProviderFailures(t *testing.T) {
 	}
 	if failed.OK || failed.Code != "provider_failed" || !failed.Retryable || len(failed.FailedResults) != 1 {
 		t.Fatalf("provider extraction failure was not exposed to the model: %#v", failed)
+	}
+}
+
+func TestWebToolResultClassifiesProviderFailures(t *testing.T) {
+	testCases := []struct {
+		code      string
+		retryable bool
+	}{
+		{code: service.WebSearchErrorInvalidRequest},
+		{code: service.WebSearchErrorAuthenticationFailed},
+		{code: service.WebSearchErrorQuotaExhausted},
+		{code: service.WebSearchErrorRateLimited, retryable: true},
+		{code: service.WebSearchErrorProviderUnavailable, retryable: true},
+		{code: service.WebSearchErrorTimeout},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.code, func(t *testing.T) {
+			providerError := &service.WebSearchProviderError{Code: testCase.code, Retryable: testCase.retryable, Message: "provider response"}
+			search, err := NormalizeWebSearchToolResult(domain.WebSearchResponse{}, providerError)
+			if err != nil || search.OK || search.Code != testCase.code || search.Retryable != testCase.retryable || search.ToolVersion != "1.1" || search.NextAction == "" {
+				t.Fatalf("search provider error = %#v, err=%v", search, err)
+			}
+			extract, err := NormalizeWebExtractToolResult(domain.WebExtractResponse{}, providerError)
+			if err != nil || extract.OK || extract.Code != testCase.code || extract.Retryable != testCase.retryable || extract.ToolVersion != "1.1" || extract.NextAction == "" {
+				t.Fatalf("extract provider error = %#v, err=%v", extract, err)
+			}
+		})
 	}
 }
 

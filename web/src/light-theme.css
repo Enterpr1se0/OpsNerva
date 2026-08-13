@@ -550,6 +550,8 @@
   .tool-command-block,
   .tool-context-pane,
   .tool-structured-result,
+  .web-source-card,
+  .web-source-failures,
   .tool-no-arguments,
   .tool-schema-raw,
   .file-metadata-panel,
@@ -560,6 +562,30 @@
   border-color: var(--light-border);
   background: var(--light-subtle);
   color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] .web-source-card > header,
+:root[data-theme='light'] .web-source-card > footer,
+:root[data-theme='light'] .web-tool-meta :where(span, code) {
+  border-color: var(--light-border);
+  background: var(--light-muted-surface);
+}
+
+:root[data-theme='light'] .web-source-card > header b {
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] .web-source-card > p,
+:root[data-theme='light'] .web-source-card > header span,
+:root[data-theme='light'] .web-source-card > footer,
+:root[data-theme='light'] .web-tool-meta,
+:root[data-theme='light'] .web-tool-omitted {
+  color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] .web-source-failures {
+  border-color: #eccaca;
+  background: #fff6f6;
 }
 
 :root[data-theme='light'] :where(.tool-event > summary, .reasoning-latest, .command-review-panel > summary) {

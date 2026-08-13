@@ -301,11 +301,16 @@ type WebSearchSettingsInput struct {
 }
 
 type WebSearchRequest struct {
-	Query          string   `json:"query"`
-	MaxResults     int      `json:"max_results,omitempty"`
-	TimeRange      string   `json:"time_range,omitempty"`
-	IncludeDomains []string `json:"include_domains,omitempty"`
-	ExcludeDomains []string `json:"exclude_domains,omitempty"`
+	Query           string   `json:"query"`
+	MaxResults      int      `json:"max_results,omitempty"`
+	Topic           string   `json:"topic,omitempty"`
+	SearchDepth     string   `json:"search_depth,omitempty"`
+	TimeRange       string   `json:"time_range,omitempty"`
+	StartDate       string   `json:"start_date,omitempty"`
+	EndDate         string   `json:"end_date,omitempty"`
+	ChunksPerSource int      `json:"chunks_per_source,omitempty"`
+	IncludeDomains  []string `json:"include_domains,omitempty"`
+	ExcludeDomains  []string `json:"exclude_domains,omitempty"`
 }
 
 type WebSearchResult struct {
@@ -314,6 +319,9 @@ type WebSearchResult struct {
 	Content       string  `json:"content"`
 	Score         float64 `json:"score,omitempty"`
 	PublishedDate string  `json:"published_date,omitempty"`
+	Truncated     bool    `json:"truncated,omitempty"`
+	OriginalBytes int     `json:"original_bytes,omitempty"`
+	ReturnedBytes int     `json:"returned_bytes,omitempty"`
 }
 
 type WebSearchResponse struct {
@@ -322,16 +330,28 @@ type WebSearchResponse struct {
 	Provider           string            `json:"provider"`
 	Results            []WebSearchResult `json:"results"`
 	ResponseTime       float64           `json:"response_time,omitempty"`
+	RequestID          string            `json:"request_id,omitempty"`
+	Credits            float64           `json:"credits,omitempty"`
+	Truncated          bool              `json:"truncated,omitempty"`
+	OriginalBytes      int               `json:"original_bytes,omitempty"`
+	ReturnedBytes      int               `json:"returned_bytes,omitempty"`
+	OmittedResults     int               `json:"omitted_results,omitempty"`
 	ContentIsUntrusted bool              `json:"content_is_untrusted"`
 }
 
 type WebExtractRequest struct {
-	URLs []string `json:"urls"`
+	URLs            []string `json:"urls"`
+	Query           string   `json:"query,omitempty"`
+	ExtractDepth    string   `json:"extract_depth,omitempty"`
+	ChunksPerSource int      `json:"chunks_per_source,omitempty"`
 }
 
 type WebExtractResult struct {
-	URL        string `json:"url"`
-	RawContent string `json:"raw_content"`
+	URL           string `json:"url"`
+	RawContent    string `json:"raw_content"`
+	Truncated     bool   `json:"truncated,omitempty"`
+	OriginalBytes int    `json:"original_bytes,omitempty"`
+	ReturnedBytes int    `json:"returned_bytes,omitempty"`
 }
 
 type WebExtractFailedResult struct {
@@ -342,9 +362,16 @@ type WebExtractFailedResult struct {
 type WebExtractResponse struct {
 	ToolMeta
 	Provider           string                   `json:"provider"`
+	Query              string                   `json:"query,omitempty"`
 	Results            []WebExtractResult       `json:"results"`
 	FailedResults      []WebExtractFailedResult `json:"failed_results,omitempty"`
 	ResponseTime       float64                  `json:"response_time,omitempty"`
+	RequestID          string                   `json:"request_id,omitempty"`
+	Credits            float64                  `json:"credits,omitempty"`
+	Truncated          bool                     `json:"truncated,omitempty"`
+	OriginalBytes      int                      `json:"original_bytes,omitempty"`
+	ReturnedBytes      int                      `json:"returned_bytes,omitempty"`
+	OmittedResults     int                      `json:"omitted_results,omitempty"`
 	ContentIsUntrusted bool                     `json:"content_is_untrusted"`
 }
 

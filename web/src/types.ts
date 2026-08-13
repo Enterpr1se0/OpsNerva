@@ -609,8 +609,14 @@ export interface WebSearchResponse {
   ok?: boolean
   query: string
   provider: string
-  results: Array<{title:string;url:string;content:string;score?:number;published_date?:string}>
+  results: Array<{title:string;url:string;content:string;score?:number;published_date?:string;truncated?:boolean;original_bytes?:number;returned_bytes?:number}>
   response_time?: number
+  request_id?: string
+  credits?: number
+  truncated?: boolean
+  original_bytes?: number
+  returned_bytes?: number
+  omitted_results?: number
   content_is_untrusted: boolean
 }
 

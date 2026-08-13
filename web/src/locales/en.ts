@@ -129,7 +129,8 @@ const en = {
   },
   webSearch: {
     title: 'Tavily Web', baseURL: 'API URL', apiKey: 'API Key',
-    timeout: 'Timeout (seconds)', maxResults: 'Search result limit', savedSecret: 'Saved; leave blank to keep', saved: 'Tavily Web settings saved.', testPassed: 'Connection passed with {{count}} result.', clearKey: 'Clear Key',
+    timeout: 'Timeout (seconds)', maxResults: 'Search result limit', savedSecret: 'Saved; leave blank to keep', saved: 'Tavily Web settings saved.', testPassed: '{{count}} result · {{latency}} · {{id}}', clearKey: 'Clear Key',
+    credits: '{{count}} credits', openSource: 'Open source', truncated: 'truncated', failures: 'Failed', omitted: '{{count}} omitted',
   },
   mcpServerMode: {
     title: 'MCP Server Mode', endpoint: 'Endpoint', token: 'Access token', tokenStored: 'Saved; regenerate to display',

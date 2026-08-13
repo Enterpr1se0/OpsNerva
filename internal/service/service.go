@@ -29,6 +29,7 @@ import (
 	"eino-ops-agent/internal/skills"
 	"eino-ops-agent/internal/sshx"
 	"eino-ops-agent/internal/store"
+	"golang.org/x/sync/singleflight"
 )
 
 type Service struct {
@@ -82,6 +83,8 @@ type Service struct {
 	tunnels                map[string]*sshTunnelState
 	shellMu                sync.RWMutex
 	shells                 map[string]*sshShellState
+	webSem                 chan struct{}
+	webRequests            singleflight.Group
 }
 
 const (
@@ -138,6 +141,7 @@ func New(st *store.Store, transport sshx.Transport, encryptor *security.Encrypto
 		executionCancels: make(map[string]context.CancelFunc), cancelledExecutions: make(map[string]struct{}),
 		tunnels: make(map[string]*sshTunnelState),
 		shells:  make(map[string]*sshShellState),
+		webSem:  make(chan struct{}, 4),
 	}
 	if len(runtimeConfig) > 0 {
 		result.dataDir = runtimeConfig[0].DataDir

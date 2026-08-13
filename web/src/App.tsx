@@ -9,7 +9,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import '@xterm/xterm/css/xterm.css'
 import {
-  Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronLeft, ChevronRight, CircleDot, Clock3, Copy, Cpu, Edit3, Eye, EyeOff, FileText, FolderOpen, FolderOutput, FunctionSquare, HardDrive, History, Home, ImagePlus, KeyRound, LockKeyhole, Maximize2, MemoryStick, Minimize2, Minus, Monitor, Moon, Network, PanelLeftClose, PanelLeftOpen, Sun,
+  Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronLeft, ChevronRight, CircleDot, Clock3, Copy, Cpu, Edit3, ExternalLink, Eye, EyeOff, FileText, FolderOpen, FolderOutput, FunctionSquare, HardDrive, History, Home, ImagePlus, KeyRound, LockKeyhole, Maximize2, MemoryStick, Minimize2, Minus, Monitor, Moon, Network, PanelLeftClose, PanelLeftOpen, Sun,
   Cable, Download, ListChecks, ListPlus, LoaderCircle, LogOut, Plus, Power, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, Square, TerminalSquare, Trash2, UploadCloud, UserRound, X, Zap,
 } from 'lucide-react'
 import { api, chatAttachmentURL, reconnectChatStream, sftpDownloadURL, sshShellEventsURL, streamChat, workspaceDownloadURL, workspaceFileEventsURL } from './api'
@@ -1921,7 +1921,7 @@ function WebSearchSettingsPanel({proxies}:{proxies:Proxy[]}){
 	useEffect(()=>{let active=true;api.webSearchSettings().then(value=>{if(active)applyStored(value)}).catch(err=>{if(active)notify(errorText(err),'error')}).finally(()=>{if(active)setLoading(false)});return()=>{active=false}},[])
 	const update=<K extends keyof WebSearchSettingsInput>(key:K,value:WebSearchSettingsInput[K])=>{setInput(current=>({...current,[key]:value}));setDirty(true)}
 	const save=async()=>{setBusy('save');try{const value=await api.saveWebSearchSettings(input);applyStored(value);notify(t('webSearch.saved'))}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
-	const test=async()=>{setBusy('test');try{const result=await api.testWebSearch();notify(t('webSearch.testPassed',{count:result.results.length}))}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
+	const test=async()=>{setBusy('test');try{const result=await api.testWebSearch();notify(t('webSearch.testPassed',{count:result.results.length,latency:`${(result.response_time||0).toFixed(2)}s`,id:result.request_id||'—'}))}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
 	const clearKey=()=>{setInput(current=>({...current,enabled:false,api_key:'',clear_api_key:true}));setDirty(true)}
 	if(loading)return <SettingsDisclosure className="web-search-settings" icon={<Search size={18}/>} title={t('webSearch.title')} meta={t('common.loading')}><div className="settings-loading"><LoaderCircle className="spin" size={16}/>{t('common.loading')}</div></SettingsDisclosure>
 	return <SettingsDisclosure className="web-search-settings" icon={<Search size={18}/>} title={t('webSearch.title')} meta={input.enabled?t('common.enabled'):t('common.disabled')}><label className="web-search-toggle"><span>{t('webSearch.title')}</span><input type="checkbox" checked={input.enabled} onChange={event=>update('enabled',event.target.checked)}/><i/><b>{input.enabled?t('common.enabled'):t('common.disabled')}</b></label><div className="web-search-grid"><label><span>{t('webSearch.baseURL')}</span><input value={input.base_url} onChange={event=>update('base_url',event.target.value)} placeholder="https://api.tavily.com"/></label><label><span>{t('webSearch.apiKey')}</span><PasswordInput value={input.api_key||''} onChange={event=>update('api_key',event.target.value)} placeholder={stored?.has_api_key?t('webSearch.savedSecret'):''}/></label><label><span>{t('common.proxy')}</span><AppSelect value={input.proxy_id||''} ariaLabel={t('common.proxy')} onChange={value=>update('proxy_id',value)} options={[{value:'',label:t('common.direct')},...proxies.map(proxy=>({value:proxy.id,label:`${proxy.name} · ${proxy.url}`}))]}/></label><label><span>{t('webSearch.timeout')}</span><input type="number" min="5" max="120" value={input.timeout_seconds} onChange={event=>update('timeout_seconds',Number(event.target.value))}/></label><label><span>{t('webSearch.maxResults')}</span><input type="number" min="1" max="20" value={input.max_results} onChange={event=>update('max_results',Number(event.target.value))}/></label></div><footer><div>{stored?.has_api_key&&<button type="button" className="danger" onClick={clearKey}>{t('webSearch.clearKey')}</button>}</div><button type="button" disabled={busy!==''||dirty||!stored?.enabled||!stored.has_api_key} onClick={()=>void test()}>{busy==='test'?<LoaderCircle className="spin" size={13}/>:<Search size={13}/>} {t('common.test')}</button><button type="button" className="primary" disabled={busy!==''||!dirty||input.enabled&&!hasEffectiveAPIKey} onClick={()=>void save()}>{busy==='save'?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {t('common.save')}</button></footer></SettingsDisclosure>
@@ -2841,6 +2841,8 @@ function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run
   const planSteps=Array.isArray(payload.steps)?payload.steps.slice(0,toolCollectionPreviewItems).map(jsonRecord).filter((step):step is JsonRecord=>!!step):[]
   const planSummary=textValue(payload.goal)||textValue(planSteps.find(step=>textValue(step.status)==='in_progress'||textValue(step.status)==='blocked')?.title)
 	const genericArgumentSummary=executionTool?'':toolArgumentSummary(entry.tool,toolArguments)
+	const webTool=entry.tool==='web_search'||entry.tool==='web_extract'
+	const webSummary=webTool?textValue(payload.query):''
 	const operation=filePath||(script?t('tool.bashScript'):program||genericArgumentSummary||eventToolLabel||t('tool.result'))
   const env=request?jsonRecord(request.env):undefined
 	const rawStdout=shellOperation&&(shellAction==='input'||shellAction==='output')?(shellChunks.length?shellChunkStdout:shellOutput):textValue(payload.stdout)||textValue(resultPayload?.stdout)||entry.liveStdout||run?.stdout_redacted||''
@@ -2857,7 +2859,7 @@ function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run
 		const previewStream=status==='in_progress'&&entry.liveOutput?entry.liveOutputStream:stdout?'stdout':stderr?'stderr':undefined
 		const previewContent=status==='in_progress'&&entry.liveOutput?entry.liveOutput:previewStream==='stderr'?stderr:stdout
 	  const outputPreview=status==='in_progress'?latestOutput(previewContent,1):''
-		const commandSummary=transferSummary||(fileSearchMode?`${fileTarget} · ${searchMatchModeLabel} pattern=${JSON.stringify(searchPattern)}`:filePath)||program||(script?compactScript(script):'')||planSummary||genericArgumentSummary||operation
+		const commandSummary=transferSummary||(fileSearchMode?`${fileTarget} · ${searchMatchModeLabel} pattern=${JSON.stringify(searchPattern)}`:filePath)||program||(script?compactScript(script):'')||planSummary||genericArgumentSummary||webSummary||operation
 	const summaryLabel=eventToolLabel||entry.tool||t('common.functions')
 	const historyRuns=[...recordArray(payload.runs),...recordArray(resultPayload?.runs)].slice(0,toolCollectionPreviewItems)
 	const historyHostIDs=[...new Set(historyRuns.map(item=>textValue(item.host_id)).filter(Boolean))]
@@ -2919,7 +2921,7 @@ function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run
 		  <dl className="tool-context-grid"><div><dt>{t('tool.permission')}</dt><dd>{workspaceShellBackend==='host'?t('tool.hostAuthority'):workspaceShellBackend==='sandbox'?t('tool.sandbox'):request.elevated===true?t('tool.managedSudo'):t('tool.normalUser')}</dd></div>{exitCode!=='—'&&<div><dt>{t('tool.exitCode')}</dt><dd>{exitCode}</dd></div>}{duration!=='—'&&<div><dt>{t('tool.duration')}</dt><dd>{duration}</dd></div>}{(waitDeadlineReached||shellHasMore)&&<div><dt>{t('common.status')}</dt><dd>{waitDeadlineReached?t('tool.waitDeadline'):t('tool.moreOutput')}</dd></div>}</dl>
 		  {textValue(request.reason)&&<div className="tool-reason"><span>{t('tool.reason')}</span><p>{textValue(request.reason)}</p></div>}
         </aside>
-      </div>:!shellPrimaryAction&&!shellOutputAction&&<GenericToolResult payload={payload}/>}
+      </div>:!shellPrimaryAction&&!shellOutputAction&&(webTool?<WebToolResult tool={entry.tool!} payload={payload}/>:<GenericToolResult payload={payload}/>)}
 	  {file&&<FileMetadataPanel file={file}/>}
 	  {fileSearchMode&&searchResult&&<div className={`file-search-result ${searchFound?'found':'empty'}`}><Search size={15}/><div><b>{t(searchFound?'tool.searchMatched':'tool.searchNoMatches')}</b><span>{searchMatchModeLabel} · {searchPattern}</span></div></div>}
 	  {(textValue(payload.message)||textValue(payload.next_action))&&<div className={`tool-guidance ${payload.ok===false||['failed','denied','interrupted'].includes(status)?'error':''}`}><ShieldAlert size={15}/><div><b>{textValue(payload.code)||t('tool.result')}</b>{textValue(payload.message)&&<p>{textValue(payload.message)}</p>}{textValue(payload.next_action)&&<small>{t('common.next')} · {textValue(payload.next_action)}</small>}</div></div>}
@@ -3043,6 +3045,42 @@ function GenericToolResult({payload}:{payload:JsonRecord}){
     {arrays.map(([key,value])=><StructuredArray key={key} label={key} values={value as unknown[]}/>)}
     {objects.map(([key,value])=><StructuredObject key={key} label={key} value={value as JsonRecord}/>)}
   </div>
+}
+
+function publicWebLink(value:string){
+	try{
+		const parsed=new URL(value),host=parsed.hostname.toLowerCase().replace(/\.$/,'')
+		if(!['http:','https:'].includes(parsed.protocol)||parsed.username||parsed.password||host==='localhost'||host.endsWith('.localhost')||host.endsWith('.local')||host.endsWith('.internal'))return
+		const ipv4=host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)?.slice(1).map(Number)
+		if(ipv4&&(ipv4.some(part=>part>255)||ipv4[0]===10||ipv4[0]===127||ipv4[0]===0||ipv4[0]===169&&ipv4[1]===254||ipv4[0]===172&&ipv4[1]>=16&&ipv4[1]<=31||ipv4[0]===192&&ipv4[1]===168))return
+		if(host==='[::1]'||host==='::1'||/^\[?f[cd]/.test(host)||/^\[?fe[89ab]/.test(host))return
+		return parsed
+	}catch{return}
+}
+
+function WebToolResult({tool,payload}:{tool:string;payload:JsonRecord}){
+	const {t}=useTranslation()
+	const results=recordArray(payload.results)
+	const failures=recordArray(payload.failed_results)
+	const responseTime=numberValue(payload.response_time)
+	const credits=numberValue(payload.credits)
+	const omitted=numberValue(payload.omitted_results)
+	return <div className="web-tool-result">
+		{(responseTime>0||credits>0||textValue(payload.request_id))&&<div className="web-tool-meta">{responseTime>0&&<span>{responseTime.toFixed(2)}s</span>}{credits>0&&<span>{t('webSearch.credits',{count:credits})}</span>}{textValue(payload.request_id)&&<code title={textValue(payload.request_id)}>{textValue(payload.request_id)}</code>}</div>}
+		{results.length>0&&<div className="web-source-list">{results.map((result,index)=>{
+			const parsed=publicWebLink(textValue(result.url))
+			const content=textValue(result.content)||textValue(result.raw_content)
+			const title=textValue(result.title)||parsed?.hostname||textValue(result.url)
+			const truncated=result.truncated===true
+			return <article className="web-source-card" key={`${textValue(result.url)}_${index}`}>
+				<header><div><b>{title}</b><span>{parsed?.hostname||textValue(result.url)}</span></div>{parsed&&<a href={parsed.href} target="_blank" rel="noreferrer noopener" title={t('webSearch.openSource')} aria-label={t('webSearch.openSource')}><ExternalLink size={14}/></a>}</header>
+				{content&&<p>{previewText(content,tool==='web_search'?2<<10:8<<10)}</p>}
+				{(textValue(result.published_date)||numberValue(result.score)>0||truncated)&&<footer>{textValue(result.published_date)&&<time>{textValue(result.published_date)}</time>}{numberValue(result.score)>0&&<span>{Math.round(numberValue(result.score)*100)}%</span>}{truncated&&<em>{t('webSearch.truncated')}</em>}</footer>}
+			</article>
+		})}</div>}
+		{failures.length>0&&<section className="web-source-failures"><b>{t('webSearch.failures')}</b>{failures.map((failure,index)=>{const parsed=publicWebLink(textValue(failure.url));return <div key={`${textValue(failure.url)}_${index}`}><span>{parsed?.hostname||textValue(failure.url)}</span><small>{textValue(failure.error)}</small></div>})}</section>}
+		{omitted>0&&<div className="web-tool-omitted">{t('webSearch.omitted',{count:omitted})}</div>}
+	</div>
 }
 
 function StructuredArray({label,values}:{label:string;values:unknown[]}){

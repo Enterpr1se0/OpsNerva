@@ -1135,8 +1135,18 @@ func (s *Server) testWebSearch(w http.ResponseWriter, r *http.Request) {
 	result, err := s.service.SearchWeb(r.Context(), domain.WebSearchRequest{Query: input.Query, MaxResults: 1}, actor(r))
 	if err != nil {
 		status := http.StatusBadRequest
+		var providerError *service.WebSearchProviderError
 		if errors.Is(err, context.DeadlineExceeded) {
 			status = http.StatusGatewayTimeout
+		} else if errors.As(err, &providerError) {
+			switch providerError.Code {
+			case service.WebSearchErrorTimeout:
+				status = http.StatusGatewayTimeout
+			case service.WebSearchErrorRateLimited, service.WebSearchErrorQuotaExhausted:
+				status = http.StatusTooManyRequests
+			default:
+				status = http.StatusBadGateway
+			}
 		} else if errors.Is(err, service.ErrWebSearchUpstream) {
 			status = http.StatusBadGateway
 		}

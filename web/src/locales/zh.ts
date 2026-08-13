@@ -129,7 +129,8 @@ const zh = {
   },
   webSearch: {
     title: 'Tavily Web', baseURL: 'API 地址', apiKey: 'API Key',
-    timeout: '超时时间（秒）', maxResults: '搜索结果上限', savedSecret: '已保存，留空不变', saved: 'Tavily Web 设置已保存。', testPassed: '连接正常，返回 {{count}} 条结果。', clearKey: '清除 Key',
+    timeout: '超时时间（秒）', maxResults: '搜索结果上限', savedSecret: '已保存，留空不变', saved: 'Tavily Web 设置已保存。', testPassed: '{{count}} 条 · {{latency}} · {{id}}', clearKey: '清除 Key',
+    credits: '{{count}} credits', openSource: '打开来源', truncated: '已截断', failures: '失败', omitted: '省略 {{count}} 条',
   },
   mcpServerMode: {
     title: 'MCP Server Mode', endpoint: 'Endpoint', token: '访问令牌', tokenStored: '已保存，重新生成后显示',

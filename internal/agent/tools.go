@@ -443,15 +443,23 @@ type HistorySearchInput struct {
 }
 
 type WebSearchInput struct {
-	Query          string   `json:"query" jsonschema:"public query; no private data or secrets"`
-	MaxResults     int      `json:"max_results,omitempty" jsonschema:"result count; default and maximum are configured"`
-	TimeRange      string   `json:"time_range,omitempty" jsonschema:"day, week, month, or year"`
-	IncludeDomains []string `json:"include_domains,omitempty" jsonschema:"public domains to include; no schemes or paths"`
-	ExcludeDomains []string `json:"exclude_domains,omitempty" jsonschema:"public domains to exclude; no schemes or paths"`
+	Query           string   `json:"query" jsonschema:"public query; no private data or secrets"`
+	MaxResults      int      `json:"max_results,omitempty" jsonschema:"result count; default 5, maximum is configured"`
+	Topic           string   `json:"topic,omitempty" jsonschema:"general (default), news, or finance"`
+	SearchDepth     string   `json:"search_depth,omitempty" jsonschema:"basic (default), advanced, fast, or ultra-fast; advanced costs more credits"`
+	TimeRange       string   `json:"time_range,omitempty" jsonschema:"day, week, month, or year"`
+	StartDate       string   `json:"start_date,omitempty" jsonschema:"inclusive YYYY-MM-DD lower bound; do not combine with time_range"`
+	EndDate         string   `json:"end_date,omitempty" jsonschema:"inclusive YYYY-MM-DD upper bound; do not combine with time_range"`
+	ChunksPerSource int      `json:"chunks_per_source,omitempty" jsonschema:"1-3 relevant chunks per source; only with search_depth=advanced"`
+	IncludeDomains  []string `json:"include_domains,omitempty" jsonschema:"public domains to include; no schemes or paths"`
+	ExcludeDomains  []string `json:"exclude_domains,omitempty" jsonschema:"public domains to exclude; no schemes or paths"`
 }
 
 type WebExtractInput struct {
-	URLs []string `json:"urls" jsonschema:"1-5 public HTTP(S) URLs; no private data or addresses"`
+	URLs            []string `json:"urls" jsonschema:"1-5 public HTTP(S) URLs; no private data or addresses"`
+	Query           string   `json:"query,omitempty" jsonschema:"focus extraction on passages relevant to this query"`
+	ExtractDepth    string   `json:"extract_depth,omitempty" jsonschema:"basic (default) or advanced; advanced costs more credits"`
+	ChunksPerSource int      `json:"chunks_per_source,omitempty" jsonschema:"1-5 relevant chunks per URL; requires query"`
 }
 
 type HistoryRunSummary struct {
@@ -1792,7 +1800,7 @@ func classifyToolError(err error) (string, bool, string) {
 }
 
 func NormalizeWebSearchToolResult(result domain.WebSearchResponse, err error) (domain.WebSearchResponse, error) {
-	result.ToolVersion = "1.0"
+	result.ToolVersion = "1.1"
 	result.ContentIsUntrusted = true
 	if err == nil {
 		result.OK = true
@@ -1808,14 +1816,16 @@ func NormalizeWebSearchToolResult(result domain.WebSearchResponse, err error) (d
 	case errors.Is(err, service.ErrWebSearchDisabled):
 		result.Code = "configuration_required"
 		result.NextAction = "tell the operator that Tavily Web must be enabled and configured in Settings; do not retry"
-	case errors.Is(err, context.DeadlineExceeded), strings.Contains(strings.ToLower(err.Error()), "timeout"):
+	case errors.Is(err, context.DeadlineExceeded):
 		result.Code = "timeout"
 		result.Retryable = true
 		result.NextAction = "retry once with a narrower query or fewer results"
 	case errors.Is(err, service.ErrWebSearchUpstream):
-		result.Code = "provider_failed"
+		result.Code, result.Retryable, result.NextAction = classifyWebProviderToolError(err)
+	case strings.Contains(strings.ToLower(err.Error()), "timeout"):
+		result.Code = "timeout"
 		result.Retryable = true
-		result.NextAction = "inspect the provider error and retry once only when it appears transient"
+		result.NextAction = "retry once with a narrower query or fewer results"
 	default:
 		result.Code, result.Retryable, result.NextAction = classifyToolError(err)
 	}
@@ -1823,7 +1833,7 @@ func NormalizeWebSearchToolResult(result domain.WebSearchResponse, err error) (d
 }
 
 func NormalizeWebExtractToolResult(result domain.WebExtractResponse, err error) (domain.WebExtractResponse, error) {
-	result.ToolVersion = "1.0"
+	result.ToolVersion = "1.1"
 	result.ContentIsUntrusted = true
 	if err == nil {
 		result.OK = true
@@ -1844,18 +1854,46 @@ func NormalizeWebExtractToolResult(result domain.WebExtractResponse, err error) 
 	case errors.Is(err, service.ErrWebSearchDisabled):
 		result.Code = "configuration_required"
 		result.NextAction = "tell the operator that Tavily Web must be enabled and configured in Settings; do not retry"
-	case errors.Is(err, context.DeadlineExceeded), strings.Contains(strings.ToLower(err.Error()), "timeout"):
+	case errors.Is(err, context.DeadlineExceeded):
 		result.Code = "timeout"
 		result.Retryable = true
 		result.NextAction = "retry once with fewer URLs"
 	case errors.Is(err, service.ErrWebSearchUpstream):
-		result.Code = "provider_failed"
+		result.Code, result.Retryable, result.NextAction = classifyWebProviderToolError(err)
+	case strings.Contains(strings.ToLower(err.Error()), "timeout"):
+		result.Code = "timeout"
 		result.Retryable = true
-		result.NextAction = "inspect failed_results and retry only when the provider failure appears transient"
+		result.NextAction = "retry once with fewer URLs"
 	default:
 		result.Code, result.Retryable, result.NextAction = classifyToolError(err)
 	}
 	return result, nil
+}
+
+func classifyWebProviderToolError(err error) (string, bool, string) {
+	var providerError *service.WebSearchProviderError
+	if !errors.As(err, &providerError) {
+		return "provider_failed", true, "retry once only when the provider failure appears transient"
+	}
+	switch providerError.Code {
+	case service.WebSearchErrorInvalidRequest:
+		return providerError.Code, false, "correct the search or extraction parameters; do not repeat unchanged input"
+	case service.WebSearchErrorAuthenticationFailed:
+		return providerError.Code, false, "tell the operator to verify the Tavily API key in Settings; do not retry"
+	case service.WebSearchErrorQuotaExhausted:
+		return providerError.Code, false, "tell the operator that Tavily quota is exhausted; do not retry"
+	case service.WebSearchErrorRateLimited:
+		if providerError.Retryable {
+			return providerError.Code, true, "retry once after a short delay with fewer results or URLs"
+		}
+		return providerError.Code, false, "do not retry in this turn; continue with sources already available"
+	case service.WebSearchErrorTimeout:
+		return providerError.Code, providerError.Retryable, "retry once with fewer results or URLs only when the operation is still necessary"
+	case service.WebSearchErrorProviderUnavailable:
+		return providerError.Code, providerError.Retryable, "retry once only when the operation is still necessary; otherwise report the provider outage"
+	default:
+		return "provider_failed", providerError.Retryable, "retry once only when the provider failure appears transient"
+	}
 }
 
 func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
@@ -1998,9 +2036,10 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("web_search", "Search the public Web with Tavily; cite result URLs.", func(ctx context.Context, input WebSearchInput) (domain.WebSearchResponse, error) {
+	if err := appendTool(toolutils.InferTool("web_search", "Search 3-5 public Web sources with Tavily. Prefer official domains and basic depth; use advanced depth only when relevant chunks are necessary. Select result URLs for web_extract and cite source URLs.", func(ctx context.Context, input WebSearchInput) (domain.WebSearchResponse, error) {
 		result, err := svc.SearchWeb(ctx, domain.WebSearchRequest{
-			Query: input.Query, MaxResults: input.MaxResults, TimeRange: input.TimeRange,
+			Query: input.Query, MaxResults: input.MaxResults, Topic: input.Topic, SearchDepth: input.SearchDepth,
+			TimeRange: input.TimeRange, StartDate: input.StartDate, EndDate: input.EndDate, ChunksPerSource: input.ChunksPerSource,
 			IncludeDomains: input.IncludeDomains, ExcludeDomains: input.ExcludeDomains,
 		}, "eino-agent")
 		if result.Query == "" {
@@ -2013,10 +2052,15 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("web_extract", "Extract Markdown from up to five public URLs; search first if URLs are unknown.", func(ctx context.Context, input WebExtractInput) (domain.WebExtractResponse, error) {
-		result, err := svc.ExtractWeb(ctx, domain.WebExtractRequest{URLs: input.URLs}, "eino-agent")
+	if err := appendTool(toolutils.InferTool("web_extract", "Extract relevant Markdown from up to five selected public URLs. Search first when URLs are unknown, pass query to focus extraction, and cite each source URL.", func(ctx context.Context, input WebExtractInput) (domain.WebExtractResponse, error) {
+		result, err := svc.ExtractWeb(ctx, domain.WebExtractRequest{
+			URLs: input.URLs, Query: input.Query, ExtractDepth: input.ExtractDepth, ChunksPerSource: input.ChunksPerSource,
+		}, "eino-agent")
 		if result.Provider == "" {
 			result.Provider = "tavily"
+		}
+		if result.Query == "" {
+			result.Query = input.Query
 		}
 		return NormalizeWebExtractToolResult(result, err)
 	})); err != nil {

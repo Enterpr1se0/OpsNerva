@@ -177,7 +177,9 @@ make dev-web
 
 ## Tavily Web
 
-系统设置中的 Tavily Web 可配置 API 地址、API Key、超时和搜索结果上限，并选择“直连”或配置中心已有的代理。`web_search` 用于发现来源，`web_extract` 从最多五个指定公开 URL 提取 Markdown。两个 func 可在 Loaded functions 中分别启停。API Key 与代理密码使用 AES-256-GCM 分别加密保存在 Tavily 设置和共享代理记录中，只对外返回是否已配置。查询和 URL 会发送给 Tavily，返回内容按不可信外部证据交给模型。审计只保存查询或 URL 列表的 SHA256、耗时、数量和代理使用状态，不保存正文或凭据。
+系统设置中的 Tavily Web 可配置 API 地址、API Key、超时和搜索结果上限，并选择“直连”或配置中心已有的代理。管理员的结果数是调用上限；模型省略 `max_results` 时默认返回 5 条。`web_search` 支持主题、检索深度、相对或绝对日期范围和域名过滤；`web_extract` 从最多五个指定公开 URL 提取 Markdown，并可用 `query` 返回相关片段。推荐先搜索 3–5 个来源，再按需提取并引用 URL。高级深度只应在需要更多相关片段时使用，因为会消耗更多 credits。
+
+搜索正文单条最多约 2 KiB，完整搜索结果最多约 32 KiB；提取正文单页最多约 16 KiB，完整提取结果最多约 48 KiB。截断结果会返回原始字节数、实际字节数和省略数量；历史工具结果进入模型前还会由 Eino Reduction 保留来源结构并进一步压缩正文。两个 func 可在 Loaded functions 中分别启停。API Key 与代理密码使用 AES-256-GCM 分别加密保存在 Tavily 设置和共享代理记录中，只对外返回是否已配置。查询和 URL 会发送给 Tavily，返回内容按不可信外部证据交给模型。审计保存查询或 URL 列表的 SHA256、耗时、数量、请求 ID、credits、重试与裁剪统计，不保存正文或凭据。
 
 ## 会话与上下文
 
