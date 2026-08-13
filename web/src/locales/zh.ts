@@ -1,5 +1,6 @@
 const zh = {
   language: { label: '语言', chinese: '中文', english: 'EN' },
+	auth: { username: '用户名', password: '密码', signIn: '登录', signingIn: '登录中...', signOut: '退出登录' },
   common: {
     save: '保存', saving: '保存中...', cancel: '取消', close: '关闭', delete: '删除', deleting: '删除中...', edit: '编辑',
     enable: '启用', enabled: '已启用', disable: '停用', disabled: '已停用', loading: '加载中...', refresh: '刷新', refreshing: '刷新中...',
@@ -49,7 +50,9 @@ const zh = {
   config: {
     tabs: { models: '模型提供商', hosts: 'SSH 主机', proxies: '代理', system: '系统设置' },
     configured: '已配置 {{count}} 个', registered: '已注册 {{count}} 台', maxIterations: '最多 {{count}} 轮',
-    sections: '配置栏目', editor: '配置编辑', backToList: '返回列表', showAddresses: '显示地址', hideAddresses: '隐藏地址',
+		sections: '配置栏目', editor: '配置编辑', backToList: '返回列表', showAddresses: '显示地址', hideAddresses: '隐藏地址',
+		transfer: '配置迁移', export: '导出', exporting: '导出中...', import: '导入', importing: '导入中...', importTitle: '导入配置', package: '配置包', choosePackage: '选择配置包', backupPassword: '配置包密码',
+		exported: '配置已导出。', exportedEncrypted: '加密配置已导出。', imported: '已导入 {{models}} 个模型 · {{hosts}} 台主机 · {{proxies}} 个代理',
   },
   proxies: {
     add: '添加代理',
@@ -167,7 +170,7 @@ const zh = {
     file: '文件', directory: '目录',
   },
   agentTasks: {
-    title: '任务', blocked: '{{count}} 个阻塞',
+    title: '任务', blocked: '{{count}} 个阻塞', operation: '操作', operations: '操作记录', operationCount: '{{count}} 次',
   },
   tool: {
     bashScript: 'Bash 脚本', moreLines: '{{line}} ...（另有 {{count}} 行）', fileOperation: '文件操作', readOperation: '读取文件', searchOperation: '搜索文件',

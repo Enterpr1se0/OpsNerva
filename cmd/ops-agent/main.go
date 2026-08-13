@@ -210,6 +210,7 @@ func serve(ctx context.Context, app *application, options serveOptions) error {
 			Version:   version,
 			StartedAt: app.startedAt,
 			Logging:   app.config.Logging,
+			Auth:      app.config.Auth,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second,
 	}

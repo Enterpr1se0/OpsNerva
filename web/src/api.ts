@@ -1,4 +1,4 @@
-import type { AgentEvent, Approval, ApprovalExecutionResult, ChatContextCompressionResult, ChatSession, ChatState, Health, Host, HostInput, LLMToolCatalog, ManagedSkill, MCPOAuthStart, MCPServer, MCPServerInput, MCPTestResult, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestJob, ModelTestResult, Proxy, ProxyInput, ProxyTestResult, QueuedChatMessage, Run, ServerLogResponse, SFTPFileList, SFTPMutationResult, SSHHostStatus, SSHShell, SSHShellList, SSHShellSnapshot, SSHShellStartInput, SSHTunnel, SSHTunnelList, SSHTunnelStartInput, SSHTunnelUpdateInput, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchResponse, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceInput, WorkspaceUploadResult } from './types'
+import type { AgentEvent, Approval, ApprovalExecutionResult, AuthStatus, ChatContextCompressionResult, ChatSession, ChatState, ConfigurationImportResult, Health, Host, HostInput, LLMToolCatalog, ManagedSkill, MCPOAuthStart, MCPServer, MCPServerInput, MCPTestResult, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestJob, ModelTestResult, Proxy, ProxyInput, ProxyTestResult, QueuedChatMessage, Run, ServerLogResponse, SFTPFileList, SFTPMutationResult, SSHHostStatus, SSHShell, SSHShellList, SSHShellSnapshot, SSHShellStartInput, SSHTunnel, SSHTunnelList, SSHTunnelStartInput, SSHTunnelUpdateInput, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchResponse, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceInput, WorkspaceUploadResult } from './types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	const multipart=typeof FormData!=='undefined'&&init?.body instanceof FormData
@@ -37,6 +37,17 @@ async function startModelTest(path:string,body:string):Promise<ModelTestResult>{
 }
 
 export const api = {
+	authStatus: () => request<AuthStatus>('/api/v1/auth/status'),
+	login: (username:string,password:string) => request<AuthStatus>('/api/v1/auth/login',{method:'POST',body:JSON.stringify({username,password})}),
+	logout: () => request<void>('/api/v1/auth/logout',{method:'POST',body:'{}'}),
+	exportConfiguration: async() => {
+		const response=await fetch('/api/v1/configuration/export',{credentials:'same-origin'})
+		if(!response.ok)throw await responseError(response)
+		const disposition=response.headers.get('Content-Disposition')||''
+		const match=/filename=(?:"([^"]+)"|([^;]+))/i.exec(disposition)
+		return{blob:await response.blob(),filename:(match?.[1]||match?.[2]||'opsnerva-configuration.json').trim()}
+	},
+	importConfiguration: (file:File,password='') => {const body=new FormData();body.set('file',file,file.name);if(password)body.set('password',password);return request<ConfigurationImportResult>('/api/v1/configuration/import',{method:'POST',body})},
   health: () => request<Health>('/api/v1/health'),
 	systemSettings: () => request<SystemSettings>('/api/v1/settings'),
 	capabilities: () => request<ToolCapabilities>('/api/v1/capabilities'),
@@ -99,7 +110,7 @@ export const api = {
   sftpEntries: (hostId:string,path='') => request<SFTPFileList>(`/api/v1/hosts/${encodeURIComponent(hostId)}/sftp/entries?path=${encodeURIComponent(path)}`),
   sftpFile: async(hostId:string,path:string) => {
 		const response=await fetch(sftpDownloadURL(hostId,path),{credentials:'same-origin',headers:{Accept:'application/octet-stream'}})
-		if(!response.ok){const body=await response.json().catch(()=>({error:response.statusText}));throw new Error(body.error||response.statusText)}
+		if(!response.ok)throw await responseError(response)
 		return response.arrayBuffer()
 	},
   uploadSFTPFile: (hostId:string,path:string,file:File,overwrite=false) => request<SFTPMutationResult>(`/api/v1/hosts/${encodeURIComponent(hostId)}/sftp/files?path=${encodeURIComponent(path)}&overwrite=${overwrite}`, { method:'PUT', body:file, headers:{'Content-Type':file.type||'application/octet-stream'} }),
@@ -156,6 +167,7 @@ export function sftpDownloadURL(hostId:string,path:string){
 }
 
 async function responseError(response:Response){
+	if(response.status===401&&response.headers.get('X-OpsNerva-Auth')==='required')window.dispatchEvent(new Event('opsnerva:unauthorized'))
 	const body=await response.json().catch(()=>({error:response.statusText}))
 	const error=new Error(body.error||response.statusText) as Error&{status?:number}
 	error.status=response.status

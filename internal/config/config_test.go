@@ -174,3 +174,32 @@ func TestModelContextWindowAllowsAutoOrManualValue(t *testing.T) {
 		t.Fatal("invalid context window was accepted")
 	}
 }
+
+func TestOptionalAuthenticationLoadsFromYAMLAndEnvironment(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("auth:\n  username: operator\n  password: yaml-password\n  session_ttl_hours: 12\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Auth.Enabled() || cfg.Auth.Username != "operator" || cfg.Auth.Password != "yaml-password" || cfg.Auth.SessionTTLHours != 12 {
+		t.Fatalf("YAML authentication = %#v", cfg.Auth)
+	}
+	t.Setenv("OPS_AGENT_AUTH_USERNAME", "environment-operator")
+	t.Setenv("OPS_AGENT_AUTH_PASSWORD", "environment-password")
+	t.Setenv("OPS_AGENT_AUTH_SESSION_TTL_HOURS", "36")
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Auth.Username != "environment-operator" || cfg.Auth.Password != "environment-password" || cfg.Auth.SessionTTLHours != 36 {
+		t.Fatalf("environment authentication = %#v", cfg.Auth)
+	}
+	t.Setenv("OPS_AGENT_AUTH_PASSWORD", "short")
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "at least 8") {
+		t.Fatalf("short authentication password was accepted: %v", err)
+	}
+}

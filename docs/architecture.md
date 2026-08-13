@@ -14,7 +14,9 @@ Eino Tool、MCP Tool、HTTP 和 CLI 都是这个 Service 的适配器。模型�
 
 这里的 MCP Tool 分为两个方向。`ops-agent mcp` 通过 stdio、设置中的 MCP Server Mode 通过同一 HTTP 服务上的 `/mcp`，把受控 SSH Service 暴露给 MCP Client，因此完整复用输入校验、审批模式和审计，但不暴露 `ssh_history`；全局执行历史只允许 Web 管理端查看。只读工具通过 MCP annotations 明确标记；`ssh_shell` 使用独立 MCP surface，`ssh_tunnel` 复用已有转发状态。HTTP 传输采用无状态 Streamable HTTP；设置开关按请求即时生效，独立高熵 Bearer Token 仅在生成时返回，SQLite 只保存 SHA-256 摘要。管理员配置的外部 MCP Server 则属于独立信任域：它的工具在远端/子进程自身权限下执行，不自动继承 OpsNerva 的审批控制。Web 会明确提示该边界，只有启用状态为 ready 且未被 func 管理单独关闭的外部工具才进入主 Agent，审批 Agent 仍保持无 Tool。
 
-App 控制面通过 loopback HTTP API 连接本地 Sidecar，不提供管理员登录。MCP HTTP 使用独立 Bearer Token；MCP stdio 与 CLI 仍属于本机进程边界。
+App 控制面通过 loopback HTTP API 连接本地 Sidecar。`auth.password` 非空时，除登录状态、登录和退出接口外，普通 `/api/v1` 端点都要求进程内随机会话 Cookie；Cookie 为 `HttpOnly`、`SameSite=Lax`，TLS 下同时设置 `Secure`，会话只保存令牌 SHA-256 与过期时间，重启后失效。配置密码使用常量时间比较，登录失败按来源地址限速。未配置密码时保持本机无登录模式。MCP HTTP 使用独立 Bearer Token，不接受控制面 Cookie；MCP stdio 与 CLI 仍属于本机进程边界。
+
+模型提供商、SSH 主机和代理使用带版本号的统一迁移契约。Store 在只读事务中生成一致快照，Service 通过专用 DTO 明确允许导出的字段，不序列化运行时 Host Key、派生状态或数据库密文。无控制面鉴权时只生成无凭据 JSON；启用鉴权后，Service 先用本机 Master Key 解密凭据，再以登录密码经 Argon2id 派生的独立密钥和 AES-256-GCM 封装 `.opsnerva` 包。导入先完整解密、解析、校验 ID、名称、模式、凭据和跨资源引用，再在单个 SQLite 事务中合并；任何错误整体回滚，未包含的现有资源不会删除。目标库用自己的 Master Key 重新加密凭据，因此迁移包不携带、也不依赖源机器 `master.key`。导入和导出只属于 Web 控制面，不暴露给 LLM 或 MCP Tool。
 
 人工审批说明使用原有 `ApprovalAgent`；Auto 决策使用新增的 `AutoApprovalAgent`。两者都是 `MaxIterations=1`、无 Tool 的独立 Eino `ChatModelAgent`，各自拥有 Runner、Prompt、Service 接口、并发槽和可用状态，互不复用。`ApprovalAgent` 仅异步生成人工审批页的操作与风险说明，不参与自动决定。`AutoApprovalAgent` 接收由 Go context 绑定的当前用户请求、精确操作、目标能力、当前任务和请求摘要；Tool reason 与任务不能扩大用户授权。它结构化返回 `allow/reject/manual`。Auto 仅在完整 `allow` 时执行，明确 `reject` 时终止，`manual`、缺少当前用户请求、不可用、超时或格式无效时回退用户审批。
 

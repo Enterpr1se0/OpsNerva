@@ -17,14 +17,16 @@ import { CopyButton, CopyablePre } from './CopyButton'
 import { AppSelect, ModelCombobox } from './Controls'
 import i18n, { localeFor, type SupportedLanguage } from './i18n'
 import { TextFileEditor } from './TextFileEditor'
-import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, ChatMessage, ChatSession, ChatTokenUsage, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, QueuedChatMessage, Run, ServerLogEntry, SFTPFileEntry, SSHHostStatus, SSHShell, SSHShellEvent, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
+import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, AuthStatus, ChatMessage, ChatSession, ChatTokenUsage, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, QueuedChatMessage, Run, ServerLogEntry, SFTPFileEntry, SSHHostStatus, SSHShell, SSHShellEvent, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
 
 type Page = 'chat' | 'ssh' | 'config' | 'extensions' | 'audit' | 'logs'
-const pageVisualOrder:Page[]=['config','chat','ssh','extensions','audit','logs']
+const pageVisualOrder:Page[]=['chat','ssh','extensions','audit','logs','config']
 type ChatEntryImage = {id:string;name:string;mimeType:string;sizeBytes:number;url:string}
 const workStatusKeys=['chat.cooking','chat.pondering','chat.brewing','chat.weaving','chat.polishing','chat.crunching'] as const
 type PendingChatImage = {id:string;file:File;url:string}
 type ChatEntry = { id: string; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; tool?: string; toolCallId?:string; runId?:string; transient?:boolean; startedAt?:number; liveStdout?:string; liveStderr?:string; liveOutput?:string; liveOutputStream?:'stdout'|'stderr'; transferredBytes?:number; transferTotalBytes?:number; images?:ChatEntryImage[]; tokenUsage?:ChatTokenUsage; active?: boolean; lifecycle?:'streaming'|'committed'; status?: 'pending' | 'completed' | 'failed' }
+type TaskToolEntryGroup={kind:'task_tool_group';id:string;tool:'TaskCreate'|'TaskUpdate';entries:ChatEntry[]}
+type ChatRenderItem={kind:'entry';entry:ChatEntry}|TaskToolEntryGroup
 type ModelRetryState = {attempt:number;max:number}
 type ActiveChatStream = { id: string; sessionId: string; controller: AbortController }
 type ConnectionRetryState = {attempt:number;readyAt:number}
@@ -229,6 +231,37 @@ function unresolvedTaskDependencies(task:AgentTask,tasks:AgentTask[]){
 	return task.blocked_by.filter(id=>tasks.find(candidate=>candidate.id===id)?.status!=='completed')
 }
 
+function taskToolOperation(entry:ChatEntry):TaskToolEntryGroup['tool']|''{
+	return entry.kind==='tool'&&(entry.tool==='TaskCreate'||entry.tool==='TaskUpdate')?entry.tool:''
+}
+
+function groupedTaskToolEntries(entries:ChatEntry[]):ChatRenderItem[]{
+	let turn=0
+	const groups=new Map<string,ChatEntry[]>()
+	for(const entry of entries){
+		if(entry.kind==='user')turn++
+		const tool=taskToolOperation(entry)
+		if(!tool)continue
+		const key=`${turn}:${tool}`
+		groups.set(key,[...(groups.get(key)||[]),entry])
+	}
+	const hidden=new Set<string>()
+	const groupedAt=new Map<string,TaskToolEntryGroup>()
+	for(const items of groups.values()){
+		if(items.length<2)continue
+		for(const entry of items.slice(0,-1))hidden.add(entry.id)
+		const last=items.at(-1)!
+		groupedAt.set(last.id,{kind:'task_tool_group',id:`task_group_${items[0].id}`,tool:taskToolOperation(last) as TaskToolEntryGroup['tool'],entries:items})
+	}
+	const result:ChatRenderItem[]=[]
+	for(const entry of entries){
+		if(hidden.has(entry.id))continue
+		const group=groupedAt.get(entry.id)
+		result.push(group||{kind:'entry',entry})
+	}
+	return result
+}
+
 let clientIdCounter = 0
 function clientId() {
   try {
@@ -320,6 +353,30 @@ function NotificationCenter({notifications,onDismiss}:{notifications:AppNotifica
 }
 
 function App() {
+	const {t}=useTranslation()
+	const [auth,setAuth]=useState<AuthStatus|null>(null)
+	const [loading,setLoading]=useState(true)
+	const [error,setError]=useState('')
+	const refresh=useCallback(async()=>{setLoading(true);setError('');try{setAuth(await api.authStatus())}catch(err){setError(errorText(err))}finally{setLoading(false)}},[])
+	useEffect(()=>{void refresh()},[refresh])
+	useEffect(()=>{const unauthorized=()=>setAuth(current=>current?.enabled?{enabled:true,authenticated:false}:current);window.addEventListener('opsnerva:unauthorized',unauthorized);return()=>window.removeEventListener('opsnerva:unauthorized',unauthorized)},[])
+	if(loading)return <AppFrame><div className="auth-screen"><LoaderCircle className="spin" size={24}/></div></AppFrame>
+	if(error&&!auth)return <AppFrame><div className="auth-screen"><section className="auth-card panel"><ShieldAlert size={24}/><div className="auth-error" role="alert">{error}</div><button className="primary" onClick={()=>void refresh()}>{t('common.retry')}</button></section></div></AppFrame>
+	if(auth?.enabled&&!auth.authenticated)return <LoginPage onAuthenticated={setAuth}/>
+	return <Application auth={auth||{enabled:false,authenticated:true}} onLogout={()=>setAuth({enabled:true,authenticated:false})}/>
+}
+
+function LoginPage({onAuthenticated}:{onAuthenticated:(status:AuthStatus)=>void}){
+	const {t}=useTranslation()
+	const [username,setUsername]=useState('')
+	const [password,setPassword]=useState('')
+	const [busy,setBusy]=useState(false)
+	const [error,setError]=useState('')
+	const login=async(event:FormEvent)=>{event.preventDefault();if(!username.trim()||!password)return;setBusy(true);setError('');try{onAuthenticated(await api.login(username,password));setPassword('')}catch(err){setError(errorText(err))}finally{setBusy(false)}}
+	return <AppFrame><div className="auth-screen"><div className="auth-language"><LanguageSwitch/></div><form className="auth-card panel" onSubmit={login}><header><div className="brand-mark"><TerminalSquare size={22}/></div><h1>OpsNerva</h1></header><label><span>{t('auth.username')}</span><input autoFocus autoComplete="username" value={username} onChange={event=>setUsername(event.target.value)}/></label><label><span>{t('auth.password')}</span><PasswordInput autoComplete="current-password" value={password} onChange={event=>setPassword(event.target.value)}/></label>{error&&<div className="auth-error" role="alert"><ShieldAlert size={14}/>{error}</div>}<button className="primary" disabled={busy||!username.trim()||!password}>{busy?<LoaderCircle className="spin" size={15}/>:<LogOut className="auth-login-icon" size={15}/>} {busy?t('auth.signingIn'):t('auth.signIn')}</button></form></div></AppFrame>
+}
+
+function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 	const {t}=useTranslation()
   const [page, setPage] = useState<Page>('chat')
 	const workspaceRef=useRef<HTMLElement>(null)
@@ -603,19 +660,21 @@ function App() {
 	const observeAgentWorkspaceShell=(shell:SSHShell)=>{
 		rememberSSHShell(shell)
 	}
+	const logout=async()=>{try{await api.logout()}finally{onLogout()}}
   return <NotificationContext.Provider value={notify}><AppFrame><div className="app-shell">
     <aside className="sidebar">
       <div className="brand"><div className="brand-mark"><TerminalSquare size={21}/></div><div className="brand-name"><strong>OpsNerva</strong></div></div>
       <nav className="sidebar-nav">
-		<Nav active={page === 'config'} icon={<Settings2/>} label={t('shell.nav.configuration')} onClick={() => navigate('config')}/>
         <Nav active={page === 'chat'} icon={<Bot/>} label={t('shell.nav.agent')} onClick={() => navigate('chat')}/>
         <Nav active={page === 'ssh'} icon={<TerminalSquare/>} label={t('shell.nav.ssh')} onClick={() => navigate('ssh')}/>
 		<Nav active={page === 'extensions'} icon={<Braces/>} label={t('shell.nav.extensions')} onClick={() => navigate('extensions')}/>
         <Nav active={page === 'audit'} icon={<History/>} label={t('shell.nav.audit')} onClick={() => navigate('audit')}/>
         <Nav active={page === 'logs'} icon={<FileText/>} label={t('shell.nav.logs')} onClick={() => navigate('logs')}/>
+		<Nav active={page === 'config'} icon={<Settings2/>} label={t('shell.nav.configuration')} onClick={() => navigate('config')}/>
       </nav>
 	  <section className="sidebar-conversations active"><div ref={setChatSidebarTarget}/></section>
       <div className="sidebar-foot">
+		{auth.enabled&&<button type="button" className="auth-logout" title={t('auth.signOut')} aria-label={t('auth.signOut')} onClick={()=>void logout()}><LogOut size={14}/><span>{auth.username||t('auth.signOut')}</span></button>}
         <div className="build">v0.1.7</div>
       </div>
     </aside>
@@ -642,7 +701,7 @@ function App() {
 				hosts={hosts} shells={sshShells.filter(shell=>shell.kind!=='workspace'&&shell.surface==='workspace')}
 				onCreated={rememberSSHShell} refresh={refreshConnections} onError={reportError}
 			/>}
-		{page === 'config' && <ConfigurationPage hosts={hosts} providers={providers} proxies={proxies} settings={settings} capabilities={capabilities} health={health} refreshModels={refreshModels} refreshHosts={refreshHosts} refreshProxies={refreshProxies} refreshCapabilities={refreshCapabilities} refreshHealth={refreshHealth} onSettingsChanged={setSettings}/>}
+		{page === 'config' && <ConfigurationPage authEnabled={auth.enabled} hosts={hosts} providers={providers} proxies={proxies} settings={settings} capabilities={capabilities} health={health} refreshModels={refreshModels} refreshHosts={refreshHosts} refreshProxies={refreshProxies} refreshCapabilities={refreshCapabilities} refreshHealth={refreshHealth} onSettingsChanged={setSettings}/>}
 		{page === 'extensions' && <ExtensionsPage skills={skills} mcpServers={mcpServers} toolCatalog={toolCatalog} refreshSkills={refreshSkills} refreshMCPServers={refreshMCPServers} refreshToolCatalog={refreshToolCatalog} onToolCatalogChanged={setToolCatalog}/>}
 		{page === 'audit' && <AuditPage runs={runs} hosts={hosts} sessions={auditSessions} ready={auditReady}/>}
         {page === 'logs' && <LogsPage/>}
@@ -1465,7 +1524,7 @@ function ConfigurationEditorPage({icon,title,busy,onBack,children}:{icon:React.R
 	</div>
 }
 
-function ConfigurationPage({hosts,providers,proxies,settings,capabilities,health,refreshModels,refreshHosts,refreshProxies,refreshCapabilities,refreshHealth,onSettingsChanged}:{hosts:Host[];providers:ModelProvider[];proxies:Proxy[];settings:SystemSettings|null;capabilities:ToolCapabilities;health:Health|null;refreshModels:()=>Promise<void>;refreshHosts:()=>Promise<void>;refreshProxies:()=>Promise<void>;refreshCapabilities:()=>Promise<void>;refreshHealth:()=>Promise<void>;onSettingsChanged:(settings:SystemSettings)=>void}) {
+function ConfigurationPage({authEnabled,hosts,providers,proxies,settings,capabilities,health,refreshModels,refreshHosts,refreshProxies,refreshCapabilities,refreshHealth,onSettingsChanged}:{authEnabled:boolean;hosts:Host[];providers:ModelProvider[];proxies:Proxy[];settings:SystemSettings|null;capabilities:ToolCapabilities;health:Health|null;refreshModels:()=>Promise<void>;refreshHosts:()=>Promise<void>;refreshProxies:()=>Promise<void>;refreshCapabilities:()=>Promise<void>;refreshHealth:()=>Promise<void>;onSettingsChanged:(settings:SystemSettings)=>void}) {
   const {t}=useTranslation()
   const [section,setSection]=useState<ConfigurationSection>('models')
   const [showAddresses,setShowAddresses]=useState(false)
@@ -1487,7 +1546,7 @@ function ConfigurationPage({hosts,providers,proxies,settings,capabilities,health
 	  {section==='proxies'&&(
 		<ProxiesPage proxies={proxies} showAddresses={showAddresses} onToggleAddresses={()=>setShowAddresses(value=>!value)} refresh={refreshProxies}/>
 	  )}
-	  {section==='system'&&<SystemSettingsPage settings={settings} providers={providers} proxies={proxies} capabilities={capabilities} modelStatus={health?.model} refreshCapabilities={refreshCapabilities} refreshHealth={refreshHealth} onSettingsChanged={onSettingsChanged}/>}
+	  {section==='system'&&<SystemSettingsPage authEnabled={authEnabled} settings={settings} providers={providers} proxies={proxies} capabilities={capabilities} modelStatus={health?.model} refreshModels={refreshModels} refreshHosts={refreshHosts} refreshProxies={refreshProxies} refreshCapabilities={refreshCapabilities} refreshHealth={refreshHealth} onSettingsChanged={onSettingsChanged}/>}
     </div>
   </div>
 }
@@ -1740,7 +1799,26 @@ function SettingsSectionFooter({dirty,busy,saving,onDiscard}:{dirty:boolean;busy
 
 type SystemSettingsSection='iterations'|'prompt'|'explanation'|'compression'|'images'|'shell'
 
-function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus,refreshCapabilities,refreshHealth,onSettingsChanged}:{settings:SystemSettings|null;providers:ModelProvider[];proxies:Proxy[];capabilities:ToolCapabilities;modelStatus?:Health['model'];refreshCapabilities:()=>Promise<void>;refreshHealth:()=>Promise<void>;onSettingsChanged:(settings:SystemSettings)=>void}) {
+function ConfigurationTransferSettings({authEnabled,refreshModels,refreshHosts,refreshProxies,refreshCapabilities,refreshHealth}:{authEnabled:boolean;refreshModels:()=>Promise<void>;refreshHosts:()=>Promise<void>;refreshProxies:()=>Promise<void>;refreshCapabilities:()=>Promise<void>;refreshHealth:()=>Promise<void>}){
+	const {t}=useTranslation()
+	const notify=useNotifier()
+	const [busy,setBusy]=useState<'export'|'import'|''>('')
+	const [importOpen,setImportOpen]=useState(false)
+	const [importFile,setImportFile]=useState<File|null>(null)
+	const [importPassword,setImportPassword]=useState('')
+	const [importError,setImportError]=useState('')
+	const exportConfiguration=async()=>{if(busy)return;setBusy('export');try{const result=await api.exportConfiguration();const url=URL.createObjectURL(result.blob);const anchor=document.createElement('a');anchor.href=url;anchor.download=result.filename;document.body.appendChild(anchor);anchor.click();anchor.remove();window.setTimeout(()=>URL.revokeObjectURL(url),1000);notify(t(authEnabled?'config.exportedEncrypted':'config.exported'))}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
+	const importConfiguration=async(event:FormEvent)=>{event.preventDefault();if(!importFile||busy)return;setBusy('import');setImportError('');try{const result=await api.importConfiguration(importFile,importPassword);await Promise.all([refreshModels(),refreshHosts(),refreshProxies(),refreshCapabilities(),refreshHealth()]);notify(t('config.imported',{models:result.model_providers,hosts:result.hosts,proxies:result.proxies}));setImportOpen(false);setImportFile(null);setImportPassword('')}catch(err){setImportError(errorText(err))}finally{setBusy('')}}
+	const closeImport=()=>{if(busy)return;setImportOpen(false);setImportFile(null);setImportPassword('');setImportError('')}
+	return <>
+		<SettingsDisclosure className="configuration-transfer-settings" icon={<FolderOutput size={18}/>} title={t('config.transfer')}>
+			<div className="configuration-transfer-actions"><button type="button" onClick={()=>{setImportOpen(true);setImportError('')}}><UploadCloud size={15}/>{t('config.import')}</button><button type="button" className="primary" disabled={busy==='export'} onClick={()=>void exportConfiguration()}>{busy==='export'?<LoaderCircle className="spin" size={15}/>:authEnabled?<ShieldCheck size={15}/>:<Download size={15}/>} {busy==='export'?t('config.exporting'):t('config.export')}</button></div>
+		</SettingsDisclosure>
+		{importOpen&&createPortal(<div className="configuration-import-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget)closeImport()}}><form className="configuration-import-dialog panel" role="dialog" aria-modal="true" aria-labelledby="configuration-import-title" onSubmit={importConfiguration}><header><UploadCloud size={20}/><h2 id="configuration-import-title">{t('config.importTitle')}</h2></header><label className="configuration-import-file"><span>{t('config.package')}</span><input type="file" accept=".json,.opsnerva,application/json,application/vnd.opsnerva.configuration+json" onChange={event=>{setImportFile(event.target.files?.[0]||null);setImportError('')}}/><b>{importFile?.name||t('config.choosePackage')}</b></label><label><span>{t('config.backupPassword')}</span><PasswordInput autoComplete="off" value={importPassword} onChange={event=>setImportPassword(event.target.value)}/></label>{importError&&<div className="configuration-import-error" role="alert"><ShieldAlert size={14}/>{importError}</div>}<footer><button type="button" disabled={busy==='import'} onClick={closeImport}>{t('common.cancel')}</button><button className="primary" disabled={!importFile||busy==='import'}>{busy==='import'?<LoaderCircle className="spin" size={14}/>:<UploadCloud size={14}/>} {busy==='import'?t('config.importing'):t('config.import')}</button></footer></form></div>,document.body)}
+	</>
+}
+
+function SystemSettingsPage({authEnabled,settings,providers,proxies,capabilities,modelStatus,refreshModels,refreshHosts,refreshProxies,refreshCapabilities,refreshHealth,onSettingsChanged}:{authEnabled:boolean;settings:SystemSettings|null;providers:ModelProvider[];proxies:Proxy[];capabilities:ToolCapabilities;modelStatus?:Health['model'];refreshModels:()=>Promise<void>;refreshHosts:()=>Promise<void>;refreshProxies:()=>Promise<void>;refreshCapabilities:()=>Promise<void>;refreshHealth:()=>Promise<void>;onSettingsChanged:(settings:SystemSettings)=>void}) {
   const {t}=useTranslation()
 	const notify=useNotifier()
   const savedValue=settings?.agent_max_iterations??50
@@ -1829,6 +1907,7 @@ function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus
   return <div className="system-settings page-stack">
 
 		<div className="settings-form">
+			<ConfigurationTransferSettings authEnabled={authEnabled} refreshModels={refreshModels} refreshHosts={refreshHosts} refreshProxies={refreshProxies} refreshCapabilities={refreshCapabilities} refreshHealth={refreshHealth}/>
 			<SettingsDisclosure icon={<SlidersHorizontal size={18}/>} title={t('settings.maxIterations')} meta={<strong>{maxIterations}</strong>}>
 				<form onSubmit={submit('iterations')}><div className="iteration-editor"><input aria-label={t('settings.maxIterations')} type="range" min="5" max="100" step="1" value={maxIterations} onChange={event=>update(Number(event.target.value))}/><label><span>{t('settings.rounds')}</span><input type="number" min="5" max="100" value={maxIterations} onChange={event=>update(Number(event.target.value))}/></label></div><div className="iteration-presets"><span>{t('settings.quickPresets')}</span>{[20,50,100].map(value=><button type="button" className={maxIterations===value?'active':''} onClick={()=>update(value)} key={value}><b>{value}</b></button>)}</div><SettingsSectionFooter dirty={iterationsDirty} busy={busy} saving={savingSection==='iterations'} onDiscard={()=>discard('iterations')}/></form>
 			</SettingsDisclosure>
@@ -1980,6 +2059,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	const pendingExplanationID=currentApprovals.find(item=>item.ai_review?.status==='pending')?.id||''
 	const sessionBusy=running||detachedRunning
 	const toolsRunning=entries.some(item=>item.kind==='tool'&&item.transient)
+	const renderEntries=useMemo(()=>groupedTaskToolEntries(entries),[entries])
 	const latestAssistantEntryID=useMemo(()=>{
 		for(let index=entries.length-1;index>=0;index--){
 			const entry=entries[index]
@@ -2418,7 +2498,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		<div className="conversation-view">
 			<div className="messages" ref={messagesRef} onWheel={trackUserScroll} onTouchMove={trackUserScroll} onPointerUp={trackUserScroll}>
 				{entries.length === 0 && <div className="empty-chat"><div className="radar"><Activity size={35}/></div><h2>{t('chat.emptyTitle')}</h2></div>}
-				{entries.map((entry) => <ChatBubble key={entry.id} entry={entry} showActions={entry.id===latestAssistantEntryID} runs={runs} hosts={hosts} onToolDisclosure={preserveToolDisclosurePosition}/>) }
+				{renderEntries.map(item=>item.kind==='task_tool_group'?<TaskToolGroupCard key={item.id} group={item} onDisclosure={preserveToolDisclosurePosition}/>:<ChatBubble key={item.entry.id} entry={item.entry} showActions={item.entry.id===latestAssistantEntryID} runs={runs} hosts={hosts} onToolDisclosure={preserveToolDisclosurePosition}/>) }
 				{(sessionBusy||toolsRunning)&&<div className={`model-activity ${stopping?'stopping':''}`} role="status" aria-live="polite"><span className="model-activity-mark" aria-hidden="true">✻</span><b key={stopping||connectionRetry||modelRetry?'priority':workStatusIndex}>{workStatusLabel}</b></div>}
 			</div>
 			{tasks&&tasksExpanded&&<SessionTaskItems tasks={tasks}/>}
@@ -2745,6 +2825,47 @@ function parseDiffRows(diff:string):DiffRow[]{
 function DiffViewer({change}:{change:JsonRecord}){
 	const {t}=useTranslation(),diff=textValue(change.diff),rows=parseDiffRows(previewText(diff,toolDiffPreviewChars))
 	return <section className="diff-viewer"><header><span><FileText size={14}/>{t('tool.fileEdit')}</span><div><em className="add">+{numberValue(change.additions)}</em><em className="delete">-{numberValue(change.deletions)}</em><CopyButton value={diff}/></div></header><div className="diff-scroll" role="table" aria-label={t('tool.diff')}><div className="diff-lines">{rows.map((row,index)=><div className={`diff-line ${row.kind}`} role="row" key={index}><span className="old-line">{row.oldLine??''}</span><span className="new-line">{row.newLine??''}</span><code>{row.text||' '}</code></div>)}</div></div></section>
+}
+
+function taskToolArguments(entry:ChatEntry){
+	return jsonRecord(jsonRecord(parseRecord(entry.content)._display)?.arguments)
+}
+
+function taskToolEntryStatus(entry:ChatEntry){
+	return toolContentStatus(entry.content)||(entry.transient?'in_progress':entry.status||'completed')
+}
+
+function taskToolGroupStatus(entries:ChatEntry[]){
+	const statuses=entries.map(taskToolEntryStatus)
+	if(statuses.includes('in_progress'))return'in_progress'
+	for(const status of ['failed','rejected','denied'])if(statuses.includes(status))return status
+	if(statuses.includes('partial'))return'partial'
+	if(statuses.includes('approval_required'))return'approval_required'
+	return statuses.at(-1)||'completed'
+}
+
+function taskToolOperationSummary(entry:ChatEntry,argumentsValue=taskToolArguments(entry)){
+	const payload=parseRecord(entry.content)
+	const task=jsonRecord(payload.task)||jsonRecord(jsonRecord(payload.result)?.task)
+	const taskID=textValue(task?.id)
+	const summary=toolArgumentSummary(entry.tool,argumentsValue)||textValue(task?.subject)
+	return entry.tool==='TaskCreate'&&taskID?[`#${taskID}`,summary].filter(Boolean).join(' · '):summary||toolLabel(entry.tool||'')
+}
+
+function TaskToolGroupCard({group,onDisclosure}:{group:TaskToolEntryGroup;onDisclosure:(summary:HTMLElement)=>void}){
+	const {t}=useTranslation()
+	const [expanded,setExpanded]=useState(false)
+	const status=taskToolGroupStatus(group.entries)
+	const operations=group.entries.map(entry=>{
+		const argumentsValue=taskToolArguments(entry)
+		const safeArguments=argumentsValue?Object.fromEntries(limitedRecordEntries(argumentsValue).entries.map(([key,value])=>[key,safeToolArgument(value,key)])):undefined
+		return{summary:taskToolOperationSummary(entry,argumentsValue),arguments:safeArguments,status:taskToolEntryStatus(entry)}
+	})
+	const summary=operations.map(operation=>operation.summary).join(' · ')
+	return <details className={`tool-event tool-event-rich task-tool-group ${status}`} open={expanded}>
+		<summary onClick={event=>{event.preventDefault();onDisclosure(event.currentTarget);setExpanded(value=>!value)}}><div className="tool-summary-icon"><ListChecks size={15}/></div><div className="tool-summary-copy"><div className="tool-summary-heading"><b>{toolLabel(group.tool)}</b><span className="task-tool-group-count">{t('agentTasks.operationCount',{count:group.entries.length})}</span></div><code title={summary}>{summary}</code></div><div className="tool-summary-statuses"><span className={`tool-status ${status}`} key={status}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight size={14}/></summary>
+		{expanded&&<div className="tool-event-body"><CompactTable title={t('agentTasks.operations')} columns={[t('agentTasks.operation'),t('tool.actualParameters'),t('common.status')]} rows={operations.map(operation=>[operation.summary,operation.arguments,t(`statusLabels.${operation.status}`,{defaultValue:operation.status.replaceAll('_',' ')})])}/></div>}
+	</details>
 }
 
 function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run[];hosts:Host[];onDisclosure:(summary:HTMLElement)=>void}){

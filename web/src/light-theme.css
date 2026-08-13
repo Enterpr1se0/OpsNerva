@@ -637,6 +637,11 @@
   color: var(--light-accent);
 }
 
+:root[data-theme='light'] .task-tool-group-count {
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
+}
+
 :root[data-theme='light'] .tool-event summary .tool-target-chip {
   border-color: var(--light-accent-border);
   background: var(--light-accent-soft);
@@ -812,6 +817,10 @@
   background: var(--light-surface);
   color: var(--light-text-secondary);
 }
+
+:root[data-theme='light'] :where(.auth-screen,.configuration-import-backdrop){background:color-mix(in srgb,var(--light-canvas) 92%,transparent)}
+:root[data-theme='light'] :where(.auth-card,.configuration-import-dialog){border-color:var(--light-border);background:var(--light-surface);box-shadow:var(--light-shadow)}
+:root[data-theme='light'] :where(.auth-card input,.configuration-import-dialog input,.configuration-import-file>b,.auth-logout,.configuration-transfer-actions>button:not(.primary)){border-color:var(--light-border);background:var(--light-surface);color:var(--light-text-secondary)}
 
 :root[data-theme='light'] .system-settings .settings-form {
   border-color: var(--light-border);

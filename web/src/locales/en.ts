@@ -1,5 +1,6 @@
 const en = {
   language: { label: 'Language', chinese: '中文', english: 'EN' },
+	auth: { username: 'Username', password: 'Password', signIn: 'Sign in', signingIn: 'Signing in...', signOut: 'Sign out' },
   common: {
     save: 'Save', saving: 'Saving...', cancel: 'Cancel', close: 'Close', delete: 'Delete', deleting: 'Deleting...', edit: 'Edit',
     enable: 'Enable', enabled: 'Enabled', disable: 'Disable', disabled: 'Disabled', loading: 'Loading...', refresh: 'Refresh', refreshing: 'Refreshing...',
@@ -49,7 +50,9 @@ const en = {
   config: {
     tabs: { models: 'Model providers', hosts: 'SSH hosts', proxies: 'Proxies', system: 'System settings' },
     configured: '{{count}} configured', registered: '{{count}} registered', maxIterations: '{{count}} max iterations',
-    sections: 'Configuration sections', editor: 'Configuration editor', backToList: 'Back to list', showAddresses: 'Show addresses', hideAddresses: 'Hide addresses',
+		sections: 'Configuration sections', editor: 'Configuration editor', backToList: 'Back to list', showAddresses: 'Show addresses', hideAddresses: 'Hide addresses',
+		transfer: 'Configuration transfer', export: 'Export', exporting: 'Exporting...', import: 'Import', importing: 'Importing...', importTitle: 'Import configuration', package: 'Package', choosePackage: 'Choose package', backupPassword: 'Package password',
+		exported: 'Configuration exported.', exportedEncrypted: 'Encrypted configuration exported.', imported: 'Imported {{models}} providers · {{hosts}} hosts · {{proxies}} proxies',
   },
   proxies: {
     add: 'Add proxy',
@@ -167,7 +170,7 @@ const en = {
     file: 'file', directory: 'directory',
   },
   agentTasks: {
-    title: 'Tasks', blocked: '{{count}} blocked',
+    title: 'Tasks', blocked: '{{count}} blocked', operation: 'Operation', operations: 'Operations', operationCount: '{{count}} operations',
   },
   tool: {
     bashScript: 'Bash script', moreLines: '{{line}} ... (+{{count}} lines)', fileOperation: 'File operation', readOperation: 'Read file', searchOperation: 'Search file',

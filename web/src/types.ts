@@ -1,6 +1,20 @@
 export type HostAuthType = 'agent' | 'key' | 'password'
 export type HostSudoMode = 'none' | 'nopasswd' | 'password'
 
+export interface AuthStatus {
+	enabled: boolean
+	authenticated: boolean
+	username?: string
+}
+
+export interface ConfigurationImportResult {
+	proxies: number
+	hosts: number
+	model_providers: number
+	secrets_imported: boolean
+	runtime_reloaded: boolean
+}
+
 export interface HostKey {
   fingerprint: string
   algorithm?: string

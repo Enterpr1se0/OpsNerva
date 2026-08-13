@@ -17,6 +17,7 @@ type Config struct {
 	ListenAddress        string        `yaml:"listen_address"`
 	DataDir              string        `yaml:"data_dir"`
 	DatabasePath         string        `yaml:"database_path"`
+	Auth                 Auth          `yaml:"auth"`
 	Logging              Logging       `yaml:"logging"`
 	MasterKey            string        `yaml:"-"`
 	SSH                  SSH           `yaml:"ssh"`
@@ -27,6 +28,14 @@ type Config struct {
 	WorkspaceSandboxPath string        `yaml:"workspace_sandbox_path"`
 	Validators           []Validator   `yaml:"validators"`
 }
+
+type Auth struct {
+	Username        string `yaml:"username"`
+	Password        string `yaml:"password"`
+	SessionTTLHours int    `yaml:"session_ttl_hours"`
+}
+
+func (a Auth) Enabled() bool { return strings.TrimSpace(a.Password) != "" }
 
 type Workspace struct {
 	ID     string
@@ -82,6 +91,7 @@ func Default() Config {
 		ListenAddress: "127.0.0.1:8080",
 		DataDir:       "data",
 		DatabasePath:  "data/ops-agent.db",
+		Auth:          Auth{Username: "admin", SessionTTLHours: 24},
 		Logging: Logging{
 			Level: "debug", Format: "text", File: "data/ops-agent.log",
 			MaxSizeMB: 20, MaxBackups: 3, RecentLimit: 2000,
@@ -176,6 +186,27 @@ func resolvePath(baseDir, path string) string {
 }
 
 func validateOperationsConfig(cfg *Config) error {
+	cfg.Auth.Username = strings.TrimSpace(cfg.Auth.Username)
+	if cfg.Auth.SessionTTLHours == 0 {
+		cfg.Auth.SessionTTLHours = 24
+	}
+	if cfg.Auth.Enabled() {
+		if cfg.Auth.Username == "" {
+			return fmt.Errorf("auth.username is required when auth.password is configured")
+		}
+		if len(cfg.Auth.Username) > 128 || containsControl(cfg.Auth.Username) {
+			return fmt.Errorf("auth.username is invalid")
+		}
+		if len(cfg.Auth.Password) < 8 {
+			return fmt.Errorf("auth.password must contain at least 8 characters")
+		}
+		if len(cfg.Auth.Password) > 1024 || containsControl(cfg.Auth.Password) {
+			return fmt.Errorf("auth.password is invalid")
+		}
+	}
+	if cfg.Auth.SessionTTLHours < 1 || cfg.Auth.SessionTTLHours > 24*30 {
+		return fmt.Errorf("auth.session_ttl_hours must be between 1 and 720")
+	}
 	if cfg.Model.ContextWindow != 0 && (cfg.Model.ContextWindow < 1024 || cfg.Model.ContextWindow > 10000000) {
 		return fmt.Errorf("model.context_window must be between 1024 and 10000000")
 	}
@@ -212,6 +243,15 @@ func validateOperationsConfig(cfg *Config) error {
 	return nil
 }
 
+func containsControl(value string) bool {
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
 func sameOrWithin(path, root string) bool {
 	relative, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
@@ -221,6 +261,9 @@ func applyEnv(cfg *Config) {
 	setString(&cfg.ListenAddress, "OPS_AGENT_LISTEN")
 	setString(&cfg.DataDir, "OPS_AGENT_DATA_DIR")
 	setString(&cfg.DatabasePath, "OPS_AGENT_DATABASE")
+	setString(&cfg.Auth.Username, "OPS_AGENT_AUTH_USERNAME")
+	setString(&cfg.Auth.Password, "OPS_AGENT_AUTH_PASSWORD")
+	setInt(&cfg.Auth.SessionTTLHours, "OPS_AGENT_AUTH_SESSION_TTL_HOURS")
 	setString(&cfg.Logging.Level, "OPS_AGENT_LOG_LEVEL")
 	setString(&cfg.Logging.Format, "OPS_AGENT_LOG_FORMAT")
 	setString(&cfg.Logging.File, "OPS_AGENT_LOG_FILE")

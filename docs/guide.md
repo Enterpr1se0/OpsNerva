@@ -74,7 +74,7 @@ docker run --rm -e OPS_AGENT_LISTEN=0.0.0.0 -p 127.0.0.1:8080:8080 \
   opsnerva
 ```
 
-浏览器打开 [http://127.0.0.1:8080](http://127.0.0.1:8080)。控制面不提供管理员登录，不应映射到非本机地址。
+浏览器打开 [http://127.0.0.1:8080](http://127.0.0.1:8080)。默认未启用控制面登录，不应映射到非本机地址。
 
 ### 便携二进制
 
@@ -146,7 +146,34 @@ $env:OPS_AGENT_LISTEN = '127.0.0.1:9090'
 .\bin\ops-agent.exe --config bin/config.local.yaml serve
 ```
 
-控制面不提供管理员登录，应保持监听在本机地址。
+### 控制面登录
+
+登录默认关闭。为 `config.yaml` 添加以下配置并重启服务即可启用：
+
+```yaml
+auth:
+  username: admin
+  password: "replace-with-a-long-password"
+  session_ttl_hours: 24
+```
+
+也可以使用环境变量，环境变量优先于 YAML：
+
+```bash
+export OPS_AGENT_AUTH_USERNAME=admin
+export OPS_AGENT_AUTH_PASSWORD='replace-with-a-long-password'
+export OPS_AGENT_AUTH_SESSION_TTL_HOURS=24
+```
+
+密码至少 8 个字符，会保留在启动配置或进程环境中，不写入数据库、日志或健康信息。登录成功后服务端签发进程内随机会话，浏览器仅保存 `HttpOnly`、`SameSite=Lax` Cookie；重启服务会使已有会话失效。登录不会替代 HTTPS：非本机部署仍应使用 HTTPS 反向代理，不要把 HTTP 控制面直接暴露到局域网或公网。`/mcp` 继续使用 MCP Server Mode 自己的 Bearer Token，不接受控制面 Cookie。
+
+### 配置迁移
+
+配置中心可以一次导入或导出模型提供商、SSH 主机和代理，并保留代理及 ProxyJump 引用。导入采用原子合并：相同 ID 或名称更新，未出现在配置包中的现有条目保留；名称冲突、无效引用或无效凭据会让整包回滚。
+
+- 未配置控制面登录时导出可读 JSON，不包含 API Key、私钥或任何密码；新机器导入后需要重新填写缺失凭据。
+- 配置控制面登录后导出 `.opsnerva` 加密包，包含 API Key、SSH 私钥、SSH/sudo 密码和代理密码。服务端使用 Argon2id 从登录密码派生迁移密钥，再以 AES-256-GCM 加密，因此不依赖源机器的 `master.key`。
+- 导入另一台机器生成的加密包时填写源机器的登录密码；目标机器必须先启用控制面登录。Host Key 信任状态和 Known Hosts 文件内容不会迁移，导入后仍需重新核对指纹。
 
 ### 使用环境变量配置模型
 
@@ -323,7 +350,7 @@ Web 的 **Extensions / MCP Servers** 还支持反向角色：让 OpsNerva 作为
 - Web 模型提供商的 API Key 同样采用 AES-256-GCM 加密保存，HTTP API 只暴露是否已配置密钥。
 - 主机 SSH/sudo 密码采用 AES-256-GCM 加密保存；HTTP 和 LLM 工具只暴露 `has_password`、`has_sudo_password` 能力标记。
 - 原始请求和 stdout/stderr 加密保存；数据库只额外保存脱敏视图用于检索和模型上下文。
-- App API 默认只监听 `127.0.0.1:8080`，不提供管理员登录。不要将它暴露到局域网或公网。
+- App API 默认只监听 `127.0.0.1:8080`。控制面登录为可选配置；即使启用，也应通过 HTTPS 反向代理访问非本机部署。
 - 远程输出被标记为不可信数据，不能改变系统提示词、输入校验或审批结果。
 - 密码认证仍保持非交互、超时和单次提示限制；优先推荐 SSH 证书/密钥与最小化 `sudo -n`，托管密码用于兼容无法立即改造的目标机。
 

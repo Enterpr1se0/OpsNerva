@@ -45,6 +45,7 @@ type Server struct {
 	chatEvents *chatEventHub
 	chatQueue  *chatMessageQueue
 	modelTests *modelTestJobs
+	auth       *authManager
 	mux        *http.ServeMux
 	mcpHTTP    http.Handler
 	options    Options
@@ -54,6 +55,7 @@ type Options struct {
 	Version   string
 	StartedAt time.Time
 	Logging   config.Logging
+	Auth      config.Auth
 }
 
 func New(svc *service.Service, agentRuntime *agent.Runtime, options Options) *Server {
@@ -65,14 +67,14 @@ func New(svc *service.Service, agentRuntime *agent.Runtime, options Options) *Se
 	}
 	s := &Server{
 		service: svc, agent: agentRuntime, mux: http.NewServeMux(),
-		mcpHTTP: mcpserver.New(svc, options.Version).HTTPHandler(), chatEvents: newChatEventHub(), chatQueue: newChatMessageQueue(), modelTests: newModelTestJobs(), options: options,
+		mcpHTTP: mcpserver.New(svc, options.Version).HTTPHandler(), chatEvents: newChatEventHub(), chatQueue: newChatMessageQueue(), modelTests: newModelTestJobs(), auth: newAuthManager(options.Auth), options: options,
 	}
 	s.routes()
 	return s
 }
 
 func (s *Server) Handler() http.Handler {
-	return requestLogMiddleware(recoverMiddleware(corsMiddleware(s.mux)), slog.Default())
+	return requestLogMiddleware(recoverMiddleware(corsMiddleware(s.auth.middleware(s.mux))), slog.Default())
 }
 
 func (s *Server) chatSessionActive(sessionID string) bool {
@@ -81,6 +83,11 @@ func (s *Server) chatSessionActive(sessionID string) bool {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/mcp", s.serveMCP)
+	s.mux.HandleFunc("GET /api/v1/auth/status", s.authStatus)
+	s.mux.HandleFunc("POST /api/v1/auth/login", s.authLogin)
+	s.mux.HandleFunc("POST /api/v1/auth/logout", s.authLogout)
+	s.mux.HandleFunc("GET /api/v1/configuration/export", s.exportConfiguration)
+	s.mux.HandleFunc("POST /api/v1/configuration/import", s.importConfiguration)
 	s.mux.HandleFunc("GET /api/v1/health", s.health)
 	s.mux.HandleFunc("GET /api/v1/proxies", s.listProxies)
 	s.mux.HandleFunc("POST /api/v1/proxies", s.saveProxy)
@@ -2110,6 +2117,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.Header().Set("Access-Control-Expose-Headers", "X-OpsNerva-Auth")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		}
 		if r.Method == http.MethodOptions {
