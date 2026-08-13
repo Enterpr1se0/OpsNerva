@@ -33,7 +33,13 @@ function goTarget(value) {
     ['aarch64', 'arm64'],
   ])
   const architecture = architectures.get(value.split('-')[0])
-  const goos = value.includes('-windows-') ? 'windows' : value.includes('-linux-') ? 'linux' : ''
+  const goos = value.includes('-windows-')
+    ? 'windows'
+    : value.includes('-linux-')
+      ? 'linux'
+      : value.includes('-apple-')
+        ? 'darwin'
+        : ''
   if (!architecture || !goos) throw new Error(`Unsupported desktop target: ${value}`)
   return { goos, goarch: architecture }
 }

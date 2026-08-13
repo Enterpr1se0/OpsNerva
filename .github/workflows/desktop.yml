@@ -53,6 +53,24 @@ jobs:
             run_tests: false
             artifact: opsnerva-windows-x64
             paths: web/src-tauri/target/release/bundle/nsis/*-setup.exe
+          - name: macOS x64
+            os: macos-13
+            run_tests: false
+            goos: darwin
+            goarch: amd64
+            artifact: opsnerva-macos-x64
+            paths: |
+              web/src-tauri/target/release/bundle/dmg/*.dmg
+              web/src-tauri/target/release/bundle/macos/*.app
+          - name: macOS ARM64
+            os: macos-14
+            run_tests: false
+            goos: darwin
+            goarch: arm64
+            artifact: opsnerva-macos-arm64
+            paths: |
+              web/src-tauri/target/release/bundle/dmg/*.dmg
+              web/src-tauri/target/release/bundle/macos/*.app
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -95,7 +113,7 @@ jobs:
         if: matrix.run_tests
         run: go test ./...
 
-      - name: Compile Go backend for Windows
+      - name: Compile Go backend
         if: ${{ !matrix.run_tests }}
         run: go test ./... -run '^$'
 

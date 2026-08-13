@@ -5,7 +5,13 @@ import { fileURLToPath } from 'node:url'
 
 const webDir = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const tauriCli = join(webDir, 'node_modules', '@tauri-apps', 'cli', 'tauri.js')
-const bundles = process.platform === 'win32' ? 'nsis' : process.platform === 'linux' ? 'appimage,deb' : ''
+const bundles = process.platform === 'win32'
+  ? 'nsis'
+  : process.platform === 'linux'
+    ? 'appimage,deb'
+    : process.platform === 'darwin'
+      ? 'app,dmg'
+      : ''
 if (!bundles) throw new Error(`Unsupported desktop build platform: ${process.platform}`)
 
 // Optional cross-compilation target triple, e.g. --target aarch64-unknown-linux-gnu.
