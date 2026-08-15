@@ -69,47 +69,89 @@ func (s *Server) serveSSHShellWebSocket(connection *websocket.Conn, request *htt
 	}
 	ctx, cancel := context.WithCancel(request.Context())
 	defer cancel()
+	liveEvents, overflow, unsubscribe := s.service.SubscribeSSHShellEvents(request.PathValue("id"))
+	defer unsubscribe()
 	readDone := make(chan error, 1)
 	go func() {
 		readDone <- s.readSSHShellWebSocket(ctx, connection, request)
 		cancel()
 	}()
 
-	for {
-		snapshot, snapshotErr := s.service.GetSSHShellSnapshot(ctx, request.PathValue("id"), "", after, 10*time.Second, false, "", "")
-		if snapshotErr != nil {
-			if !errors.Is(snapshotErr, context.Canceled) && !errors.Is(snapshotErr, store.ErrNotFound) {
-				_ = websocket.JSON.Send(connection, sshShellWebSocketEvent{Type: "error", Error: snapshotErr.Error()})
-			}
-			return
+	sendEvent := func(event domain.SSHShellEvent) error {
+		if event.Sequence <= after {
+			return nil
 		}
-		for _, event := range snapshot.Events {
-			if event.Sequence <= after {
-				continue
+		if event.Stream == "stdout" || event.Stream == "stderr" {
+			if err := websocket.Message.Send(connection, encodeSSHShellOutputFrame(event)); err != nil {
+				return err
 			}
-			if event.Stream == "stdout" || event.Stream == "stderr" {
-				if err := websocket.Message.Send(connection, encodeSSHShellOutputFrame(event)); err != nil {
-					return
-				}
-			} else if err := websocket.JSON.Send(connection, sshShellWebSocketEvent{Type: "event", Event: event}); err != nil {
+		} else if err := websocket.JSON.Send(connection, sshShellWebSocketEvent{Type: "event", Event: event}); err != nil {
+			return err
+		}
+		after = event.Sequence
+		return nil
+	}
+	sendSnapshot := func(snapshot domain.SSHShellSnapshot) error {
+		for _, event := range snapshot.Events {
+			if err := sendEvent(event); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	snapshot, snapshotErr := s.service.GetSSHShellSnapshot(ctx, request.PathValue("id"), "", after, 0, false, "", "")
+	if snapshotErr != nil {
+		if !errors.Is(snapshotErr, context.Canceled) && !errors.Is(snapshotErr, store.ErrNotFound) {
+			_ = websocket.JSON.Send(connection, sshShellWebSocketEvent{Type: "error", Error: snapshotErr.Error()})
+		}
+		return
+	}
+	if err := sendSnapshot(snapshot); err != nil {
+		return
+	}
+	if !shellHTTPStatusActive(snapshot.Shell.Status) {
+		return
+	}
+	if liveEvents == nil {
+		for {
+			snapshot, snapshotErr = s.service.GetSSHShellSnapshot(ctx, request.PathValue("id"), "", after, 10*time.Second, false, "", "")
+			if snapshotErr != nil {
 				return
 			}
-			after = event.Sequence
+			if err := sendSnapshot(snapshot); err != nil {
+				return
+			}
+			if !shellHTTPStatusActive(snapshot.Shell.Status) {
+				return
+			}
+			if len(snapshot.Events) == 0 {
+				if err := websocket.JSON.Send(connection, sshShellWebSocketEvent{Type: "heartbeat"}); err != nil {
+					return
+				}
+			}
 		}
-		if !shellHTTPStatusActive(snapshot.Shell.Status) {
+	}
+	heartbeat := time.NewTicker(10 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case event := <-liveEvents:
+			if err := sendEvent(event); err != nil {
+				return
+			}
+			if event.Stream == "status" && !shellHTTPStatusActive(event.Status) {
+				return
+			}
+		case <-overflow:
 			return
-		}
-		if len(snapshot.Events) == 0 {
+		case <-heartbeat.C:
 			if err := websocket.JSON.Send(connection, sshShellWebSocketEvent{Type: "heartbeat"}); err != nil {
 				return
 			}
-		}
-		select {
 		case <-ctx.Done():
 			return
 		case <-readDone:
 			return
-		default:
 		}
 	}
 }

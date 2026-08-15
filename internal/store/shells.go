@@ -101,15 +101,19 @@ FROM ssh_shell_sessions WHERE id=?`, id)
 }
 
 func (s *Store) ListSSHShells(ctx context.Context, sessionID string, activeOnly bool) ([]domain.SSHShell, error) {
-	active := 0
-	if activeOnly {
-		active = 1
-	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id,run_id,session_id,kind,surface,host_id,host_name,workspace_id,backend,username,elevated,cwd,
+	statement := `SELECT id,run_id,session_id,kind,surface,host_id,host_name,workspace_id,backend,username,elevated,cwd,
 status,cols,rows,last_sequence,response_sequence,exit_code,termination_reason,error,started_at,ended_at
-FROM ssh_shell_sessions
-WHERE (?='' OR session_id=?) AND (?=0 OR status IN ('starting','running','stopping'))
-ORDER BY started_at`, sessionID, sessionID, active)
+FROM ssh_shell_sessions WHERE 1=1`
+	arguments := make([]any, 0, 1)
+	if sessionID != "" {
+		statement += " AND session_id=?"
+		arguments = append(arguments, sessionID)
+	}
+	if activeOnly {
+		statement += " AND status IN ('starting','running','stopping')"
+	}
+	statement += " ORDER BY started_at"
+	rows, err := s.db.QueryContext(ctx, statement, arguments...)
 	if err != nil {
 		return nil, err
 	}

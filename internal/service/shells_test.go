@@ -178,6 +178,8 @@ func TestAgentShellOutputStreamsBeforeTheToolResult(t *testing.T) {
 
 	events, unsubscribe := svc.SubscribeExecutionEvents(sessionID)
 	defer unsubscribe()
+	shellEvents, overflow, unsubscribeShell := svc.SubscribeSSHShellEvents(approved.Shell.ID)
+	defer unsubscribeShell()
 	toolCtx := WithExecutionOwner(context.Background(), "call-shell-input", "ssh_shell", `{"action":"input"}`)
 	if _, err := svc.WriteSSHShellPage(toolCtx, approved.Shell.ID, sessionID, "echo live\r", 0, 0, "", "eino-agent"); err != nil {
 		t.Fatal(err)
@@ -189,6 +191,54 @@ func TestAgentShellOutputStreamsBeforeTheToolResult(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("live shell output was not published")
+	}
+	select {
+	case event := <-shellEvents:
+		if event.ShellID != approved.Shell.ID || event.Stream != "input" || event.Sequence == 0 {
+			t.Fatalf("live shell bus event is invalid: %#v", event)
+		}
+	case <-overflow:
+		t.Fatal("live shell subscriber overflowed")
+	case <-time.After(time.Second):
+		t.Fatal("live shell event was not published")
+	}
+}
+
+func TestSSHShellOutputBatchesPersistenceUntilFlush(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	state := &sshShellState{
+		shell:   domain.SSHShell{ID: "shell-batched-output", Kind: domain.SSHShellKindSSH, Status: "running", StartedAt: time.Now().UTC()},
+		pending: make(map[string]string), notify: make(chan struct{}),
+	}
+	if err := svc.store.CreateSSHShell(context.Background(), state.shell); err != nil {
+		t.Fatal(err)
+	}
+	state.eventMu.Lock()
+	readable := svc.appendSSHShellOutputEventsLocked(state, "stdout", "firstsecond")
+	if readable != "firstsecond" || len(state.persistEvents) != 1 {
+		state.eventMu.Unlock()
+		t.Fatalf("queued output = %q, pending events = %d", readable, len(state.persistEvents))
+	}
+	storedBefore, err := svc.store.GetSSHShell(context.Background(), state.shell.ID)
+	if err != nil {
+		state.eventMu.Unlock()
+		t.Fatal(err)
+	}
+	if storedBefore.LastSequence != 0 {
+		state.eventMu.Unlock()
+		t.Fatalf("output persisted before batch flush: sequence=%d", storedBefore.LastSequence)
+	}
+	if err := svc.flushSSHShellEventsLocked(state); err != nil {
+		state.eventMu.Unlock()
+		t.Fatal(err)
+	}
+	state.eventMu.Unlock()
+	storedAfter, err := svc.store.GetSSHShell(context.Background(), state.shell.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedAfter.LastSequence != 1 || len(state.persistEvents) != 0 {
+		t.Fatalf("batch flush state: sequence=%d pending=%d", storedAfter.LastSequence, len(state.persistEvents))
 	}
 }
 
@@ -549,10 +599,11 @@ func TestInteractiveSSHShellApprovalIsolationCompleteOutputAndSensitiveRedaction
 		t.Fatalf("adjacent output events were not coalesced losslessly: %#v", coalesced.Events)
 	}
 	fakeSession.callback("stdout", []byte("before\x1b[?20"))
-	shellInsideANSI, err := svc.store.GetSSHShell(context.Background(), shellID)
+	insideANSI, err := svc.GetSSHShellSnapshot(context.Background(), shellID, "session-shell", 0, 0, false, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
+	shellInsideANSI := insideANSI.Shell
 	fakeSession.callback("stdout", []byte("04lafter"))
 	incremental, err := svc.GetSSHShellSnapshot(context.Background(), shellID, "session-shell", shellInsideANSI.LastSequence, 0, false, "", "")
 	if err != nil {
@@ -572,10 +623,11 @@ func TestInteractiveSSHShellApprovalIsolationCompleteOutputAndSensitiveRedaction
 	if _, err := svc.WriteSSHShellPage(context.Background(), shellID, "session-shell", "should-not-be-sent\r", 0, 0, "", "test"); err == nil || !strings.Contains(err.Error(), "private Web terminal") {
 		t.Fatalf("Agent input was accepted at a credential prompt: %v", err)
 	}
-	shellBeforeSecret, err := svc.store.GetSSHShell(context.Background(), shellID)
+	beforeSecretSnapshot, err := svc.GetSSHShellSnapshot(context.Background(), shellID, "session-shell", 0, 0, false, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
+	shellBeforeSecret := beforeSecretSnapshot.Shell
 	before := shellBeforeSecret.LastSequence
 	if err := svc.WriteSensitiveSSHShellInput(context.Background(), shellID, "very-secret-password\r", "test"); err != nil {
 		t.Fatal(err)

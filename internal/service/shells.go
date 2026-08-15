@@ -26,6 +26,10 @@ const (
 	maxSSHShellReasonBytes      = 500
 	maxSSHShellRecentBytes      = 16 << 10
 	maxSSHShellOutputEventBytes = 16 << 10
+	maxSSHShellPersistBatch     = 32
+	maxSSHShellPersistBytes     = 256 << 10
+	maxSSHShellPersistBacklog   = 1 << 20
+	sshShellPersistDelay        = 12 * time.Millisecond
 	defaultShellQueryDelay      = time.Duration(domain.DefaultShellQueryDelaySeconds) * time.Second
 	maxShellQueryDelay          = time.Duration(domain.MaxShellQueryDelaySeconds) * time.Second
 )
@@ -48,6 +52,50 @@ type sshShellState struct {
 	secretPrompt   bool
 	outputOwner    executionOwner
 	responseCursor uint64
+	subscribers    map[uint64]*sshShellSubscriber
+	subscriberID   uint64
+	persistEvents  []domain.SSHShellEvent
+	persistRecent  string
+	persistBytes   int
+	persistTimer   *time.Timer
+	persistAbort   sync.Once
+}
+
+type sshShellSubscriber struct {
+	events       chan domain.SSHShellEvent
+	overflow     chan struct{}
+	done         chan struct{}
+	overflowOnce sync.Once
+	cancelOnce   sync.Once
+}
+
+func (s *Service) SubscribeSSHShellEvents(id string) (<-chan domain.SSHShellEvent, <-chan struct{}, func()) {
+	s.shellMu.RLock()
+	state := s.shells[strings.TrimSpace(id)]
+	s.shellMu.RUnlock()
+	if state == nil {
+		return nil, nil, func() {}
+	}
+	subscriber := &sshShellSubscriber{
+		events: make(chan domain.SSHShellEvent, 256), overflow: make(chan struct{}), done: make(chan struct{}),
+	}
+	state.mu.Lock()
+	if state.subscribers == nil {
+		state.subscribers = make(map[uint64]*sshShellSubscriber)
+	}
+	state.subscriberID++
+	idValue := state.subscriberID
+	state.subscribers[idValue] = subscriber
+	state.mu.Unlock()
+	cancel := func() {
+		subscriber.cancelOnce.Do(func() {
+			state.mu.Lock()
+			delete(state.subscribers, idValue)
+			state.mu.Unlock()
+			close(subscriber.done)
+		})
+	}
+	return subscriber.events, subscriber.overflow, cancel
 }
 
 func (s *Service) StartSSHShell(ctx context.Context, hostID, cwd string, elevated bool, cols, rows int, reason, actor string) (domain.ExecResult, error) {
@@ -146,6 +194,9 @@ func (s *Service) getSSHShellSnapshotPage(ctx context.Context, id, expectedSessi
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return domain.SSHShellSnapshot{}, false, fmt.Errorf("shell_id is required")
+	}
+	if err := s.flushLiveSSHShellEvents(id); err != nil {
+		return domain.SSHShellSnapshot{}, false, err
 	}
 	shell, err := s.store.GetSSHShell(ctx, id)
 	if err != nil {
@@ -745,6 +796,11 @@ func (s *Service) runSSHShell(ctx context.Context, state *sshShellState) {
 		status = "closed"
 		termination = "requested_close"
 		exitCode = nil
+	} else if state.closing && state.reason == "persistence_failed" {
+		status = "failed"
+		termination = "persistence_failed"
+		exitCode = nil
+		result.Err = errors.New("interactive shell stopped because event persistence could not keep up")
 	} else if ctx.Err() != nil {
 		status = "interrupted"
 		termination = "service_stopped"
@@ -892,6 +948,29 @@ func (s *Service) appendSSHShellEventValuesLocked(state *sshShellState, events [
 	if len(events) == 0 {
 		return
 	}
+	s.assignSSHShellEventsLocked(state, events)
+	state.mu.Lock()
+	recent := state.recentOutput
+	state.mu.Unlock()
+	state.persistEvents = append(state.persistEvents, events...)
+	state.persistRecent = recent
+	for _, event := range events {
+		state.persistBytes += sshShellPersistEventBytes(event)
+	}
+	if err := s.flushSSHShellEventsLocked(state); err != nil {
+		last := events[len(events)-1]
+		observability.FromContext(context.Background()).ErrorContext(context.Background(), "persist SSH shell event failed",
+			"component", "ssh_shell", "shell_id", last.ShellID, "sequence", last.Sequence, "error", err)
+		if state.persistBytes > maxSSHShellPersistBacklog {
+			s.abortSSHShellPersistence(state)
+		}
+		s.scheduleSSHShellPersistLocked(state)
+		return
+	}
+	s.publishSSHShellEvents(state, events)
+}
+
+func (s *Service) assignSSHShellEventsLocked(state *sshShellState, events []domain.SSHShellEvent) {
 	state.mu.Lock()
 	createdAt := time.Now().UTC()
 	for index := range events {
@@ -900,18 +979,140 @@ func (s *Service) appendSSHShellEventValuesLocked(state *sshShellState, events [
 		events[index].Sequence = state.shell.LastSequence
 		events[index].CreatedAt = createdAt
 	}
-	recent := state.recentOutput
 	state.mu.Unlock()
-	if err := s.store.AppendSSHShellEvents(context.Background(), events, recent); err != nil {
-		last := events[len(events)-1]
-		observability.FromContext(context.Background()).ErrorContext(context.Background(), "persist SSH shell output failed",
-			"component", "ssh_shell", "shell_id", last.ShellID, "sequence", last.Sequence, "error", err)
+}
+
+func (s *Service) queueSSHShellOutputEventsLocked(state *sshShellState, events []domain.SSHShellEvent) {
+	if len(events) == 0 {
 		return
 	}
+	s.assignSSHShellEventsLocked(state, events)
+	state.mu.Lock()
+	recent := state.recentOutput
+	state.mu.Unlock()
+	for _, event := range events {
+		state.persistBytes += sshShellPersistEventBytes(event)
+	}
+	state.persistEvents = append(state.persistEvents, events...)
+	state.persistRecent = recent
+	s.publishSSHShellEvents(state, events)
+	if state.persistBytes > maxSSHShellPersistBacklog {
+		err := fmt.Errorf("SSH shell event persistence backlog exceeded %d bytes", maxSSHShellPersistBacklog)
+		s.logSSHShellPersistError(events[len(events)-1], err)
+		s.abortSSHShellPersistence(state)
+		return
+	}
+	if len(state.persistEvents) >= maxSSHShellPersistBatch || state.persistBytes >= maxSSHShellPersistBytes {
+		if err := s.flushSSHShellEventsLocked(state); err != nil {
+			s.logSSHShellPersistError(events[len(events)-1], err)
+			s.scheduleSSHShellPersistLocked(state)
+		}
+		return
+	}
+	s.scheduleSSHShellPersistLocked(state)
+}
+
+func (s *Service) scheduleSSHShellPersistLocked(state *sshShellState) {
+	if state.persistTimer != nil || len(state.persistEvents) == 0 {
+		return
+	}
+	state.persistTimer = time.AfterFunc(sshShellPersistDelay, func() {
+		state.eventMu.Lock()
+		state.persistTimer = nil
+		if err := s.flushSSHShellEventsLocked(state); err != nil {
+			last := state.persistEvents[len(state.persistEvents)-1]
+			s.logSSHShellPersistError(last, err)
+			s.scheduleSSHShellPersistLocked(state)
+		}
+		state.eventMu.Unlock()
+	})
+}
+
+func (s *Service) flushSSHShellEventsLocked(state *sshShellState) error {
+	if state.persistTimer != nil {
+		state.persistTimer.Stop()
+		state.persistTimer = nil
+	}
+	if len(state.persistEvents) == 0 {
+		return nil
+	}
+	if err := s.store.AppendSSHShellEvents(context.Background(), state.persistEvents, state.persistRecent); err != nil {
+		return err
+	}
+	state.persistEvents = state.persistEvents[:0]
+	state.persistBytes = 0
 	state.mu.Lock()
 	close(state.notify)
 	state.notify = make(chan struct{})
 	state.mu.Unlock()
+	return nil
+}
+
+func (s *Service) flushLiveSSHShellEvents(id string) error {
+	s.shellMu.RLock()
+	state := s.shells[id]
+	s.shellMu.RUnlock()
+	if state == nil {
+		return nil
+	}
+	state.eventMu.Lock()
+	defer state.eventMu.Unlock()
+	return s.flushSSHShellEventsLocked(state)
+}
+
+func (s *Service) logSSHShellPersistError(event domain.SSHShellEvent, err error) {
+	observability.FromContext(context.Background()).ErrorContext(context.Background(), "persist SSH shell output failed",
+		"component", "ssh_shell", "shell_id", event.ShellID, "sequence", event.Sequence, "error", err)
+}
+
+func sshShellPersistEventBytes(event domain.SSHShellEvent) int {
+	return len(event.Content) + len(event.Status) + len(event.Source) + 64
+}
+
+func (s *Service) abortSSHShellPersistence(state *sshShellState) {
+	state.persistAbort.Do(func() {
+		go func() {
+			state.mu.Lock()
+			if state.closing || !shellStatusActive(state.shell.Status) {
+				state.mu.Unlock()
+				return
+			}
+			state.closing = true
+			state.reason = "persistence_failed"
+			state.shell.Status = "stopping"
+			session, cancel := state.session, state.cancel
+			state.mu.Unlock()
+			if cancel != nil {
+				cancel()
+			}
+			if session != nil {
+				_ = session.Close()
+			}
+		}()
+	})
+}
+
+func (s *Service) publishSSHShellEvents(state *sshShellState, events []domain.SSHShellEvent) {
+	state.mu.Lock()
+	subscribers := make([]*sshShellSubscriber, 0, len(state.subscribers))
+	for _, subscriber := range state.subscribers {
+		subscribers = append(subscribers, subscriber)
+	}
+	state.mu.Unlock()
+	for _, event := range events {
+		for _, subscriber := range subscribers {
+			select {
+			case <-subscriber.done:
+				continue
+			default:
+			}
+			select {
+			case subscriber.events <- event:
+			default:
+				subscriber.overflowOnce.Do(func() { close(subscriber.overflow) })
+			}
+		}
+	}
 }
 
 func (s *Service) flushSSHShellPendingLocked(state *sshShellState) {
@@ -951,7 +1152,7 @@ func (s *Service) appendSSHShellOutputEventsLocked(state *sshShellState, stream,
 			Stream: stream, Content: part, ReadableContent: &readable, Status: "running",
 		})
 	}
-	s.appendSSHShellEventValuesLocked(state, events)
+	s.queueSSHShellOutputEventsLocked(state, events)
 	return combined.String()
 }
 
