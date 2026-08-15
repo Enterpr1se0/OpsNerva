@@ -178,7 +178,8 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 		if descriptor.Name == "ssh_exec" {
 			if descriptor.Guard != "approval_required" || !strings.Contains(schemaText, `"host_id"`) || !strings.Contains(schemaText, `"program"`) ||
 				!strings.Contains(schemaText, `"args"`) || !strings.Contains(schemaText, `"background"`) || !strings.Contains(schemaText, `"elevated"`) ||
-				!strings.Contains(schemaText, `"max_output_bytes"`) || !strings.Contains(schemaText, `"output_view"`) {
+				!strings.Contains(schemaText, `"max_output_bytes"`) || !strings.Contains(schemaText, `"output_view"`) ||
+				!strings.Contains(schemaText, "never bash") || !strings.Contains(descriptor.Description, "ssh_run_script") || !strings.Contains(descriptor.Description, "ssh_shell") {
 				t.Fatalf("ssh_exec metadata does not reflect its runtime schema: %#v", descriptor)
 			}
 			var schema struct {
@@ -193,8 +194,12 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 				}
 			}
 		}
-		if descriptor.Name == "ssh_run_script" && !strings.Contains(string(descriptor.InputSchema), `"background"`) {
-			t.Fatalf("ssh_run_script metadata is missing background: %#v", descriptor)
+		if descriptor.Name == "ssh_run_script" && (!strings.Contains(string(descriptor.InputSchema), `"background"`) ||
+			!strings.Contains(string(descriptor.InputSchema), "do not wrap") || !strings.Contains(descriptor.Description, "without a PTY")) {
+			t.Fatalf("ssh_run_script metadata does not distinguish non-interactive scripts: %#v", descriptor)
+		}
+		if descriptor.Name == "ssh_shell" && (!strings.Contains(descriptor.Description, "login shell") || !strings.Contains(descriptor.Description, "terminal UI")) {
+			t.Fatalf("ssh_shell metadata does not explain PTY routing: %#v", descriptor)
 		}
 		if descriptor.Name == "ssh_file_read" {
 			schema := string(descriptor.InputSchema)
@@ -306,6 +311,50 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 	}
 	if !seen["ssh_file_edit"] || !seen["ssh_file_transfer"] || !seen["ssh_tunnel"] || !seen["ssh_shell"] || !seen["workspace_file_edit"] || !seen["workspace_file_delete"] || !seen["workspace_file_upload"] || !seen["workspace_file_download"] || !seen["workspace_shell"] || !seen["web_search"] || !seen["web_extract"] || !seen["ssh_task"] || !seen["ssh_history"] || !seen["skill"] {
 		t.Fatalf("representative functions missing: %#v", seen)
+	}
+}
+
+func TestSSHExecWrongToolResultGuidesTheNextModelCall(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/ssh-routing.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	encryptor, err := security.NewEncryptor("", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := service.New(st, nil, encryptor, security.NewRedactor(), config.Default().Limits)
+	loaded, err := BuildTools(svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var execTool tool.InvokableTool
+	for _, candidate := range loaded {
+		info, infoErr := candidate.Info(ctx)
+		if infoErr != nil {
+			t.Fatal(infoErr)
+		}
+		if info.Name == "ssh_exec" {
+			execTool = candidate.(tool.InvokableTool)
+			break
+		}
+	}
+	if execTool == nil {
+		t.Fatal("ssh_exec was not registered")
+	}
+	encoded, err := execTool.InvokableRun(ctx, `{"host_id":"host_test","program":"bash","reason":"open shell"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var failure ExecToolResult
+	if err := json.Unmarshal([]byte(encoded), &failure); err != nil {
+		t.Fatal(err)
+	}
+	if failure.Status != "failed" || failure.Code != "wrong_tool" || failure.NextAction == "" ||
+		failure.Validation == nil || failure.Validation.SuggestedTool != "ssh_shell" || failure.Validation.Example["action"] != "start" {
+		t.Fatalf("model-facing wrong-tool result is not actionable: %s", encoded)
 	}
 }
 
@@ -649,6 +698,23 @@ func TestTaskToolResultsExposeRejectionAndStderr(t *testing.T) {
 	}
 	if validationFailure.Code != "validation_failed" || validationFailure.Retryable {
 		t.Fatalf("typed task input failure was exposed as retryable remote failure: %#v", validationFailure)
+	}
+	if validationFailure.NextAction == "" {
+		t.Fatalf("typed task input failure omitted correction guidance: %#v", validationFailure)
+	}
+
+	routingFailure, err := CompactExecToolResult(domain.ExecResult{}, &service.ExecutionToolSelectionError{
+		Message:       "ssh_exec cannot run interactive program \"bash\" because it has no PTY; use ssh_shell",
+		SuggestedTool: "ssh_shell",
+		NextAction:    "call ssh_shell with action=start",
+		Example:       map[string]any{"action": "start", "host_id": "host_test", "reason": "open shell"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if routingFailure.Code != "wrong_tool" || routingFailure.Retryable || routingFailure.NextAction == "" ||
+		routingFailure.Validation == nil || routingFailure.Validation.SuggestedTool != "ssh_shell" || len(routingFailure.Validation.Example) == 0 {
+		t.Fatalf("execution routing failure was not actionable: %#v", routingFailure)
 	}
 
 	persistenceFailure, err := CompactExecToolResult(domain.ExecResult{}, errors.New("constraint failed: FOREIGN KEY constraint failed (787)"))
@@ -1540,8 +1606,8 @@ func TestUnifiedSkillToolReadsTheLiveAdministratorRegistry(t *testing.T) {
 			t.Fatal(infoErr)
 		}
 		if info.Name == "skill" {
-			if !strings.Contains(info.Desc, "custom-diagnosis") {
-				t.Fatalf("enabled Skill summary was not included in the function description: %q", info.Desc)
+			if info.Desc != "Load one enabled Skill by exact name." || strings.Contains(info.Desc, "custom-diagnosis") {
+				t.Fatalf("Skill function description should remain stable without registry metadata: %q", info.Desc)
 			}
 			schemaJSON, schemaErr := info.ParamsOneOf.ToJSONSchema()
 			if schemaErr != nil {

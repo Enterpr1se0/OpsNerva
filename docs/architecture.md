@@ -46,7 +46,7 @@ stdio 通过 `exec.Command(command,args...)` 启动，不解析 Shell；Streamab
 
 `ssh_exec` 接收 program 与 args，服务对每个参数进行 POSIX 单引号编码，并通过 `golang.org/x/crypto/ssh` 在进程内建立连接，不调用本地 SSH 程序或 shell。同步 Tool 结果默认返回完整 stdout/stderr；调用方可设置 `max_output_bytes` 和 `output_view=head|tail|head_tail` 仅精炼模型视图，返回值同时携带每个流的总字节数、省略字节数和 `output_limited`，因此不存在静默截断。
 
-`ssh_run_script` 将脚本通过 stdin 传给远端 `bash -se`。服务端使用 Bash AST 校验语法并拒绝脚本内直接调用 sudo；提权只能使用结构化的 `elevated` 参数。后台执行返回 task ID；未显式指定 `timeout_seconds` 时，后台命令使用 `max_timeout_seconds`，同步命令使用 `sync_timeout_seconds`。`ssh_task status` 可在 Service 内阻塞等待终态或指定字节偏移后的新输出，单次最长 60 秒，并可只返回 stdout/stderr 增量；等待截止只返回仍在运行的任务和 `wait_deadline_reached=true`，不会终止或改写任务。
+`ssh_exec` 只接受单个非交互可执行文件及分离的 argv；Shell 语法和多步骤操作使用 `ssh_run_script`，提示或终端 UI 使用 `ssh_shell`。`ssh_run_script` 将脚本通过 stdin 传给远端 `bash -se`。服务端使用 Bash AST 校验语法并拒绝脚本内直接调用 sudo；提权只能使用结构化的 `elevated` 参数。后台执行返回 task ID；未显式指定 `timeout_seconds` 时，后台命令使用 `max_timeout_seconds`，同步命令使用 `sync_timeout_seconds`。`ssh_task status` 可在 Service 内阻塞等待终态或指定字节偏移后的新输出，单次最长 60 秒，并可只返回 stdout/stderr 增量；等待截止只返回仍在运行的任务和 `wait_deadline_reached=true`，不会终止或改写任务。
 
 `ssh_tunnel` 的 `start` 进入同一套 Run、审批模式和加密审计状态机；`list` 与 `stop` 直接操作进程内 Tunnel Registry。本地转发由控制面在指定 IP 建立 TCP Listener，再以 `direct-tcpip` channel 连接主机侧目标；反向转发通过 `tcpip-forward` 请求 SSH 服务端监听指定 IP，并接收 `forwarded-tcpip` channel 后回拨控制面侧目标。两种方向都使用已解析的持久 `ConnectionSpec`，因此网络代理、ProxyJump 链、认证与严格 Host Key 校验和普通 SSH 操作完全共用一条连接实现。Registry 记录相对控制面的双向流量，Service Shutdown 会关闭 Listener、SSH Client 及全部已接受连接并等待 worker 退出；不把隧道恢复为跨重启持久状态。
 

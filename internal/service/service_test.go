@@ -473,8 +473,22 @@ func TestDirectSudoIsRejectedInProgramAndScriptModes(t *testing.T) {
 
 func TestInteractiveCommandsAndPackagePromptsAreRejected(t *testing.T) {
 	svc, transport, host := newTestService(t)
+	routingRequests := []struct {
+		request       domain.ExecRequest
+		suggestedTool string
+	}{
+		{domain.ExecRequest{HostID: host.ID, Mode: domain.ExecProgram, Program: "bash", Reason: "open shell"}, "ssh_shell"},
+		{domain.ExecRequest{HostID: host.ID, Mode: domain.ExecProgram, Program: "bash", Args: []string{"-lc", "uname -a | head -1"}, Reason: "inspect kernel"}, "ssh_run_script"},
+		{domain.ExecRequest{HostID: host.ID, Mode: domain.ExecProgram, Program: "top", Reason: "inspect processes"}, "ssh_exec"},
+	}
+	for _, testCase := range routingRequests {
+		_, err := svc.Submit(context.Background(), testCase.request, "test")
+		var selectionErr *ExecutionToolSelectionError
+		if !errors.As(err, &selectionErr) || selectionErr.SuggestedTool != testCase.suggestedTool || selectionErr.NextAction == "" || len(selectionErr.Example) == 0 {
+			t.Fatalf("interactive request did not return actionable routing details: request=%#v err=%#v", testCase.request, err)
+		}
+	}
 	requests := []domain.ExecRequest{
-		{HostID: host.ID, Mode: domain.ExecProgram, Program: "bash", Reason: "open shell"},
 		{HostID: host.ID, Mode: domain.ExecProgram, Program: "pacman", Args: []string{"-S", "nginx"}, Reason: "install nginx"},
 		{HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"edit", "nginx"}, Reason: "edit unit"},
 	}

@@ -2297,9 +2297,19 @@ func validateRequestLimits(req domain.ExecRequest, limits config.Limits, redacto
 		return nil
 	}
 	program := strings.ToLower(posixpath.Base(req.Program))
-	interactive := map[string]bool{"bash": true, "sh": true, "zsh": true, "fish": true, "su": true, "vi": true, "vim": true, "nano": true, "emacs": true, "less": true, "more": true, "man": true}
+	interactive := map[string]bool{"bash": true, "sh": true, "zsh": true, "fish": true, "su": true, "vi": true, "vim": true, "nano": true, "emacs": true, "less": true, "more": true, "man": true, "htop": true, "watch": true, "tmux": true, "screen": true}
 	if interactive[program] {
-		return fmt.Errorf("interactive program %q is unsupported because SSH tools do not allocate a PTY; use a non-interactive command or ssh_run_script", program)
+		return executionToolSelectionError(req, program)
+	}
+	if program == "top" && !hasAnyArg(req.Args, "-b", "--batch") {
+		return &ExecutionToolSelectionError{
+			Message:       "ssh_exec requires top batch mode because it has no PTY",
+			SuggestedTool: "ssh_exec",
+			NextAction:    "for a snapshot retry ssh_exec with program=top and args=[\"-b\",\"-n\",\"1\"]; use ssh_shell only for interactive top",
+			Example: map[string]any{
+				"host_id": req.HostID, "program": "top", "args": []string{"-b", "-n", "1"}, "reason": req.Reason,
+			},
+		}
 	}
 	if program == "systemctl" && len(req.Args) > 0 && req.Args[0] == "edit" {
 		return fmt.Errorf("interactive systemctl edit is unsupported; use ssh_file_edit on the unit or override file")

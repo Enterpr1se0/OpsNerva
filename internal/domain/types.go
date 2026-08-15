@@ -689,6 +689,7 @@ type ToolFailure struct {
 
 type ToolValidationDetails struct {
 	Action           string         `json:"action,omitempty"`
+	SuggestedTool    string         `json:"suggested_tool,omitempty"`
 	AllowedFields    []string       `json:"allowed_fields,omitempty"`
 	GotFields        []string       `json:"got_fields,omitempty"`
 	UnexpectedFields []string       `json:"unexpected_fields,omitempty"`

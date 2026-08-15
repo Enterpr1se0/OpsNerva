@@ -130,9 +130,12 @@ func classifyAgentToolError(toolName string, err error) (code, message string, r
 	messageLower := strings.ToLower(err.Error())
 	rootMessage := rootToolError(err).Error()
 	var inputValidation *toolInputValidationError
+	var selectionErr *service.ExecutionToolSelectionError
 	switch {
 	case errors.As(err, &inputValidation):
 		return "validation_failed", inputValidation.Error(), false, "correct the function tool input using this error; do not repeat unchanged input"
+	case errors.As(err, &selectionErr):
+		return "wrong_tool", rootMessage, false, selectionErr.NextAction
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, skills.ErrNotFound):
 		return "not_found", rootMessage, false, "list or read the available resources and use a valid identifier"
 	case errors.Is(err, skills.ErrDisabled):

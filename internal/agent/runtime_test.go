@@ -429,7 +429,11 @@ func TestRuntimeReloadAppliesCompleteSystemPromptToExistingConversation(t *testi
 	}
 	assertSystemPrompt := func(configured string) {
 		t.Helper()
-		want := hostPlatformSystemPrompt(configured, goruntime.GOOS, goruntime.GOARCH)
+		settings, err := svc.SystemSettings(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := runtimeSystemPrompt(configured, settings, goruntime.GOOS, goruntime.GOARCH)
 		select {
 		case messages := <-requests:
 			for _, message := range messages {
@@ -480,17 +484,19 @@ func TestRuntimeReloadAppliesCompleteSystemPromptToExistingConversation(t *testi
 	assertSystemPrompt(emptyPrompt)
 }
 
-func TestHostPlatformSystemPromptDistinguishesLocalAndRemoteHosts(t *testing.T) {
-	got := hostPlatformSystemPrompt("custom instructions", "windows", "amd64")
-	for _, want := range []string{"custom instructions", "service host platform: windows/amd64", "local Workspace tools", "not registered SSH hosts"} {
+func TestRuntimeSystemPromptDescribesWorkspaceShellAndDistinguishesRemoteHosts(t *testing.T) {
+	got := runtimeSystemPrompt("custom instructions", domain.SystemSettings{
+		WorkspaceShellMode: domain.WorkspaceShellModeHost, WorkspaceShellBackend: domain.WorkspaceShellModeHost, WorkspaceShellName: "pwsh",
+	}, "windows", "amd64")
+	for _, want := range []string{"custom instructions", "Service host platform: windows/amd64", "backend=host", "shell=pwsh", "script language=PowerShell", "registered SSH hosts"} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("host platform prompt is missing %q: %s", want, got)
+			t.Fatalf("runtime prompt is missing %q: %s", want, got)
 		}
 	}
 
-	empty := hostPlatformSystemPrompt("", "linux", "arm64")
-	if strings.Contains(empty, domain.DefaultSystemPrompt) || !strings.Contains(empty, "service host platform: linux/arm64") {
-		t.Fatalf("empty configured prompt did not produce only runtime host context: %q", empty)
+	empty := runtimeSystemPrompt("", domain.SystemSettings{WorkspaceShellMode: domain.WorkspaceShellModeDisabled}, "linux", "arm64")
+	if strings.Contains(empty, domain.DefaultSystemPrompt) || !strings.Contains(empty, "Service host platform: linux/arm64") || !strings.Contains(empty, "Local Workspace shell: unavailable") || !strings.Contains(empty, "Do not call workspace_shell") {
+		t.Fatalf("empty configured prompt did not produce only runtime context: %q", empty)
 	}
 }
 

@@ -21,6 +21,12 @@ import (
 	einojsonschema "github.com/eino-contrib/jsonschema"
 )
 
+const (
+	SSHExecToolDescription   = "Run exactly one non-interactive remote executable with separate argv items. Never use bash/sh, shell syntax, a command string, prompts, or terminal UIs; use ssh_run_script for Bash and ssh_shell for a PTY. Use top -b -n 1 for a top snapshot."
+	SSHScriptToolDescription = "Run non-interactive remote Bash syntax, pipelines, or multiple steps without a PTY. Pass the script body directly, never bash -c; use ssh_shell when a prompt or terminal UI is required."
+	SSHShellToolDescription  = "Manage an interactive SSH PTY for prompts and terminal UIs. action=start already opens a login shell: do not input bash; use input/output, continue after next_sequence, and always close it. Never send secrets."
+)
+
 // ToolDescriptor exposes the runtime function schema to the administrator.
 // InputSchema is generated from the same Eino ToolInfo used by the model;
 // descriptions may be shortened for the Web catalog.
@@ -127,30 +133,30 @@ type HostListOutput struct {
 }
 
 type ExecInput struct {
-	HostID         string            `json:"host_id" jsonschema:"registered host identifier"`
-	Program        string            `json:"program" jsonschema:"remote executable; keep arguments separate"`
-	Args           []string          `json:"args,omitempty" jsonschema:"argument vector; no shell quoting"`
-	Background     bool              `json:"background,omitempty" jsonschema:"cancellable background task; default false"`
-	Cwd            string            `json:"cwd,omitempty" jsonschema:"absolute remote working directory"`
-	Env            map[string]string `json:"env,omitempty" jsonschema:"non-secret environment variables"`
-	Elevated       bool              `json:"elevated,omitempty" jsonschema:"managed root access; never use sudo or a password"`
-	TimeoutSeconds int               `json:"timeout_seconds,omitempty" jsonschema:"1-600; default uses configured sync/background timeout"`
-	MaxOutputBytes int               `json:"max_output_bytes,omitempty" jsonschema:"per-stream output limit; omit for complete output"`
-	OutputView     string            `json:"output_view,omitempty" jsonschema:"with max_output_bytes: head, tail, or head_tail (default)"`
-	Reason         string            `json:"reason" jsonschema:"one-sentence purpose"`
+	HostID         string            `json:"host_id" jsonschema_description:"registered host identifier"`
+	Program        string            `json:"program" jsonschema_description:"one non-interactive executable; never bash, sh, shell syntax, or a command string"`
+	Args           []string          `json:"args,omitempty" jsonschema_description:"argument vector; one argument per item, no shell quoting or command string"`
+	Background     bool              `json:"background,omitempty" jsonschema_description:"cancellable background task; default false"`
+	Cwd            string            `json:"cwd,omitempty" jsonschema_description:"absolute remote working directory"`
+	Env            map[string]string `json:"env,omitempty" jsonschema_description:"non-secret environment variables"`
+	Elevated       bool              `json:"elevated,omitempty" jsonschema_description:"managed root access; never use sudo or a password"`
+	TimeoutSeconds int               `json:"timeout_seconds,omitempty" jsonschema_description:"1-600; default uses configured sync/background timeout"`
+	MaxOutputBytes int               `json:"max_output_bytes,omitempty" jsonschema_description:"per-stream output limit; omit for complete output"`
+	OutputView     string            `json:"output_view,omitempty" jsonschema_description:"with max_output_bytes: head, tail, or head_tail (default)"`
+	Reason         string            `json:"reason" jsonschema_description:"one-sentence purpose"`
 }
 
 type ScriptInput struct {
-	HostID         string            `json:"host_id" jsonschema:"registered host identifier"`
-	Script         string            `json:"script" jsonschema:"complete Bash script"`
-	Background     bool              `json:"background,omitempty" jsonschema:"cancellable background task; default false"`
-	Cwd            string            `json:"cwd,omitempty" jsonschema:"absolute remote working directory"`
-	Env            map[string]string `json:"env,omitempty" jsonschema:"non-secret environment variables"`
-	Elevated       bool              `json:"elevated,omitempty" jsonschema:"managed root access; never include sudo or a password"`
-	TimeoutSeconds int               `json:"timeout_seconds,omitempty" jsonschema:"1-600; default uses configured sync/background timeout"`
-	MaxOutputBytes int               `json:"max_output_bytes,omitempty" jsonschema:"per-stream output limit; omit for complete output"`
-	OutputView     string            `json:"output_view,omitempty" jsonschema:"with max_output_bytes: head, tail, or head_tail (default)"`
-	Reason         string            `json:"reason" jsonschema:"one-sentence purpose"`
+	HostID         string            `json:"host_id" jsonschema_description:"registered host identifier"`
+	Script         string            `json:"script" jsonschema_description:"non-interactive Bash body; do not wrap in bash -c or sh -c"`
+	Background     bool              `json:"background,omitempty" jsonschema_description:"cancellable background task; default false"`
+	Cwd            string            `json:"cwd,omitempty" jsonschema_description:"absolute remote working directory"`
+	Env            map[string]string `json:"env,omitempty" jsonschema_description:"non-secret environment variables"`
+	Elevated       bool              `json:"elevated,omitempty" jsonschema_description:"managed root access; never include sudo or a password"`
+	TimeoutSeconds int               `json:"timeout_seconds,omitempty" jsonschema_description:"1-600; default uses configured sync/background timeout"`
+	MaxOutputBytes int               `json:"max_output_bytes,omitempty" jsonschema_description:"per-stream output limit; omit for complete output"`
+	OutputView     string            `json:"output_view,omitempty" jsonschema_description:"with max_output_bytes: head, tail, or head_tail (default)"`
+	Reason         string            `json:"reason" jsonschema_description:"one-sentence purpose"`
 }
 
 type SSHTunnelInput struct {
@@ -166,17 +172,17 @@ type SSHTunnelInput struct {
 }
 
 type SSHShellInput struct {
-	Action         string  `json:"action" jsonschema:"start, input, output, list, interrupt, or close"`
-	HostID         string  `json:"host_id,omitempty" jsonschema:"start: SSH host ID"`
-	ShellID        string  `json:"shell_id,omitempty" jsonschema:"input/output/interrupt/close: shell ID"`
-	Input          string  `json:"input,omitempty" jsonschema:"input: exact non-secret bytes"`
-	Submit         bool    `json:"submit,omitempty" jsonschema:"input: append carriage return if no newline"`
-	Cwd            string  `json:"cwd,omitempty" jsonschema:"start: absolute remote directory"`
-	Elevated       bool    `json:"elevated,omitempty" jsonschema:"start: managed root shell"`
-	AfterSequence  *uint64 `json:"after_sequence,omitempty" jsonschema:"output: events after next_sequence; omit for cursor, 0 to replay"`
-	WaitSeconds    *int    `json:"wait_seconds,omitempty" jsonschema:"input/output: delay before read, 0-600; default 5"`
-	MaxOutputBytes *int    `json:"max_output_bytes,omitempty" jsonschema:"input/output: page bytes, 4096-4194304; default 131072"`
-	Reason         string  `json:"reason,omitempty" jsonschema:"audit note; required for start"`
+	Action         string  `json:"action" jsonschema_description:"start, input, output, list, interrupt, or close"`
+	HostID         string  `json:"host_id,omitempty" jsonschema_description:"start: SSH host ID"`
+	ShellID        string  `json:"shell_id,omitempty" jsonschema_description:"input/output/interrupt/close: shell ID"`
+	Input          string  `json:"input,omitempty" jsonschema_description:"input: exact non-secret bytes; the login shell already exists, so do not send bash or sh"`
+	Submit         bool    `json:"submit,omitempty" jsonschema_description:"input: append carriage return if no newline"`
+	Cwd            string  `json:"cwd,omitempty" jsonschema_description:"start: absolute remote directory"`
+	Elevated       bool    `json:"elevated,omitempty" jsonschema_description:"start: managed root shell"`
+	AfterSequence  *uint64 `json:"after_sequence,omitempty" jsonschema_description:"output: events after next_sequence; omit for cursor, 0 to replay"`
+	WaitSeconds    *int    `json:"wait_seconds,omitempty" jsonschema_description:"input/output: delay before read, 0-600; default 5"`
+	MaxOutputBytes *int    `json:"max_output_bytes,omitempty" jsonschema_description:"input/output: page bytes, 4096-4194304; default 131072"`
+	Reason         string  `json:"reason,omitempty" jsonschema_description:"audit note; required for start"`
 }
 
 func sshShellProvidedFields(input SSHShellInput) []string {
@@ -986,6 +992,7 @@ type ExecToolResult struct {
 	Code                string                        `json:"code,omitempty"`
 	Message             string                        `json:"message,omitempty"`
 	Retryable           bool                          `json:"retryable,omitempty"`
+	NextAction          string                        `json:"next_action,omitempty"`
 	Validation          *domain.ToolValidationDetails `json:"validation,omitempty"`
 }
 
@@ -1010,13 +1017,21 @@ func normalizeExecResult(result domain.ExecResult, err error) (domain.ExecResult
 	var validationErr *toolInputValidationError
 	if errors.As(err, &validationErr) {
 		result.Code = "validation_failed"
+		result.NextAction = "correct the function tool input using the validation details; do not repeat unchanged input"
 		result.Validation = validationErr.validation
 		if result.Status == "" {
 			result.Status = "failed"
 		}
 		return result, nil
 	}
-	result.Code, result.Retryable, _ = classifyToolError(err)
+	result.Code, result.Retryable, result.NextAction = classifyToolError(err)
+	var selectionErr *service.ExecutionToolSelectionError
+	if errors.As(err, &selectionErr) {
+		result.Validation = &domain.ToolValidationDetails{
+			SuggestedTool: selectionErr.SuggestedTool,
+			Example:       selectionErr.Example,
+		}
+	}
 	if result.Status == "" {
 		result.Status = "failed"
 	}
@@ -1041,6 +1056,7 @@ func compactExecToolResult(result domain.ExecResult) ExecToolResult {
 		compact.Code = result.Code
 		compact.Message = result.Message
 		compact.Retryable = result.Retryable
+		compact.NextAction = result.NextAction
 		compact.Validation = result.Validation
 	}
 	return compact
@@ -1780,6 +1796,10 @@ func RunWorkspaceShellTool(ctx context.Context, svc *service.Service, input Work
 }
 
 func classifyToolError(err error) (string, bool, string) {
+	var selectionErr *service.ExecutionToolSelectionError
+	if errors.As(err, &selectionErr) {
+		return "wrong_tool", false, selectionErr.NextAction
+	}
 	message := strings.ToLower(err.Error())
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -1926,13 +1946,13 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_exec", "Run one remote executable with separate arguments. Use background only for long, pollable work.", func(ctx context.Context, input ExecInput) (ExecToolResult, error) {
+	if err := appendTool(toolutils.InferTool("ssh_exec", SSHExecToolDescription, func(ctx context.Context, input ExecInput) (ExecToolResult, error) {
 		request := domain.ExecRequest{HostID: input.HostID, Mode: domain.ExecProgram, Program: input.Program, Args: input.Args, Background: input.Background, Cwd: input.Cwd, Env: input.Env, Elevated: input.Elevated, TimeoutSeconds: input.TimeoutSeconds, MaxOutputBytes: input.MaxOutputBytes, OutputView: input.OutputView, Reason: input.Reason}
 		return RunExecutionTool(ctx, svc, request, "eino-agent")
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_run_script", "Run a remote Bash script. Use background only for long, pollable work.", func(ctx context.Context, input ScriptInput) (ExecToolResult, error) {
+	if err := appendTool(toolutils.InferTool("ssh_run_script", SSHScriptToolDescription, func(ctx context.Context, input ScriptInput) (ExecToolResult, error) {
 		request := domain.ExecRequest{HostID: input.HostID, Mode: domain.ExecScript, Script: input.Script, Background: input.Background, Cwd: input.Cwd, Env: input.Env, Elevated: input.Elevated, TimeoutSeconds: input.TimeoutSeconds, MaxOutputBytes: input.MaxOutputBytes, OutputView: input.OutputView, Reason: input.Reason}
 		return RunExecutionTool(ctx, svc, request, "eino-agent")
 	})); err != nil {
@@ -1943,7 +1963,7 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_shell", "Manage an interactive SSH PTY. Use only for prompts; wait_seconds delays reads; continue from next_sequence. Never send secrets.", func(ctx context.Context, input SSHShellInput) (any, error) {
+	if err := appendTool(toolutils.InferTool("ssh_shell", SSHShellToolDescription, func(ctx context.Context, input SSHShellInput) (any, error) {
 		return RunSSHShellTool(ctx, svc, input, "eino-agent")
 	})); err != nil {
 		return nil, err

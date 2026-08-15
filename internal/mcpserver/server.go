@@ -30,12 +30,12 @@ func New(svc *service.Service, version string) *Server {
 			hosts, err := svc.ListHostCapabilities(ctx)
 			return nil, agent.HostListOutput{Hosts: hosts}, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_exec", Description: "Run one remote executable with separate arguments; use background for long work.", Annotations: changeAnnotations("Execute SSH program", true)},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_exec", Description: agent.SSHExecToolDescription, Annotations: changeAnnotations("Execute SSH program", true)},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.ExecInput) (*mcp.CallToolResult, agent.ExecToolResult, error) {
 			output, err := agent.RunExecutionTool(ctx, svc, execRequest(input), "mcp-client")
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_run_script", Description: "Run a remote Bash script; use background for long work.", Annotations: changeAnnotations("Run SSH script", true)},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_run_script", Description: agent.SSHScriptToolDescription, Annotations: changeAnnotations("Run SSH script", true)},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.ScriptInput) (*mcp.CallToolResult, agent.ExecToolResult, error) {
 			output, err := agent.RunExecutionTool(ctx, svc, scriptRequest(input), "mcp-client")
 			return nil, output, err
@@ -73,7 +73,7 @@ func New(svc *service.Service, version string) *Server {
 			output, err := agent.RunSSHTunnelTool(ctx, svc, input, "mcp-client")
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_shell", Description: "Manage an SSH PTY; wait_seconds delays reads; continue from next_sequence. Never send secrets.", Annotations: changeAnnotations("Manage SSH shell", true)},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_shell", Description: agent.SSHShellToolDescription, Annotations: changeAnnotations("Manage SSH shell", true)},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.SSHShellInput) (*mcp.CallToolResult, any, error) {
 			ctx = service.WithMCPClientSession(ctx)
 			output, err := agent.RunSSHShellTool(ctx, svc, input, "mcp-client")

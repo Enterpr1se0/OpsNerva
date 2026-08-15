@@ -339,7 +339,7 @@ func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st
 	}
 	agentInstance, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name: "ops-nerva", Description: "Operate registered Linux hosts and the current Workspace.",
-		Instruction: hostPlatformSystemPrompt(settings.SystemPrompt, goruntime.GOOS, goruntime.GOARCH), Model: chatModel, MaxIterations: settings.AgentMaxIterations,
+		Instruction: runtimeSystemPrompt(settings.SystemPrompt, settings, goruntime.GOOS, goruntime.GOARCH), Model: chatModel, MaxIterations: settings.AgentMaxIterations,
 		ModelRetryConfig: modelRequestRetryConfig(),
 		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
 			Tools: tools, ExecuteSequentially: true, UnknownToolsHandler: unknownToolResult,
@@ -353,12 +353,33 @@ func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st
 	return adk.NewRunner(ctx, adk.RunnerConfig{Agent: agentInstance, EnableStreaming: true, CheckPointStore: st}), descriptors, contextSummarizer, nil
 }
 
-func hostPlatformSystemPrompt(systemPrompt, goos, goarch string) string {
-	hostContext := fmt.Sprintf(`Runtime: service host platform: %s/%s. This applies to local Workspace tools, not registered SSH hosts; inspect remote hosts before assuming their OS.`, goos, goarch)
-	if systemPrompt == "" {
-		return hostContext
+func runtimeSystemPrompt(systemPrompt string, settings domain.SystemSettings, goos, goarch string) string {
+	runtimeContext := fmt.Sprintf("Runtime:\n- Service host platform: %s/%s.", goos, goarch)
+	if settings.WorkspaceShellBackend == "" {
+		mode := settings.WorkspaceShellMode
+		if mode == "" {
+			mode = domain.DefaultWorkspaceShellMode(goos)
+		}
+		runtimeContext += fmt.Sprintf("\n- Local Workspace shell: unavailable (configured mode: %s). Do not call workspace_shell.", mode)
+	} else {
+		shellName := settings.WorkspaceShellName
+		if shellName == "" {
+			shellName = "unknown"
+		}
+		scriptLanguage := shellName
+		switch strings.ToLower(shellName) {
+		case "pwsh", "powershell":
+			scriptLanguage = "PowerShell"
+		case "bash":
+			scriptLanguage = "Bash"
+		}
+		runtimeContext += fmt.Sprintf("\n- Local Workspace shell: backend=%s, shell=%s, script language=%s. Use %s syntax for workspace_shell scripts.", settings.WorkspaceShellBackend, shellName, scriptLanguage, scriptLanguage)
 	}
-	return systemPrompt + "\n\n" + hostContext
+	runtimeContext += "\nThis Workspace context does not apply to registered SSH hosts; inspect each remote host before assuming its OS or shell."
+	if systemPrompt == "" {
+		return runtimeContext
+	}
+	return systemPrompt + "\n\n" + runtimeContext
 }
 
 func (r *Runtime) Reload(ctx context.Context) error {

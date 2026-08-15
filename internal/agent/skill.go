@@ -50,28 +50,37 @@ func (b *managedSkillBackend) Get(ctx context.Context, name string) (skillmw.Ski
 	}, nil
 }
 
-func managedSkillToolDescription(_ context.Context, items []skillmw.FrontMatter) string {
-	const prefix = "Load one enabled Skill by exact name."
+func managedSkillToolDescription(_ context.Context, _ []skillmw.FrontMatter) string {
+	return "Load one enabled Skill by exact name."
+}
+
+func managedSkillSystemPrompt(_ context.Context, toolName string) string {
+	return fmt.Sprintf(`# Skills System
+Skills are administrator-managed instructions for specialized tasks. Match the request against the available Skill index below. When a Skill applies, call the %q tool with its exact name before acting, then follow the loaded instructions. Load only Skills relevant to the request.`, toolName)
+}
+
+func managedSkillIndexPrompt(items []skillmw.FrontMatter) string {
 	if len(items) == 0 {
-		return prefix + " No enabled Skills are available."
+		return "## Available Skills\nNo enabled Skills are available."
 	}
 	summaries := make([]string, 0, len(items))
 	for _, item := range items {
 		summary := strings.Join(strings.Fields(item.Description), " ")
 		if summary == "" {
-			summaries = append(summaries, item.Name)
+			summaries = append(summaries, "- "+item.Name)
 			continue
 		}
 		if runes := []rune(summary); len(runes) > 120 {
 			summary = string(runes[:120]) + "…"
 		}
-		summaries = append(summaries, item.Name+": "+summary)
+		summaries = append(summaries, "- "+item.Name+": "+summary)
 	}
-	return prefix + " Enabled Skills: " + strings.Join(summaries, "; ")
+	return "## Available Skills\n" + strings.Join(summaries, "\n")
 }
 
 type configuredSkillMiddleware struct {
 	adk.ChatModelAgentMiddleware
+	backend skillmw.Backend
 	enabled bool
 }
 
@@ -79,12 +88,23 @@ func (m *configuredSkillMiddleware) BeforeAgent(ctx context.Context, runCtx *adk
 	if !m.enabled {
 		return ctx, runCtx, nil
 	}
-	return m.ChatModelAgentMiddleware.BeforeAgent(ctx, runCtx)
+	items, err := m.backend.List(ctx)
+	if err != nil {
+		return ctx, runCtx, fmt.Errorf("list enabled Skills: %w", err)
+	}
+	ctx, runCtx, err = m.ChatModelAgentMiddleware.BeforeAgent(ctx, runCtx)
+	if err != nil {
+		return ctx, runCtx, err
+	}
+	runCtx.Instruction = strings.TrimRight(runCtx.Instruction, "\n") + "\n\n" + managedSkillIndexPrompt(items)
+	return ctx, runCtx, nil
 }
 
 func newSkillMiddleware(ctx context.Context, svc *service.Service, states map[string]bool) (adk.ChatModelAgentMiddleware, []tool.BaseTool, error) {
+	backend := &managedSkillBackend{service: svc}
 	framework, err := skillmw.NewMiddleware(ctx, &skillmw.Config{
-		Backend:               &managedSkillBackend{service: svc},
+		Backend:               backend,
+		CustomSystemPrompt:    managedSkillSystemPrompt,
 		CustomToolDescription: managedSkillToolDescription,
 	})
 	if err != nil {
@@ -98,6 +118,6 @@ func newSkillMiddleware(ctx context.Context, svc *service.Service, states map[st
 	if state, configured := states["skill"]; configured {
 		enabled = state
 	}
-	configured := &configuredSkillMiddleware{ChatModelAgentMiddleware: framework, enabled: enabled}
+	configured := &configuredSkillMiddleware{ChatModelAgentMiddleware: framework, backend: backend, enabled: enabled}
 	return configured, runCtx.Tools, nil
 }
