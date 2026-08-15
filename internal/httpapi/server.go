@@ -163,6 +163,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/ssh-shells/{id}", s.getSSHShell)
 	s.mux.HandleFunc("GET /api/v1/ssh-shells/{id}/host-status", s.sshShellHostStatus)
 	s.mux.HandleFunc("GET /api/v1/ssh-shells/{id}/events", s.sshShellEvents)
+	s.mux.HandleFunc("GET /api/v1/ssh-shells/{id}/ws", s.sshShellWebSocket)
 	s.mux.HandleFunc("POST /api/v1/ssh-shells/{id}/input", s.sshShellInput)
 	s.mux.HandleFunc("POST /api/v1/ssh-shells/{id}/resize", s.resizeSSHShell)
 	s.mux.HandleFunc("POST /api/v1/ssh-shells/{id}/interrupt", s.interruptSSHShell)
@@ -180,6 +181,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/audit", s.listAudit)
 	s.mux.HandleFunc("GET /api/v1/logs", s.logs)
 	s.mux.HandleFunc("GET /api/v1/logs/export", s.exportLogs)
+	s.mux.HandleFunc("GET /api/v1/events/ws", s.applicationWebSocket)
 	s.mux.HandleFunc("POST /api/v1/chat", s.chat)
 	s.mux.HandleFunc("GET /api/v1/chat/sessions", s.chatSessions)
 	s.mux.HandleFunc("GET /api/v1/chat/{id}/events", s.chatEventsStream)
@@ -1909,32 +1911,35 @@ func (s *Server) chatAttachment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) chatState(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("id")
-	session, err := s.service.GetChatSession(r.Context(), sessionID)
+	state, err := s.applicationChatState(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	messages, err := s.service.ListChatMessages(r.Context(), sessionID, 0)
+	writeJSON(w, http.StatusOK, state)
+}
+
+func (s *Server) applicationChatState(ctx context.Context, sessionID string) (map[string]any, error) {
+	session, err := s.service.GetChatSession(ctx, sessionID)
 	if err != nil {
-		writeError(w, err)
-		return
+		return nil, err
 	}
-	toolCalls, err := s.service.ListChatToolCalls(r.Context(), sessionID)
+	messages, err := s.service.ListChatMessages(ctx, sessionID, 0)
 	if err != nil {
-		writeError(w, err)
-		return
+		return nil, err
 	}
-	tasks, taskErr := s.service.GetAgentTasks(r.Context(), sessionID)
+	toolCalls, err := s.service.ListChatToolCalls(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	tasks, taskErr := s.service.GetAgentTasks(ctx, sessionID)
 	if taskErr != nil {
-		writeError(w, taskErr)
-		return
+		return nil, taskErr
 	}
 	active := s.chatSessionActive(sessionID)
-	contextSummary, summaryErr := s.service.GetChatContextSummary(r.Context(), sessionID)
+	contextSummary, summaryErr := s.service.GetChatContextSummary(ctx, sessionID)
 	if summaryErr != nil && !errors.Is(summaryErr, store.ErrNotFound) {
-		writeError(w, summaryErr)
-		return
+		return nil, summaryErr
 	}
 	state := map[string]any{
 		"active": active, "workspace_id": session.WorkspaceID,
@@ -1945,7 +1950,7 @@ func (s *Server) chatState(w http.ResponseWriter, r *http.Request) {
 	if summaryErr == nil {
 		state["context_summary"] = contextSummary
 	}
-	writeJSON(w, http.StatusOK, state)
+	return state, nil
 }
 
 func (s *Server) compressChatContext(w http.ResponseWriter, r *http.Request) {
@@ -2146,6 +2151,8 @@ type logResponseWriter struct {
 	bytes  int
 }
 
+var _ http.Hijacker = (*logResponseWriter)(nil)
+
 func (w *logResponseWriter) WriteHeader(status int) {
 	if w.status != 0 {
 		return
@@ -2167,6 +2174,14 @@ func (w *logResponseWriter) Flush() {
 	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
 		flusher.Flush()
 	}
+}
+
+func (w *logResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("HTTP connection does not support hijacking")
+	}
+	return hijacker.Hijack()
 }
 
 func (w *logResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
@@ -2191,6 +2206,9 @@ func requestLogMiddleware(next http.Handler, baseLogger *slog.Logger) http.Handl
 			status = http.StatusOK
 		}
 		duration := time.Since(started)
+		if strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket") {
+			return
+		}
 		if status < http.StatusBadRequest && strings.HasPrefix(strings.ToLower(recorder.Header().Get("Content-Type")), "text/event-stream") {
 			return
 		}

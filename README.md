@@ -84,7 +84,7 @@ OpsNerva 是一个使用 **Go 与 Eino** 构建的个人 AI 运维 Agent：LLM �
 ### 💾 可恢复会话
 
 - 会话、工具结果、Agent 任务和审批状态持久化（SQLite + Eino Checkpoint）
-- 页面刷新或网络中断不中断正在运行的 Agent；断线后通过 Chat state 轮询同步恢复
+- 页面刷新或网络中断不中断正在运行的 Agent；断线后通过事件流重连与 Chat state 同步恢复
 
 ### 📦 多形态交付
 
@@ -97,7 +97,7 @@ OpsNerva 是一个使用 **Go 与 Eino** 构建的个人 AI 运维 Agent：LLM �
 
 ```mermaid
 flowchart LR
-    UI[React / CLI] --> API[Go API + SSE]
+    UI[React / CLI] --> API[Go API + SSE + WebSocket]
     API --> Eino[Eino ChatModelAgent]
     MCP[MCP Client] --> Tools[Typed SSH Tools]
     Eino --> Tools

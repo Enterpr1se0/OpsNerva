@@ -5,7 +5,46 @@ import (
 	"database/sql"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"eino-ops-agent/internal/domain"
 )
+
+func TestAppendSSHShellEventsCommitsBatchAndSessionCursor(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "shell-batch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now().UTC()
+	if err := st.CreateSSHShell(ctx, domain.SSHShell{ID: "shell-batch", RunID: "run-batch", Kind: domain.SSHShellKindSSH, Status: "running", Cols: 80, Rows: 24, StartedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	readable := "second"
+	events := []domain.SSHShellEvent{
+		{ShellID: "shell-batch", Sequence: 1, Stream: "stdout", Content: "first", Status: "running", CreatedAt: now},
+		{ShellID: "shell-batch", Sequence: 2, Stream: "stdout", Content: "second", ReadableContent: &readable, Status: "running", CreatedAt: now},
+	}
+	if err := st.AppendSSHShellEvents(ctx, events, "firstsecond"); err != nil {
+		t.Fatal(err)
+	}
+	shell, err := st.GetSSHShell(ctx, "shell-batch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := st.ListSSHShellEvents(ctx, "shell-batch", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recent, err := st.GetSSHShellRecentOutput(ctx, "shell-batch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shell.LastSequence != 2 || len(stored) != 2 || stored[1].Content != "second" || recent != "firstsecond" {
+		t.Fatalf("batch persistence mismatch: shell=%#v events=%#v recent=%q", shell, stored, recent)
+	}
+}
 
 func TestOpenMigratesAddedColumns(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "shell-migration.db")

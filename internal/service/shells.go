@@ -25,7 +25,7 @@ const (
 	maxSSHShellInputBytes       = 64 << 10
 	maxSSHShellReasonBytes      = 500
 	maxSSHShellRecentBytes      = 16 << 10
-	maxSSHShellOutputEventBytes = 4 << 10
+	maxSSHShellOutputEventBytes = 16 << 10
 	defaultShellQueryDelay      = time.Duration(domain.DefaultShellQueryDelaySeconds) * time.Second
 	maxShellQueryDelay          = time.Duration(domain.MaxShellQueryDelaySeconds) * time.Second
 )
@@ -885,16 +885,27 @@ func (s *Service) appendSSHShellEventLocked(state *sshShellState, stream, conten
 }
 
 func (s *Service) appendSSHShellEventValueLocked(state *sshShellState, event domain.SSHShellEvent) {
+	s.appendSSHShellEventValuesLocked(state, []domain.SSHShellEvent{event})
+}
+
+func (s *Service) appendSSHShellEventValuesLocked(state *sshShellState, events []domain.SSHShellEvent) {
+	if len(events) == 0 {
+		return
+	}
 	state.mu.Lock()
-	state.shell.LastSequence++
-	event.ShellID = state.shell.ID
-	event.Sequence = state.shell.LastSequence
-	event.CreatedAt = time.Now().UTC()
+	createdAt := time.Now().UTC()
+	for index := range events {
+		state.shell.LastSequence++
+		events[index].ShellID = state.shell.ID
+		events[index].Sequence = state.shell.LastSequence
+		events[index].CreatedAt = createdAt
+	}
 	recent := state.recentOutput
 	state.mu.Unlock()
-	if err := s.store.AppendSSHShellEvent(context.Background(), event, recent); err != nil {
+	if err := s.store.AppendSSHShellEvents(context.Background(), events, recent); err != nil {
+		last := events[len(events)-1]
 		observability.FromContext(context.Background()).ErrorContext(context.Background(), "persist SSH shell output failed",
-			"component", "ssh_shell", "shell_id", event.ShellID, "sequence", event.Sequence, "error", err)
+			"component", "ssh_shell", "shell_id", last.ShellID, "sequence", last.Sequence, "error", err)
 		return
 	}
 	state.mu.Lock()
@@ -920,6 +931,7 @@ func (s *Service) flushSSHShellPendingLocked(state *sshShellState) {
 
 func (s *Service) appendSSHShellOutputEventsLocked(state *sshShellState, stream, content string) string {
 	var combined strings.Builder
+	events := make([]domain.SSHShellEvent, 0, (len(content)+maxSSHShellOutputEventBytes-1)/maxSSHShellOutputEventBytes)
 	for content != "" {
 		end := len(content)
 		if end > maxSSHShellOutputEventBytes {
@@ -935,10 +947,11 @@ func (s *Service) appendSSHShellOutputEventsLocked(state *sshShellState, stream,
 		content = content[end:]
 		readable := updateSSHShellOutputState(state, part)
 		combined.WriteString(readable)
-		s.appendSSHShellEventValueLocked(state, domain.SSHShellEvent{
+		events = append(events, domain.SSHShellEvent{
 			Stream: stream, Content: part, ReadableContent: &readable, Status: "running",
 		})
 	}
+	s.appendSSHShellEventValuesLocked(state, events)
 	return combined.String()
 }
 

@@ -1,5 +1,63 @@
 import type { AgentEvent, Approval, ApprovalExecutionResult, AuthStatus, ChatContextCompressionResult, ChatSession, ChatState, ConfigurationImportResult, Health, Host, HostInput, LLMToolCatalog, ManagedSkill, MCPOAuthStart, MCPServer, MCPServerInput, MCPTestResult, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestJob, ModelTestResult, Proxy, ProxyInput, ProxyTestResult, QueuedChatMessage, Run, ServerLogResponse, SFTPFileList, SFTPMutationResult, SSHHostStatus, SSHShell, SSHShellList, SSHShellSnapshot, SSHShellStartInput, SSHTunnel, SSHTunnelList, SSHTunnelStartInput, SSHTunnelUpdateInput, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchResponse, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceInput, WorkspaceUploadResult } from './types'
 
+export type TransferProgress={loaded:number;total:number}
+export type TransferOptions={signal?:AbortSignal;onProgress?:(progress:TransferProgress)=>void;totalBytes?:number}
+
+function transferError(status:number,statusText:string,response:unknown,authHeader:string|null){
+	if(status===401&&authHeader==='required')window.dispatchEvent(new Event('opsnerva:unauthorized'))
+	const body=response&&typeof response==='object'?response as {error?:string}:undefined
+	const error=new Error(body?.error||statusText||'Transfer failed') as Error&{status?:number}
+	error.status=status
+	return error
+}
+
+function uploadJSON<T>(method:string,url:string,body:Blob,contentType:string,options:TransferOptions={}):Promise<T>{
+	return new Promise((resolve,reject)=>{
+		const xhr=new XMLHttpRequest()
+		xhr.open(method,url)
+		xhr.withCredentials=true
+		xhr.responseType='json'
+		xhr.setRequestHeader('Content-Type',contentType)
+		xhr.upload.onprogress=event=>options.onProgress?.({loaded:event.loaded,total:event.lengthComputable?event.total:options.totalBytes||body.size})
+		xhr.onload=()=>xhr.status>=200&&xhr.status<300?resolve(xhr.response as T):reject(transferError(xhr.status,xhr.statusText,xhr.response,xhr.getResponseHeader('X-OpsNerva-Auth')))
+		xhr.onerror=()=>reject(new Error(xhr.statusText||'Transfer failed'))
+		xhr.onabort=()=>reject(new DOMException('Transfer aborted','AbortError'))
+		const abort=()=>xhr.abort()
+		options.signal?.addEventListener('abort',abort,{once:true})
+		xhr.onloadend=()=>options.signal?.removeEventListener('abort',abort)
+		xhr.send(body)
+	})
+}
+
+export function downloadFile(url:string,filename:string,options:TransferOptions={}):Promise<void>{
+	return new Promise((resolve,reject)=>{
+		const xhr=new XMLHttpRequest()
+		xhr.open('GET',url)
+		xhr.withCredentials=true
+		xhr.responseType='blob'
+		xhr.onprogress=event=>options.onProgress?.({loaded:event.loaded,total:event.lengthComputable?event.total:options.totalBytes||0})
+		xhr.onload=async()=>{
+			if(xhr.status<200||xhr.status>=300){
+				let body:unknown
+				try{body=JSON.parse(await (xhr.response as Blob).text())}catch{/* non-JSON transfer errors use the HTTP status text */}
+				reject(transferError(xhr.status,xhr.statusText,body,xhr.getResponseHeader('X-OpsNerva-Auth')));return
+			}
+			const objectURL=URL.createObjectURL(xhr.response as Blob)
+			const anchor=document.createElement('a')
+			anchor.href=objectURL;anchor.download=filename
+			document.body.appendChild(anchor);anchor.click();anchor.remove()
+			window.setTimeout(()=>URL.revokeObjectURL(objectURL),1000)
+			resolve()
+		}
+		xhr.onerror=()=>reject(new Error(xhr.statusText||'Transfer failed'))
+		xhr.onabort=()=>reject(new DOMException('Transfer aborted','AbortError'))
+		const abort=()=>xhr.abort()
+		options.signal?.addEventListener('abort',abort,{once:true})
+		xhr.onloadend=()=>options.signal?.removeEventListener('abort',abort)
+		xhr.send()
+	})
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	const multipart=typeof FormData!=='undefined'&&init?.body instanceof FormData
 	const headers:Record<string,string> = { ...(multipart?{}:{'Content-Type':'application/json'}), ...(init?.headers as Record<string,string> || {}) }
@@ -76,7 +134,7 @@ export const api = {
 	workspaceFiles: (workspaceId:string,path='.') => request<WorkspaceFileList>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files?path=${encodeURIComponent(path)}`),
 	previewWorkspaceFile: (workspaceId:string,path:string) => request<WorkspaceFilePreview>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/preview?path=${encodeURIComponent(path)}`),
 	saveWorkspaceTextFile: (workspaceId:string,path:string,content:string) => request<WorkspaceUploadResult>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files`,{method:'PUT',body:JSON.stringify({path,content})}),
-	uploadWorkspaceFile: (workspaceId:string,file:File,path:string) => {const query=new URLSearchParams({path,filename:file.name});return request<WorkspaceUploadResult>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files?${query}`,{method:'POST',body:file,headers:{'Content-Type':file.type||'application/octet-stream'}})},
+	uploadWorkspaceFile: (workspaceId:string,file:File,path:string,options:TransferOptions={}) => {const query=new URLSearchParams({path,filename:file.name});return uploadJSON<WorkspaceUploadResult>('POST',`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files?${query}`,file,file.type||'application/octet-stream',{...options,totalBytes:file.size})},
 	deleteWorkspaceEntry: (workspaceId:string,path:string) => request<WorkspaceDeleteResult>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files?path=${encodeURIComponent(path)}`,{method:'DELETE'}),
   saveSystemSettings: (settings: SystemSettingsInput) => request<SystemSettings>('/api/v1/settings', { method: 'PUT', body: JSON.stringify(settings) }),
   webSearchSettings: () => request<WebSearchSettings>('/api/v1/web-search/settings'),
@@ -113,7 +171,7 @@ export const api = {
 		if(!response.ok)throw await responseError(response)
 		return response.arrayBuffer()
 	},
-  uploadSFTPFile: (hostId:string,path:string,file:File,overwrite=false) => request<SFTPMutationResult>(`/api/v1/hosts/${encodeURIComponent(hostId)}/sftp/files?path=${encodeURIComponent(path)}&overwrite=${overwrite}`, { method:'PUT', body:file, headers:{'Content-Type':file.type||'application/octet-stream'} }),
+	  uploadSFTPFile: (hostId:string,path:string,file:File,overwrite=false,options:TransferOptions={}) => uploadJSON<SFTPMutationResult>('PUT',`/api/v1/hosts/${encodeURIComponent(hostId)}/sftp/files?path=${encodeURIComponent(path)}&overwrite=${overwrite}`,file,file.type||'application/octet-stream',{...options,totalBytes:file.size}),
   uploadSFTPTextFile: (hostId:string,path:string,content:string,encoding:'utf-8'|'utf-16le'|'utf-16be'|'gb18030') => request<SFTPMutationResult>(`/api/v1/hosts/${encodeURIComponent(hostId)}/sftp/files?path=${encodeURIComponent(path)}&overwrite=true&encoding=${encodeURIComponent(encoding)}`, { method:'PUT', body:content, headers:{'Content-Type':'text/plain;charset=utf-8'} }),
   createSFTPDirectory: (hostId:string,path:string) => request<SFTPMutationResult>(`/api/v1/hosts/${encodeURIComponent(hostId)}/sftp/directories`, { method:'POST', body:JSON.stringify({path}) }),
   renameSFTPEntry: (hostId:string,sourcePath:string,destinationPath:string) => request<SFTPMutationResult>(`/api/v1/hosts/${encodeURIComponent(hostId)}/sftp/entries`, { method:'PATCH', body:JSON.stringify({source_path:sourcePath,destination_path:destinationPath}) }),
@@ -160,6 +218,11 @@ export function workspaceDownloadURL(workspaceId:string,path:string){
 
 export function sshShellEventsURL(shellId:string,after=0){
 	return `/api/v1/ssh-shells/${encodeURIComponent(shellId)}/events?after=${after}`
+}
+
+export function sshShellWebSocketURL(shellId:string,after=0){
+	const protocol=window.location.protocol==='https:'?'wss:':'ws:'
+	return `${protocol}//${window.location.host}/api/v1/ssh-shells/${encodeURIComponent(shellId)}/ws?after=${Math.max(0,after)}`
 }
 
 export function sftpDownloadURL(hostId:string,path:string){

@@ -12,12 +12,13 @@ import {
   Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronLeft, ChevronRight, CircleDot, Clock3, Copy, Cpu, Edit3, ExternalLink, Eye, EyeOff, FileText, FolderOpen, FolderOutput, FunctionSquare, HardDrive, History, Home, ImagePlus, KeyRound, LockKeyhole, Maximize2, MemoryStick, Minimize2, Minus, Monitor, Moon, Network, PanelLeftClose, PanelLeftOpen, Sun,
   Cable, Download, ListChecks, ListPlus, LoaderCircle, LogOut, Plus, Power, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, Square, TerminalSquare, Trash2, UploadCloud, UserRound, X, Zap,
 } from 'lucide-react'
-import { api, chatAttachmentURL, reconnectChatStream, sftpDownloadURL, sshShellEventsURL, streamChat, workspaceDownloadURL, workspaceFileEventsURL } from './api'
+import { api, chatAttachmentURL, downloadFile, reconnectChatStream, sftpDownloadURL, sshShellWebSocketURL, streamChat, workspaceDownloadURL, workspaceFileEventsURL } from './api'
+import { subscribeApplicationEvents } from './appEvents'
 import { CopyButton, CopyablePre } from './CopyButton'
 import { AppSelect, ModelCombobox } from './Controls'
 import i18n, { localeFor, type SupportedLanguage } from './i18n'
 import { TextFileEditor } from './TextFileEditor'
-import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, AuthStatus, ChatMessage, ChatSession, ChatTokenUsage, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, QueuedChatMessage, Run, ServerLogEntry, SFTPFileEntry, SSHHostStatus, SSHShell, SSHShellEvent, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
+import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, AuthStatus, ChatMessage, ChatSession, ChatState, ChatTokenUsage, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, QueuedChatMessage, Run, ServerLogEntry, ServerLogResponse, SFTPFileEntry, SSHHostStatus, SSHShell, SSHShellEvent, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
 
 type Page = 'chat' | 'ssh' | 'config' | 'extensions' | 'audit' | 'logs'
 const pageVisualOrder:Page[]=['chat','ssh','extensions','audit','logs','config']
@@ -227,10 +228,6 @@ function tasksFromToolContent(content:string):AgentTaskList|undefined{
   try{const value=JSON.parse(content) as {tasks?:AgentTaskList};return value.tasks&&Array.isArray(value.tasks.items)?value.tasks:undefined}catch{return undefined}
 }
 
-function unresolvedTaskDependencies(task:AgentTask,tasks:AgentTask[]){
-	return task.blocked_by.filter(id=>tasks.find(candidate=>candidate.id===id)?.status!=='completed')
-}
-
 function taskToolOperation(entry:ChatEntry):TaskToolEntryGroup['tool']|''{
 	return entry.kind==='tool'&&(entry.tool==='TaskCreate'||entry.tool==='TaskUpdate')?entry.tool:''
 }
@@ -285,6 +282,10 @@ function errorText(error: unknown) {
   return message
 }
 
+function isAbortError(error:unknown){return error instanceof DOMException&&error.name==='AbortError'}
+
+function keepEquivalent<T>(current:T,next:T){return JSON.stringify(current)===JSON.stringify(next)?current:next}
+
 const newSessionMarker = '__new__'
 const defaultChatImageTypes=['image/png','image/jpeg','image/webp','image/gif']
 const desktopRuntime='__TAURI_INTERNALS__' in window
@@ -331,6 +332,7 @@ type NotificationTone='success'|'error'
 type AppNotification={id:string;message:string;tone:NotificationTone}
 type NotificationSink=(message:string,tone?:NotificationTone)=>void
 const NotificationContext=createContext<NotificationSink>(()=>{})
+const ChatVisibilityContext=createContext(true)
 function useNotifier(){return useContext(NotificationContext)}
 
 function NotificationItem({notification,onDismiss}:{notification:AppNotification;onDismiss:(id:string)=>void}){
@@ -424,8 +426,8 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 	const refreshConnections=useCallback(()=>{
 		if(connectionRefreshRef.current)return connectionRefreshRef.current
 		const task=Promise.allSettled([api.sshTunnels(),api.sshShells()]).then(([tunnels,shells])=>{
-			if(tunnels.status==='fulfilled')setSSHTunnels(tunnels.value.tunnels||[])
-			if(shells.status==='fulfilled')setSSHShells(shells.value.shells||[])
+			if(tunnels.status==='fulfilled')setSSHTunnels(current=>keepEquivalent(current,tunnels.value.tunnels||[]))
+			if(shells.status==='fulfilled')setSSHShells(current=>keepEquivalent(current,shells.value.shells||[]))
 		})
 		connectionRefreshRef.current=task
 		void task.finally(()=>{if(connectionRefreshRef.current===task)connectionRefreshRef.current=null})
@@ -454,7 +456,7 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 		catch(err){notify(errorText(err),'error')}
 	},[notify])
 	const refreshHealth=useCallback(async()=>{
-		try{setHealth(await api.health())}
+		try{const next=await api.health();setHealth(current=>keepEquivalent(current,next))}
 		catch(err){notify(errorText(err),'error')}
 	},[notify])
 	const refreshHosts=useCallback(async()=>{
@@ -480,7 +482,7 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 	},[notify])
 	const refreshApprovals=useCallback(async(decidedID?:string)=>{
 		if(decidedID)setApprovals(current=>current.filter(item=>item.id!==decidedID))
-		try{setApprovals(await api.approvals())}
+		try{const next=await api.approvals();setApprovals(current=>keepEquivalent(current,next))}
 		catch(err){notify(errorText(err),'error')}
 	},[notify])
 	const refreshBootstrap=useCallback(async()=>{
@@ -536,22 +538,23 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 		return()=>{window.removeEventListener('focus',sync);window.removeEventListener('blur',sync)}
 	},[])
 	useEffect(() => { void refreshBootstrap();void refreshConnections() }, [refreshBootstrap,refreshConnections])
+	useEffect(()=>subscribeApplicationEvents<{tunnels:SSHTunnel[];shells:SSHShell[]}>('connections',event=>{
+		if(event.type!=='event'||!event.data)return
+		setSSHTunnels(current=>keepEquivalent(current,event.data!.tunnels||[]))
+		setSSHShells(current=>keepEquivalent(current,event.data!.shells||[]))
+	}),[])
+	useEffect(()=>subscribeApplicationEvents<Approval[]>('approvals',event=>{
+		if(event.type==='event'&&event.data)setApprovals(current=>keepEquivalent(current,event.data!))
+	}),[])
+	useEffect(()=>subscribeApplicationEvents<Health>('health',event=>{
+		if(event.type==='event'&&event.data)setHealth(current=>keepEquivalent(current,event.data!))
+	}),[])
 	useEffect(()=>{
 		if(page==='extensions')void refreshExtensions()
 		else if(page==='audit')void refreshAudit()
 		else if(page==='ssh')void Promise.all([refreshHosts(),refreshConnections()])
 		else if(page==='config')void refreshConfiguration()
 	},[page,refreshAudit,refreshConfiguration,refreshConnections,refreshExtensions,refreshHosts])
-	const pollConnections=page==='ssh'||openConnectionPanel!==null||sshTunnels.some(tunnel=>['running','retrying','stopping'].includes(tunnel.status))||sshShells.some(shell=>sshShellActive(shell.status))
-	useEffect(()=>{
-		if(!pollConnections)return
-		const timer=window.setInterval(()=>{if(document.visibilityState==='visible')void refreshConnections()},2000)
-		return()=>window.clearInterval(timer)
-	},[pollConnections,refreshConnections])
-	useEffect(() => {
-		const timer=window.setInterval(()=>{if(document.visibilityState==='visible')void refreshHealth()},30000)
-		return()=>window.clearInterval(timer)
-	},[refreshHealth])
 	useLayoutEffect(()=>{
 		const previous=previousPageRef.current
 		previousPageRef.current=page
@@ -576,7 +579,10 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 		if(transition&&!reduced&&!extensionEdge){
 			pageTransitionRef.current=true
 			transition.call(document,()=>flushSync(()=>setPage(next)))
-		}else setPage(next)
+		}else{
+			if(extensionEdge)pageTransitionRef.current=true
+			setPage(next)
+		}
 	},[page])
 	useEffect(()=>{
 		if(!desktopRuntime)return
@@ -630,13 +636,13 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 	const replaceSSHTunnel=(previousID:string,tunnel:SSHTunnel)=>{
 		setSSHTunnels(current=>[...current.filter(item=>item.id!==previousID&&item.id!==tunnel.id),tunnel])
 	}
-	const rememberSSHShell=(shell:SSHShell)=>{
+	const rememberSSHShell=useCallback((shell:SSHShell)=>{
 		setSSHShells(current=>[...current.filter(item=>item.id!==shell.id),shell])
-	}
-	const registerSSHShell=(shell:SSHShell)=>{
+	},[])
+	const registerSSHShell=useCallback((shell:SSHShell)=>{
 		rememberSSHShell(shell)
 		setSelectedShell(shell)
-	}
+	},[rememberSSHShell])
 	const closeSSHShell=async(id:string)=>{
 		const dismiss=()=>{
 			setSSHShells(current=>current.filter(item=>item.id!==id))
@@ -653,13 +659,21 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 			}
 		}
 	}
-	const createWorkspaceShell=async(workspaceID:string)=>{
+	const createWorkspaceShell=useCallback(async(workspaceID:string)=>{
 		try{registerSSHShell(await api.startSSHShell({workspace_id:workspaceID}))}
 		catch(err){notify(errorText(err),'error')}
-	}
-	const observeAgentWorkspaceShell=(shell:SSHShell)=>{
+	},[notify,registerSSHShell])
+	const observeAgentWorkspaceShell=useCallback((shell:SSHShell)=>{
 		rememberSSHShell(shell)
-	}
+	},[rememberSSHShell])
+	const activateChat=useCallback(()=>navigate('chat'),[navigate])
+	const hostChanged=useCallback((host:Host)=>setHosts(current=>current.map(item=>item.id===host.id?host:item)),[])
+	const modelChanged=useCallback((provider:ModelProvider)=>{
+		setProviders(current=>current.map(item=>item.id===provider.id?provider:{...item,active:provider.active?false:item.active}))
+		void api.health().then(next=>setHealth(current=>keepEquivalent(current,next))).catch(err=>reportError(errorText(err)))
+	},[reportError])
+	const workspaceShells=useMemo(()=>sshShells.filter(shell=>shell.kind==='workspace'),[sshShells])
+	const topbarShells=useMemo(()=>sshShells.filter(topbarShell),[sshShells])
 	const logout=async()=>{try{await api.logout()}finally{onLogout()}}
   return <NotificationContext.Provider value={notify}><AppFrame><div className="app-shell">
     <aside className="sidebar">
@@ -681,20 +695,20 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
     <main>
 	      <header className="topbar"><div><h1 ref={pageTitleRef}>{title}</h1></div><div className="top-actions">
         <SSHTunnelStatus tunnels={sshTunnels} hosts={hosts} open={openConnectionPanel==='tunnel'} onOpenChange={open=>setOpenConnectionPanel(current=>open?'tunnel':current==='tunnel'?null:current)} onRetry={retrySSHTunnel} onStop={stopSSHTunnel} onCreated={registerSSHTunnel} onUpdated={replaceSSHTunnel} onRefresh={()=>void refreshConnections()}/>
-		<SSHShellStatus shells={sshShells.filter(topbarShell)} hosts={hosts} open={openConnectionPanel==='shell'} onOpenChange={open=>setOpenConnectionPanel(current=>open?'shell':current==='shell'?null:current)} onOpen={shell=>{setOpenConnectionPanel(null);setSelectedShell(shell)}} onClose={closeSSHShell} onCreated={registerSSHShell}/>
+		<SSHShellStatus shells={topbarShells} hosts={hosts} open={openConnectionPanel==='shell'} onOpenChange={open=>setOpenConnectionPanel(current=>open?'shell':current==='shell'?null:current)} onOpen={shell=>{setOpenConnectionPanel(null);setSelectedShell(shell)}} onClose={closeSSHShell} onCreated={registerSSHShell}/>
         <LanguageSwitch/>
 		<ThemeSwitch preference={themePreference} onChange={setThemePreference}/>
         <span className={`status ${health?.status === 'ok' ? 'online' : ''}`}><CircleDot size={14}/>{health?.status === 'ok' ? t('shell.online') : t('shell.disconnected')}</span>
         <button className={`icon-button ${refreshing?'refreshing':''}`} onClick={()=>void manualRefresh()} disabled={refreshing} title={t(refreshing?'common.refreshing':'shell.refresh')} aria-label={t(refreshing?'common.refreshing':'shell.refresh')}><RefreshCw size={17}/></button>
       </div></header>
       <section ref={workspaceRef} className={`workspace workspace-${page}`}>
-			<ChatPage visible={page==='chat'} onActivate={()=>navigate('chat')}
-				hosts={hosts} providers={providers} approvals={approvals} runs={runs} workspaceShells={sshShells.filter(shell=>shell.kind==='workspace')}
+			<MemoChatPage visible={page==='chat'} onActivate={activateChat}
+				hosts={hosts} providers={providers} approvals={approvals} runs={runs} workspaceShells={workspaceShells}
 				capabilities={capabilities} settings={settings} imageTypes={settings?.chat_image_allowed_types||defaultChatImageTypes}
 					agentAvailable={!!health?.agent_available} modelName={health?.model?.model} contextWindow={health?.model?.context_window||0} refreshConnections={refreshConnections}
 				refreshApprovals={refreshApprovals} onCreateWorkspaceShell={createWorkspaceShell} onOpenWorkspaceShell={setSelectedShell} onWorkspaceShellStarted={observeAgentWorkspaceShell} onSettingsChanged={setSettings}
-				onHostChanged={host=>setHosts(current=>current.map(item=>item.id===host.id?host:item))}
-				onModelChanged={provider=>{setProviders(current=>current.map(item=>item.id===provider.id?provider:{...item,active:provider.active?false:item.active}));void api.health().then(setHealth).catch(err=>reportError(errorText(err)))}}
+				onHostChanged={hostChanged}
+				onModelChanged={modelChanged}
 				sidebarTarget={chatSidebarTarget} onSessionDeleted={removeSessionState} onError={reportError}
 			/>
 			{page === 'ssh' && <SSHWorkspacePage
@@ -943,8 +957,8 @@ function SSHTunnelEditorDialog({hosts,tunnel,onCancel,onSaved,onFailed}:{hosts:H
 		<form className="connection-dialog panel" role="dialog" aria-modal="true" aria-labelledby="tunnel-editor-title" noValidate onSubmit={submit}>
 			<header><span><Cable size={20}/><span><small>{t('tunnels.title')}</small><h2 id="tunnel-editor-title">{t(tunnel?'tunnels.edit':'tunnels.create')}</h2></span></span><button type="button" disabled={busy} onClick={onCancel}><X size={16}/></button></header>
 			<div className="connection-dialog-fields">
-				<label><span>{t('common.host')}</span><AppSelect value={hostID} ariaLabel={t('common.host')} onChange={setHostID} options={hosts.map(host=>({value:host.id,label:`${host.name} · ${host.user}@${host.address}:${host.port}`}))}/></label>
-				<label><span>{t('tunnels.direction')}</span><AppSelect value={direction} ariaLabel={t('tunnels.direction')} onChange={value=>setDirection(value as 'local'|'reverse')} options={[{value:'local',label:t('tunnels.localForward')},{value:'reverse',label:t('tunnels.reverseForward')}]}/></label>
+				<label><span>{t('common.host')}</span><AppSelect portal value={hostID} ariaLabel={t('common.host')} onChange={setHostID} options={hosts.map(host=>({value:host.id,label:`${host.name} · ${host.user}@${host.address}:${host.port}`}))}/></label>
+				<label><span>{t('tunnels.direction')}</span><AppSelect portal value={direction} ariaLabel={t('tunnels.direction')} onChange={value=>setDirection(value as 'local'|'reverse')} options={[{value:'local',label:t('tunnels.localForward')},{value:'reverse',label:t('tunnels.reverseForward')}]}/></label>
 				<label><span>{t(direction==='local'?'tunnels.localListenHost':'tunnels.localTargetHost')}</span><input value={localHost} onChange={event=>setLocalHost(event.target.value)}/></label>
 				<label><span>{t(direction==='local'?'tunnels.localListenPort':'tunnels.localTargetPort')}</span><input inputMode="numeric" value={localPort} onChange={event=>setLocalPort(event.target.value.replace(/\D/g,'').slice(0,5))} placeholder={direction==='local'?t('tunnels.automaticPort'):undefined} autoFocus={direction==='reverse'}/></label>
 				<label><span>{t(direction==='local'?'tunnels.remoteTargetHost':'tunnels.remoteListenHost')}</span><input value={remoteHost} onChange={event=>setRemoteHost(event.target.value)}/></label>
@@ -1116,6 +1130,7 @@ function SSHShellTerminal({initialShell,relatedShells=[],onSelect,onClose,onChan
 	const [closing,setClosing]=useState(false)
 	const terminalElement=useRef<HTMLDivElement>(null)
 	const terminalRef=useRef<XTermInstance|null>(null)
+	const socketRef=useRef<WebSocket|null>(null)
 	const lastSequence=useRef(0)
 	const onChangedRef=useRef(onChanged)
 	const onErrorRef=useRef(onError)
@@ -1136,25 +1151,30 @@ function SSHShellTerminal({initialShell,relatedShells=[],onSelect,onClose,onChan
 				fontFamily:"'JetBrains Mono','Cascadia Code','SFMono-Regular',Consolas,monospace",
 				fontSize:13,
 				theme:{background:'#071019',foreground:'#d8e3ea',cursor:'#55d6be',selectionBackground:'#31546a'},
-				scrollback:4_294_967_295,
+				scrollback:10_000,
 			})
 			const fit=new fitModule.FitAddon()
 			terminal.loadAddon(fit)
 			terminal.open(container)
 			terminalRef.current=terminal
-			fit.fit()
-			terminal.focus()
-
 			let inputBuffer=''
 			let inputTimer:number|undefined
-			let sendChain=Promise.resolve()
+			let reconnectTimer:number|undefined
+			let terminalEnded=false
+			let socket:WebSocket|null=null
+			const sendCommand=(command:Record<string,unknown>)=>{
+				if(socket?.readyState!==WebSocket.OPEN)return false
+				socket.send(JSON.stringify(command))
+				return true
+			}
 			const flushInput=()=>{
 				if(inputTimer!==undefined)window.clearTimeout(inputTimer)
 				inputTimer=undefined
-				const input=inputBuffer
-				inputBuffer=''
-				if(!input)return
-				sendChain=sendChain.then(()=>api.sshShellInput(initialShell.id,input,false)).catch(err=>onErrorRef.current(errorText(err)))
+				if(!inputBuffer)return
+				const input=inputBuffer.slice(0,64<<10)
+				if(!sendCommand({type:'input',content:input}))return
+				inputBuffer=inputBuffer.slice(input.length)
+				if(inputBuffer)inputTimer=window.setTimeout(flushInput,0)
 			}
 			const inputDisposable=terminal.onData(data=>{
 				inputBuffer+=data
@@ -1164,35 +1184,65 @@ function SSHShellTerminal({initialShell,relatedShells=[],onSelect,onClose,onChan
 			let resizeTimer:number|undefined
 			const resizeDisposable=terminal.onResize(({cols,rows})=>{
 				if(resizeTimer!==undefined)window.clearTimeout(resizeTimer)
-				resizeTimer=window.setTimeout(()=>{void api.resizeSSHShell(initialShell.id,cols,rows).catch(()=>{/* the session may have ended */})},120)
+				resizeTimer=window.setTimeout(()=>{sendCommand({type:'resize',cols,rows})},80)
 			})
 			const observer=new ResizeObserver(()=>fit.fit())
 			observer.observe(container)
+			fit.fit()
+			terminal.focus()
 
-			const source=new EventSource(sshShellEventsURL(initialShell.id,0))
-			const onShellEvent=(raw:Event)=>{
-				const message=raw as MessageEvent<string>
-				try{
-					const event=JSON.parse(message.data) as SSHShellEvent
-					if(event.sequence<=lastSequence.current)return
-					lastSequence.current=event.sequence
-					if(event.content&&(event.stream==='stdout'||event.stream==='stderr'))terminal.write(event.content)
-					if(event.status&&event.stream==='status'){
-						setShell(current=>({...current,status:event.status as SSHShell['status'],last_sequence:event.sequence}))
-						if(!sshShellActive(event.status)){
-							source.close()
-							void api.sshShell(initialShell.id,event.sequence).then(snapshot=>setShell(snapshot.shell)).catch(()=>{/* final state is already visible */})
-							onChangedRef.current()
-						}
+			const applyEvent=(event:SSHShellEvent)=>{
+				if(event.sequence<=lastSequence.current)return
+				lastSequence.current=event.sequence
+				if(event.content&&(event.stream==='stdout'||event.stream==='stderr'))terminal.write(event.content)
+				if(event.status&&event.stream==='status'){
+					setShell(current=>({...current,status:event.status as SSHShell['status'],last_sequence:event.sequence}))
+					if(!sshShellActive(event.status)){
+						terminalEnded=true
+						socket?.close()
+						void api.sshShell(initialShell.id,event.sequence).then(snapshot=>setShell(snapshot.shell)).catch(()=>{/* final state is already visible */})
+						onChangedRef.current()
 					}
-				}catch{/* malformed events are ignored; the next sequence remains recoverable */}
+				}
 			}
-			source.addEventListener('shell-event',onShellEvent)
-			source.onerror=()=>{if(source.readyState===EventSource.CLOSED)onErrorRef.current(t('sshShell.streamEnded'))}
+			const connect=()=>{
+				if(disposed||terminalEnded)return
+				socket=new WebSocket(sshShellWebSocketURL(initialShell.id,lastSequence.current))
+				socket.binaryType='arraybuffer'
+				socketRef.current=socket
+				socket.onopen=()=>{
+					sendCommand({type:'resize',cols:terminal.cols,rows:terminal.rows})
+					flushInput()
+				}
+				socket.onmessage=message=>{
+					try{
+						if(message.data instanceof ArrayBuffer){
+							if(message.data.byteLength<10)return
+							const view=new DataView(message.data)
+							if(view.getUint8(0)!==1)return
+							const sequence=Number(view.getBigUint64(2))
+							if(sequence<=lastSequence.current)return
+							lastSequence.current=sequence
+							terminal.write(new Uint8Array(message.data,10))
+							return
+						}
+						const payload=JSON.parse(String(message.data)) as {type:string;event?:SSHShellEvent;error?:string}
+						if(payload.type==='event'&&payload.event)applyEvent(payload.event)
+						else if(payload.type==='error'&&payload.error)onErrorRef.current(payload.error)
+					}catch{/* malformed frames are ignored; reconnect resumes from the last valid sequence */}
+				}
+				socket.onclose=()=>{
+					if(socketRef.current===socket)socketRef.current=null
+					if(!disposed&&!terminalEnded)reconnectTimer=window.setTimeout(connect,1000)
+				}
+			}
+			connect()
 			cleanup=()=>{
 				flushInput()
-				source.removeEventListener('shell-event',onShellEvent)
-				source.close()
+				terminalEnded=true
+				if(reconnectTimer!==undefined)window.clearTimeout(reconnectTimer)
+				socket?.close()
+				if(socketRef.current===socket)socketRef.current=null
 				observer.disconnect()
 				inputDisposable.dispose()
 				resizeDisposable.dispose()
@@ -1210,11 +1260,15 @@ function SSHShellTerminal({initialShell,relatedShells=[],onSelect,onClose,onChan
 		event.preventDefault()
 		if(!secret||!active||sendingSecret)return
 		setSendingSecret(true)
-		try{await api.sshShellInput(shell.id,`${secret}\r`,true);setSecret('');terminalRef.current?.focus()}
+		try{
+			const socket=socketRef.current
+			if(!socket||socket.readyState!==WebSocket.OPEN)throw new Error(t('sshShell.streamEnded'))
+			socket.send(JSON.stringify({type:'input',content:`${secret}\r`,sensitive:true}));setSecret('');terminalRef.current?.focus()
+		}
 		catch(err){onError(errorText(err))}
 		finally{setSendingSecret(false)}
 	}
-	const interrupt=async()=>{try{setShell(await api.interruptSSHShell(shell.id))}catch(err){onError(errorText(err))}finally{terminalRef.current?.focus()}}
+	const interrupt=async()=>{try{const socket=socketRef.current;if(!socket||socket.readyState!==WebSocket.OPEN)throw new Error(t('sshShell.streamEnded'));socket.send(JSON.stringify({type:'interrupt'}))}catch(err){onError(errorText(err))}finally{terminalRef.current?.focus()}}
 	const stop=async()=>{setClosing(true);try{setShell(await api.closeSSHShell(shell.id));onChanged();onClose()}catch(err){onError(errorText(err))}finally{setClosing(false)}}
 	const titleID=`ssh-shell-terminal-title-${shell.id}`
 	const workspaceShell=shell.kind==='workspace'
@@ -1349,7 +1403,7 @@ function decodeTextFile(buffer:ArrayBuffer,name:string){
 	}
 }
 
-function SFTPBrowser({host}:{host?:Host}){
+function SFTPBrowser({host,embedded=false,hosts=[],onHostSelect,onWorkspaceMode,onCollapse}:{host?:Host;embedded?:boolean;hosts?:Host[];onHostSelect?:(id:string)=>void;onWorkspaceMode?:()=>void;onCollapse?:()=>void}){
 	const {t,i18n:instance}=useTranslation()
 	const hostID=host?.id||''
 	const [path,setPath]=useState('')
@@ -1367,7 +1421,10 @@ function SFTPBrowser({host}:{host?:Host}){
 	const [overwriteCandidate,setOverwriteCandidate]=useState<SFTPOverwriteCandidate|null>(null)
 	const [textFile,setTextFile]=useState<SFTPTextFile|null>(null)
 	const [openingFile,setOpeningFile]=useState('')
+	const [transfer,setTransfer]=useState<ActiveFileTransfer|null>(null)
+	const transferAbort=useRef<AbortController|null>(null)
 	const loadRequest=useRef(0)
+	useEffect(()=>()=>transferAbort.current?.abort(),[])
 	const load=useCallback(async(target='')=>{
 		if(!hostID)return
 		const request=++loadRequest.current
@@ -1382,10 +1439,13 @@ function SFTPBrowser({host}:{host?:Host}){
 		}finally{if(request===loadRequest.current)setLoading(false)}
 	},[hostID])
 	useEffect(()=>{void load('')},[load])
-	const download=(entry:SFTPFileEntry)=>{
-		const anchor=document.createElement('a')
-		anchor.href=sftpDownloadURL(hostID,entry.path);anchor.download=entry.name
-		document.body.appendChild(anchor);anchor.click();anchor.remove()
+	const download=async(entry:SFTPFileEntry)=>{
+		if(transfer)return
+		const controller=new AbortController();transferAbort.current=controller
+		setTransfer({name:entry.name,loaded:0,total:entry.size||0})
+		try{await downloadFile(sftpDownloadURL(hostID,entry.path),entry.name,{signal:controller.signal,totalBytes:entry.size||0,onProgress:progress=>setTransfer(current=>current?{...current,...progress}:current)})}
+		catch(err){if(!isAbortError(err)){setNotice(errorText(err));setNoticeError(true)}}
+		finally{if(transferAbort.current===controller)transferAbort.current=null;setTransfer(null)}
 	}
 	const openTextFile=async(entry:SFTPFileEntry)=>{
 		if(openingFile)return
@@ -1397,21 +1457,30 @@ function SFTPBrowser({host}:{host?:Host}){
 		finally{setOpeningFile('')}
 	}
 	const uploadFiles=async(files:File[],overwrite=false)=>{
-		if(!files.length||busy)return
+		if(!files.length||busy||transfer)return
 		setBusy(true);setNotice('');setNoticeError(false)
+		const controller=new AbortController();transferAbort.current=controller
+		const total=files.reduce((sum,file)=>sum+file.size,0)
+		let completedBytes=0
 		let uploaded=0
-		for(const file of files){
+		let aborted=false
+		for(let index=0;index<files.length;index++){
+			const file=files[index]
 			const target=remoteChildPath(path,file.name)
-			try{await api.uploadSFTPFile(hostID,target,file,overwrite);uploaded+=1}
+			setTransfer({name:file.name,loaded:completedBytes,total,index:index+1,count:files.length})
+			try{await api.uploadSFTPFile(hostID,target,file,overwrite,{signal:controller.signal,onProgress:progress=>setTransfer(current=>current?{...current,loaded:completedBytes+progress.loaded,total}:current)});uploaded+=1;completedBytes+=file.size}
 			catch(err){
+				if(isAbortError(err)){aborted=true;break}
 				const message=errorText(err)
 				if(files.length===1&&!overwrite&&message.includes('already exists'))setOverwriteCandidate({file,path:target})
 				else{setNotice(message);setNoticeError(true)}
 				break
 			}
 		}
-		if(uploaded){setNotice(t('sshWorkspace.uploaded',{count:uploaded}));setNoticeError(false)}
-		setInputKey(value=>value+1);setBusy(false)
+		if(aborted){setNotice('');setNoticeError(false)}
+		else if(uploaded){setNotice(t('sshWorkspace.uploaded',{count:uploaded}));setNoticeError(false)}
+		if(transferAbort.current===controller)transferAbort.current=null
+		setTransfer(null);setInputKey(value=>value+1);setBusy(false)
 		if(uploaded)await load(path)
 	}
 	const saveName=async(name:string)=>{
@@ -1442,11 +1511,13 @@ function SFTPBrowser({host}:{host?:Host}){
 		if(!overwriteCandidate)return
 		const candidate=overwriteCandidate
 		setBusy(true);setNotice('');setNoticeError(false)
+		const controller=new AbortController();transferAbort.current=controller
+		setTransfer({name:candidate.file.name,loaded:0,total:candidate.file.size})
 		try{
-			await api.uploadSFTPFile(hostID,candidate.path,candidate.file,true)
+			await api.uploadSFTPFile(hostID,candidate.path,candidate.file,true,{signal:controller.signal,onProgress:progress=>setTransfer(current=>current?{...current,...progress}:current)})
 			setNotice(t('sshWorkspace.uploaded',{count:1}));setOverwriteCandidate(null);await load(path)
-		}catch(err){setNotice(errorText(err));setNoticeError(true)}
-		finally{setBusy(false)}
+		}catch(err){if(!isAbortError(err)){setNotice(errorText(err));setNoticeError(true)}}
+		finally{if(transferAbort.current===controller)transferAbort.current=null;setTransfer(null);setBusy(false)}
 	}
 	const saveTextFile=async(content:string)=>{
 		if(!textFile)return
@@ -1457,11 +1528,12 @@ function SFTPBrowser({host}:{host?:Host}){
 	}
 	const acceptsFiles=(event:React.DragEvent<HTMLElement>)=>Array.from(event.dataTransfer.types).includes('Files')
 	return <>
-		<aside className={`sftp-browser panel ${dragging?'dragging':''}`} onDragEnter={event=>{if(hostID&&acceptsFiles(event)){event.preventDefault();setDragging(true)}}} onDragOver={event=>{if(hostID&&acceptsFiles(event)){event.preventDefault();event.dataTransfer.dropEffect=busy?'none':'copy'}}} onDragLeave={event=>{event.preventDefault();if(!(event.relatedTarget instanceof Node&&event.currentTarget.contains(event.relatedTarget)))setDragging(false)}} onDrop={event=>{if(!hostID||!acceptsFiles(event))return;event.preventDefault();setDragging(false);if(!busy)void uploadFiles(Array.from(event.dataTransfer.files))}}>
-			<header><div><FolderOpen size={17}/><b>SFTP</b></div><span className="sftp-host">{host?`${host.name} · ${host.user}@${host.address}`:'—'}</span></header>
+		<aside className={`sftp-browser panel ${embedded?'workspace-browser-panel chat-sftp-browser ':''}${dragging?'dragging':''}`} onDragEnter={event=>{if(hostID&&acceptsFiles(event)){event.preventDefault();setDragging(true)}}} onDragOver={event=>{if(hostID&&acceptsFiles(event)){event.preventDefault();event.dataTransfer.dropEffect=busy||transfer?'none':'copy'}}} onDragLeave={event=>{event.preventDefault();if(!(event.relatedTarget instanceof Node&&event.currentTarget.contains(event.relatedTarget)))setDragging(false)}} onDrop={event=>{if(!hostID||!acceptsFiles(event))return;event.preventDefault();setDragging(false);if(!busy&&!transfer)void uploadFiles(Array.from(event.dataTransfer.files))}}>
+			{embedded?<><header className="panel-header"><FileBrowserTabs mode="sftp" onChange={mode=>{if(mode==='workspace')onWorkspaceMode?.()}}/><div className="workspace-panel-actions"><button type="button" onClick={onCollapse} title={t('workspace.collapsePanel')} aria-label={t('workspace.collapsePanel')}><PanelLeftClose size={14}/></button></div></header><div className="workspace-summary"><div className="chat-workspace-head sftp-workspace-head">{hosts.length>0?<AppSelect className="workspace-switch-select" value={host?.id||''} disabled={hosts.length<2} ariaLabel={t('config.tabs.hosts')} onChange={value=>onHostSelect?.(value)} options={hosts.map(item=>({value:item.id,label:item.name}))}/>:<span><b>{t('connections.noHosts')}</b></span>}{host&&<em>{host.auth_type.toUpperCase()}</em>}</div></div></>:<header><div><FolderOpen size={17}/><b>SFTP</b></div><span className="sftp-host">{host?`${host.name} · ${host.user}@${host.address}`:'—'}</span></header>}
 			<form className="sftp-path" onSubmit={event=>{event.preventDefault();void load(pathInput)}}><button type="button" disabled={!path||path==='/'} onClick={()=>void load(remoteParentPath(path))} title={t('workspace.parent')}>‹</button><input value={pathInput} disabled={!hostID} onChange={event=>setPathInput(event.target.value)} aria-label={t('sshWorkspace.remotePath')}/><button type="submit" disabled={!hostID||loading}><ChevronRight size={13}/></button><button type="button" disabled={!hostID||loading} onClick={()=>void load(path)} title={t('common.refresh')}><RefreshCw className={loading?'spin':''} size={13}/></button></form>
-			<div className="sftp-actions"><button type="button" disabled={busy||!path} onClick={()=>setNameEditor({mode:'create'})}><Plus size={13}/>{t('sshWorkspace.newDirectory')}</button><label className={busy||!path?'disabled':''}><UploadCloud size={13}/>{t('common.upload')}<input key={inputKey} type="file" multiple disabled={busy||!path} onChange={event=>void uploadFiles(Array.from(event.target.files||[]))}/></label></div>
-			<div className="sftp-list">{!hostID?<span className="sftp-state">{t('sshWorkspace.noTerminal')}</span>:loading?<span className="sftp-state"><LoaderCircle className="spin" size={14}/>{t('common.loading')}</span>:listError?<span className="sftp-state error">{listError}</span>:entries.length?entries.map(entry=><div className="sftp-row" key={`${entry.type}:${entry.path}`}><button type="button" className="sftp-entry" onClick={()=>entry.type==='directory'?void load(entry.path):void openTextFile(entry)} title={entry.path}>{openingFile===entry.path?<LoaderCircle className="spin" size={14}/>:entry.type==='directory'?<FolderOpen size={14}/>:<FileText size={14}/>}<span><b>{entry.name}</b><small>{entry.mode} · {entry.type==='directory'?'—':formatFileSize(entry.size||0)} · {new Date(entry.modified_at).toLocaleString(localeFor(instance.language))}</small></span></button>{entry.type!=='directory'&&<button type="button" onClick={()=>download(entry)} title={t('common.download')}><Download size={12}/></button>}<button type="button" onClick={()=>setNameEditor({mode:'rename',entry})} title={t('sshWorkspace.rename')}><Edit3 size={12}/></button><button type="button" className="danger" onClick={()=>setDeleteCandidate({entry})} title={t('common.delete')}><Trash2 size={12}/></button></div>):<span className="sftp-state">{t('workspace.emptyDirectory')}</span>}</div>
+			<div className="sftp-actions"><button type="button" disabled={busy||!!transfer||!path} onClick={()=>setNameEditor({mode:'create'})}><Plus size={13}/>{t('sshWorkspace.newDirectory')}</button><label className={busy||transfer||!path?'disabled':''}><UploadCloud size={13}/>{t('common.upload')}<input key={inputKey} type="file" multiple disabled={busy||!!transfer||!path} onChange={event=>void uploadFiles(Array.from(event.target.files||[]))}/></label></div>
+			<div className="sftp-list">{!hostID?<span className="sftp-state">{t('connections.noHosts')}</span>:loading?<span className="sftp-state"><LoaderCircle className="spin" size={14}/>{t('common.loading')}</span>:listError?<span className="sftp-state error">{listError}</span>:entries.length?entries.map(entry=><div className="sftp-row" key={`${entry.type}:${entry.path}`}><button type="button" className="sftp-entry" onClick={()=>entry.type==='directory'?void load(entry.path):void openTextFile(entry)} title={entry.path}>{openingFile===entry.path?<LoaderCircle className="spin" size={14}/>:entry.type==='directory'?<FolderOpen size={14}/>:<FileText size={14}/>}<span><b>{entry.name}</b><small>{entry.mode} · {entry.type==='directory'?'—':formatFileSize(entry.size||0)} · {new Date(entry.modified_at).toLocaleString(localeFor(instance.language))}</small></span></button>{entry.type!=='directory'&&<button type="button" disabled={!!transfer} onClick={()=>void download(entry)} title={t('common.download')}><Download size={12}/></button>}<button type="button" disabled={!!transfer} onClick={()=>setNameEditor({mode:'rename',entry})} title={t('sshWorkspace.rename')}><Edit3 size={12}/></button><button type="button" className="danger" disabled={!!transfer} onClick={()=>setDeleteCandidate({entry})} title={t('common.delete')}><Trash2 size={12}/></button></div>):<span className="sftp-state">{t('workspace.emptyDirectory')}</span>}</div>
+			{transfer&&<FileTransferProgress transfer={transfer} onCancel={()=>transferAbort.current?.abort()}/>}
 			{notice&&<div className={`sftp-notice ${noticeError?'error':''}`}>{notice}<button onClick={()=>setNotice('')}><X size={11}/></button></div>}
 			{dragging&&<div className="sftp-drop"><UploadCloud size={28}/><b>{t('workspace.dropFilesHere')}</b></div>}
 		</aside>
@@ -1655,6 +1727,7 @@ function MCPServersPage({servers,refreshServers,refreshToolCatalog}:{servers:MCP
 	const [authorizing,setAuthorizing]=useState('')
 	const refresh=async()=>{await Promise.all([refreshServers(),refreshToolCatalog()])}
 	const openCreate=()=>{setForm(null);setImportConfig('');setError('')}
+	const closeCreate=()=>{if(busy==='import')return;setImportConfig(null);setError('')}
 	const openEdit=(server:MCPServer)=>{setImportConfig(null);setForm({id:server.id,name:server.name,transport:server.transport,command:server.command||'',argsText:(server.args||[]).join('\n'),cwd:server.cwd||'',url:server.url||'',envText:'',headersText:'',enabled:server.enabled,clearEnv:false,clearHeaders:false});setError('')}
 	const importServers=async(event:FormEvent)=>{event.preventDefault();if(importConfig===null)return;setBusy('import');setError('');let imported=0;try{
 		const inputs=parseMCPImport(importConfig)
@@ -1696,8 +1769,8 @@ function MCPServersPage({servers,refreshServers,refreshToolCatalog}:{servers:MCP
 	const remove=async()=>{if(!deleteCandidate)return;const server=deleteCandidate;setBusy(`delete-${server.id}`);setError('');try{await api.deleteMCPServer(server.id);notify(t('mcp.deleted',{name:server.name}));await refresh()}catch(err){setError(errorText(err))}finally{setBusy('');setDeleteCandidate(null)}}
 		return <div className="mcp-page page-stack has-floating-actions">
 			{importConfig===null&&!form&&<FloatingPageActions><button className="primary" onClick={openCreate}><Plus size={15}/>{t('mcp.add')}</button></FloatingPageActions>}
-		{error&&<div className="skill-error"><ShieldAlert size={15}/>{error}<button onClick={()=>setError('')}><X size={14}/></button></div>}
-		{importConfig!==null&&<form className="mcp-form mcp-import-form panel" onSubmit={importServers}><header><div><Zap size={19}/><span><h3>{t('mcp.importConfig')}</h3></span></div><button type="button" onClick={()=>setImportConfig(null)} title={t('common.close')}><X size={15}/></button></header><div className="mcp-import-body"><textarea autoFocus spellCheck={false} aria-label={t('mcp.config')} value={importConfig} onChange={event=>setImportConfig(event.target.value)} placeholder={mcpImportExample}/></div><footer><span className="mcp-form-spacer"/><button type="button" onClick={()=>setImportConfig(null)}>{t('common.cancel')}</button><button className="primary" disabled={busy==='import'||!importConfig.trim()}>{busy==='import'?<LoaderCircle className="spin" size={14}/>:<Plus size={14}/>} {busy==='import'?t('mcp.importing'):t('mcp.import')}</button></footer></form>}
+		{error&&importConfig===null&&<div className="skill-error"><ShieldAlert size={15}/>{error}<button onClick={()=>setError('')}><X size={14}/></button></div>}
+		{importConfig!==null&&createPortal(<div className="connection-dialog-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget)closeCreate()}}><form className="mcp-form mcp-import-form extension-dialog panel" role="dialog" aria-modal="true" aria-labelledby="mcp-import-title" onSubmit={importServers}><header><div><Zap size={19}/><span><h3 id="mcp-import-title">{t('mcp.importConfig')}</h3></span></div><button type="button" disabled={busy==='import'} onClick={closeCreate} title={t('common.close')}><X size={15}/></button></header><div className="mcp-import-body"><textarea autoFocus spellCheck={false} aria-label={t('mcp.config')} value={importConfig} onChange={event=>setImportConfig(event.target.value)} placeholder={mcpImportExample}/></div>{error&&<div className="connection-dialog-error" role="alert"><ShieldAlert size={14}/><span>{error}</span></div>}<footer><span className="mcp-form-spacer"/><button type="button" disabled={busy==='import'} onClick={closeCreate}>{t('common.cancel')}</button><button className="primary" disabled={busy==='import'||!importConfig.trim()}>{busy==='import'?<LoaderCircle className="spin" size={14}/>:<Plus size={14}/>} {busy==='import'?t('mcp.importing'):t('mcp.import')}</button></footer></form></div>,document.body)}
 		{form&&<form className="mcp-form panel" noValidate onSubmit={save}><header><div><Zap size={19}/><span><h3>{form.name||t('mcp.server')}</h3></span></div><button type="button" onClick={()=>setForm(null)} title={t('common.close')}><X size={15}/></button></header><div className="mcp-form-grid"><label><span>{t('mcp.displayName')}</span><input value={form.name} onChange={event=>setForm({...form,name:event.target.value})}/></label><label><span>{t('mcp.transport')}</span><AppSelect value={form.transport} ariaLabel={t('mcp.transport')} onChange={value=>setForm({...form,transport:value as MCPTransport})} options={[{value:'stdio',label:t('mcp.localProcess')},{value:'streamable_http',label:'Streamable HTTP'}]}/></label>{form.transport==='stdio'?<><label><span>{t('mcp.command')}</span><input value={form.command} onChange={event=>setForm({...form,command:event.target.value})}/></label><label><span>{t('mcp.cwd')}</span><input value={form.cwd} onChange={event=>setForm({...form,cwd:event.target.value})}/></label><label className="mcp-wide"><span>{t('mcp.args')}</span><textarea value={form.argsText} onChange={event=>setForm({...form,argsText:event.target.value})}/></label></>:<label className="mcp-wide"><span>{t('mcp.endpoint')}</span><input value={form.url} onChange={event=>setForm({...form,url:event.target.value})}/></label>}<label className="mcp-wide"><span>{t('mcp.env')}</span><textarea value={form.envText} onChange={event=>setForm({...form,envText:event.target.value,clearEnv:false})} placeholder={t('mcp.preserve')}/><small><label><input type="checkbox" checked={form.clearEnv} onChange={event=>setForm({...form,clearEnv:event.target.checked,envText:event.target.checked?'':form.envText})}/> {t('mcp.clearEnv')}</label></small></label><label className="mcp-wide"><span>{t('mcp.headers')}</span><textarea value={form.headersText} onChange={event=>setForm({...form,headersText:event.target.value,clearHeaders:false})} placeholder={t('mcp.preserve')}/><small><label><input type="checkbox" checked={form.clearHeaders} onChange={event=>setForm({...form,clearHeaders:event.target.checked,headersText:event.target.checked?'':form.headersText})}/> {t('mcp.clearHeaders')}</label></small></label></div><footer><label className="mcp-enable-on-save"><input type="checkbox" checked={form.enabled} onChange={event=>setForm({...form,enabled:event.target.checked})}/><i/><span><b>{t('mcp.enableAfterSave')}</b></span></label><button type="button" onClick={()=>setForm(null)}>{t('common.cancel')}</button><button className="primary" disabled={busy==='save'}>{busy==='save'?<LoaderCircle className="spin" size={14}/>:<Save size={14}/>} {busy==='save'?t('common.saving'):t('mcp.saveServer')}</button></footer></form>}
 		<div className="mcp-grid">{servers.map(server=><article className={`mcp-card panel ${server.status}`} key={server.id}><header><div className="mcp-card-icon"><Zap size={19}/></div><span><h3>{server.name}</h3><code>{server.transport==='stdio'?server.command:server.url}</code></span><em className={server.status}><CircleDot size={9}/>{t(`statusLabels.${server.status}`,{defaultValue:server.status})}</em></header><dl><div><dt>{t('mcp.discoveredTools')}</dt><dd>{server.tool_count}</dd></div><div><dt>{t('mcp.secrets')}</dt><dd>{server.oauth_configured?t('mcp.oauth'):t('mcp.configuredSecrets',{count:(server.env_keys?.length||0)+(server.header_keys?.length||0)})}</dd></div><div><dt>{t('mcp.lastConnected')}</dt><dd>{server.connected_at?new Date(server.connected_at).toLocaleString(localeFor(instance.language)):'—'}</dd></div></dl>{server.last_error&&<div className="mcp-card-error"><ShieldAlert size={13}/><span>{server.last_error}</span></div>}<div className="mcp-actions"><button onClick={()=>void test(server)} disabled={!!busy||authorizing===server.id}><Activity size={13}/>{busy===`test-${server.id}`?t('common.testing'):t('common.test')}</button><button onClick={()=>openEdit(server)} disabled={!!busy||authorizing===server.id}><Edit3 size={13}/>{t('common.edit')}</button>{server.transport==='streamable_http'&&(server.status==='error'||server.oauth_configured)&&<button onClick={()=>void authorize(server)} disabled={!!busy||!!authorizing}><KeyRound size={13}/>{authorizing===server.id?t('mcp.authorizing'):server.oauth_configured?t('mcp.reauthorize'):t('mcp.authorize')}</button>}{server.oauth_configured&&<button title={t('mcp.clearAuthorization')} onClick={()=>void clearOAuth(server)} disabled={!!busy||!!authorizing}><LogOut size={13}/></button>}{server.enabled&&server.status!=='ready'&&authorizing!==server.id&&<button onClick={()=>void retry(server)} disabled={!!busy}><RefreshCw className={busy===`retry-${server.id}`?'spin':''} size={13}/>{t('common.retry')}</button>}<button className={server.enabled?'disable':'enable'} onClick={()=>void toggle(server)} disabled={!!busy||authorizing===server.id}>{busy===`toggle-${server.id}`?<LoaderCircle className="spin" size={13}/>:server.enabled?<X size={13}/>:<Check size={13}/>} {server.enabled?t('common.disable'):t('common.enable')}</button><button className="danger" title={t('common.delete')} onClick={()=>setDeleteCandidate(server)} disabled={!!busy||authorizing===server.id}><Trash2 size={13}/></button></div>{server.tools?.length?<details className="mcp-tools"><summary>{t('mcp.modelTools',{count:server.tools.length})} <ChevronRight size={13}/></summary><div>{server.tools.map(item=><section key={item.exposed_name}><code>{item.exposed_name}</code><span>{t('mcp.remote')} · {item.name}</span><p>{item.description}</p></section>)}</div></details>:null}</article>)}</div>
 		{!servers.length&&<Empty icon={<Zap/>} title={t('mcp.emptyTitle')}/>}
@@ -1770,6 +1843,8 @@ function SkillsPage({skills,refreshSkills,refreshToolCatalog,onToolCatalogChange
 	const dirty=!!selected&&draft!==selected.content
 	const markdownUpload=!!uploadFile&&/\.(?:md|markdown)$/i.test(uploadFile.name)
 	const selectFile=(file:File|null)=>{setUploadFile(file);if(file&&/\.(?:md|markdown)$/i.test(file.name)&&!uploadName){const base=file.name.replace(/\.(markdown|md)$/i,'').replace(/[^A-Za-z0-9_.-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,64);setUploadName(base)}else if(file)setUploadName('')}
+	const openUpload=()=>{setUploadOpen(true);setError('')}
+	const closeUpload=()=>{if(uploading)return;setUploadOpen(false);setUploadName('');setUploadFile(null);setError('')}
 	const upload=async(event:FormEvent)=>{event.preventDefault();if(!uploadFile)return;if(markdownUpload&&!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(uploadName.trim())){setError(t('skills.invalidName'));return}setUploading(true);setError('');try{const results=await api.uploadSkill(uploadName.trim(),uploadFile);const result=results[0]!;await Promise.all([refreshSkills(),refreshToolCatalog()]);setSelectedName(result.name);setSelected(result);setDraft(result.content||'');setUploadOpen(false);setUploadName('');setUploadFile(null);notify(t(results.length===1?'skills.uploaded':'skills.uploadedMany',{name:result.name,count:results.length}))}catch(err){setError(errorText(err))}finally{setUploading(false)}}
 	const save=async()=>{if(!selected)return;setSaving(true);setError('');try{const result=await api.saveSkill(selected.name,draft);setSelected(result);setDraft(result.content||'');await refreshSkills();notify(t('skills.saved',{name:result.name}))}catch(err){setError(errorText(err))}finally{setSaving(false)}}
 	const permanentlyDelete=async()=>{if(!deleteName)return;setDeleting(true);setError('');try{await api.deleteSkill(deleteName);setDeleteName('');setSelectedName('');setSelected(null);setDraft('');await refreshSkills();notify(t('skills.deleted',{name:deleteName}))}catch(err){setError(errorText(err))}finally{setDeleting(false)}}
@@ -1777,9 +1852,9 @@ function SkillsPage({skills,refreshSkills,refreshToolCatalog,onToolCatalogChange
 	const reload=async()=>{setReloading(true);setError('');try{onToolCatalogChanged(await api.reloadSkills());await refreshSkills();notify(t('skills.reloaded'))}catch(err){setError(errorText(err))}finally{setReloading(false)}}
 
 	return <div className="skills-page page-stack has-floating-actions">
-			<FloatingPageActions><button onClick={()=>void reload()} disabled={reloading}><RefreshCw className={reloading?'spin':''} size={15}/>{reloading?t('common.refreshing'):t('skills.reload')}</button><button className="primary" onClick={()=>{setUploadOpen(value=>!value);setError('')}}>{uploadOpen?<X size={15}/>:<UploadCloud size={15}/>} {uploadOpen?t('skills.closeUpload'):t('skills.uploadSkill')}</button></FloatingPageActions>
-		{error&&<div className="skill-error"><ShieldAlert size={15}/>{error}<button onClick={()=>setError('')}><X size={14}/></button></div>}
-		{uploadOpen&&<form className="skill-upload-panel panel" noValidate onSubmit={upload}><div><div className="skill-upload-icon"><UploadCloud size={20}/></div><span><b>{t('skills.uploadPackage')}</b><small>{t('skills.packageHelp')}</small></span></div>{markdownUpload&&<label><span>{t('skills.skillName')}</span><input value={uploadName} onChange={event=>setUploadName(event.target.value)}/></label>}<label className="skill-file-picker"><FileText size={15}/><span><b>{uploadFile?.name||t('skills.choosePackage')}</b><small>{uploadFile?formatFileSize(uploadFile.size):t('skills.maxPackage')}</small></span><input type="file" accept=".md,.markdown,.zip,.7z,text/markdown,application/zip,application/x-7z-compressed" onChange={event=>selectFile(event.target.files?.[0]||null)}/></label><button className="primary" disabled={uploading||!uploadFile||(markdownUpload&&!uploadName.trim())}>{uploading?<LoaderCircle className="spin" size={14}/>:<UploadCloud size={14}/>} {uploading?t('common.uploading'):t('skills.uploadActivate')}</button></form>}
+			<FloatingPageActions><button onClick={()=>void reload()} disabled={reloading}><RefreshCw className={reloading?'spin':''} size={15}/>{reloading?t('common.refreshing'):t('skills.reload')}</button><button className="primary" onClick={openUpload}><UploadCloud size={15}/>{t('skills.uploadSkill')}</button></FloatingPageActions>
+		{error&&!uploadOpen&&<div className="skill-error"><ShieldAlert size={15}/>{error}<button onClick={()=>setError('')}><X size={14}/></button></div>}
+		{uploadOpen&&createPortal(<div className="connection-dialog-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget)closeUpload()}}><form className="connection-dialog compact panel skill-upload-panel skill-upload-dialog" role="dialog" aria-modal="true" aria-labelledby="skill-upload-title" noValidate onSubmit={upload}><header><span><UploadCloud size={19}/><span><h2 id="skill-upload-title">{t('skills.uploadPackage')}</h2></span></span><button type="button" disabled={uploading} onClick={closeUpload} title={t('common.close')}><X size={15}/></button></header><div className="skill-upload-dialog-body">{markdownUpload&&<label><span>{t('skills.skillName')}</span><input value={uploadName} onChange={event=>setUploadName(event.target.value)} autoFocus/></label>}<label className="skill-file-picker"><FileText size={15}/><span><b>{uploadFile?.name||t('skills.choosePackage')}</b><small>{uploadFile?formatFileSize(uploadFile.size):t('skills.maxPackage')}</small></span><input type="file" accept=".md,.markdown,.zip,.7z,text/markdown,application/zip,application/x-7z-compressed" onChange={event=>selectFile(event.target.files?.[0]||null)}/></label></div>{error&&<div className="connection-dialog-error" role="alert"><ShieldAlert size={14}/><span>{error}</span></div>}<footer><button type="button" disabled={uploading} onClick={closeUpload}>{t('common.cancel')}</button><button className="primary" disabled={uploading||!uploadFile||(markdownUpload&&!uploadName.trim())}>{uploading?<LoaderCircle className="spin" size={14}/>:<UploadCloud size={14}/>} {uploading?t('common.uploading'):t('skills.uploadActivate')}</button></footer></form></div>,document.body)}
 		<div className="skill-manager-layout">
 			<section className="skill-list-panel panel"><label className="skill-search"><Search size={14}/><input value={query} onChange={event=>setQuery(event.target.value)} placeholder={t('skills.search')}/></label><div className="skill-list">{filtered.length?filtered.map(skill=><button className={`${selectedName===skill.name?'active':''} ${skill.enabled?'':'disabled'}`} onClick={()=>setSelectedName(skill.name)} key={skill.name}><div className="skill-card-icon"><BookOpen size={16}/></div><span><code>{skill.name}</code>{skill.summary&&<p>{skill.summary}</p>}<small><em className={skill.enabled?'enabled':'disabled'}>{skill.enabled?t('common.enabled'):t('common.disabled')}</em>{skill.file_count||1} {t('common.files')} · {formatFileSize(skill.size_bytes||0)}{skill.updated_at?` · ${new Date(skill.updated_at).toLocaleDateString(localeFor(instance.language))}`:''}</small></span><ChevronRight size={14}/></button>):<div className="skill-list-empty"><BookOpen size={23}/><b>{skills.length?t('skills.noMatch'):t('skills.noneInstalled')}</b></div>}</div></section>
 				<section className="skill-editor panel">{loading?<div className="skill-editor-state"><LoaderCircle className="spin" size={21}/>{t('skills.loading')}</div>:selected?<><header><div><BookOpen size={17}/><span><small>{t('skills.managed')} · {selected.enabled?t('common.enabled'):t('common.disabled')}</small><code>{selected.name}</code></span></div><section><button className={selected.enabled?'skill-disable':'skill-enable'} disabled={toggling} onClick={toggleEnabled}>{toggling?<LoaderCircle className="spin" size={13}/>:selected.enabled?<X size={13}/>:<Check size={13}/>} {selected.enabled?t('common.disable'):t('common.enable')}</button><button disabled={!dirty||saving} onClick={save}>{saving?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {saving?t('common.saving'):t('skills.saveChanges')}</button><button className="danger" onClick={()=>setDeleteName(selected.name)}><Trash2 size={13}/>{t('common.delete')}</button></section></header><div className="skill-editor-meta"><span><b>SHA256</b><code title={selected.content_sha256}>{selected.content_sha256?.slice(0,16)||'—'}</code></span><span><b>{t('common.files')}</b><code>{selected.file_count||1}</code></span><span><b>{t('common.size')}</b><code>{formatFileSize(selected.size_bytes||0)}</code></span><span><b>{t('common.updated')}</b><code>{selected.updated_at?new Date(selected.updated_at).toLocaleString(localeFor(instance.language)):'—'}</code></span></div><div className="skill-editor-split"><label><span>SKILL.md</span><textarea value={draft} spellCheck={false} onChange={event=>setDraft(event.target.value)}/></label><section><span>{t('skills.livePreview')}</span><div className="markdown-body"><Markdown skipHtml remarkPlugins={[remarkGfm]} components={{a:({href,children})=><a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,img:({alt})=><span className="markdown-image-blocked">{t('skills.blockedImage',{alt:alt||t('common.image')})}</span>,pre:({children})=><CopyablePre>{children}</CopyablePre>}}>{draft||t('skills.emptySkill')}</Markdown></div></section></div></>:<div className="skill-editor-state"><BookOpen size={25}/><b>{t('skills.select')}</b></div>}</section>
@@ -2043,8 +2118,9 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		useEffect(()=>setContextUsage(current=>current.tokens===0?{...current,window:activeContextWindow}:current),[activeContextWindow])
   const [tasks,setTasks]=useState<AgentTaskList|null>(null)
 	const [tasksExpanded,setTasksExpanded]=useState(false)
-	const [approvalNotice,setApprovalNotice]=useState('')
 	const [workspaceID,setWorkspaceID]=useState(recalledWorkspace)
+	const [fileBrowserMode,setFileBrowserMode]=useState<'workspace'|'sftp'>('workspace')
+	const [sftpHostID,setSFTPHostID]=useState('')
 	const [boundWorkspaceID,setBoundWorkspaceID]=useState('')
 	const [workspaceSwitching,setWorkspaceSwitching]=useState(false)
   const messagesRef=useRef<HTMLDivElement>(null)
@@ -2056,10 +2132,11 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	const reconnectErrorRef=useRef('')
   const sessionLoadRef=useRef('')
   const currentApprovals=useMemo(()=>sessionId?approvals.filter(item=>item.session_id===sessionId):[],[approvals,sessionId])
-	const pendingExplanationID=currentApprovals.find(item=>item.ai_review?.status==='pending')?.id||''
+	const approvalCountsBySession=useMemo(()=>{const counts=new Map<string,number>();for(const approval of approvals){if(!approval.session_id)continue;counts.set(approval.session_id,(counts.get(approval.session_id)||0)+1)}return counts},[approvals])
 	const sessionBusy=running||detachedRunning
-	const toolsRunning=entries.some(item=>item.kind==='tool'&&item.transient)
+	const toolsRunning=useMemo(()=>entries.some(item=>item.kind==='tool'&&item.transient),[entries])
 	const renderEntries=useMemo(()=>groupedTaskToolEntries(entries),[entries])
+	const taskRows=useMemo(()=>tasks?buildSessionTaskRows(tasks):[],[tasks])
 	const latestAssistantEntryID=useMemo(()=>{
 		for(let index=entries.length-1;index>=0;index--){
 			const entry=entries[index]
@@ -2069,36 +2146,32 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	},[entries])
 	const selectedWorkspace=capabilities.workspaces.find(workspace=>workspace.id===workspaceID)||capabilities.workspaces[0]
 	useEffect(()=>{
-		if(!sessionBusy&&!toolsRunning){setWorkStatusIndex(0);return}
+		if(!visible||!sessionBusy&&!toolsRunning){setWorkStatusIndex(0);return}
 		const timer=window.setInterval(()=>setWorkStatusIndex(current=>(current+1)%workStatusKeys.length),2600)
 		return()=>window.clearInterval(timer)
-	},[sessionBusy,toolsRunning])
+	},[sessionBusy,toolsRunning,visible])
 	useEffect(()=>{if(!sessionId)setContextUsage({tokens:0,window:activeContextWindow})},[activeContextWindow,sessionId])
 	useEffect(()=>{if(!selectedWorkspace)return;if(workspaceID!==selectedWorkspace.id)setWorkspaceID(selectedWorkspace.id);rememberWorkspace(selectedWorkspace.id)},[selectedWorkspace,workspaceID])
 	useEffect(()=>{if(!tasks)setTasksExpanded(false);else setTasksExpanded(true)},[tasks?.session_id,!!tasks])
 	useEffect(()=>{
-		if(!connectionRetry)return
+		if(!visible||!connectionRetry)return
 		setRetryClock(Date.now())
 		const timer=window.setInterval(()=>setRetryClock(Date.now()),1000)
 		return()=>window.clearInterval(timer)
-	},[connectionRetry])
+	},[connectionRetry,visible])
 	useEffect(()=>()=>{sessionLoadRef.current='';const stream=activeStreamRef.current;activeStreamRef.current=null;stream?.controller.abort();window.cancelAnimationFrame(userScrollFrame.current);window.cancelAnimationFrame(disclosureScrollFrame.current)},[])
 	useEffect(()=>()=>{for(const url of imageURLsRef.current)URL.revokeObjectURL(url);imageURLsRef.current.clear()},[])
 	const addImages=(files:File[])=>{const accepted=files.filter(file=>imageTypes.includes(file.type));if(accepted.length!==files.length)setImageNotice(t('chat.imageTypeRejected'));if(!accepted.length)return;const next=accepted.map(file=>{const url=URL.createObjectURL(file);imageURLsRef.current.add(url);return{id:clientId(),file,url}});setPendingImages(current=>[...current,...next])}
 	const removePendingImage=(id:string)=>{setPendingImages(current=>{const target=current.find(image=>image.id===id);if(target){URL.revokeObjectURL(target.url);imageURLsRef.current.delete(target.url)}return current.filter(image=>image.id!==id)});setImageInputKey(value=>value+1)}
 	const clearPendingImages=()=>{for(const image of pendingImages){URL.revokeObjectURL(image.url);imageURLsRef.current.delete(image.url)}setPendingImages([]);setImageInputKey(value=>value+1);setImageNotice('')}
-	useEffect(()=>{
-		if(!pendingExplanationID)return
-		void refreshApprovals()
-		const timer=window.setInterval(()=>{if(document.visibilityState==='visible')void refreshApprovals()},1500)
-		return()=>window.clearInterval(timer)
-	},[pendingExplanationID,refreshApprovals])
-
   const refreshSessions = useCallback(async () => {
     try {
-      const items = await api.chatSessions(); setSessions(items); setHistoryError(''); return items
+      const items = await api.chatSessions(); setSessions(current=>keepEquivalent(current,items)); setHistoryError(''); return items
     } catch (err) { setHistoryError(errorText(err)); return [] }
-  }, [])
+	}, [])
+	useEffect(()=>subscribeApplicationEvents<ChatSession[]>('sessions',event=>{
+		if(event.type==='event'&&event.data)setSessions(current=>keepEquivalent(current,event.data!))
+	}),[])
 
   const detachActiveStream = useCallback(() => {
     const stream=activeStreamRef.current
@@ -2124,18 +2197,11 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	finally { if(sessionLoadRef.current===requestID)setLoadingSession('') }
 	}, [activeContextWindow])
 
-	const hasBackgroundActiveSession=useMemo(()=>sessions.some(item=>item.active&&item.id!==sessionId),[sessionId,sessions])
-	useEffect(()=>{
-		if(!hasBackgroundActiveSession)return
-		const timer=window.setInterval(()=>{if(document.visibilityState==='visible')void refreshSessions()},2500)
-		return()=>window.clearInterval(timer)
-	},[hasBackgroundActiveSession,refreshSessions])
-
   useLayoutEffect(()=>{
-    if(!stickToLatest.current)return
+	    if(!visible||!stickToLatest.current)return
     const container=messagesRef.current
     if(container)container.scrollTop=container.scrollHeight
-  },[entries,loadingSession])
+	  },[entries,loadingSession,visible])
 
 	const trackUserScroll=()=>{
 		window.cancelAnimationFrame(userScrollFrame.current)
@@ -2254,7 +2320,6 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		if(frame.type==='turn_done')setEntries(old=>old.map(item=>item.kind==='user'&&item.status==='pending'?{...deactivateReasoning(item),status:'completed' as const}:deactivateReasoning(item)))
 		if(frame.type==='approval'){
 			setEntries(old=>updateToolStatusByRunID(old.map(item=>updateUser(item,'completed')),'approval_required',frame.run_id))
-			setApprovalNotice('')
 			void refreshApprovals()
 		}
 		if(frame.type==='tool_output')setEntries(old=>appendToolOutput(old,frame))
@@ -2362,23 +2427,17 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	},[activeContextWindow,detachedRunning,handleAgentFrame,refreshSessions,running,sessionId])
 
 	useEffect(()=>{
-		if(!sessionId||!toolsRunning||running)return
-		let active=true
-		const poll=async()=>{
-			try{
-				const state=await api.chatState(sessionId)
-				if(!active)return
-				setEntries(old=>mergePersistedToolEntries(state.messages||[],sessionId,old))
-				setQueuedMessages(state.queued_messages||[])
-				setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)})
-				if(state.active&&!running)setDetachedRunning(true)
-				if(!state.active&&!(state.tool_calls||[]).some(call=>call.status==='running'))setStopping(false)
-			}catch{/* keep the last confirmed tool state and retry */}
-		}
-		void poll()
-		const timer=window.setInterval(()=>{if(document.visibilityState==='visible')void poll()},3000)
-		return()=>{active=false;window.clearInterval(timer)}
-	},[activeContextWindow,running,sessionId,toolsRunning])
+		if(!visible||!sessionId||!toolsRunning||running)return
+		return subscribeApplicationEvents<ChatState>('chat_state',event=>{
+			if(event.type!=='event'||!event.data)return
+			const state=event.data
+			setEntries(old=>mergePersistedToolEntries(state.messages||[],sessionId,old))
+			setQueuedMessages(current=>keepEquivalent(current,state.queued_messages||[]))
+			setContextUsage(current=>keepEquivalent(current,{tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)}))
+			if(state.active&&!running)setDetachedRunning(true)
+			if(!state.active&&!(state.tool_calls||[]).some(call=>call.status==='running'))setStopping(false)
+		},{sessionId})
+	},[activeContextWindow,running,sessionId,toolsRunning,visible])
 
 	  const sendQuery = async (query:string,queryImages:PendingChatImage[]) => {
 	    query=query.trim(); if((!query&&!queryImages.length)||sessionBusy||loadingSession||workspaceSwitching)return
@@ -2392,7 +2451,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
     stickToLatest.current=true
 		setSessionId(querySessionID);rememberSession(querySessionID)
 		reconnectErrorRef.current=''
-		setApprovalNotice('');setStopping(false);setCompressingContext(false);setModelRetry(null);setConnectionRetry(null);setRunning(true)
+		setStopping(false);setCompressingContext(false);setModelRetry(null);setConnectionRetry(null);setRunning(true)
 	    const entryImages=queryImages.map(image=>({id:image.id,name:image.file.name,mimeType:image.file.type,sizeBytes:image.file.size,url:image.url}))
 	    setEntries((old) => [...old.filter(item=>item.kind!=='error'), { id: userEntryID, kind: 'user', content: query, images:entryImages, status:'pending' }])
 	    try {
@@ -2485,23 +2544,23 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		<div className="session-list">
 			{historyError&&<div className="history-error">{historyError}</div>}
 			{!sessions.length&&!historyError&&<div className="history-empty">{t('chat.noSaved')}</div>}
-			{sessions.map(session=>{const pending=approvals.filter(item=>item.session_id===session.id).length;const active=session.active||(session.id===sessionId&&(sessionBusy||toolsRunning));return <div className={`session-item ${session.id===sessionId?'active':''}`} key={session.id}><button className="session-open" onClick={()=>switchSession(session.id)} disabled={workspaceSwitching||loadingSession===session.id}><b>{session.title}{pending>0&&<em className="session-approval-count">{t('chat.approvalCount',{count:pending})}</em>}{active&&<em className="session-running-count">{t('chat.runningBadge')}</em>}</b><span>{new Date(session.updated_at).toLocaleString(localeFor(instance.language))} · {t('chat.messageCount',{count:session.message_count})}</span></button><div className="session-actions"><button className="session-edit" onClick={()=>{setSessionRenameError('');setSessionRenameCandidate(session)}} disabled={workspaceSwitching} title={t('chat.renameConversation')} aria-label={t('chat.renameConversation')}><Edit3 size={13}/></button><button className="session-delete" onClick={()=>{if(!active)setSessionDeleteCandidate(session)}} disabled={active||workspaceSwitching} title={active?t('chat.cannotDelete'):t('chat.deleteConversation')}><Trash2 size={13}/></button></div></div>})}
+			{sessions.map(session=>{const pending=approvalCountsBySession.get(session.id)||0;const active=session.active||(session.id===sessionId&&(sessionBusy||toolsRunning));return <div className={`session-item ${session.id===sessionId?'active':''}`} key={session.id}><button className="session-open" onClick={()=>switchSession(session.id)} disabled={workspaceSwitching||loadingSession===session.id}><b>{session.title}{pending>0&&<em className="session-approval-count">{t('chat.approvalCount',{count:pending})}</em>}{active&&<em className="session-running-count">{t('chat.runningBadge')}</em>}</b><span>{new Date(session.updated_at).toLocaleString(localeFor(instance.language))} · {t('chat.messageCount',{count:session.message_count})}</span></button><div className="session-actions"><button className="session-edit" onClick={()=>{setSessionRenameError('');setSessionRenameCandidate(session)}} disabled={workspaceSwitching} title={t('chat.renameConversation')} aria-label={t('chat.renameConversation')}><Edit3 size={13}/></button><button className="session-delete" onClick={()=>{if(!active)setSessionDeleteCandidate(session)}} disabled={active||workspaceSwitching} title={active?t('chat.cannotDelete'):t('chat.deleteConversation')}><Trash2 size={13}/></button></div></div>})}
 		</div>
 	</>,sidebarTarget)
 
-  return <>{sessionSidebar}<div className={`chat-layout ${workspacePanelCollapsed?'workspace-panel-collapsed ':''}${visible?'':'page-hidden'}`}>
-		<ChatWorkspacePanel key={selectedWorkspace?.id||''} workspaces={capabilities.workspaces} workspaceID={selectedWorkspace?.id||''} shells={workspaceShells} switching={workspaceSwitching} disabled={sessionBusy||!!loadingSession} bound={!!selectedWorkspace&&boundWorkspaceID===selectedWorkspace.id} onSelect={id=>void switchWorkspace(id)} onCreateShell={onCreateWorkspaceShell} onOpenShell={onOpenWorkspaceShell} onCollapse={()=>setWorkspaceCollapsed(true)}/>
+	return <>{sessionSidebar}<ChatVisibilityContext.Provider value={visible}><div className={`chat-layout ${workspacePanelCollapsed?'workspace-panel-collapsed ':''}${visible?'':'page-hidden'}`}>
+		<ChatWorkspacePanel key={selectedWorkspace?.id||''} active={visible} mode={fileBrowserMode} onModeChange={setFileBrowserMode} workspaces={capabilities.workspaces} workspaceID={selectedWorkspace?.id||''} hosts={hosts} sftpHostID={sftpHostID} onSFTPHostChange={setSFTPHostID} shells={workspaceShells} switching={workspaceSwitching} disabled={sessionBusy||!!loadingSession} bound={!!selectedWorkspace&&boundWorkspaceID===selectedWorkspace.id} onSelect={id=>void switchWorkspace(id)} onCreateShell={onCreateWorkspaceShell} onOpenShell={onOpenWorkspaceShell} onCollapse={()=>setWorkspaceCollapsed(true)}/>
+	  {workspacePanelCollapsed&&<button type="button" className="chat-panel-open-button" onClick={()=>setWorkspaceCollapsed(false)} title={t('workspace.expandPanel')} aria-label={t('workspace.expandPanel')}><PanelLeftOpen size={15}/></button>}
     <div className="chat-main panel">
-	  {workspacePanelCollapsed&&<button className="chat-panel-open-button" onClick={()=>setWorkspaceCollapsed(false)} title={t('workspace.expandPanel')} aria-label={t('workspace.expandPanel')}><PanelLeftOpen size={15}/></button>}
-	  <div className="session-approval-slot">{currentApprovals.length>0&&<ApprovalDialog key={currentApprovals[0].id} approval={currentApprovals[0]} pendingCount={currentApprovals.length} hosts={hosts} running={sessionBusy} stopping={stopping} onStop={()=>void stopAgent()} refreshApprovals={refreshApprovals} onApproved={result=>{setEntries(old=>updateToolRunStatus(old,result.run_id,result.status==='running'?'in_progress':result.status));if(result.shell?.kind==='workspace')onWorkspaceShellStarted(result.shell)}} onNotice={setApprovalNotice}/>} {approvalNotice&&currentApprovals.length===0&&<div className="approval-toast"><ShieldCheck size={14}/><span>{approvalNotice}</span><button onClick={()=>setApprovalNotice('')}><X size={13}/></button></div>}</div>
-	      <div className="session-task-slot">{tasks&&<SessionTasks tasks={tasks} expanded={tasksExpanded} onExpanded={setTasksExpanded}/>}</div>
+	  <div className="session-approval-slot">{currentApprovals.length>0&&<ApprovalDialog key={currentApprovals[0].id} approval={currentApprovals[0]} pendingCount={currentApprovals.length} hosts={hosts} running={sessionBusy} stopping={stopping} onStop={()=>void stopAgent()} refreshApprovals={refreshApprovals} onApproved={result=>{setEntries(old=>updateToolRunStatus(old,result.run_id,result.status==='running'?'in_progress':result.status));if(result.shell?.kind==='workspace')onWorkspaceShellStarted(result.shell)}} onNotice={notify}/>}</div>
+	      <div className="session-task-slot">{tasks&&<SessionTasks tasks={tasks} rows={taskRows} expanded={tasksExpanded} onExpanded={setTasksExpanded}/>}</div>
 		<div className="conversation-view">
 			<div className="messages" ref={messagesRef} onWheel={trackUserScroll} onTouchMove={trackUserScroll} onPointerUp={trackUserScroll}>
 				{entries.length === 0 && <div className="empty-chat"><div className="radar"><Activity size={35}/></div><h2>{t('chat.emptyTitle')}</h2></div>}
 				{renderEntries.map(item=>item.kind==='task_tool_group'?<TaskToolGroupCard key={item.id} group={item} onDisclosure={preserveToolDisclosurePosition}/>:<ChatBubble key={item.entry.id} entry={item.entry} showActions={item.entry.id===latestAssistantEntryID} runs={runs} hosts={hosts} onToolDisclosure={preserveToolDisclosurePosition}/>) }
 				{(sessionBusy||toolsRunning)&&<div className={`model-activity ${stopping?'stopping':''}`} role="status" aria-live="polite"><span className="model-activity-mark" aria-hidden="true">✻</span><b key={stopping||connectionRetry||modelRetry?'priority':workStatusIndex}>{workStatusLabel}</b></div>}
 			</div>
-			{tasks&&tasksExpanded&&<SessionTaskItems tasks={tasks}/>}
+			{tasks&&tasksExpanded&&<SessionTaskItems rows={taskRows}/>}
 		</div>
 		  <form className="composer" onSubmit={submit}>
 			  {queuedMessages.length>0&&<div className="message-queue" role="status"><header><ListPlus size={13}/><b>{t('chat.queueCount',{count:queuedMessages.length})}</b></header><div>{queuedMessages.map((item,index)=>{const imageCount=item.attachments?.length||item.attachment_count||0;return <span key={item.id}><em>{index+1}</em><b>{item.message||t('chat.queuedImages',{count:imageCount})}</b>{imageCount>0&&item.message&&<small>{t('chat.imageCount',{count:imageCount})}</small>}</span>})}</div></div>}
@@ -2513,19 +2572,39 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
     </div>
 	{sessionDeleteCandidate&&<DestructiveConfirmDialog title={t('chat.deleteTitle',{title:sessionDeleteCandidate.title})} busy={deletingSession} onCancel={()=>setSessionDeleteCandidate(null)} onConfirm={()=>void removeSession()}/>}
 	{sessionRenameCandidate&&<SessionRenameDialog key={sessionRenameCandidate.id} session={sessionRenameCandidate} busy={renamingSession} error={sessionRenameError} onCancel={()=>{if(!renamingSession)setSessionRenameCandidate(null)}} onConfirm={title=>void renameSession(title)}/>}
-  </div></>
+	</div></ChatVisibilityContext.Provider></>
 }
 
-function formatFileSize(size:number){if(size<1024)return `${size} B`;if(size<1024*1024)return `${(size/1024).toFixed(1)} KiB`;return `${(size/1024/1024).toFixed(1)} MiB`}
+function formatFileSize(size:number){if(size<1024)return `${size} B`;if(size<1024**2)return `${(size/1024).toFixed(1)} KiB`;if(size<1024**3)return `${(size/1024**2).toFixed(1)} MiB`;return `${(size/1024**3).toFixed(1)} GiB`}
+
+type ActiveFileTransfer={name:string;loaded:number;total:number;index?:number;count?:number}
+
+function FileTransferProgress({transfer,onCancel}:{transfer:ActiveFileTransfer;onCancel:()=>void}){
+	const {t}=useTranslation()
+	const percent=transfer.total>0?Math.min(100,Math.round(transfer.loaded/transfer.total*100)):0
+	return <div className={`file-transfer-progress ${transfer.total>0?'':'indeterminate'}`} role="progressbar" aria-valuemin={0} aria-valuemax={transfer.total||undefined} aria-valuenow={transfer.total>0?transfer.loaded:undefined}>
+		<div><span title={transfer.name}>{transfer.index&&transfer.count?`${transfer.index}/${transfer.count} · `:''}{transfer.name}</span><b>{formatFileSize(transfer.loaded)}{transfer.total>0?` / ${formatFileSize(transfer.total)}`:''}</b><button type="button" onClick={onCancel}>{t('common.cancel')}</button></div>
+		<i><em style={transfer.total>0?{width:`${percent}%`}:undefined}/></i>
+	</div>
+}
 
 type WorkspaceNotice={kind:'success'|'error';text:string}
 type WorkspaceDeleteCandidate={workspaceID:string;path:string;type:'file'|'directory'}
+type FileBrowserMode='workspace'|'sftp'
 
 function workspaceChildPath(path:string,name:string){return path==='.'?name:`${path}/${name}`}
 
-function ChatWorkspacePanel({workspaces,workspaceID,shells,switching,disabled,bound,onSelect,onCreateShell,onOpenShell,onCollapse}:{workspaces:WorkspaceCapability[];workspaceID:string;shells:SSHShell[];switching:boolean;disabled:boolean;bound:boolean;onSelect:(id:string)=>void;onCreateShell:(workspaceID:string)=>Promise<void>;onOpenShell:(shell:SSHShell)=>void;onCollapse:()=>void}){
+const MemoChatPage=memo(ChatPage)
+
+function FileBrowserTabs({mode,onChange}:{mode:FileBrowserMode;onChange:(mode:FileBrowserMode)=>void}){
+	const {t}=useTranslation()
+	return <div className="file-browser-tabs" role="tablist"><button type="button" className={mode==='workspace'?'active':''} role="tab" aria-selected={mode==='workspace'} onClick={()=>onChange('workspace')}><FolderOpen size={14}/><span>{t('common.workspace')}</span></button><button type="button" className={mode==='sftp'?'active':''} role="tab" aria-selected={mode==='sftp'} onClick={()=>onChange('sftp')}><Server size={14}/><span>SFTP</span></button></div>
+}
+
+function ChatWorkspacePanel({active,mode,onModeChange,workspaces,workspaceID,hosts,sftpHostID,onSFTPHostChange,shells,switching,disabled,bound,onSelect,onCreateShell,onOpenShell,onCollapse}:{active:boolean;mode:FileBrowserMode;onModeChange:(mode:FileBrowserMode)=>void;workspaces:WorkspaceCapability[];workspaceID:string;hosts:Host[];sftpHostID:string;onSFTPHostChange:(id:string)=>void;shells:SSHShell[];switching:boolean;disabled:boolean;bound:boolean;onSelect:(id:string)=>void;onCreateShell:(workspaceID:string)=>Promise<void>;onOpenShell:(shell:SSHShell)=>void;onCollapse:()=>void}){
 	const {t}=useTranslation()
 	const workspace=workspaces.find(item=>item.id===workspaceID)||workspaces[0]
+	const sftpHost=hosts.find(item=>item.id===sftpHostID)||hosts[0]
 	const activeWorkspaceID=workspace?.id||''
 	const [path,setPath]=useState('.')
 	const [entries,setEntries]=useState<{name:string;type:'file'|'directory';size?:number}[]>([])
@@ -2535,7 +2614,10 @@ function ChatWorkspacePanel({workspaces,workspaceID,shells,switching,disabled,bo
 	const [preview,setPreview]=useState<WorkspaceFilePreview|null>(null),[previewLoading,setPreviewLoading]=useState(''),[deleting,setDeleting]=useState('')
 	const [deleteCandidate,setDeleteCandidate]=useState<WorkspaceDeleteCandidate|null>(null)
 	const [startingShell,setStartingShell]=useState(false)
+	const [transfer,setTransfer]=useState<ActiveFileTransfer|null>(null)
+	const transferAbort=useRef<AbortController|null>(null)
 	const loadRequestRef=useRef(0),previewPathRef=useRef('')
+	useEffect(()=>()=>transferAbort.current?.abort(),[])
 	const activeShells=shells.filter(shell=>shell.workspace_id===activeWorkspaceID&&sshShellActive(shell.status)).sort((left,right)=>left.started_at.localeCompare(right.started_at))
 
 	const load=useCallback(async(showLoading=true)=>{
@@ -2561,47 +2643,57 @@ function ChatWorkspacePanel({workspaces,workspaceID,shells,switching,disabled,bo
 	},[activeWorkspaceID,previewPath])
 	const synchronize=useCallback((showLoading=false)=>{void load(showLoading);void refreshPreview()},[load,refreshPreview])
 
-	useEffect(()=>{void load()},[load])
+	useEffect(()=>{if(active&&mode==='workspace')void load()},[active,load,mode])
 	useEffect(()=>{
-		if(!activeWorkspaceID)return
+		if(!active||mode!=='workspace'||!activeWorkspaceID)return
 		const source=new EventSource(workspaceFileEventsURL(activeWorkspaceID,path))
 		const changed=()=>synchronize(false)
 		source.addEventListener('workspace-change',changed)
 		source.onopen=changed
 		return()=>{source.removeEventListener('workspace-change',changed);source.close()}
-	},[activeWorkspaceID,path,synchronize])
+	},[active,activeWorkspaceID,mode,path,synchronize])
 
 	const choose=(event:React.ChangeEvent<HTMLInputElement>)=>{
 		const selected=event.target.files?.[0]||null
 		setFile(selected);setTarget(selected?workspaceChildPath(path,selected.name):'');setNotice(null)
 	}
 	const upload=async()=>{
-		if(!workspace||!file||!target.trim())return
+		if(!workspace||!file||!target.trim()||transfer)return
 		setUploading(true);setNotice(null)
+		const controller=new AbortController();transferAbort.current=controller
+		setTransfer({name:file.name,loaded:0,total:file.size})
 		try{
-			const result=await api.uploadWorkspaceFile(workspace.id,file,target.trim())
+			const result=await api.uploadWorkspaceFile(workspace.id,file,target.trim(),{signal:controller.signal,onProgress:progress=>setTransfer(current=>current?{...current,...progress}:current)})
 			setNotice({kind:'success',text:t('workspace.uploaded',{path:result.path})});setFile(null);setTarget('');setInputKey(value=>value+1)
-		}catch(err){setNotice({kind:'error',text:errorText(err)})}
-		finally{setUploading(false)}
+		}catch(err){if(!isAbortError(err))setNotice({kind:'error',text:errorText(err)})}
+		finally{if(transferAbort.current===controller)transferAbort.current=null;setTransfer(null);setUploading(false)}
 	}
 	const uploadDropped=async(files:File[])=>{
-		if(!workspace||workspace.access!=='read_write'||uploading||!files.length)return
+		if(!workspace||workspace.access!=='read_write'||uploading||transfer||!files.length)return
 		setUploading(true);setNotice({kind:'success',text:t('workspace.uploadingFiles',{count:files.length})})
+		const controller=new AbortController();transferAbort.current=controller
+		const total=files.reduce((sum,item)=>sum+item.size,0)
+		let completedBytes=0
 		let uploaded=0
+		let aborted=false
 		const failures:string[]=[]
-		for(const dropped of files){
-			try{await api.uploadWorkspaceFile(workspace.id,dropped,workspaceChildPath(path,dropped.name));uploaded+=1}
-			catch(err){failures.push(`${dropped.name}: ${errorText(err)}`)}
+		for(let index=0;index<files.length;index++){
+			const dropped=files[index]
+			setTransfer({name:dropped.name,loaded:completedBytes,total,index:index+1,count:files.length})
+			try{await api.uploadWorkspaceFile(workspace.id,dropped,workspaceChildPath(path,dropped.name),{signal:controller.signal,onProgress:progress=>setTransfer(current=>current?{...current,loaded:completedBytes+progress.loaded,total}:current)});uploaded+=1;completedBytes+=dropped.size}
+			catch(err){if(isAbortError(err)){aborted=true;break}failures.push(`${dropped.name}: ${errorText(err)}`)}
 		}
-		if(failures.length){setNotice({kind:'error',text:t('workspace.uploadPartial',{uploaded,failed:failures.length,message:failures[0]})})}
+		if(aborted)setNotice(null)
+		else if(failures.length){setNotice({kind:'error',text:t('workspace.uploadPartial',{uploaded,failed:failures.length,message:failures[0]})})}
 		else{setNotice({kind:'success',text:t('workspace.uploadedFiles',{count:uploaded})})}
-		setUploading(false)
+		if(transferAbort.current===controller)transferAbort.current=null
+		setTransfer(null);setUploading(false)
 	}
 	const acceptsFiles=(event:React.DragEvent<HTMLElement>)=>workspace?.access==='read_write'&&Array.from(event.dataTransfer.types).includes('Files')
 	const dragEnter=(event:React.DragEvent<HTMLElement>)=>{if(!acceptsFiles(event))return;event.preventDefault();event.stopPropagation();setDragging(true)}
-	const dragOver=(event:React.DragEvent<HTMLElement>)=>{if(!acceptsFiles(event))return;event.preventDefault();event.stopPropagation();event.dataTransfer.dropEffect=uploading?'none':'copy'}
+	const dragOver=(event:React.DragEvent<HTMLElement>)=>{if(!acceptsFiles(event))return;event.preventDefault();event.stopPropagation();event.dataTransfer.dropEffect=uploading||transfer?'none':'copy'}
 	const dragLeave=(event:React.DragEvent<HTMLElement>)=>{if(workspace?.access!=='read_write')return;event.preventDefault();event.stopPropagation();if(event.relatedTarget instanceof Node&&event.currentTarget.contains(event.relatedTarget))return;setDragging(false)}
-	const drop=(event:React.DragEvent<HTMLElement>)=>{if(!acceptsFiles(event))return;event.preventDefault();event.stopPropagation();setDragging(false);if(!uploading)void uploadDropped(Array.from(event.dataTransfer.files))}
+	const drop=(event:React.DragEvent<HTMLElement>)=>{if(!acceptsFiles(event))return;event.preventDefault();event.stopPropagation();setDragging(false);if(!uploading&&!transfer)void uploadDropped(Array.from(event.dataTransfer.files))}
 	const openEntry=async(name:string,type:'file'|'directory')=>{
 		const next=workspaceChildPath(path,name)
 		if(type==='directory'){setPath(next);return}
@@ -2609,11 +2701,13 @@ function ChatWorkspacePanel({workspaces,workspaceID,shells,switching,disabled,bo
 		setPreviewLoading(next);setNotice(null)
 		try{setPreview(await api.previewWorkspaceFile(workspace.id,next))}catch(err){setNotice({kind:'error',text:errorText(err)})}finally{setPreviewLoading('')}
 	}
-	const download=(relativePath:string,name:string)=>{
-		if(!workspace)return
-		const anchor=document.createElement('a')
-		anchor.href=workspaceDownloadURL(workspace.id,relativePath);anchor.download=name
-		document.body.appendChild(anchor);anchor.click();anchor.remove()
+	const download=async(relativePath:string,name:string,size=0)=>{
+		if(!workspace||transfer)return
+		const controller=new AbortController();transferAbort.current=controller
+		setTransfer({name,loaded:0,total:size})
+		try{await downloadFile(workspaceDownloadURL(workspace.id,relativePath),name,{signal:controller.signal,totalBytes:size,onProgress:progress=>setTransfer(current=>current?{...current,...progress}:current)})}
+		catch(err){if(!isAbortError(err))setNotice({kind:'error',text:errorText(err)})}
+		finally{if(transferAbort.current===controller)transferAbort.current=null;setTransfer(null)}
 	}
 	const requestEntryRemoval=(name:string,type:'file'|'directory')=>{
 		if(workspace)setDeleteCandidate({workspaceID:workspace.id,path:workspaceChildPath(path,name),type})
@@ -2647,37 +2741,46 @@ function ChatWorkspacePanel({workspaces,workspaceID,shells,switching,disabled,bo
 		try{await onCreateShell(workspace.id)}finally{setStartingShell(false)}
 	}
 
-	if(!workspace)return <aside className="workspace-browser-panel panel empty"><div className="panel-header"><div><FolderOpen size={17}/><span>{t('common.workspace')}</span></div><div className="workspace-panel-actions"><button type="button" onClick={onCollapse} title={t('workspace.collapsePanel')} aria-label={t('workspace.collapsePanel')}><PanelLeftClose size={14}/></button></div></div><div className="workspace-empty"><FolderOpen size={23}/><span>{t('workspace.noConfigured')}</span></div></aside>
+	if(mode==='sftp')return <SFTPBrowser key={sftpHost?.id||'no-host'} host={sftpHost} embedded hosts={hosts} onHostSelect={onSFTPHostChange} onWorkspaceMode={()=>onModeChange('workspace')} onCollapse={onCollapse}/>
+	if(!workspace)return <aside className="workspace-browser-panel panel empty"><div className="panel-header"><FileBrowserTabs mode={mode} onChange={onModeChange}/><div className="workspace-panel-actions"><button type="button" onClick={onCollapse} title={t('workspace.collapsePanel')} aria-label={t('workspace.collapsePanel')}><PanelLeftClose size={14}/></button></div></div><div className="workspace-empty"><FolderOpen size={23}/><span>{t('workspace.noConfigured')}</span></div></aside>
 	return <>
 		<aside className={`workspace-browser-panel panel ${dragging?'dragging':''}`} onDragEnter={dragEnter} onDragOver={dragOver} onDragLeave={dragLeave} onDrop={drop}>
-			<div className="panel-header"><div><FolderOpen size={17}/><span>{t('common.workspace')}</span></div><div className="workspace-panel-actions"><button type="button" disabled={!workspace.shell||startingShell} onClick={()=>void createShell()} title={t('workspace.newTerminal')}>{startingShell?<LoaderCircle className="spin" size={14}/>:<TerminalSquare size={14}/>}</button><AppSelect className="workspace-switch-select" value={workspace.id} disabled={workspaces.length<2||disabled||switching} ariaLabel={t('workspace.switchWorkspace')} onChange={onSelect} options={workspaces.map(item=>({value:item.id,label:item.id}))}/><button type="button" onClick={onCollapse} title={t('workspace.collapsePanel')} aria-label={t('workspace.collapsePanel')}><PanelLeftClose size={14}/></button></div></div>
-			<div className="workspace-summary"><div className="chat-workspace-head"><span><b>{workspace.id}</b>{(switching||bound)&&<small>{switching?t('workspace.switching'):t('workspace.boundToConversation')}</small>}</span><em className={workspace.access}>{workspace.access==='read_write'?t('workspace.readWrite'):t('workspace.readOnly')}</em></div>{activeShells.length>0&&<div className="workspace-shell-sessions">{activeShells.map(shell=><button type="button" onClick={()=>onOpenShell(shell)} title={shell.id} key={shell.id}><i className={shell.status}/><b>{t(shell.surface==='workspace_agent'?'workspace.agent':'workspace.operator')}</b><code>{shell.cwd||'.'}</code></button>)}</div>}</div>
-			<div className="workspace-path-row"><button onClick={up} disabled={path==='.'} title={t('workspace.parent')}>‹</button><code title={path}>{path}</code>{workspace.access==='read_write'&&<label title={t('workspace.uploadFile')}><UploadCloud size={14}/><input key={inputKey} type="file" onChange={choose}/></label>}<button onClick={()=>synchronize(true)} title={t('workspace.refreshFiles')}><RefreshCw size={12}/></button></div>
-			{file&&<div className="chat-upload-row"><input value={target} onChange={event=>setTarget(event.target.value)} aria-label={t('workspace.relativePath')}/><button onClick={()=>void upload()} disabled={uploading||!target.trim()}>{uploading?'...':t('common.upload')}</button><button onClick={()=>{setFile(null);setTarget('');setInputKey(value=>value+1)}} title={t('workspace.cancelUpload')}><X size={11}/></button></div>}
-			<div className="workspace-file-list">{loading?<span className="workspace-files-state"><LoaderCircle className="spin" size={13}/>{t('common.loading')}</span>:error?<span className="workspace-files-state error">{error}</span>:entries.length?entries.map(entry=>{const fullPath=workspaceChildPath(path,entry.name);return <div className="workspace-file-row" key={`${entry.type}:${entry.name}`}><button className="workspace-file-open" onClick={()=>void openEntry(entry.name,entry.type)} title={entry.type==='file'?t('workspace.previewFile'):t('workspace.openDirectory')}>{previewLoading===fullPath?<LoaderCircle className="spin" size={13}/>:entry.type==='directory'?<FolderOpen size={13}/>:<FileText size={13}/>}<span>{entry.name}</span>{entry.type==='file'&&<small>{formatFileSize(entry.size??0)}</small>}</button>{(entry.type==='file'||desktopRuntime&&entry.type==='directory'||workspace.access==='read_write')&&<div className="workspace-file-actions">{entry.type==='file'&&<button className="workspace-file-download" onClick={()=>download(fullPath,entry.name)} title={t('common.download')}><Download size={12}/></button>}{desktopRuntime&&entry.type==='directory'&&<button className="workspace-file-reveal" onClick={()=>void revealDirectory(fullPath)} title={t('workspace.revealDirectory')}><FolderOutput size={12}/></button>}{workspace.access==='read_write'&&<button className="workspace-file-delete" onClick={()=>requestEntryRemoval(entry.name,entry.type)} disabled={deleting===fullPath} title={t('workspace.deleteEntry',{type:t(`workspace.${entry.type}`)})}><Trash2 size={12}/></button>}</div>}</div>}):<span className="workspace-files-state">{t('workspace.emptyDirectory')}</span>}</div>
+			<div className="panel-header"><FileBrowserTabs mode={mode} onChange={onModeChange}/><div className="workspace-panel-actions"><button type="button" onClick={onCollapse} title={t('workspace.collapsePanel')} aria-label={t('workspace.collapsePanel')}><PanelLeftClose size={14}/></button></div></div>
+			<div className="workspace-summary"><div className="chat-workspace-head"><div className="chat-workspace-selector"><AppSelect className="workspace-switch-select" value={workspace.id} disabled={workspaces.length<2||disabled||switching} ariaLabel={t('workspace.switchWorkspace')} onChange={onSelect} options={workspaces.map(item=>({value:item.id,label:item.id}))}/>{(switching||bound)&&<small>{switching?t('workspace.switching'):t('workspace.boundToConversation')}</small>}</div><div className="chat-workspace-head-actions"><em className={workspace.access}>{workspace.access==='read_write'?t('workspace.readWrite'):t('workspace.readOnly')}</em><button type="button" disabled={!workspace.shell||startingShell} onClick={()=>void createShell()} title={t('workspace.newTerminal')} aria-label={t('workspace.newTerminal')}>{startingShell?<LoaderCircle className="spin" size={14}/>:<TerminalSquare size={14}/>}</button></div></div>{activeShells.length>0&&<div className="workspace-shell-sessions">{activeShells.map(shell=><button type="button" onClick={()=>onOpenShell(shell)} title={shell.id} key={shell.id}><i className={shell.status}/><b>{t(shell.surface==='workspace_agent'?'workspace.agent':'workspace.operator')}</b><code>{shell.cwd||'.'}</code></button>)}</div>}</div>
+			<div className="workspace-path-row"><button onClick={up} disabled={path==='.'} title={t('workspace.parent')}>‹</button><code title={path}>{path}</code>{workspace.access==='read_write'&&<label className={transfer?'disabled':''} title={t('workspace.uploadFile')}><UploadCloud size={14}/><input key={inputKey} type="file" disabled={!!transfer} onChange={choose}/></label>}<button onClick={()=>synchronize(true)} title={t('workspace.refreshFiles')}><RefreshCw size={12}/></button></div>
+			{file&&<div className="chat-upload-row"><input value={target} disabled={uploading} onChange={event=>setTarget(event.target.value)} aria-label={t('workspace.relativePath')}/><button onClick={()=>void upload()} disabled={uploading||!target.trim()}>{uploading?'...':t('common.upload')}</button><button onClick={()=>{if(uploading){transferAbort.current?.abort();return}setFile(null);setTarget('');setInputKey(value=>value+1)}} title={t('workspace.cancelUpload')}><X size={11}/></button></div>}
+			{transfer&&<FileTransferProgress transfer={transfer} onCancel={()=>transferAbort.current?.abort()}/>}
+			<div className="workspace-file-list">{loading?<span className="workspace-files-state"><LoaderCircle className="spin" size={13}/>{t('common.loading')}</span>:error?<span className="workspace-files-state error">{error}</span>:entries.length?entries.map(entry=>{const fullPath=workspaceChildPath(path,entry.name);return <div className="workspace-file-row" key={`${entry.type}:${entry.name}`}><button className="workspace-file-open" onClick={()=>void openEntry(entry.name,entry.type)} title={entry.type==='file'?t('workspace.previewFile'):t('workspace.openDirectory')}>{previewLoading===fullPath?<LoaderCircle className="spin" size={13}/>:entry.type==='directory'?<FolderOpen size={13}/>:<FileText size={13}/>}<span>{entry.name}</span>{entry.type==='file'&&<small>{formatFileSize(entry.size??0)}</small>}</button>{(entry.type==='file'||desktopRuntime&&entry.type==='directory'||workspace.access==='read_write')&&<div className="workspace-file-actions">{entry.type==='file'&&<button className="workspace-file-download" disabled={!!transfer} onClick={()=>void download(fullPath,entry.name,entry.size??0)} title={t('common.download')}><Download size={12}/></button>}{desktopRuntime&&entry.type==='directory'&&<button className="workspace-file-reveal" onClick={()=>void revealDirectory(fullPath)} title={t('workspace.revealDirectory')}><FolderOutput size={12}/></button>}{workspace.access==='read_write'&&<button className="workspace-file-delete" onClick={()=>requestEntryRemoval(entry.name,entry.type)} disabled={deleting===fullPath||!!transfer} title={t('workspace.deleteEntry',{type:t(`workspace.${entry.type}`)})}><Trash2 size={12}/></button>}</div>}</div>}):<span className="workspace-files-state">{t('workspace.emptyDirectory')}</span>}</div>
 			{notice&&<div className={`chat-workspace-notice ${notice.kind}`}>{notice.text}</div>}
 			{dragging&&<div className="workspace-drop-overlay"><UploadCloud size={27}/><b>{t('workspace.dropFilesHere')}</b><span>{path}</span></div>}
 		</aside>
-		{preview&&<TextFileEditor path={preview.path} meta={`${formatFileSize(preview.size)} · SHA-256 ${preview.sha256}`} content={preview.content||''} binary={preview.binary} editable={workspace.access==='read_write'} onClose={()=>setPreview(null)} onSave={savePreview} onDownload={()=>download(preview.path,preview.path.split('/').at(-1)||'download')}/>}
+		{preview&&<TextFileEditor path={preview.path} meta={`${formatFileSize(preview.size)} · SHA-256 ${preview.sha256}`} content={preview.content||''} binary={preview.binary} editable={workspace.access==='read_write'} onClose={()=>setPreview(null)} onSave={savePreview} onDownload={()=>void download(preview.path,preview.path.split('/').at(-1)||'download',preview.size)}/>}
 		{deleteCandidate&&<DestructiveConfirmDialog title={t('workspace.deleteTitle',{path:`${deleteCandidate.workspaceID}:${deleteCandidate.path}`})} busy={deleting===deleteCandidate.path} onCancel={()=>setDeleteCandidate(null)} onConfirm={()=>void removeEntry()}/>}
 	</>
 }
 
-function SessionTasks({tasks,expanded,onExpanded}:{tasks:AgentTaskList;expanded:boolean;onExpanded:(expanded:boolean)=>void}){
-	const {t}=useTranslation()
-	const completed=tasks.items.filter(task=>task.status==='completed').length
-	const current=tasks.items.find(task=>task.status==='in_progress')||tasks.items.find(task=>task.status==='pending'&&!unresolvedTaskDependencies(task,tasks.items).length)
-	const blocked=tasks.items.filter(task=>task.status==='pending'&&unresolvedTaskDependencies(task,tasks.items).length>0).length
-	const state=current?'active':blocked?'blocked':'completed'
-  const progress=tasks.items.length?Math.round(completed/tasks.items.length*100):0
-	return <details className={`session-tasks ${state}`} open={expanded} onToggle={event=>onExpanded(event.currentTarget.open)}><summary><span className="task-list-icon"><ListChecks size={16}/></span><span className="task-list-summary"><b>{t('agentTasks.title')}</b><small>{current?`${current.active_form||current.subject} · #${current.id}`:blocked?t('agentTasks.blocked',{count:blocked}):`${completed}/${tasks.items.length}`}</small></span><span className="task-list-progress"><i><em style={{width:`${progress}%`}}/></i><b>{progress}%</b></span><span className={`task-list-state ${state}`} key={state}>{t(`statusLabels.${state}`,{defaultValue:state})}</span><ChevronRight size={14}/></summary></details>
+type SessionTaskRow={task:AgentTask;blockers:string[];status:AgentTask['status']|'blocked'}
+
+function buildSessionTaskRows(tasks:AgentTaskList):SessionTaskRow[]{
+	const completed=new Set(tasks.items.filter(task=>task.status==='completed').map(task=>task.id))
+	return tasks.items.map(task=>{const blockers=task.blocked_by.filter(id=>!completed.has(id));return{task,blockers,status:task.status==='pending'&&blockers.length?'blocked':task.status}})
 }
 
-function SessionTaskItems({tasks}:{tasks:AgentTaskList}){
+const SessionTasks=memo(function SessionTasks({tasks,rows,expanded,onExpanded}:{tasks:AgentTaskList;rows:SessionTaskRow[];expanded:boolean;onExpanded:(expanded:boolean)=>void}){
 	const {t}=useTranslation()
-	const blocked=tasks.items.some(task=>task.status==='pending'&&unresolvedTaskDependencies(task,tasks.items).length>0)&&!tasks.items.some(task=>task.status==='in_progress'||task.status==='pending'&&!unresolvedTaskDependencies(task,tasks.items).length)
-	return <section className={`session-task-view ${blocked?'blocked':'active'}`}><ol className="session-task-items">{tasks.items.map(task=>{const blockers=unresolvedTaskDependencies(task,tasks.items);const taskBlocked=task.status==='pending'&&blockers.length>0;const status=taskBlocked?'blocked':task.status;return <li className={status} key={task.id}><span className="task-item-marker">{task.status==='completed'?<Check size={12}/>:task.status==='in_progress'?<LoaderCircle size={12}/>:taskBlocked?<ShieldAlert size={12}/>:task.id}</span><div title={task.description}><b>{task.subject}</b>{taskBlocked&&<small>#{blockers.join(', #')}</small>}</div><em>{task.owner||t(`statusLabels.${status}`,{defaultValue:status.replace('_',' ')})}</em></li>})}</ol></section>
-}
+	const completed=rows.filter(row=>row.status==='completed').length
+	const current=rows.find(row=>row.status==='in_progress')?.task||rows.find(row=>row.status==='pending')?.task
+	const blocked=rows.filter(row=>row.status==='blocked').length
+	const state=current?'active':blocked?'blocked':'completed'
+  const progress=tasks.items.length?Math.round(completed/tasks.items.length*100):0
+	return <details className={`session-tasks ${state}`} open={expanded} onToggle={event=>onExpanded(event.currentTarget.open)}><summary><span className="task-list-icon"><ListChecks size={16}/></span><span className="task-list-summary"><b>{t('agentTasks.title')}</b><small>{current?current.active_form||current.subject:blocked?t('agentTasks.blocked',{count:blocked}):`${completed}/${tasks.items.length}`}</small></span><span className="task-list-progress"><i><em style={{width:`${progress}%`}}/></i><b>{progress}%</b></span><span className={`task-list-state ${state}`} key={state}>{t(`statusLabels.${state}`,{defaultValue:state})}</span><ChevronRight size={14}/></summary></details>
+})
+
+const SessionTaskItems=memo(function SessionTaskItems({rows}:{rows:SessionTaskRow[]}){
+	const {t}=useTranslation()
+	const blocked=rows.some(row=>row.status==='blocked')&&!rows.some(row=>row.status==='in_progress'||row.status==='pending')
+	return <section className={`session-task-view ${blocked?'blocked':'active'}`}><ul className="session-task-items">{rows.map(({task,blockers,status})=><li className={status} key={task.id}><span className="task-item-marker">{status==='completed'?<Check size={12}/>:status==='in_progress'?<LoaderCircle size={12}/>:status==='blocked'?<ShieldAlert size={12}/>:<CircleDot size={10}/>}</span><div title={task.description}><b>{task.subject}</b>{status==='blocked'&&<small>{t('agentTasks.blocked',{count:blockers.length})}</small>}</div><em>{task.owner||t(`statusLabels.${status}`,{defaultValue:status.replace('_',' ')})}</em></li>)}</ul></section>
+})
 
 const ChatBubble=memo(function ChatBubble({ entry, showActions, runs, hosts, onToolDisclosure }: {entry:ChatEntry;showActions:boolean;runs:Run[];hosts:Host[];onToolDisclosure:(summary:HTMLElement)=>void}) {
 	const {t}=useTranslation()
@@ -2870,6 +2973,7 @@ function TaskToolGroupCard({group,onDisclosure}:{group:TaskToolEntryGroup;onDisc
 
 function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run[];hosts:Host[];onDisclosure:(summary:HTMLElement)=>void}){
 	const {t}=useTranslation()
+	const chatVisible=useContext(ChatVisibilityContext)
   const payload=parseRecord(entry.content)
 	const taskPayload=jsonRecord(payload.task)
 	const resultPayload=jsonRecord(payload.result)
@@ -3015,11 +3119,11 @@ function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run
 		const startedAt=Number.isFinite(persistedStartedAt)?persistedStartedAt!:firstSeenAt.current
 		const [now,setNow]=useState(Date.now())
 		useEffect(()=>{
-			if(status!=='in_progress')return
+		if(!chatVisible||status!=='in_progress')return
 			setNow(Date.now())
 			const timer=window.setInterval(()=>setNow(Date.now()),1000)
 			return()=>window.clearInterval(timer)
-		},[status])
+		},[chatVisible,status])
 		const elapsed=formatLiveDuration(Math.max(0,Math.floor((now-startedAt)/1000)))
 		const resultExitCode=resultPayload?.exit_code
 	const exitCode=typeof payload.exit_code==='number'?payload.exit_code:typeof resultExitCode==='number'?resultExitCode:run?.exit_code??'—'
@@ -3975,7 +4079,17 @@ function LogsPage(){
     catch(err){setLogError(errorText(err))}
     finally{if(!silent)setLoading(false)}
   },[level,component,query])
-  useEffect(()=>{void refreshLogs();if(!live)return;const timer=window.setInterval(()=>void refreshLogs(true),3000);return()=>window.clearInterval(timer)},[refreshLogs,live])
+  useEffect(()=>{
+	void refreshLogs()
+	if(!live)return
+	return subscribeApplicationEvents<ServerLogResponse>('logs',event=>{
+		if(event.type==='error'){setLogError(event.error||'Live log stream failed');return}
+		if(event.type!=='event'||!event.data)return
+		const result=event.data
+		setEntries(current=>event.mode==='delta'?[...(result.entries||[]),...current].slice(0,500):result.entries||[])
+		setComponents(result.components||[]);setMinimumLevel(result.minimum_level||'debug');setLogFile(result.file||'');setLogError('')
+	},{logs:{level,component,q:query,limit:500}})
+  },[component,level,live,query,refreshLogs])
   return <div className="logs-page page-stack">
     <div className="logs-toolbar panel">
 	  <div className="search-box"><Search size={16}/><input value={query} onChange={event=>setQuery(event.target.value)} placeholder={t('logs.search')}/></div>

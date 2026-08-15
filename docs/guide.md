@@ -17,7 +17,7 @@
 
 ```mermaid
 flowchart LR
-    UI[React / CLI] --> API[Go API + SSE]
+    UI[React / CLI] --> API[Go API + SSE + WebSocket]
     API --> Eino[Eino ChatModelAgent]
     MCP[MCP Client] --> Tools[Typed SSH Tools]
     Eino --> Tools
@@ -210,15 +210,15 @@ make dev-web
 
 ## 会话与上下文
 
-Agent 页面右侧的 Conversations 会列出最近会话，标题取首条用户消息。刷新页面会恢复上次选择的会话并自动定位到最新消息；向上查看旧内容后，新增内容不会强制抢走滚动位置。可以新建、切换或删除历史会话。用户消息、最终 Assistant 回复、模型提供商实际返回的 reasoning 和工具结果卡片都保存在 SQLite；reasoning 卡片默认折叠并只显示最新一行，展开后查看该次模型调用的完整思考过程。不支持 reasoning 的模型不会显示伪造内容。reasoning 仅用于界面历史，不会作为新消息重复发送给模型。跨轮模型上下文按完整用户轮次恢复：脱敏工具结果会作为明确标记的不可信历史证据回放，失败或中断轮次只要已经执行过工具也会保留；较长会话按最近完整轮次和 256 KiB 总预算裁剪。执行真实性仍以审计 Run 为权威记录。工具真正开始执行时，当前 SSE 会立即显示带实际参数的“执行中”卡片；待审批、完成或失败都按同一个 Tool Call ID 原位更新，不会等待最终结果后才出现，也不会生成重复卡片。命令类 Tool 卡片会直接展示服务端标准化后的完整 program/argv 或完整 Bash 脚本，以及目标主机、工作目录、环境、提权、状态、退出码和分离的 stdout/stderr；`ssh_exec` 与 `ssh_run_script` 默认返回完整输出，也可用 `max_output_bytes` 配合 `output_view=head|tail|head_tail` 精炼交给模型的每个输出流，结果会明确返回总字节数和省略字节数，前端不会把精炼结果伪装成完整输出。原始 JSON 只作为折叠的排错信息。受控操作的审批不会再堆在独立页面中，而是只在发起它的当前会话上方弹出，并同样直接显示 LLM 请求执行的完整命令或脚本。
+Agent 页面右侧的 Conversations 会列出最近会话，标题取首条用户消息。刷新页面会恢复上次选择的会话并自动定位到最新消息；向上查看旧内容后，新增内容不会强制抢走滚动位置。可以新建、切换或删除历史会话。连接、审批、会话、活动 Tool 和健康状态通过一个应用 WebSocket 按变化推送，不再由页面短周期轮询；活动 Tool 状态只订阅当前会话，断线后自动重连并重新取得快照。用户消息、最终 Assistant 回复、模型提供商实际返回的 reasoning 和工具结果卡片都保存在 SQLite；reasoning 卡片默认折叠并只显示最新一行，展开后查看该次模型调用的完整思考过程。不支持 reasoning 的模型不会显示伪造内容。reasoning 仅用于界面历史，不会作为新消息重复发送给模型。跨轮模型上下文按完整用户轮次恢复：脱敏工具结果会作为明确标记的不可信历史证据回放，失败或中断轮次只要已经执行过工具也会保留；较长会话按最近完整轮次和 256 KiB 总预算裁剪。执行真实性仍以审计 Run 为权威记录。工具真正开始执行时，当前 SSE 会立即显示带实际参数的“执行中”卡片；待审批、完成或失败都按同一个 Tool Call ID 原位更新，不会等待最终结果后才出现，也不会生成重复卡片。命令类 Tool 卡片会直接展示服务端标准化后的完整 program/argv 或完整 Bash 脚本，以及目标主机、工作目录、环境、提权、状态、退出码和分离的 stdout/stderr；`ssh_exec` 与 `ssh_run_script` 默认返回完整输出，也可用 `max_output_bytes` 配合 `output_view=head|tail|head_tail` 精炼交给模型的每个输出流，结果会明确返回总字节数和省略字节数，前端不会把精炼结果伪装成完整输出。原始 JSON 只作为折叠的排错信息。受控操作的审批不会再堆在独立页面中，而是只在发起它的当前会话上方弹出，并同样直接显示 LLM 请求执行的完整命令或脚本。
 
 聊天框支持多选和粘贴图片，也允许只发送图片。Agent 运行时仍可输入并发送，新消息进入当前会话的有界队列，在当前轮完成后按顺序自动开始下一轮；停止 Agent 会同时清空待处理队列。管理员可在 Agent 设置中选择 PNG、JPEG、WebP 和 GIF 格式；服务端不设置图片张数、单张大小或模型上下文图片预算。图片原始数据随消息保存在 SQLite，历史页面通过鉴权接口读取；被文本上下文规则选中的历史轮次会携带该轮全部图片重新发送给模型。活动模型必须兼容 OpenAI 风格的 `image_url` 内容块，否则提供商会返回不支持多模态的错误。
 
 ## Workspace
 
-服务在 `workspace_dir`（默认启动目录下的 `workspace/`）中托管全部 Workspace。首次初始化会创建 `default/read_write`，之后可在系统设置中按名称新增、修改权限或移除；每个 Workspace 固定使用 `<workspace_dir>/<名称>/`，无需填写或查看宿主机绝对路径。在系统设置中删除 Workspace 会先解除登记（Agent 立即失去访问权），再永久删除对应目录及其中全部文件，无法恢复；审计事件会记录目录路径与删除结果。每个 Agent 会话持久化绑定一个 Workspace；对话左侧的选择器负责首次绑定和后续切换，运行中的 Agent 禁止切换。模型没有 Workspace 列表工具，所有 `workspace_*` Tool 都由服务端读取当前会话绑定，Tool schema 不接受 `workspace_id`。文件面板可进入子目录、点击上传或拖入多个不超过 100 MiB 的文件、预览文本，并从文件列表或预览窗口把原文件下载到浏览器。服务端通过操作系统文件事件监听当前打开的目录，再以 SSE 通知 Web 静默刷新，因此 Web 上传、Agent Tool、Workspace Shell 和外部编辑器产生的变化使用同一条刷新链路；监听不会递归扫描整个项目。Web 删除会直接永久删除宿主机文件或目录，确认后无法恢复。这些操作不会自动改写提示词或触发 LLM。文本预览上限为 1 MiB，二进制文件只显示元数据和 SHA256，但仍可直接下载。Web 上传使用防路径穿越、敏感文件名拒绝、禁止覆盖、同目录临时文件、`fsync` 和原子落盘。
+服务在 `workspace_dir`（默认启动目录下的 `workspace/`）中托管全部 Workspace。首次初始化会创建 `default/read_write`，之后可在系统设置中按名称新增、修改权限或移除；每个 Workspace 固定使用 `<workspace_dir>/<名称>/`，无需填写或查看宿主机绝对路径。在系统设置中删除 Workspace 会先解除登记（Agent 立即失去访问权），再永久删除对应目录及其中全部文件，无法恢复；审计事件会记录目录路径与删除结果。每个 Agent 会话持久化绑定一个 Workspace；对话左侧的选择器负责首次绑定和后续切换，运行中的 Agent 禁止切换。模型没有 Workspace 列表工具，所有 `workspace_*` Tool 都由服务端读取当前会话绑定，Tool schema 不接受 `workspace_id`。文件面板可进入子目录、点击上传或拖入多个不超过 100 MiB 的文件、预览文本，并从文件列表或预览窗口把原文件下载到浏览器；上传和下载显示实时字节进度并可取消。服务端通过操作系统文件事件监听当前打开的目录，再以 SSE 通知 Web 静默刷新，因此 Web 上传、Agent Tool、Workspace Shell 和外部编辑器产生的变化使用同一条刷新链路；页面隐藏时暂停该监听，重新显示时自动同步。Web 删除会直接永久删除宿主机文件或目录，确认后无法恢复。这些操作不会自动改写提示词或触发 LLM。文本预览上限为 1 MiB，二进制文件只显示元数据和 SHA256，但仍可直接下载。Web 上传使用防路径穿越、敏感文件名拒绝、禁止覆盖、同目录临时文件、`fsync` 和原子落盘。
 
-`workspace_shell` 用于解压、构建、测试、打包和交互式调试。`action=run` 执行一次性脚本并一次返回完整输出；`start/input/output/list/interrupt/close` 管理持续 PTY。`input` 先发送输入，`input/output` 再按 `wait_seconds` 延迟 0–600 秒后读取一次输出，未填写时延迟 5 秒；期间产生的输出仍实时推送到 Web，不会提前结束工具等待。Agent 创建的 Workspace Shell 会进入右上角统一 Shell 列表并可直接打开观察；Workspace 文件栏中用户手动新建的终端只保留在当前 Workspace，不重复展示。交互 Sandbox 保留专用 PTY 的控制终端，因此 Bash 作业控制及 `vim`、`top` 等全屏程序可用。Web 终端接收原始 ANSI 事件，Agent Tool 结果使用跨输出块清理后的可读文本。系统设置提供 `Sandbox`、`Host Shell`、`Disabled` 三种模式；Linux 默认 Sandbox，Windows 默认 Host Shell，设置变化不会让已审批请求切换执行边界。Sandbox 仅支持 Linux，通过 `workspace_sandbox_path`（默认 `bwrap`，也可用 `OPS_AGENT_WORKSPACE_SANDBOX`）启动隔离的 user/mount/PID/network namespace，只挂载只读系统运行目录、独立 `/tmp` 和目标 Workspace，并禁用网络与嵌套 user namespace；缺少 Bubblewrap 或 namespace 权限时直接失败，不会降级执行。Workspace 的 `read_only/read_write` 决定沙箱挂载权限，`.env*`、`.ssh` 和系统隐藏文件等敏感路径会被遮蔽。交互会话持续到主动关闭、进程退出或服务停止，不设置 TTL。
+`workspace_shell` 用于解压、构建、测试、打包和交互式调试。`action=run` 执行一次性脚本并一次返回完整输出；`start/input/output/list/interrupt/close` 管理持续 PTY。`input` 先发送输入，`input/output` 再按 `wait_seconds` 延迟 0–600 秒后读取一次输出，未填写时延迟 5 秒；期间产生的输出仍实时推送到 Web，不会提前结束工具等待。Agent 创建的 Workspace Shell 会进入右上角统一 Shell 列表并可直接打开观察；Workspace 文件栏中用户手动新建的终端只保留在当前 Workspace，不重复展示。Web 终端通过同一条 WebSocket 发送输入、尺寸和中断，并以带序列号的二进制帧接收原始 PTY 输出；断线按最后序列恢复。交互 Sandbox 保留专用 PTY 的控制终端，因此 Bash 作业控制及 `vim`、`top` 等全屏程序可用。初次渲染会立即同步实际终端尺寸，xterm 滚动缓冲限制为 10,000 行。Agent Tool 结果仍使用跨输出块清理后的可读文本。系统设置提供 `Sandbox`、`Host Shell`、`Disabled` 三种模式；Linux 默认 Sandbox，Windows 默认 Host Shell，设置变化不会让已审批请求切换执行边界。Sandbox 仅支持 Linux，通过 `workspace_sandbox_path`（默认 `bwrap`，也可用 `OPS_AGENT_WORKSPACE_SANDBOX`）启动隔离的 user/mount/PID/network namespace，只挂载只读系统运行目录、独立 `/tmp` 和目标 Workspace，并禁用网络与嵌套 user namespace；缺少 Bubblewrap 或 namespace 权限时直接失败，不会降级执行。Workspace 的 `read_only/read_write` 决定沙箱挂载权限，`.env*`、`.ssh` 和系统隐藏文件等敏感路径会被遮蔽。交互会话持续到主动关闭、进程退出或服务停止，不设置 TTL。
 
 Host Shell 直接拥有当前服务账户可用的宿主机文件系统与网络权限：Unix 使用 Bash，Windows 优先使用 PowerShell 7 (`pwsh.exe`) 并回退 Windows PowerShell。它仅允许 `read_write` Workspace，并遵循当前审批模式。省略 `cwd` 时固定使用 Workspace 根目录；Bash、PowerShell、Python 等子进程统一声明 UTF-8 环境。实际后端、Workspace、脚本、相对工作目录、环境与超时全部进入加密请求摘要；模式或请求内容变化不会修改已经开始的执行。`Disabled` 会在审批前拒绝调用。
 
@@ -232,7 +232,7 @@ SSH 主机间迁移单个普通文件使用 `ssh_file_transfer`。OpsNerva 分�
 
 ## 日志
 
-服务端统一使用标准库 `log/slog`。终端按 `logging.format` 输出，轮转文件始终使用便于检索的 JSONL；Web 的 **Logs** 页面显示当前进程最近的结构化日志，支持级别、组件、关键字筛选、三秒自动刷新和诊断包导出。默认采集 `debug` 及以上级别；生产环境不需要详细生命周期日志时可将级别调为 `info`：
+服务端统一使用标准库 `log/slog`。终端按 `logging.format` 输出，轮转文件始终使用便于检索的 JSONL；Web 的 **Logs** 页面显示当前进程最近的结构化日志，支持级别、组件、关键字筛选、WebSocket 增量更新和诊断包导出。切换筛选条件或断线重连时先取得快照，之后只传输新增条目。默认采集 `debug` 及以上级别；生产环境不需要详细生命周期日志时可将级别调为 `info`：
 
 ```bash
 OPS_AGENT_LOG_LEVEL=info ./bin/ops-agent serve

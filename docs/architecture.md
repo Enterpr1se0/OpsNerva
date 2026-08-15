@@ -28,7 +28,7 @@ App 控制面通过 loopback HTTP API 连接本地 Sidecar。`auth.password` 非
 - `internal/store`：SQLite hosts、runs、approvals、events、chat、加密模型/MCP 配置与 Eino checkpoints。
 - `internal/agent`：Eino ChatModelAgent、强类型 Tools、消息历史、事件流与并发安全的 Runner 热切换。
 - `internal/mcpserver`：官方 MCP Go SDK stdio 与 Streamable HTTP 适配器。
-- `internal/httpapi`：本地 HTTP API、SSE 和嵌入 Go 二进制的 React 静态资源。
+- `internal/httpapi`：本地 HTTP API、SSE、应用状态/交互终端 WebSocket 和嵌入 Go 二进制的 React 静态资源。
 - `internal/observability`：`slog` 多路 Handler、字段脱敏、JSONL 文件轮转与 Web 内存日志缓冲。
 - `internal/skills`：可上传、永久删除和启停的无权限运维方法论注册表。
 
@@ -62,7 +62,7 @@ Workspace 与 SSH 文件读取共享 `tail_lines` 语义。Agent 侧 Workspace �
 
 Workspace 在 `workspace_dir` 下按 ID 托管；SQLite 只登记 ID、权限和时间戳，`chat_sessions` 持久化当前绑定。目录固定派生为 `<workspace_dir>/<id>`，API、审计和模型上下文均不返回真实根路径。`workspace_list` 不存在，模型侧 Workspace Tool schema 不含 `workspace_id`，只从可信会话上下文解析绑定；没有会话语义的 MCP Server 不注册这些 Tool。上传与下载限制为 100 MiB，拒绝敏感路径、符号链接和覆盖，通过同目录临时文件、`fsync`、SHA256 校验与原子 hard-link 提交。`workspace_file_upload` 绑定本地源版本后发送到 SSH，`workspace_file_download` 绑定远端源版本后写入 Workspace；绝对本地路径不会序列化。`workspace_file_delete` 拒绝根目录，非空目录要求 `recursive=true`。Web 文件面板通过独立附件接口流式下载普通文件，响应使用原文件名、`no-store` 与 `nosniff`；文件列表和预览窗口共享该入口。Web 文件面板与 Agent、Shell、外部程序共享 SSE 文件事件刷新链路。每个 Workspace 使用隐藏的受管目标复用 Run/Approval/Audit 状态机。
 
-`workspace_shell` 是唯一开放给模型的本地 Shell，支持一次性 `run` 以及 `start/input/output/list/interrupt/close` 交互式 PTY。`input/output` 的 `wait_seconds` 是读取前的可取消延迟，范围 0–600 秒、默认 5 秒；定时期间的输出事件只实时推送到 Web，不会唤醒工具，定时结束后按调用开始时确定的序列游标读取一页。管理员在 SQLite 持久化的 System 设置中明确选择 `sandbox`、`host` 或 `disabled`，Linux 默认 `sandbox`，Windows 默认 `host`。启动或运行时解析出的实际后端写入 `ExecRequest.workspace_shell_backend`，和 Workspace ID、相对 cwd、环境及脚本一起进入加密审批摘要；执行前再次读取设置，后端不一致即拒绝。交互会话复用 SSH 终端的事件序列、ANSI 输出、尺寸变更、Ctrl+C 与持久化状态，但以 `kind=workspace` 记录 Workspace 和后端；没有 TTL。Bubblewrap 交互模式复用外层专用 PTY 的 session/controlling terminal，不再创建第二个 session，因此 Bash job control 和全屏程序可用；原始 ANSI 事件保留给 Web 终端，Agent 适配器使用跨块状态机移除控制序列。启动和一次性脚本都遵循当前审批模式，不再进行等级分类。
+`workspace_shell` 是唯一开放给模型的本地 Shell，支持一次性 `run` 以及 `start/input/output/list/interrupt/close` 交互式 PTY。`input/output` 的 `wait_seconds` 是读取前的可取消延迟，范围 0–600 秒、默认 5 秒；定时期间的输出事件只实时推送到 Web，不会唤醒工具，定时结束后按调用开始时确定的序列游标读取一页。管理员在 SQLite 持久化的 System 设置中明确选择 `sandbox`、`host` 或 `disabled`，Linux 默认 `sandbox`，Windows 默认 `host`。启动或运行时解析出的实际后端写入 `ExecRequest.workspace_shell_backend`，和 Workspace ID、相对 cwd、环境及脚本一起进入加密审批摘要；执行前再次读取设置，后端不一致即拒绝。交互会话复用 SSH 终端的事件序列、ANSI 输出、尺寸变更、Ctrl+C 与持久化状态，但以 `kind=workspace` 记录 Workspace 和后端；没有 TTL。Web 以 WebSocket JSON 控制帧发送输入、实际尺寸和中断，服务端以带序列号的二进制帧发送脱敏后的原始 PTY 字节，重连通过 `after` 游标续传；相邻输出分片在单个 SQLite 事务中批量提交。Bubblewrap 交互模式复用外层专用 PTY 的 session/controlling terminal，不再创建第二个 session，因此 Bash job control和全屏程序可用；原始 ANSI 事件保留给 Web 终端，Agent 适配器使用跨块状态机移除控制序列。启动和一次性脚本都遵循当前审批模式，不再进行等级分类。
 
 `web_search` 和 `web_extract` 共用管理员保存在 `web_search_settings` 中的 Tavily 配置，但可由 func 管理分别启停。Tavily 设置只保存共享 `proxy_id`，运行时从 `proxies` 解析 HTTP、HTTPS、SOCKS5 或 SOCKS5H 地址及加密凭据；请求禁用环境代理，选中的代理失败时不会回退直连。查询、域名过滤条件和待提取 URL 会离开本机。管理员结果数是上限，模型省略结果数时默认取 5。搜索支持 topic、depth、相对/绝对日期范围和高级分片；提取一次接受最多五个公开 HTTP/HTTPS URL，并支持 query、depth 和相关分片。URL 输入与提供方返回值均会规范化、去重并拒绝凭据、localhost、私网和链路本地地址。
 
@@ -118,7 +118,7 @@ HTTP Chat Handler 使用保留 request logger/value、但移除浏览器取消�
 
 ## Server observability
 
-服务端日志与执行审计是两条独立链路：Audit 是 SQLite 中不可替代的安全证据，Server Logs 用于排查控制面运行状态。应用统一调用标准库 `log/slog`，初始化时通过 MultiHandler 分发到终端、JSONL 轮转文件和进程内环形缓冲区。成功的普通 GET、HEAD 和 OPTIONS 不写访问日志；超过 2 秒的只读请求记录为 Warn，写请求记录为 Info，4xx/5xx 分别记录为 Warn/Error。因此 Web 的状态刷新和日志轮询不会挤占环形缓冲区。
+服务端日志与执行审计是两条独立链路：Audit 是 SQLite 中不可替代的安全证据，Server Logs 用于排查控制面运行状态。应用统一调用标准库 `log/slog`，初始化时通过 MultiHandler 分发到终端、JSONL 轮转文件和进程内环形缓冲区。成功的普通 GET、HEAD 和 OPTIONS 不写访问日志；超过 2 秒的只读请求记录为 Warn，写请求记录为 Info，4xx/5xx 分别记录为 Warn/Error。Web 通过单一应用 WebSocket 订阅连接、审批、会话、活动 Tool 状态、健康和日志主题；普通主题仅在快照变化时发送，活动 Tool 状态按当前 session ID 按需订阅，日志首次发送筛选后的快照，随后只发送新增条目，重连或游标丢失时回退快照。终端仍使用独立 WebSocket，避免 PTY 流量阻塞控制面状态。
 
 HTTP Middleware 始终为请求生成 `request_id` 并通过 context 传递给 Agent、Approval 与 SSH 层；需要记录访问事件时附带 method、path、status、耗时、响应字节和来源 IP，因此一次请求的跨层事件可以关联检索。模型输入、reasoning token、HTTP body、命令参数、脚本和远端输出均不进入服务日志，只记录长度、计数、ID 与最终状态。统一脱敏 Handler 会处理结构化敏感字段，并清理消息、错误文本和嵌套对象中的 Authorization、Bearer/Basic、密码、Token、API Key、私钥与常见云凭据格式。Debug 日志默认启用，可通过配置或 `OPS_AGENT_LOG_LEVEL=info` 降低详细程度。
 

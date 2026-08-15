@@ -61,23 +61,33 @@ WHERE id=?`, shell.Kind, shell.Surface, shell.HostName, shell.WorkspaceID, shell
 }
 
 func (s *Store) AppendSSHShellEvent(ctx context.Context, event domain.SSHShellEvent, recentOutput string) error {
+	return s.AppendSSHShellEvents(ctx, []domain.SSHShellEvent{event}, recentOutput)
+}
+
+func (s *Store) AppendSSHShellEvents(ctx context.Context, events []domain.SSHShellEvent, recentOutput string) error {
+	if len(events) == 0 {
+		return nil
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	var readable any
-	if event.ReadableContent != nil {
-		readable = *event.ReadableContent
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO ssh_shell_events(
+	for _, event := range events {
+		var readable any
+		if event.ReadableContent != nil {
+			readable = *event.ReadableContent
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO ssh_shell_events(
 shell_id,sequence,stream,source,content_redacted,content_readable,sensitive,input_bytes,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		event.ShellID, event.Sequence, event.Stream, event.Source, event.Content, readable, event.Sensitive,
-		event.InputBytes, event.Status, formatTime(event.CreatedAt)); err != nil {
-		return err
+			event.ShellID, event.Sequence, event.Stream, event.Source, event.Content, readable, event.Sensitive,
+			event.InputBytes, event.Status, formatTime(event.CreatedAt)); err != nil {
+			return err
+		}
 	}
+	last := events[len(events)-1]
 	if _, err := tx.ExecContext(ctx, `UPDATE ssh_shell_sessions SET last_sequence=?,recent_output=? WHERE id=?`,
-		event.Sequence, recentOutput, event.ShellID); err != nil {
+		last.Sequence, recentOutput, last.ShellID); err != nil {
 		return err
 	}
 	return tx.Commit()
