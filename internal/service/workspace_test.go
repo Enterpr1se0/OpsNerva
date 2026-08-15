@@ -653,6 +653,22 @@ func TestWorkspaceAdminUploadIsAtomicAndNeverOverwrites(t *testing.T) {
 	}
 }
 
+func TestWorkspaceAdminPreviewIsBoundedAndHashesWholeFile(t *testing.T) {
+	svc, root := newWorkspaceService(t, "read_write")
+	content := bytes.Repeat([]byte("a"), int(maxAdminWorkspacePreviewBytes)+4096)
+	if err := os.WriteFile(filepath.Join(root, "large.txt"), content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := svc.PreviewAdminWorkspaceFile("project", "large.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSHA := fmt.Sprintf("%x", sha256.Sum256(content))
+	if !preview.Truncated || len(preview.Content) != int(maxAdminWorkspacePreviewBytes) || preview.Size != int64(len(content)) || preview.SHA256 != wantSHA {
+		t.Fatalf("unexpected bounded workspace preview: %#v", preview)
+	}
+}
+
 func TestWorkspaceAdminUploadAcceptsFilesLargerThanLegacyLimit(t *testing.T) {
 	svc, root := newWorkspaceService(t, "read_write")
 	const size = int64(100<<20) + 1

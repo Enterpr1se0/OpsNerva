@@ -78,7 +78,10 @@ type WorkspaceFilePreview struct {
 	SHA256      string `json:"sha256"`
 	Content     string `json:"content,omitempty"`
 	Binary      bool   `json:"binary,omitempty"`
+	Truncated   bool   `json:"truncated,omitempty"`
 }
+
+const maxAdminWorkspacePreviewBytes int64 = 1 << 20
 
 type WorkspaceFileDownload struct {
 	WorkspaceID string
@@ -544,21 +547,23 @@ func (s *Service) PreviewAdminWorkspaceFile(workspaceID, relativePath string) (W
 	if err != nil || !info.Mode().IsRegular() {
 		return WorkspaceFilePreview{}, fmt.Errorf("workspace preview target is not a regular file")
 	}
-	data, err := io.ReadAll(file)
+	digest := sha256.New()
+	hashed := io.TeeReader(file, digest)
+	data, err := io.ReadAll(io.LimitReader(hashed, maxAdminWorkspacePreviewBytes+1))
 	if err != nil {
 		return WorkspaceFilePreview{}, err
 	}
-	digest := sha256.New()
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return WorkspaceFilePreview{}, err
+	truncated := int64(len(data)) > maxAdminWorkspacePreviewBytes
+	if truncated {
+		data = data[:maxAdminWorkspacePreviewBytes]
 	}
-	if _, err := io.Copy(digest, file); err != nil {
+	if _, err := io.Copy(io.Discard, hashed); err != nil {
 		return WorkspaceFilePreview{}, err
 	}
 	binary := bytes.IndexByte(data, 0) >= 0 || !utf8.Valid(data)
 	result := WorkspaceFilePreview{
 		WorkspaceID: workspace.ID, Path: relativePath, Size: info.Size(), SHA256: hex.EncodeToString(digest.Sum(nil)),
-		Binary: binary,
+		Binary: binary, Truncated: truncated,
 	}
 	if !binary {
 		result.Content = string(data)
