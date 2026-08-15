@@ -50,14 +50,14 @@ type SFTPTransport interface {
 }
 
 func (t *NativeSSHTransport) ListSFTPFiles(ctx context.Context, connection ConnectionSpec, remotePath string) (SFTPFileList, error) {
-	client, sftpClient, err := t.openSFTP(ctx, connection)
+	lease, err := t.openSFTP(ctx, connection)
 	if err != nil {
 		return SFTPFileList{}, err
 	}
-	defer client.Close()
-	defer sftpClient.Close()
-	stop := closeSFTPOnContext(ctx, client, sftpClient)
+	defer lease.Close()
+	stop := closeSFTPOnContext(ctx, lease)
 	defer stop()
+	sftpClient := lease.client
 	if strings.TrimSpace(remotePath) == "" {
 		remotePath, err = sftpClient.Getwd()
 		if err != nil {
@@ -92,28 +92,26 @@ func (t *NativeSSHTransport) OpenSFTPFile(ctx context.Context, connection Connec
 	if err != nil {
 		return SFTPDownload{}, err
 	}
-	client, sftpClient, err := t.openSFTP(ctx, connection)
+	lease, err := t.openSFTP(ctx, connection)
 	if err != nil {
 		return SFTPDownload{}, err
 	}
+	sftpClient := lease.client
 	info, err := sftpClient.Lstat(remotePath)
 	if err != nil {
-		_ = sftpClient.Close()
-		_ = client.Close()
+		_ = lease.Close()
 		return SFTPDownload{}, fmt.Errorf("inspect remote file: %w", err)
 	}
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		_ = sftpClient.Close()
-		_ = client.Close()
+		_ = lease.Close()
 		return SFTPDownload{}, fmt.Errorf("remote path is not a regular non-symbolic file")
 	}
 	file, err := sftpClient.Open(remotePath)
 	if err != nil {
-		_ = sftpClient.Close()
-		_ = client.Close()
+		_ = lease.Close()
 		return SFTPDownload{}, fmt.Errorf("open remote file: %w", err)
 	}
-	reader := &sftpDownloadReader{file: file, sftp: sftpClient, client: client}
+	reader := &sftpDownloadReader{file: file, lease: lease}
 	reader.stop = context.AfterFunc(ctx, func() { _ = reader.Close() })
 	return SFTPDownload{Entry: sftpFileEntry(remotePath, info), Reader: reader}, nil
 }
@@ -123,14 +121,14 @@ func (t *NativeSSHTransport) UploadSFTPFile(ctx context.Context, connection Conn
 	if err != nil {
 		return SFTPFileEntry{}, err
 	}
-	client, sftpClient, err := t.openSFTP(ctx, connection)
+	lease, err := t.openSFTP(ctx, connection)
 	if err != nil {
 		return SFTPFileEntry{}, err
 	}
-	defer client.Close()
-	defer sftpClient.Close()
-	stop := closeSFTPOnContext(ctx, client, sftpClient)
+	defer lease.Close()
+	stop := closeSFTPOnContext(ctx, lease)
 	defer stop()
+	sftpClient := lease.client
 	mode := os.FileMode(0o644)
 	if info, statErr := sftpClient.Lstat(remotePath); statErr == nil {
 		if !overwrite {
@@ -185,14 +183,14 @@ func (t *NativeSSHTransport) CreateSFTPDirectory(ctx context.Context, connection
 	if err != nil {
 		return SFTPFileEntry{}, err
 	}
-	client, sftpClient, err := t.openSFTP(ctx, connection)
+	lease, err := t.openSFTP(ctx, connection)
 	if err != nil {
 		return SFTPFileEntry{}, err
 	}
-	defer client.Close()
-	defer sftpClient.Close()
-	stop := closeSFTPOnContext(ctx, client, sftpClient)
+	defer lease.Close()
+	stop := closeSFTPOnContext(ctx, lease)
 	defer stop()
+	sftpClient := lease.client
 	if err := sftpClient.Mkdir(remotePath); err != nil {
 		return SFTPFileEntry{}, fmt.Errorf("create remote directory: %w", err)
 	}
@@ -219,14 +217,14 @@ func (t *NativeSSHTransport) RenameSFTPEntry(ctx context.Context, connection Con
 	if sourcePath == "/" {
 		return SFTPFileEntry{}, fmt.Errorf("remote root cannot be renamed")
 	}
-	client, sftpClient, err := t.openSFTP(ctx, connection)
+	lease, err := t.openSFTP(ctx, connection)
 	if err != nil {
 		return SFTPFileEntry{}, err
 	}
-	defer client.Close()
-	defer sftpClient.Close()
-	stop := closeSFTPOnContext(ctx, client, sftpClient)
+	defer lease.Close()
+	stop := closeSFTPOnContext(ctx, lease)
 	defer stop()
+	sftpClient := lease.client
 	if _, err := sftpClient.Lstat(destinationPath); err == nil {
 		return SFTPFileEntry{}, fmt.Errorf("remote destination already exists")
 	} else if !os.IsNotExist(err) {
@@ -250,14 +248,14 @@ func (t *NativeSSHTransport) RemoveSFTPEntry(ctx context.Context, connection Con
 	if remotePath == "/" {
 		return SFTPFileEntry{}, fmt.Errorf("remote root cannot be deleted")
 	}
-	client, sftpClient, err := t.openSFTP(ctx, connection)
+	lease, err := t.openSFTP(ctx, connection)
 	if err != nil {
 		return SFTPFileEntry{}, err
 	}
-	defer client.Close()
-	defer sftpClient.Close()
-	stop := closeSFTPOnContext(ctx, client, sftpClient)
+	defer lease.Close()
+	stop := closeSFTPOnContext(ctx, lease)
 	defer stop()
+	sftpClient := lease.client
 	info, err := sftpClient.Lstat(remotePath)
 	if err != nil {
 		return SFTPFileEntry{}, fmt.Errorf("inspect remote entry: %w", err)
@@ -278,27 +276,44 @@ func (t *NativeSSHTransport) RemoveSFTPEntry(ctx context.Context, connection Con
 	return entry, nil
 }
 
-func (t *NativeSSHTransport) openSFTP(ctx context.Context, connection ConnectionSpec) (*nativeClient, *sftp.Client, error) {
-	if err := validateNativeConnection(connection); err != nil {
-		return nil, nil, err
-	}
-	client, err := t.connect(ctx, connection, nil, false)
-	if err != nil {
-		return nil, nil, fmt.Errorf("connect native SSH for SFTP: %w", err)
-	}
-	sftpClient, err := sftp.NewClient(client.client)
-	if err != nil {
-		_ = client.Close()
-		return nil, nil, fmt.Errorf("start native SFTP: %w", err)
-	}
-	return client, sftpClient, nil
+type sftpLease struct {
+	transport *NativeSSHTransport
+	entry     *sftpPoolEntry
+	client    *sftp.Client
+	once      sync.Once
+	err       error
 }
 
-func closeSFTPOnContext(ctx context.Context, client *nativeClient, sftpClient *sftp.Client) func() bool {
-	return context.AfterFunc(ctx, func() {
-		_ = sftpClient.Close()
-		_ = client.Close()
+func (lease *sftpLease) Close() error {
+	lease.once.Do(func() {
+		lease.err = lease.client.Close()
+		lease.transport.releaseSFTPConnection(lease.entry, false)
 	})
+	return lease.err
+}
+
+func (t *NativeSSHTransport) openSFTP(ctx context.Context, connection ConnectionSpec) (*sftpLease, error) {
+	if err := validateNativeConnection(connection); err != nil {
+		return nil, err
+	}
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		entry, err := t.acquireSFTPConnection(ctx, connection)
+		if err != nil {
+			return nil, fmt.Errorf("connect native SSH for SFTP: %w", err)
+		}
+		sftpClient, err := sftp.NewClient(entry.client.client)
+		if err == nil {
+			return &sftpLease{transport: t, entry: entry, client: sftpClient}, nil
+		}
+		lastErr = err
+		t.releaseSFTPConnection(entry, true)
+	}
+	return nil, fmt.Errorf("start native SFTP: %w", lastErr)
+}
+
+func closeSFTPOnContext(ctx context.Context, lease *sftpLease) func() bool {
+	return context.AfterFunc(ctx, func() { _ = lease.Close() })
 }
 
 func cleanSFTPPath(value string) (string, error) {
@@ -346,12 +361,11 @@ func removeSFTPDirectory(client *sftp.Client, remotePath string) error {
 }
 
 type sftpDownloadReader struct {
-	file   *sftp.File
-	sftp   *sftp.Client
-	client *nativeClient
-	stop   func() bool
-	once   sync.Once
-	err    error
+	file  *sftp.File
+	lease *sftpLease
+	stop  func() bool
+	once  sync.Once
+	err   error
 }
 
 func (reader *sftpDownloadReader) Read(data []byte) (int, error) {
@@ -363,7 +377,7 @@ func (reader *sftpDownloadReader) Close() error {
 		if reader.stop != nil {
 			reader.stop()
 		}
-		reader.err = errors.Join(reader.file.Close(), reader.sftp.Close(), reader.client.Close())
+		reader.err = errors.Join(reader.file.Close(), reader.lease.Close())
 	})
 	return reader.err
 }

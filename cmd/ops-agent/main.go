@@ -40,6 +40,7 @@ type application struct {
 	store     *store.Store
 	service   *service.Service
 	agent     *agent.Runtime
+	transport *sshx.NativeSSHTransport
 	startedAt time.Time
 }
 
@@ -98,6 +99,7 @@ func run(ctx context.Context, args []string) error {
 		return err
 	}
 	defer app.store.Close()
+	defer app.transport.Close()
 	defer app.service.CloseMCPServers()
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -161,7 +163,7 @@ func newApplication(ctx context.Context, cfg config.Config) (*application, error
 		return nil, err
 	}
 	slog.InfoContext(ctx, "application initialized", "component", "server", "duration_ms", time.Since(started).Milliseconds(), "agent_available", runtime.Available())
-	return &application{config: cfg, store: st, service: svc, agent: runtime, startedAt: started.UTC()}, nil
+	return &application{config: cfg, store: st, service: svc, agent: runtime, transport: transport, startedAt: started.UTC()}, nil
 }
 
 func prepareQuickStart() (string, bool, error) {

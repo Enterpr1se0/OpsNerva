@@ -35,6 +35,9 @@ type NativeSSHTransport struct {
 	config       config.SSH
 	limits       config.Limits
 	knownHostsMu sync.Mutex
+	sftpPoolMu   sync.Mutex
+	sftpPool     map[string]*sftpPoolEntry
+	sftpPoolDone bool
 }
 
 type nativeClient struct {
@@ -45,7 +48,32 @@ type nativeClient struct {
 }
 
 func NewNativeSSHTransport(cfg config.SSH, limits config.Limits) *NativeSSHTransport {
-	return &NativeSSHTransport{config: cfg, limits: limits}
+	return &NativeSSHTransport{config: cfg, limits: limits, sftpPool: make(map[string]*sftpPoolEntry)}
+}
+
+func (t *NativeSSHTransport) Close() error {
+	var clients []*nativeClient
+	t.sftpPoolMu.Lock()
+	t.sftpPoolDone = true
+	for key, entry := range t.sftpPool {
+		delete(t.sftpPool, key)
+		entry.stale = true
+		if entry.idleTimer != nil {
+			entry.idleTimer.Stop()
+			entry.idleTimer = nil
+		}
+		if entry.client != nil {
+			clients = append(clients, entry.client)
+		} else {
+			entry.readyOnce.Do(func() { close(entry.ready) })
+		}
+	}
+	t.sftpPoolMu.Unlock()
+	var closeErr error
+	for _, client := range clients {
+		closeErr = errors.Join(closeErr, client.Close())
+	}
+	return closeErr
 }
 
 func (t *NativeSSHTransport) Exec(ctx context.Context, connection ConnectionSpec, req domain.ExecRequest) (RawResult, error) {

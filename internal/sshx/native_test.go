@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -82,6 +83,31 @@ func (s *testSSHServer) host() domain.Host {
 	return domain.Host{
 		ID: "host_native_test", Name: "native-test", Address: host, Port: port, User: "ops",
 		AuthType: "password", Password: s.password,
+	}
+}
+
+func testSFTPPath(localPath string) string {
+	remotePath := filepath.ToSlash(localPath)
+	if filepath.VolumeName(localPath) != "" {
+		return "/" + remotePath
+	}
+	return remotePath
+}
+
+func TestSFTPConnectionKeyTracksCredentialsAndRoute(t *testing.T) {
+	connection := ConnectionSpec{Target: domain.Host{
+		ID: "target", Address: "192.0.2.10", Port: 22, User: "ops", AuthType: "password", Password: "first",
+	}}
+	original := sftpConnectionKey(connection)
+	changedPassword := connection
+	changedPassword.Target.Password = "second"
+	if sftpConnectionKey(changedPassword) == original {
+		t.Fatal("SFTP pool key ignored a credential change")
+	}
+	changedRoute := connection
+	changedRoute.Jumps = []domain.Host{{ID: "jump", Address: "192.0.2.20", Port: 22, User: "relay", AuthType: "password", Password: "jump-secret"}}
+	if sftpConnectionKey(changedRoute) == original {
+		t.Fatal("SFTP pool key ignored a jump-host route change")
 	}
 }
 
@@ -221,6 +247,7 @@ func TestNativeSSHTrustExecAndExitStatus(t *testing.T) {
 	server := startTestSSHServer(t, "native-password")
 	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
 	transport := NewNativeSSHTransport(config.SSH{DefaultKnownHosts: knownHosts}, config.Default().Limits)
+	t.Cleanup(func() { _ = transport.Close() })
 	connection := ConnectionSpec{Target: server.host()}
 
 	_, err := transport.Exec(context.Background(), connection, domain.ExecRequest{Mode: domain.ExecProgram, Program: "printf", Args: []string{"ok"}, TimeoutSeconds: 5})
@@ -315,7 +342,7 @@ func TestNativeSFTPUpload(t *testing.T) {
 	}
 	remotePath := filepath.Join(server.root, "uploaded.txt")
 	result, err := transport.Exec(context.Background(), connection, domain.ExecRequest{
-		Mode: domain.ExecWorkspaceUpload, LocalPath: localPath, RemotePath: filepath.ToSlash(remotePath), TimeoutSeconds: 5,
+		Mode: domain.ExecWorkspaceUpload, LocalPath: localPath, RemotePath: testSFTPPath(remotePath), TimeoutSeconds: 5,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -336,6 +363,7 @@ func TestNativeSFTPFileManagerOperations(t *testing.T) {
 	server := startTestSSHServer(t, "sftp-manager-password")
 	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
 	transport := NewNativeSSHTransport(config.SSH{DefaultKnownHosts: knownHosts}, config.Default().Limits)
+	t.Cleanup(func() { _ = transport.Close() })
 	connection := ConnectionSpec{Target: server.host()}
 	connection.Target.ID = "sftp_manager_host"
 	key, err := transport.ScanHostKey(context.Background(), connection)
@@ -346,7 +374,8 @@ func TestNativeSFTPFileManagerOperations(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	directory := filepath.ToSlash(filepath.Join(server.root, "managed"))
+	directoryLocal := filepath.Join(server.root, "managed")
+	directory := testSFTPPath(directoryLocal)
 	created, err := transport.CreateSFTPDirectory(context.Background(), connection, directory)
 	if err != nil {
 		t.Fatal(err)
@@ -354,14 +383,29 @@ func TestNativeSFTPFileManagerOperations(t *testing.T) {
 	if created.Type != "directory" || created.Path != directory {
 		t.Fatalf("unexpected created directory: %#v", created)
 	}
+	poolKey := sftpConnectionKey(connection)
+	transport.sftpPoolMu.Lock()
+	pooledEntry := transport.sftpPool[poolKey]
+	pooledReady := pooledEntry != nil && pooledEntry.client != nil && pooledEntry.refs == 0
+	transport.sftpPoolMu.Unlock()
+	if !pooledReady {
+		t.Fatalf("SFTP base connection was not retained after the first operation: %#v", pooledEntry)
+	}
 
 	filePath := directory + "/hello.txt"
+	fileLocal := filepath.Join(directoryLocal, "hello.txt")
 	uploaded, err := transport.UploadSFTPFile(context.Background(), connection, filePath, strings.NewReader("hello over SFTP"), false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if uploaded.Type != "file" || uploaded.Size != int64(len("hello over SFTP")) {
 		t.Fatalf("unexpected uploaded entry: %#v", uploaded)
+	}
+	transport.sftpPoolMu.Lock()
+	reusedEntry := transport.sftpPool[poolKey]
+	transport.sftpPoolMu.Unlock()
+	if reusedEntry != pooledEntry {
+		t.Fatal("sequential SFTP operations did not reuse the base SSH connection")
 	}
 	if _, err := transport.UploadSFTPFile(context.Background(), connection, filePath, strings.NewReader("conflict"), false); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("upload conflict was not rejected: %v", err)
@@ -389,7 +433,7 @@ func TestNativeSFTPFileManagerOperations(t *testing.T) {
 	if string(downloaded) != "hello over SFTP" {
 		t.Fatalf("unexpected downloaded content %q", downloaded)
 	}
-	if err := os.Chmod(filepath.FromSlash(filePath), 0o750); err != nil {
+	if err := os.Chmod(fileLocal, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	replaced, err := transport.UploadSFTPFile(context.Background(), connection, filePath, strings.NewReader("edited over SFTP"), true)
@@ -399,11 +443,11 @@ func TestNativeSFTPFileManagerOperations(t *testing.T) {
 	if replaced.Size != int64(len("edited over SFTP")) {
 		t.Fatalf("unexpected replaced entry: %#v", replaced)
 	}
-	replacedInfo, err := os.Stat(filepath.FromSlash(filePath))
-	if err != nil || replacedInfo.Mode().Perm() != 0o750 {
+	replacedInfo, err := os.Stat(fileLocal)
+	if err != nil || (runtime.GOOS != "windows" && replacedInfo.Mode().Perm() != 0o750) {
 		t.Fatalf("SFTP overwrite mode = %v, err = %v", replacedInfo.Mode().Perm(), err)
 	}
-	replacedContent, err := os.ReadFile(filepath.FromSlash(filePath))
+	replacedContent, err := os.ReadFile(fileLocal)
 	if err != nil || string(replacedContent) != "edited over SFTP" {
 		t.Fatalf("SFTP overwrite content = %q, err = %v", replacedContent, err)
 	}
@@ -422,7 +466,7 @@ func TestNativeSFTPFileManagerOperations(t *testing.T) {
 	if _, err := transport.RemoveSFTPEntry(context.Background(), connection, directory, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.FromSlash(directory)); !os.IsNotExist(err) {
+	if _, err := os.Stat(directoryLocal); !os.IsNotExist(err) {
 		t.Fatalf("managed directory still exists: %v", err)
 	}
 }
@@ -457,8 +501,8 @@ func TestNativeSFTPTransfersFileBetweenHostsAtomically(t *testing.T) {
 	digest := fmt.Sprintf("%x", sha256.Sum256(content))
 	var progress [][2]int64
 	result, err := transport.TransferFile(context.Background(), source, destination, domain.ExecRequest{
-		Mode: domain.ExecSSHFileTransfer, SourceHostID: source.Target.ID, SourcePath: filepath.ToSlash(sourcePath),
-		HostID: destination.Target.ID, RemotePath: filepath.ToSlash(destinationPath), ExpectedSHA256: digest, TimeoutSeconds: 5,
+		Mode: domain.ExecSSHFileTransfer, SourceHostID: source.Target.ID, SourcePath: testSFTPPath(sourcePath),
+		HostID: destination.Target.ID, RemotePath: testSFTPPath(destinationPath), ExpectedSHA256: digest, TimeoutSeconds: 5,
 	}, func(transferred, total int64) { progress = append(progress, [2]int64{transferred, total}) })
 	if err != nil {
 		t.Fatal(err)
@@ -480,7 +524,7 @@ func TestNativeSFTPTransfersFileBetweenHostsAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o640 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o640 {
 		t.Fatalf("destination mode=%o, want 640", info.Mode().Perm())
 	}
 }
@@ -515,8 +559,8 @@ func TestNativeSFTPTransferConflictLeavesDestinationUntouched(t *testing.T) {
 	}
 	destinationDigest := fmt.Sprintf("%x", sha256.Sum256(original))
 	_, err := transport.TransferFile(context.Background(), source, destination, domain.ExecRequest{
-		Mode: domain.ExecSSHFileTransfer, SourceHostID: source.Target.ID, SourcePath: filepath.ToSlash(sourcePath),
-		HostID: destination.Target.ID, RemotePath: filepath.ToSlash(destinationPath), ExpectedSHA256: strings.Repeat("0", 64),
+		Mode: domain.ExecSSHFileTransfer, SourceHostID: source.Target.ID, SourcePath: testSFTPPath(sourcePath),
+		HostID: destination.Target.ID, RemotePath: testSFTPPath(destinationPath), ExpectedSHA256: strings.Repeat("0", 64),
 		ExpectedDestinationSHA256: destinationDigest, TimeoutSeconds: 5,
 	}, nil)
 	if err == nil || !strings.Contains(err.Error(), "source file version conflict") {
