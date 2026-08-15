@@ -103,9 +103,10 @@ func TestQueuedTurnCompletionDoesNotCloseChatEventStream(t *testing.T) {
 
 func TestChatEventsStreamReturnsReplayWithSSEEventIDs(t *testing.T) {
 	hub := newChatEventHub()
+	const userMessageID = "msg_user"
 	hub.publish("session_test", agent.Event{Type: "session"})
-	hub.publish("session_test", agent.Event{Type: "message", Content: "complete"})
-	hub.publish("session_test", agent.Event{Type: "done"})
+	hub.publish("session_test", agent.Event{Type: "message", UserMessageID: userMessageID, Content: "complete"})
+	hub.publish("session_test", agent.Event{Type: "done", UserMessageID: userMessageID})
 	server := &Server{agent: &agent.Runtime{}, chatEvents: hub}
 	request := httptest.NewRequest("GET", "/api/v1/chat/session_test/events?after=1", nil)
 	request.SetPathValue("id", "session_test")
@@ -117,7 +118,8 @@ func TestChatEventsStreamReturnsReplayWithSSEEventIDs(t *testing.T) {
 		t.Fatalf("status = %d", response.Code)
 	}
 	body := response.Body.String()
-	if strings.Contains(body, "id: 1\n") || !strings.Contains(body, "id: 2\nevent: message\n") || !strings.Contains(body, "id: 3\nevent: done\n") {
+	if strings.Contains(body, "id: 1\n") || !strings.Contains(body, "id: 2\nevent: message\n") || !strings.Contains(body, "id: 3\nevent: done\n") ||
+		strings.Count(body, `"user_message_id":"`+userMessageID+`"`) != 2 {
 		t.Fatalf("replay body = %q", body)
 	}
 	if response.flushes < 3 {

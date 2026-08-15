@@ -265,14 +265,15 @@ export interface ServerLogResponse {
 
 export interface AgentEvent {
 	event_id?: number
-  type: string
+	type: string
 	message_id?: string
-  role?: string
-  tool_name?: string
-  tool_call_id?: string
-  content?: string
-  segment_id?: string
-  session_id?: string
+	user_message_id?: string
+	role?: string
+	tool_name?: string
+	tool_call_id?: string
+	content?: string
+	segment_id?: string
+	session_id?: string
 	title?: string
   run_id?: string
   stream?: 'stdout' | 'stderr' | 'progress'

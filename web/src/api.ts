@@ -285,6 +285,7 @@ async function consumeAgentEventStream(response:Response,onEvent:(event:AgentEve
 	let terminalEventReceived=false
 	let flushTimer:number|undefined
 	let pending:AgentEvent[]=[]
+	const flushInterval=80
 
 	const flushPending=()=>{
 		if(flushTimer!==undefined)window.clearTimeout(flushTimer)
@@ -295,24 +296,27 @@ async function consumeAgentEventStream(response:Response,onEvent:(event:AgentEve
 	}
 	const isContentDelta=(event:AgentEvent)=>
 		!!event.content&&(event.type==='reasoning'||event.type==='tool_output'||(event.type==='message'&&event.role!=='tool'))
+	const isProgressUpdate=(event:AgentEvent)=>event.type==='tool_output'&&event.stream==='progress'
 	const sameContentStream=(left:AgentEvent,right:AgentEvent)=>
 		left.type===right.type&&left.role===right.role&&left.tool_name===right.tool_name&&
-		left.message_id===right.message_id&&left.tool_call_id===right.tool_call_id&&left.segment_id===right.segment_id&&
+		left.message_id===right.message_id&&left.user_message_id===right.user_message_id&&left.tool_call_id===right.tool_call_id&&left.segment_id===right.segment_id&&
 		left.session_id===right.session_id&&left.run_id===right.run_id&&left.stream===right.stream&&
 		left.status===right.status
 	const dispatch=(event:AgentEvent)=>{
 		if(event.type==='done'||event.type==='error'||event.type==='model_error'||event.type==='interrupted')terminalEventReceived=true
-		if(!isContentDelta(event)){
+		if(!isContentDelta(event)&&!isProgressUpdate(event)){
 			flushPending()
 			onEvent(event)
 			return
 		}
 		const previous=pending.at(-1)
-		if(previous&&sameContentStream(previous,event)){
+		if(isProgressUpdate(event)&&previous&&isProgressUpdate(previous)&&sameContentStream(previous,event)){
+			pending[pending.length-1]={...previous,...event}
+		}else if(previous&&isContentDelta(previous)&&sameContentStream(previous,event)){
 			previous.content=(previous.content||'')+event.content
 			previous.event_id=event.event_id||previous.event_id
 		}else pending.push({...event})
-		if(flushTimer===undefined)flushTimer=window.setTimeout(flushPending,40)
+		if(flushTimer===undefined)flushTimer=window.setTimeout(flushPending,flushInterval)
 	}
 	const processFrame=(frame:string)=>{
 		const data=frame.split('\n').filter(line=>line.startsWith('data:')).map(line=>line.slice(5).replace(/^ /,'')).join('\n')

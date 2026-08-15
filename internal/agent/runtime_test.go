@@ -1540,11 +1540,24 @@ func TestQueryCommitsNonStreamingToolCallPreamble(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(messages) != 4 {
+		t.Fatalf("stored messages = %#v", messages)
+	}
+	var commitStatuses []string
+	for _, event := range emitted {
+		if event.UserMessageID == "" || event.UserMessageID != messages[0].ID {
+			t.Fatalf("event is not bound to its user turn: %#v", event)
+		}
+		if event.Type == "message_commit" {
+			commitStatuses = append(commitStatuses, event.Status)
+		}
+	}
 	if answer != "Host memory is stable." || len(assistantEvents) != 2 || assistantEvents[0].Content != "I will inspect." || assistantEvents[1].Content != answer ||
 		len(lifecycle.committedIDs) != 2 || len(lifecycle.resetIDs) != 0 || len(lifecycle.active) != 0 ||
 		lifecycle.content[lifecycle.committedIDs[0]] != "I will inspect." || lifecycle.content[lifecycle.committedIDs[1]] != answer ||
-		len(messages) != 4 || messages[1].ID != lifecycle.committedIDs[0] || messages[3].ID != lifecycle.committedIDs[1] {
-		t.Fatalf("answer = %q, assistant message events = %#v, lifecycle = %#v, stored messages = %#v", answer, assistantEvents, lifecycle, messages)
+		messages[1].ID != lifecycle.committedIDs[0] || messages[3].ID != lifecycle.committedIDs[1] ||
+		len(commitStatuses) != 2 || commitStatuses[0] != "progress" || commitStatuses[1] != "completed" {
+		t.Fatalf("answer = %q, assistant message events = %#v, lifecycle = %#v, commit statuses = %#v, stored messages = %#v", answer, assistantEvents, lifecycle, commitStatuses, messages)
 	}
 }
 

@@ -182,6 +182,7 @@ type Event struct {
 	EventID          uint64 `json:"event_id,omitempty"`
 	Type             string `json:"type"`
 	MessageID        string `json:"message_id,omitempty"`
+	UserMessageID    string `json:"user_message_id,omitempty"`
 	Role             string `json:"role,omitempty"`
 	ToolName         string `json:"tool_name,omitempty"`
 	ToolCallID       string `json:"tool_call_id,omitempty"`
@@ -971,12 +972,12 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 		startAssistantMessage(messageID, role, toolName)
 		emit(Event{Type: "message", MessageID: *messageID, Role: role, ToolName: toolName, Content: content, SessionID: sessionID})
 	}
-	commitAssistantMessage := func(messageID, role string) {
+	commitAssistantMessage := func(messageID, role, status string) {
 		if _, exists := activeAssistantMessages[messageID]; !exists {
 			return
 		}
 		delete(activeAssistantMessages, messageID)
-		emit(Event{Type: "message_commit", MessageID: messageID, Role: role, SessionID: sessionID})
+		emit(Event{Type: "message_commit", MessageID: messageID, Role: role, SessionID: sessionID, Status: status})
 	}
 	resetAssistantMessage := func(messageID, role string) {
 		if _, exists := activeAssistantMessages[messageID]; !exists {
@@ -1059,6 +1060,13 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 	userMessageID, err := r.store.AppendPendingChatMessageWithAttachments(ctx, sessionID, "user", query, attachments)
 	if err != nil {
 		return "", err
+	}
+	turnEmit := emit
+	emit = func(event Event) {
+		if event.UserMessageID == "" {
+			event.UserMessageID = userMessageID
+		}
+		turnEmit(event)
 	}
 	var titleCancel context.CancelFunc
 	var titleDone <-chan struct{}
@@ -1420,7 +1428,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 							return "", err
 						}
 						if assistantStreamVisible {
-							commitAssistantMessage(assistantMessageID, role)
+							commitAssistantMessage(assistantMessageID, role, "progress")
 						}
 					} else if assistantStreamVisible {
 						resetAssistantMessage(assistantMessageID, role)
@@ -1519,7 +1527,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 					if err := r.store.AppendChatMessageWithID(ctx, messageID, sessionID, domain.ChatMessageRoleAssistantProgress, displayContent); err != nil {
 						return "", err
 					}
-					commitAssistantMessage(messageID, role)
+					commitAssistantMessage(messageID, role, "progress")
 				} else {
 					answerCandidate = displayContent
 					answerMessageID = messageID
@@ -1592,7 +1600,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 		} else if err := r.store.AppendChatMessageWithID(ctx, answerMessageID, sessionID, "assistant", answer); err != nil {
 			return answer, err
 		}
-		commitAssistantMessage(answerMessageID, string(schema.Assistant))
+		commitAssistantMessage(answerMessageID, string(schema.Assistant), "completed")
 		if latestTokenUsage.TotalTokens > 0 {
 			emit(Event{
 				Type: "token_usage", MessageID: answerMessageID, SessionID: sessionID,

@@ -21,10 +21,11 @@ import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionR
 type Page = 'chat' | 'ssh' | 'config' | 'extensions' | 'audit' | 'logs'
 const pageVisualOrder:Page[]=['chat','ssh','extensions','audit','logs','config']
 const maxFilePreviewBytes=1<<20
+const liveToolOutputBufferChars=128<<10
 type ChatEntryImage = {id:string;name:string;mimeType:string;sizeBytes:number;url:string}
 const workStatusKeys=['chat.cooking','chat.pondering','chat.brewing','chat.weaving','chat.polishing','chat.crunching'] as const
 type PendingChatImage = {id:string;file:File;url:string}
-type ChatEntry = { id: string; sourceMessageId?:string; persisted?:boolean; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; contentTruncated?:boolean; contentChars?:number; tool?: string; toolCallId?:string; runId?:string; transient?:boolean; startedAt?:number; liveStdout?:string; liveStderr?:string; liveOutput?:string; liveOutputStream?:'stdout'|'stderr'; transferredBytes?:number; transferTotalBytes?:number; images?:ChatEntryImage[]; tokenUsage?:ChatTokenUsage; active?: boolean; lifecycle?:'streaming'|'committed'; status?: 'pending' | 'completed' | 'failed' }
+type ChatEntry = { id: string; sourceMessageId?:string; persisted?:boolean; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; contentTruncated?:boolean; contentChars?:number; tool?: string; toolCallId?:string; runId?:string; transient?:boolean; progress?:boolean; startedAt?:number; liveStdout?:string; liveStderr?:string; liveOutput?:string; liveOutputStream?:'stdout'|'stderr'; transferredBytes?:number; transferTotalBytes?:number; images?:ChatEntryImage[]; tokenUsage?:ChatTokenUsage; active?: boolean; lifecycle?:'streaming'|'committed'; status?: 'pending' | 'completed' | 'failed' }
 type TaskToolEntryGroup={kind:'task_tool_group';id:string;tool:'TaskCreate'|'TaskUpdate';entries:ChatEntry[]}
 type ChatRenderItem={kind:'entry';entry:ChatEntry}|TaskToolEntryGroup
 type ModelRetryState = {attempt:number;max:number}
@@ -38,7 +39,7 @@ function historyEntries(messages:ChatMessage[],sessionID:string):ChatEntry[]{
 	return messages.map((item,index)=>{
 		const kind=item.role==='assistant_progress'?'assistant':item.role
 		const toolStatus=item.tool_status||(kind==='tool'?toolContentStatus(item.content):'')
-		return{id:item.tool_call_id?`tool_${item.tool_call_id}`:item.id||`history_${index}_${item.created_at}`,sourceMessageId:item.id,persisted:true,kind,content:item.content,contentTruncated:item.content_truncated,contentChars:item.content_chars,tool:item.tool_name,toolCallId:item.tool_call_id,runId:item.run_id,transient:kind==='tool'&&!settledToolStatus(toolStatus),startedAt:kind==='tool'?Date.parse(item.created_at):undefined,status:item.status,lifecycle:item.role==='assistant'||item.role==='assistant_progress'?'committed':undefined,images:item.attachments?.map(image=>({id:image.id,name:image.name,mimeType:image.mime_type,sizeBytes:image.size_bytes,url:chatAttachmentURL(sessionID,image.id)})),tokenUsage:item.token_usage}
+		return{id:item.tool_call_id?`tool_${item.tool_call_id}`:item.id||`history_${index}_${item.created_at}`,sourceMessageId:item.id,persisted:true,kind,content:item.content,contentTruncated:item.content_truncated,contentChars:item.content_chars,tool:item.tool_name,toolCallId:item.tool_call_id,runId:item.run_id,transient:kind==='tool'&&!settledToolStatus(toolStatus),progress:item.role==='assistant_progress',startedAt:kind==='tool'?Date.parse(item.created_at):undefined,status:item.status,lifecycle:item.role==='assistant'||item.role==='assistant_progress'?'committed':undefined,images:item.attachments?.map(image=>({id:image.id,name:image.name,mimeType:image.mime_type,sizeBytes:image.size_bytes,url:chatAttachmentURL(sessionID,image.id)})),tokenUsage:item.token_usage}
 	})
 }
 
@@ -94,9 +95,23 @@ function appendAssistantDelta(entries:ChatEntry[],messageID:string,content:strin
 	return[...entries.map(deactivateReasoning),{id:messageID,kind:'assistant' as const,content,lifecycle:'streaming' as const}]
 }
 
-function commitAssistantLifecycle(entries:ChatEntry[],messageID:string){
+function commitAssistantLifecycle(entries:ChatEntry[],messageID:string,progress=false){
 	if(!messageID)return entries
-	return entries.flatMap(item=>item.id===messageID?(item.content.trim()?[{...item,lifecycle:'committed' as const}]:[]):[item])
+	return entries.flatMap(item=>item.id===messageID?(item.content.trim()?[{...item,progress,lifecycle:'committed' as const}]:[]):[item])
+}
+
+function bindTurnUser(entries:ChatEntry[],userMessageID:string,clientUserEntryID:string){
+	if(!userMessageID||entries.some(item=>item.kind==='user'&&item.sourceMessageId===userMessageID))return entries
+	let index=clientUserEntryID?entries.findIndex(item=>item.kind==='user'&&item.id===clientUserEntryID&&item.status==='pending'):-1
+	if(index<0)for(let current=entries.length-1;current>=0;current--){if(entries[current].kind==='user'&&entries[current].status==='pending'){index=current;break}}
+	return index<0?entries:entries.map((item,current)=>current===index?{...item,sourceMessageId:userMessageID}:item)
+}
+
+function updateTurnUserStatus(entries:ChatEntry[],status:'completed'|'failed',userMessageID:string|undefined,clientUserEntryID:string){
+	let index=userMessageID?entries.findIndex(item=>item.kind==='user'&&item.sourceMessageId===userMessageID):-1
+	if(index<0&&!userMessageID&&clientUserEntryID)index=entries.findIndex(item=>item.kind==='user'&&item.id===clientUserEntryID&&item.status==='pending')
+	if(index<0&&!userMessageID)for(let current=entries.length-1;current>=0;current--){if(entries[current].kind==='user'&&entries[current].status==='pending'){index=current;break}}
+	return index<0||entries[index].status===status?entries:entries.map((item,current)=>current===index?{...item,status}:item)
 }
 
 function resetAssistantLifecycle(entries:ChatEntry[],messageID:string){
@@ -209,7 +224,7 @@ function appendToolOutput(entries:ChatEntry[],frame:AgentEvent){
 		if(itemIndex!==index)return item
 		const currentStatus=toolContentStatus(item.content)
 		if(!item.transient&&status==='in_progress'&&settledToolStatus(currentStatus))return item
-		const content=toolContentWithStatus(item.content,status,runID)
+		const content=currentStatus===status&&(!runID||item.runId===runID)?item.content:toolContentWithStatus(item.content,status,runID)
 		const chunk=frame.content||''
 		const outputStream=frame.stream==='stdout'||frame.stream==='stderr'?frame.stream:undefined
 		const liveOutput=outputStream&&chunk?`${item.liveOutput||''}${chunk}`.slice(-16_384):item.liveOutput
@@ -219,8 +234,8 @@ function appendToolOutput(entries:ChatEntry[],frame:AgentEvent){
 			tool:frame.tool_name||item.tool,
 			toolCallId:callID||item.toolCallId,
 			runId:runID||item.runId,
-			liveStdout:frame.stream==='stdout'?(item.liveStdout||'')+chunk:item.liveStdout,
-			liveStderr:frame.stream==='stderr'?(item.liveStderr||'')+chunk:item.liveStderr,
+			liveStdout:frame.stream==='stdout'?appendBoundedOutput(item.liveStdout,chunk):item.liveStdout,
+			liveStderr:frame.stream==='stderr'?appendBoundedOutput(item.liveStderr,chunk):item.liveStderr,
 			liveOutput,
 			liveOutputStream:outputStream&&chunk?outputStream:item.liveOutputStream,
 			transferredBytes:frame.stream==='progress'&&typeof frame.transferred_bytes==='number'?frame.transferred_bytes:item.transferredBytes,
@@ -228,6 +243,14 @@ function appendToolOutput(entries:ChatEntry[],frame:AgentEvent){
 			transient:status==='in_progress'||status==='approval_required',
 		}
 	})
+}
+
+function appendBoundedOutput(current:string|undefined,chunk:string){
+	if(!chunk)return current||''
+	if(chunk.length>=liveToolOutputBufferChars)return chunk.slice(-liveToolOutputBufferChars)
+	const existing=current||''
+	const keep=Math.max(0,liveToolOutputBufferChars-chunk.length)
+	return existing.slice(-keep)+chunk
 }
 
 function tasksFromToolContent(content:string):AgentTaskList|undefined{
@@ -2113,6 +2136,18 @@ function Nav({ active, icon, label, count, warn, onClick }: {active:boolean;icon
   return <button className={`nav-item ${active ? 'active' : ''}`} onClick={onClick} title={label} aria-label={label} aria-current={active?'page':undefined}>{icon}<span>{label}</span>{count !== undefined && <em className={warn ? 'warn' : ''}>{count}</em>}</button>
 }
 
+const ChatSessionSidebar=memo(function ChatSessionSidebar({sessions,historyError,approvalCounts,activeSessionID,activeCurrentSession,workspaceSwitching,loadingSession,onNew,onOpen,onRename,onDelete}:{sessions:ChatSession[];historyError:string;approvalCounts:Map<string,number>;activeSessionID:string;activeCurrentSession:boolean;workspaceSwitching:boolean;loadingSession:string;onNew:()=>void;onOpen:(id:string)=>void;onRename:(session:ChatSession)=>void;onDelete:(session:ChatSession)=>void}){
+	const {t,i18n:instance}=useTranslation()
+	return <>
+		<header className="sidebar-conversation-head"><span><History size={15}/>{t('chat.conversations')}</span><button className="new-chat-button" onClick={onNew} disabled={workspaceSwitching} title={t('chat.newConversation')} aria-label={t('chat.newConversation')}><Plus size={14}/><span>{t('common.new')}</span></button></header>
+		<div className="session-list">
+			{historyError&&<div className="history-error">{historyError}</div>}
+			{!sessions.length&&!historyError&&<div className="history-empty">{t('chat.noSaved')}</div>}
+			{sessions.map(session=>{const pending=approvalCounts.get(session.id)||0;const active=session.active||(session.id===activeSessionID&&activeCurrentSession);return <div className={`session-item ${session.id===activeSessionID?'active':''}`} key={session.id}><button className="session-open" onClick={()=>onOpen(session.id)} disabled={workspaceSwitching||loadingSession===session.id}><b>{session.title}{pending>0&&<em className="session-approval-count">{t('chat.approvalCount',{count:pending})}</em>}{active&&<em className="session-running-count">{t('chat.runningBadge')}</em>}</b><span>{new Date(session.updated_at).toLocaleString(localeFor(instance.language))} · {t('chat.messageCount',{count:session.message_count})}</span></button><div className="session-actions"><button className="session-edit" onClick={()=>onRename(session)} disabled={workspaceSwitching} title={t('chat.renameConversation')} aria-label={t('chat.renameConversation')}><Edit3 size={13}/></button><button className="session-delete" onClick={()=>onDelete(session)} disabled={active||workspaceSwitching} title={active?t('chat.cannotDelete'):t('chat.deleteConversation')}><Trash2 size={13}/></button></div></div>})}
+		</div>
+	</>
+})
+
 function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, workspaceShells, capabilities, settings, imageTypes, agentAvailable, modelName, contextWindow, refreshConnections, refreshApprovals, onCreateWorkspaceShell, onOpenWorkspaceShell, onWorkspaceShellStarted, onSettingsChanged, onHostChanged, onModelChanged, sidebarTarget, onSessionDeleted, onError }: {visible:boolean;onActivate:()=>void;hosts:Host[];providers:ModelProvider[];approvals:Approval[];runs:Run[];workspaceShells:SSHShell[];capabilities:ToolCapabilities;settings:SystemSettings|null;imageTypes:string[];agentAvailable:boolean;modelName?:string;contextWindow:number;refreshConnections:()=>Promise<void>;refreshApprovals:(decidedID?:string)=>Promise<void>;onCreateWorkspaceShell:(workspaceID:string)=>Promise<void>;onOpenWorkspaceShell:(shell:SSHShell)=>void;onWorkspaceShellStarted:(shell:SSHShell)=>void;onSettingsChanged:(settings:SystemSettings)=>void;onHostChanged:(host:Host)=>void;onModelChanged:(provider:ModelProvider)=>void;sidebarTarget:HTMLDivElement|null;onSessionDeleted:(sessionID:string)=>void;onError:(message:string)=>void}) {
 		const {t,i18n:instance}=useTranslation()
 		const notify=useNotifier()
@@ -2159,7 +2194,10 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
   const stickToLatest=useRef(true)
 	const userScrollFrame=useRef(0)
 	const disclosureScrollFrame=useRef(0)
+	const autoScrollFrame=useRef(0)
 	  const activeStreamRef=useRef<ActiveChatStream|null>(null)
+	const lastAgentEventIDRef=useRef(0)
+	const lastAgentEventSessionRef=useRef('')
 	  const imageURLsRef=useRef(new Set<string>())
 	const reconnectErrorRef=useRef('')
   const sessionLoadRef=useRef('')
@@ -2173,7 +2211,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		if(sessionBusy)return ''
 		for(let index=entries.length-1;index>=0;index--){
 			const entry=entries[index]
-			if(entry.kind==='assistant'&&entry.lifecycle==='committed'&&entry.content)return entry.id
+			if(entry.kind==='assistant'&&!entry.progress&&entry.lifecycle==='committed'&&entry.content)return entry.id
 		}
 		return ''
 	},[entries,sessionBusy])
@@ -2193,11 +2231,11 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		const timer=window.setInterval(()=>setRetryClock(Date.now()),1000)
 		return()=>window.clearInterval(timer)
 	},[connectionRetry,visible])
-	useEffect(()=>()=>{sessionLoadRef.current='';const stream=activeStreamRef.current;activeStreamRef.current=null;stream?.controller.abort();window.cancelAnimationFrame(userScrollFrame.current);window.cancelAnimationFrame(disclosureScrollFrame.current)},[])
+	useEffect(()=>()=>{sessionLoadRef.current='';const stream=activeStreamRef.current;activeStreamRef.current=null;stream?.controller.abort();window.cancelAnimationFrame(userScrollFrame.current);window.cancelAnimationFrame(disclosureScrollFrame.current);window.cancelAnimationFrame(autoScrollFrame.current)},[])
 	useEffect(()=>()=>{for(const url of imageURLsRef.current)URL.revokeObjectURL(url);imageURLsRef.current.clear()},[])
 	const addImages=(files:File[])=>{const accepted=files.filter(file=>imageTypes.includes(file.type));if(accepted.length!==files.length)setImageNotice(t('chat.imageTypeRejected'));if(!accepted.length)return;const next=accepted.map(file=>{const url=URL.createObjectURL(file);imageURLsRef.current.add(url);return{id:clientId(),file,url}});setPendingImages(current=>[...current,...next])}
 	const removePendingImage=(id:string)=>{setPendingImages(current=>{const target=current.find(image=>image.id===id);if(target){URL.revokeObjectURL(target.url);imageURLsRef.current.delete(target.url)}return current.filter(image=>image.id!==id)});setImageInputKey(value=>value+1)}
-	const clearPendingImages=()=>{for(const image of pendingImages){URL.revokeObjectURL(image.url);imageURLsRef.current.delete(image.url)}setPendingImages([]);setImageInputKey(value=>value+1);setImageNotice('')}
+	const clearPendingImages=useCallback(()=>{for(const image of pendingImages){URL.revokeObjectURL(image.url);imageURLsRef.current.delete(image.url)}setPendingImages([]);setImageInputKey(value=>value+1);setImageNotice('')},[pendingImages])
   const refreshSessions = useCallback(async () => {
     try {
       const items = await api.chatSessions(); setSessions(current=>keepEquivalent(current,items)); setHistoryError(''); return items
@@ -2225,6 +2263,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
     try {
       const state = await api.chatState(id)
       if(sessionLoadRef.current!==requestID)return
+		lastAgentEventSessionRef.current=id;lastAgentEventIDRef.current=0
 	      setEntries(historyEntries(state.messages||[],id));setHistoryHasMore(!!state.messages_has_more);setHistoryCursor(state.messages_next_created_at&&state.messages_next_id?{createdAt:state.messages_next_created_at,id:state.messages_next_id}:null);setDetachedRunning(!!state.active);setQueuedMessages(state.queued_messages||[]);setQueueingMessage(false);setStopping(false);setModelRetry(null);setConnectionRetry(null);setTasks(state.tasks?.items?.length?state.tasks:null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setWorkspaceID(state.workspace_id||'');setBoundWorkspaceID(state.workspace_id||'')
       setSessionId(id); rememberSession(id); setHistoryError('')
 	} catch (err) { if(sessionLoadRef.current===requestID)setHistoryError(errorText(err)) }
@@ -2249,11 +2288,15 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		finally{if(sessionIDRef.current===targetSessionID)setLoadingOlderMessages(false)}
 	},[historyCursor,historyHasMore,loadingOlderMessages,sessionId])
 
-  useLayoutEffect(()=>{
-	    if(!visible||!stickToLatest.current)return
-    const container=messagesRef.current
-    if(container)container.scrollTop=container.scrollHeight
-	  },[entries,loadingSession,visible])
+	useEffect(()=>{
+		window.cancelAnimationFrame(autoScrollFrame.current)
+		if(!visible||!stickToLatest.current)return
+		autoScrollFrame.current=window.requestAnimationFrame(()=>{
+			const container=messagesRef.current
+			if(container&&stickToLatest.current)container.scrollTop=container.scrollHeight
+		})
+		return()=>window.cancelAnimationFrame(autoScrollFrame.current)
+	},[entries,loadingSession,visible])
 
 	const trackUserScroll=()=>{
 		window.cancelAnimationFrame(userScrollFrame.current)
@@ -2290,17 +2333,18 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
     return () => { active = false }
   }, [loadSession])
 
-  const newChat = () => {
+	const newChat=useCallback(()=>{
 		if(workspaceSwitching)return
 		onActivate()
-    detachActiveStream()
-    sessionLoadRef.current=''
+		detachActiveStream()
+		lastAgentEventSessionRef.current='';lastAgentEventIDRef.current=0
+		sessionLoadRef.current=''
     setLoadingSession('')
 	    stickToLatest.current=true;setSessionId('');setBoundWorkspaceID('');setEntries([]);setHistoryHasMore(false);setHistoryCursor(null);setLoadingOlderMessages(false); setMessage('');clearPendingImages(); setHistoryError('');setContextUsage({tokens:0,window:activeContextWindow});setDetachedRunning(false);setQueuedMessages([]);setQueueingMessage(false);setStopping(false);setCompressingContext(false);setModelRetry(null);setConnectionRetry(null);setTasks(null); rememberSession(newSessionMarker)
     void refreshSessions()
-  }
+	},[activeContextWindow,clearPendingImages,detachActiveStream,onActivate,refreshSessions,workspaceSwitching])
 
-  const switchSession = (id:string) => {
+	const switchSession=useCallback((id:string)=>{
 		if(workspaceSwitching)return
 		onActivate()
     if(id===sessionId){
@@ -2308,10 +2352,13 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
       return
     }
     detachActiveStream()
+		lastAgentEventSessionRef.current=id;lastAgentEventIDRef.current=0
 		setDetachedRunning(false);setQueuedMessages([]);setQueueingMessage(false);setStopping(false);setConnectionRetry(null);setHistoryHasMore(false);setHistoryCursor(null);setLoadingOlderMessages(false)
     void loadSession(id)
     void refreshSessions()
-  }
+	},[detachActiveStream,loadSession,loadingSession,onActivate,refreshSessions,sessionId,workspaceSwitching])
+	const openSessionRename=useCallback((session:ChatSession)=>{setSessionRenameError('');setSessionRenameCandidate(session)},[])
+	const openSessionDelete=useCallback((session:ChatSession)=>setSessionDeleteCandidate(session),[])
 
 	const switchWorkspace=useCallback(async(id:string)=>{
 		if(id===selectedWorkspace?.id||sessionBusy||loadingSession||workspaceSwitching)return
@@ -2351,13 +2398,17 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	}
 
 	const handleAgentFrame=useCallback((frame:AgentEvent,userEntryID='',workspace='')=>{
-		const updateUser=(item:ChatEntry,status:'completed'|'failed')=>item.kind==='user'&&(userEntryID?item.id===userEntryID:item.status==='pending')?{...item,status}:item
-		if(frame.session_id){
+		const eventSessionID=frame.session_id||sessionIDRef.current
+		if(eventSessionID&&lastAgentEventSessionRef.current!==eventSessionID){lastAgentEventSessionRef.current=eventSessionID;lastAgentEventIDRef.current=0}
+		if(frame.event_id&&frame.event_id>lastAgentEventIDRef.current)lastAgentEventIDRef.current=frame.event_id
+		if(frame.session_id&&frame.session_id!==sessionIDRef.current){
+			sessionIDRef.current=frame.session_id
 			if(activeStreamRef.current)activeStreamRef.current.sessionId=frame.session_id
 			setSessionId(frame.session_id)
 			if(workspace)setBoundWorkspaceID(workspace)
 			rememberSession(frame.session_id)
 		}
+		if(frame.user_message_id)setEntries(old=>bindTurnUser(old,frame.user_message_id!,userEntryID))
 		if(frame.type==='session'||frame.type==='title')void refreshSessions()
 		if(frame.type==='retry'){
 			setModelRetry({attempt:frame.retry_attempt||1,max:frame.retry_max||1})
@@ -2369,9 +2420,9 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			setQueuedMessages(current=>current.filter(item=>item.id!==frame.message_id))
 			setEntries(old=>[...old.map(deactivateReasoning),{id:`queued_${frame.message_id}`,kind:'user',content:frame.content||'',status:'pending'}])
 		}
-		if(frame.type==='turn_done')setEntries(old=>old.map(item=>item.kind==='user'&&item.status==='pending'?{...deactivateReasoning(item),status:'completed' as const}:deactivateReasoning(item)))
+		if(frame.type==='turn_done')setEntries(old=>updateTurnUserStatus(old.map(deactivateReasoning),'completed',frame.user_message_id,userEntryID))
 		if(frame.type==='approval'){
-			setEntries(old=>updateToolStatusByRunID(old.map(item=>updateUser(item,'completed')),'approval_required',frame.run_id))
+			setEntries(old=>updateToolStatusByRunID(updateTurnUserStatus(old,'completed',frame.user_message_id,userEntryID),'approval_required',frame.run_id))
 			void refreshApprovals()
 		}
 		if(frame.type==='tool_output')setEntries(old=>appendToolOutput(old,frame))
@@ -2417,19 +2468,19 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		}
 		if(frame.type==='message_start'&&frame.message_id)setEntries(old=>startAssistantLifecycle(old,frame.message_id!))
 		if(frame.type==='message'&&frame.message_id&&frame.content)setEntries(old=>appendAssistantDelta(old,frame.message_id!,frame.content!))
-		if(frame.type==='message_commit'&&frame.message_id)setEntries(old=>commitAssistantLifecycle(old,frame.message_id!))
+		if(frame.type==='message_commit'&&frame.message_id)setEntries(old=>commitAssistantLifecycle(old,frame.message_id!,frame.status==='progress'))
 		if(frame.type==='message_reset'&&frame.message_id)setEntries(old=>resetAssistantLifecycle(old,frame.message_id!))
 		if(frame.type==='done'){
 			setStopping(false)
 			setQueuedMessages([])
-			setEntries(old=>old.map(item=>item.kind==='user'&&item.status==='pending'?{...item,status:'completed' as const}:item))
+			setEntries(old=>updateTurnUserStatus(old,'completed',frame.user_message_id,userEntryID))
 		}
 		if(frame.type==='interrupted'){
 			setStopping(false)
 			setQueuedMessages([])
-			setEntries(old=>[...old.map(item=>{const next=deactivateReasoning(item);return next.kind==='user'&&next.status==='pending'?{...next,status:'failed' as const}:next}),{id:clientId(),kind:'assistant',content:frame.content||t('chat.stopped'),lifecycle:'committed'}])
+			setEntries(old=>[...updateTurnUserStatus(old.map(deactivateReasoning),'failed',frame.user_message_id,userEntryID),{id:clientId(),kind:'assistant',content:frame.content||t('chat.stopped'),lifecycle:'committed'}])
 		}
-		if(frame.type==='model_error'||frame.type==='error'){setQueuedMessages([]);setEntries(old=>[...old.map(item=>item.kind==='user'&&item.status==='pending'?{...item,status:'failed' as const}:item),{id:clientId(),kind:'error',content:frame.error||t('chat.agentError')}])}
+		if(frame.type==='model_error'||frame.type==='error'){setQueuedMessages([]);setEntries(old=>[...updateTurnUserStatus(old,'failed',frame.user_message_id,userEntryID),{id:clientId(),kind:'error',content:frame.error||t('chat.agentError')}])}
 	},[activeContextWindow,onWorkspaceShellStarted,refreshApprovals,refreshConnections,refreshSessions,t])
 
 	useEffect(()=>{
@@ -2461,7 +2512,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 					setEntries(old=>settledTurnEntries(state.messages||[],sessionId,old,true))
 					setConnectionRetry(null)
 					setHistoryError('')
-					await reconnectChatStream(sessionId,0,frame=>{if(active)handleAgentFrame(frame)},controller.signal)
+					await reconnectChatStream(sessionId,lastAgentEventSessionRef.current===sessionId?lastAgentEventIDRef.current:0,frame=>{if(active)handleAgentFrame(frame)},controller.signal)
 					attempt=0
 				}catch(err){
 					if(!active||controller.signal.aborted)return
@@ -2512,6 +2563,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
     const controller=new AbortController()
 		const workspace=selectedWorkspace?.id||''
 		activeStreamRef.current={id:streamID,sessionId:querySessionID,controller}
+		lastAgentEventSessionRef.current=querySessionID;lastAgentEventIDRef.current=0
     const isAttached=()=>activeStreamRef.current?.id===streamID
     stickToLatest.current=true
 		setSessionId(querySessionID);rememberSession(querySessionID)
@@ -2605,14 +2657,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		setWorkspacePanelCollapsed(collapsed)
 	},[])
 	const collapseWorkspacePanel=useCallback(()=>setWorkspaceCollapsed(true),[setWorkspaceCollapsed])
-	const sessionSidebar=sidebarTarget&&createPortal(<>
-		<header className="sidebar-conversation-head"><span><History size={15}/>{t('chat.conversations')}</span><button className="new-chat-button" onClick={newChat} disabled={workspaceSwitching} title={t('chat.newConversation')} aria-label={t('chat.newConversation')}><Plus size={14}/><span>{t('common.new')}</span></button></header>
-		<div className="session-list">
-			{historyError&&<div className="history-error">{historyError}</div>}
-			{!sessions.length&&!historyError&&<div className="history-empty">{t('chat.noSaved')}</div>}
-			{sessions.map(session=>{const pending=approvalCountsBySession.get(session.id)||0;const active=session.active||(session.id===sessionId&&(sessionBusy||toolsRunning));return <div className={`session-item ${session.id===sessionId?'active':''}`} key={session.id}><button className="session-open" onClick={()=>switchSession(session.id)} disabled={workspaceSwitching||loadingSession===session.id}><b>{session.title}{pending>0&&<em className="session-approval-count">{t('chat.approvalCount',{count:pending})}</em>}{active&&<em className="session-running-count">{t('chat.runningBadge')}</em>}</b><span>{new Date(session.updated_at).toLocaleString(localeFor(instance.language))} · {t('chat.messageCount',{count:session.message_count})}</span></button><div className="session-actions"><button className="session-edit" onClick={()=>{setSessionRenameError('');setSessionRenameCandidate(session)}} disabled={workspaceSwitching} title={t('chat.renameConversation')} aria-label={t('chat.renameConversation')}><Edit3 size={13}/></button><button className="session-delete" onClick={()=>{if(!active)setSessionDeleteCandidate(session)}} disabled={active||workspaceSwitching} title={active?t('chat.cannotDelete'):t('chat.deleteConversation')}><Trash2 size={13}/></button></div></div>})}
-		</div>
-	</>,sidebarTarget)
+	const sessionSidebar=sidebarTarget&&createPortal(<ChatSessionSidebar sessions={sessions} historyError={historyError} approvalCounts={approvalCountsBySession} activeSessionID={sessionId} activeCurrentSession={sessionBusy||toolsRunning} workspaceSwitching={workspaceSwitching} loadingSession={loadingSession} onNew={newChat} onOpen={switchSession} onRename={openSessionRename} onDelete={openSessionDelete}/>,sidebarTarget)
 
 	return <>{sessionSidebar}<ChatVisibilityContext.Provider value={visible}><div className={`chat-layout ${workspacePanelCollapsed?'workspace-panel-collapsed ':''}${visible?'':'page-hidden'}`}>
 		<ChatWorkspacePanel key={selectedWorkspace?.id||''} active={visible} mode={fileBrowserMode} onModeChange={setFileBrowserMode} workspaces={capabilities.workspaces} workspaceID={selectedWorkspace?.id||''} hosts={hosts} sftpHostID={sftpHostID} onSFTPHostChange={setSFTPHostID} shells={workspaceShells} switching={workspaceSwitching} disabled={sessionBusy||!!loadingSession} bound={!!selectedWorkspace&&boundWorkspaceID===selectedWorkspace.id} onSelect={switchWorkspace} onCreateShell={onCreateWorkspaceShell} onOpenShell={onOpenWorkspaceShell} onCollapse={collapseWorkspacePanel}/>
@@ -2854,7 +2899,7 @@ const ChatBubble=memo(function ChatBubble({ sessionID, entry, showActions, runs,
   if (entry.kind === 'tool') return <ToolEventCard sessionID={sessionID} entry={entry} runs={runs} hosts={hosts} onDisclosure={onToolDisclosure}/>
   if (entry.kind === 'reasoning') return <ReasoningCard content={entry.content} active={!!entry.active}/>
   if (entry.kind === 'assistant' && !entry.content) return null
-	return <div className={`bubble ${entry.kind} ${entry.status||''}`}><div className="avatar">{entry.kind === 'user' ? <UserRound size={17}/> : entry.kind === 'error' ? '!' : <Bot size={17}/>}</div><div><span className="bubble-label">{entry.kind === 'user' ? <>{t('chat.operator')}{entry.status==='failed'&&<em>{t('chat.responseFailed')}</em>}{entry.status==='pending'&&<em>{t('chat.processing')}</em>}</> : entry.kind === 'error' ? t('common.error') : 'OpsNerva'}</span>{entry.images&&entry.images.length>0&&<div className="message-images">{entry.images.map(image=><a href={image.url} target="_blank" rel="noopener noreferrer" title={`${image.name} · ${formatFileSize(image.sizeBytes)}`} key={image.id}><img src={image.url} alt={image.name}/><span>{image.name}</span></a>)}</div>}{entry.content&&<div className={`bubble-copy ${entry.kind==='assistant'&&entry.lifecycle!=='streaming'?'markdown-body':''}`}>{entry.kind==='assistant'&&entry.lifecycle!=='streaming'?<Suspense fallback={entry.content}><MarkdownMessage content={entry.content}/></Suspense>:entry.content}</div>}{showActions&&<div className="assistant-message-footer"><CopyButton value={entry.content} className="message-copy-button"/>{entry.tokenUsage&&<TokenUsageLine usage={entry.tokenUsage}/>}</div>}</div></div>
+	return <div className={`bubble ${entry.kind} ${entry.status||''} ${entry.progress?'progress':''}`}><div className="avatar">{entry.kind === 'user' ? <UserRound size={17}/> : entry.kind === 'error' ? '!' : <Bot size={17}/>}</div><div><span className="bubble-label">{entry.kind === 'user' ? <>{t('chat.operator')}{entry.status==='failed'&&<em>{t('chat.turnIncomplete')}</em>}{entry.status==='pending'&&<em>{t('chat.processing')}</em>}</> : entry.kind === 'error' ? t('common.error') : <>OpsNerva{entry.progress&&<em>{t('chat.progressOutput')}</em>}</>}</span>{entry.images&&entry.images.length>0&&<div className="message-images">{entry.images.map(image=><a href={image.url} target="_blank" rel="noopener noreferrer" title={`${image.name} · ${formatFileSize(image.sizeBytes)}`} key={image.id}><img src={image.url} alt={image.name}/><span>{image.name}</span></a>)}</div>}{entry.content&&<div className={`bubble-copy ${entry.kind==='assistant'&&entry.lifecycle!=='streaming'?'markdown-body':''}`}>{entry.kind==='assistant'&&entry.lifecycle!=='streaming'?<Suspense fallback={entry.content}><MarkdownMessage content={entry.content}/></Suspense>:entry.content}</div>}{showActions&&<div className="assistant-message-footer"><CopyButton value={entry.content} className="message-copy-button"/>{entry.tokenUsage&&<TokenUsageLine usage={entry.tokenUsage}/>}</div>}</div></div>
 })
 
 function TokenUsageLine({usage}:{usage:ChatTokenUsage}){
@@ -2865,18 +2910,19 @@ function TokenUsageLine({usage}:{usage:ChatTokenUsage}){
 }
 
 function latestReasoningLine(content:string){
-  const lines=content.split(/\r?\n/).map((line)=>line.trim()).filter(Boolean)
-	const line=lines.at(-1)||i18n.t('chat.reasoningFallback')
-  const characters=Array.from(line)
-  return characters.length>72?`…${characters.slice(-72).join('')}`:line
+	const tail=content.slice(-2048).trimEnd()
+	const line=tail.slice(Math.max(tail.lastIndexOf('\n'),tail.lastIndexOf('\r'))+1).trim()||i18n.t('chat.reasoningFallback')
+	const characters=Array.from(line.slice(-144))
+	return characters.length>72?`…${characters.slice(-72).join('')}`:line
 }
 
 function ReasoningCard({content,active}:{content:string;active:boolean}){
 	const {t}=useTranslation()
+	const [expanded,setExpanded]=useState(false)
   const latest=latestReasoningLine(content)
-  return <details className={`reasoning-card ${active?'active':''}`}>
+	return <details className={`reasoning-card ${active?'active':''}`} open={expanded} onToggle={event=>setExpanded(event.currentTarget.open)}>
 	  <summary><span className="reasoning-icon"><BrainCircuit size={15}/></span><span className="reasoning-title">{active?t('chat.reasoningActive'):t('chat.reasoning')}</span><span className="reasoning-latest" title={latest}>{latest}</span><ChevronRight className="reasoning-chevron" size={14}/></summary>
-    <div className="reasoning-content"><pre>{content}</pre></div>
+	  {expanded&&<div className="reasoning-content"><pre>{content}</pre></div>}
   </details>
 }
 
@@ -3022,7 +3068,7 @@ function taskToolOperationSummary(entry:ChatEntry,argumentsValue=taskToolArgumen
 	return entry.tool==='TaskCreate'&&taskID?[`#${taskID}`,summary].filter(Boolean).join(' · '):summary||toolLabel(entry.tool||'')
 }
 
-function TaskToolGroupCard({group,onDisclosure}:{group:TaskToolEntryGroup;onDisclosure:(summary:HTMLElement)=>void}){
+const TaskToolGroupCard=memo(function TaskToolGroupCard({group,onDisclosure}:{group:TaskToolEntryGroup;onDisclosure:(summary:HTMLElement)=>void}){
 	const {t}=useTranslation()
 	const [expanded,setExpanded]=useState(false)
 	const status=taskToolGroupStatus(group.entries)
@@ -3036,7 +3082,7 @@ function TaskToolGroupCard({group,onDisclosure}:{group:TaskToolEntryGroup;onDisc
 		<summary onClick={event=>{event.preventDefault();onDisclosure(event.currentTarget);setExpanded(value=>!value)}}><div className="tool-summary-icon"><ListChecks size={15}/></div><div className="tool-summary-copy"><div className="tool-summary-heading"><b>{toolLabel(group.tool)}</b><span className="task-tool-group-count">{t('agentTasks.operationCount',{count:group.entries.length})}</span></div><code title={summary}>{summary}</code></div><div className="tool-summary-statuses"><span className={`tool-status ${status}`} key={status}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight size={14}/></summary>
 		{expanded&&<div className="tool-event-body"><CompactTable title={t('agentTasks.operations')} columns={[t('agentTasks.operation'),t('tool.actualParameters'),t('common.status')]} rows={operations.map(operation=>[operation.summary,operation.arguments,t(`statusLabels.${operation.status}`,{defaultValue:operation.status.replaceAll('_',' ')})])}/></div>}
 	</details>
-}
+},(previous,next)=>previous.onDisclosure===next.onDisclosure&&previous.group.tool===next.group.tool&&previous.group.entries.length===next.group.entries.length&&previous.group.entries.every((entry,index)=>entry===next.group.entries[index]))
 
 function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,onDisclosure}:{sessionID:string;entry:ChatEntry;runs:Run[];hosts:Host[];onDisclosure:(summary:HTMLElement)=>void}){
 	const {t}=useTranslation()

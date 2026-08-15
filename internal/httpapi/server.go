@@ -1681,7 +1681,11 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		currentMessage, currentAttachments := message, attachments
 		for {
 			var completed *agent.Event
+			currentUserMessageID := ""
 			publish := func(event agent.Event) {
+				if event.UserMessageID != "" {
+					currentUserMessageID = event.UserMessageID
+				}
 				if event.Type == "done" {
 					copy := event
 					completed = &copy
@@ -1693,7 +1697,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				_, _ = s.chatQueue.clear(sessionID)
 				if !errors.Is(err, context.Canceled) {
-					event := agent.Event{Type: "model_error", Error: err.Error(), SessionID: sessionID}
+					event := agent.Event{Type: "model_error", Error: err.Error(), SessionID: sessionID, UserMessageID: currentUserMessageID}
 					if started.Load() {
 						broadcast(event)
 					} else {
@@ -1707,12 +1711,12 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 			next, ok := s.chatQueue.nextAfterTurn(sessionID)
 			if !ok {
 				if completed == nil {
-					completed = &agent.Event{Type: "done", SessionID: sessionID}
+					completed = &agent.Event{Type: "done", SessionID: sessionID, UserMessageID: currentUserMessageID}
 				}
 				broadcast(*completed)
 				return
 			}
-			broadcast(agent.Event{Type: "turn_done", SessionID: sessionID, Content: completedContent(completed)})
+			broadcast(agent.Event{Type: "turn_done", SessionID: sessionID, UserMessageID: currentUserMessageID, Content: completedContent(completed)})
 			broadcast(agent.Event{
 				Type: "queue_started", MessageID: next.ID, SessionID: sessionID, Content: next.Message,
 				Status: "in_progress", QueueCount: len(s.chatQueue.snapshot(sessionID)), AttachmentCount: len(next.Attachments),
