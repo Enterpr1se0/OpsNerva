@@ -334,10 +334,15 @@ func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st
 		return nil, nil, nil, fmt.Errorf("build Eino tool reduction middleware: %w", err)
 	}
 	contextSummarizer, err := newContextSummarizationMiddleware(ctx, chatModel, st,
-		autoContextCompressionTrigger(cfg.ContextWindow, settings.ContextCompressionPercent))
+		cfg.ContextWindow, settings.ContextCompressionPercent)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("build Eino summarization middleware: %w", err)
 	}
+	contextWindow, thresholdPercent, triggerTokens := contextSummarizer.compressionThreshold()
+	observability.FromContext(ctx).InfoContext(ctx, "agent context compression configured",
+		"component", "agent", "model", cfg.Name, "context_window", contextWindow,
+		"threshold_percent", thresholdPercent, "trigger_tokens", triggerTokens,
+		"using_fallback", contextWindow == 0)
 	agentInstance, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name: "ops-nerva", Description: "Operate registered Linux hosts and the current Workspace.",
 		Instruction: runtimeSystemPrompt(settings.SystemPrompt, settings, goruntime.GOOS, goruntime.GOARCH), Model: chatModel, MaxIterations: settings.AgentMaxIterations,
@@ -633,10 +638,19 @@ func (r *Runtime) detectContextWindow(ctx context.Context, cancel context.Cancel
 		r.mu.Unlock()
 		return
 	}
+	triggerTokens := 0
+	thresholdPercent := 0
+	if r.contextSummarizer != nil {
+		triggerTokens = r.contextSummarizer.updateContextWindow(window)
+		_, thresholdPercent, _ = r.contextSummarizer.compressionThreshold()
+	}
 	r.contextWindow = window
 	r.status.ContextWindow = window
 	r.mu.Unlock()
-	observability.FromContext(ctx).InfoContext(ctx, "model context window detected", "component", "agent", "model", cfg.Name, "context_window", window)
+	observability.FromContext(ctx).InfoContext(ctx, "model context window detected",
+		"component", "agent", "model", cfg.Name, "context_window", window,
+		"context_compression_threshold_percent", thresholdPercent,
+		"context_compression_trigger_tokens", triggerTokens)
 }
 
 func (r *Runtime) Available() bool {

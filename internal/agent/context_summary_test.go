@@ -76,6 +76,70 @@ func TestContextSummaryIsIgnoredWhenBoundaryIsMissing(t *testing.T) {
 	}
 }
 
+func TestAutoContextCompressionTriggerUsesKnownModelWindow(t *testing.T) {
+	tests := []struct {
+		name          string
+		contextWindow int
+		percent       int
+		want          int
+	}{
+		{name: "unknown window uses fallback", contextWindow: 0, percent: 70, want: contextCompressionFallbackTokens},
+		{name: "large window is not capped at fallback", contextWindow: 500_000, percent: 70, want: 350_000},
+		{name: "smaller known window can be below fallback", contextWindow: 128_000, percent: 70, want: 89_600},
+		{name: "configured percentage is respected", contextWindow: 200_000, percent: 90, want: 180_000},
+		{name: "invalid percentage uses default", contextWindow: 500_000, percent: 1, want: 350_000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := autoContextCompressionTrigger(tt.contextWindow, tt.percent); got != tt.want {
+				t.Fatalf("autoContextCompressionTrigger(%d, %d) = %d, want %d", tt.contextWindow, tt.percent, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestContextSummarizerUpdatesThresholdAfterWindowDetection(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "summary-threshold.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	fixture := &summaryFixtureModel{}
+	middleware, err := newContextSummarizationMiddleware(ctx, fixture, st, 0, 70)
+	if err != nil {
+		t.Fatal(err)
+	}
+	window, percent, trigger := middleware.compressionThreshold()
+	if window != 0 || percent != 70 || trigger != contextCompressionFallbackTokens {
+		t.Fatalf("initial threshold = window %d, percent %d, trigger %d", window, percent, trigger)
+	}
+	if got := middleware.updateContextWindow(500_000); got != 350_000 {
+		t.Fatalf("updated trigger = %d, want 350000", got)
+	}
+	window, percent, trigger = middleware.compressionThreshold()
+	if window != 500_000 || percent != 70 || trigger != 350_000 {
+		t.Fatalf("updated threshold = window %d, percent %d, trigger %d", window, percent, trigger)
+	}
+	state := &adk.ChatModelAgentState{Messages: []*schema.Message{
+		schema.SystemMessage("agent instruction"),
+		schema.UserMessage("old question"), schema.AssistantMessage(strings.Repeat("x", 400_000), nil),
+		schema.UserMessage("recent one"), schema.AssistantMessage("answer one", nil),
+		schema.UserMessage("recent two"), schema.AssistantMessage("answer two", nil),
+		schema.UserMessage("current"),
+	}}
+	runCtx := withContextCompressionState(ctx, &contextCompressionRunState{
+		sessionID: "session", boundaryID: "boundary", trigger: "auto", model: "fixture", hasCurrent: true,
+	})
+	_, next, err := middleware.BeforeModelRewriteState(runCtx, state, &adk.ModelContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next != state || len(fixture.inputs) != 0 {
+		t.Fatal("context below the detected-window threshold was compressed")
+	}
+}
+
 func TestEinoContextSummarizerForcePersistsCleanSummary(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "summary-middleware.db"))
@@ -94,7 +158,7 @@ func TestEinoContextSummarizerForcePersistsCleanSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 	fixture := &summaryFixtureModel{}
-	middleware, err := newContextSummarizationMiddleware(ctx, fixture, st, 1)
+	middleware, err := newContextSummarizationMiddleware(ctx, fixture, st, 1, 70)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +192,7 @@ func TestAutomaticContextSummarizationFailsOpen(t *testing.T) {
 	}
 	defer st.Close()
 	fixture := &summaryFixtureModel{err: errors.New("summary unavailable")}
-	middleware, err := newContextSummarizationMiddleware(ctx, fixture, st, 1)
+	middleware, err := newContextSummarizationMiddleware(ctx, fixture, st, 1, 70)
 	if err != nil {
 		t.Fatal(err)
 	}

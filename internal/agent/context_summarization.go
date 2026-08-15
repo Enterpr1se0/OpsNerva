@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"eino-ops-agent/internal/domain"
 	"eino-ops-agent/internal/observability"
@@ -20,7 +21,6 @@ import (
 const (
 	contextCompressionPreserveTurns    = 2
 	contextCompressionFallbackTokens   = 96_000
-	contextCompressionMaxTriggerTokens = 96_000
 	contextCompressionSummaryMaxTokens = 8_192
 )
 
@@ -113,16 +113,21 @@ type contextSummaryEngine interface {
 
 type contextSummarizationMiddleware struct {
 	*adk.BaseChatModelAgentMiddleware
-	framework adk.ChatModelAgentMiddleware
-	engine    contextSummaryEngine
-	store     *store.Store
+	engine           contextSummaryEngine
+	store            *store.Store
+	thresholdPercent int
+	contextWindow    atomic.Int64
+	triggerTokens    atomic.Int64
 }
 
-func newContextSummarizationMiddleware(ctx context.Context, chatModel model.BaseChatModel, st *store.Store, triggerTokens int) (*contextSummarizationMiddleware, error) {
+func newContextSummarizationMiddleware(ctx context.Context, chatModel model.BaseChatModel, st *store.Store, contextWindow, thresholdPercent int) (*contextSummarizationMiddleware, error) {
+	thresholdPercent = normalizedContextCompressionPercent(thresholdPercent)
 	middleware := &contextSummarizationMiddleware{
 		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
 		store:                        st,
+		thresholdPercent:             thresholdPercent,
 	}
+	triggerTokens := middleware.updateContextWindow(contextWindow)
 	oneRetry := 1
 	framework, err := summarization.New(ctx, &summarization.Config{
 		Model:        chatModel,
@@ -144,36 +149,58 @@ func newContextSummarizationMiddleware(ctx context.Context, chatModel model.Base
 	if !ok {
 		return nil, fmt.Errorf("Eino summarization middleware does not expose Summarize")
 	}
-	middleware.framework = framework
 	middleware.engine = engine
 	return middleware, nil
 }
 
-func autoContextCompressionTrigger(contextWindow, percent int) int {
+func normalizedContextCompressionPercent(percent int) int {
 	if percent < domain.MinContextCompressionPercent || percent > domain.MaxContextCompressionPercent {
-		percent = domain.DefaultContextCompressionPercent
+		return domain.DefaultContextCompressionPercent
 	}
-	trigger := contextCompressionFallbackTokens
-	if contextWindow > 0 {
-		trigger = contextWindow * percent / 100
+	return percent
+}
+
+func autoContextCompressionTrigger(contextWindow, percent int) int {
+	if contextWindow <= 0 {
+		return contextCompressionFallbackTokens
 	}
-	if trigger > contextCompressionMaxTriggerTokens {
-		trigger = contextCompressionMaxTriggerTokens
-	}
+	trigger := contextWindow * normalizedContextCompressionPercent(percent) / 100
 	if trigger < 1 {
 		trigger = 1
 	}
 	return trigger
 }
 
-func (m *contextSummarizationMiddleware) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState, modelContext *adk.ModelContext) (context.Context, *adk.ChatModelAgentState, error) {
+func (m *contextSummarizationMiddleware) updateContextWindow(contextWindow int) int {
+	triggerTokens := autoContextCompressionTrigger(contextWindow, m.thresholdPercent)
+	m.contextWindow.Store(int64(max(0, contextWindow)))
+	m.triggerTokens.Store(int64(triggerTokens))
+	return triggerTokens
+}
+
+func (m *contextSummarizationMiddleware) compressionThreshold() (contextWindow, percent, triggerTokens int) {
+	return int(m.contextWindow.Load()), m.thresholdPercent, int(m.triggerTokens.Load())
+}
+
+func (m *contextSummarizationMiddleware) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState, _ *adk.ModelContext) (context.Context, *adk.ChatModelAgentState, error) {
 	run := contextCompressionStateFromContext(ctx)
 	if run == nil || run.boundaryID == "" || run.isComplete() {
 		return ctx, state, nil
 	}
-	nextCtx, nextState, err := m.framework.BeforeModelRewriteState(ctx, state, modelContext)
+	contextTokens := estimateContextTokens(state.Messages, state.ToolInfos)
+	contextWindow, percent, triggerTokens := m.compressionThreshold()
+	if contextTokens <= triggerTokens {
+		return ctx, state, nil
+	}
+	observability.FromContext(ctx).InfoContext(ctx, "automatic context compression triggered",
+		"component", "agent", "session_id", run.sessionID, "model", run.model,
+		"context_tokens", contextTokens, "context_window", contextWindow,
+		"threshold_percent", percent, "trigger_tokens", triggerTokens)
+	finalMessages, err := m.engine.Summarize(ctx, state)
 	if err == nil {
-		return nextCtx, nextState, nil
+		nextState := *state
+		nextState.Messages = finalMessages
+		return ctx, &nextState, nil
 	}
 	run.fail(err)
 	observability.FromContext(ctx).WarnContext(ctx, "automatic context compression failed; continuing with recent context", "component", "agent", "session_id", run.sessionID, "error", err)
