@@ -39,6 +39,17 @@ func TestBufferFiltersAndRedactsSensitiveFields(t *testing.T) {
 	}
 }
 
+func TestBufferUsesRingOrderAfterCapacity(t *testing.T) {
+	buffer := &Buffer{limit: 3}
+	for _, message := range []string{"one", "two", "three", "four", "five"} {
+		buffer.add(LogEntry{Level: "info", Message: message})
+	}
+	entries := buffer.recent(LogFilter{Limit: 10})
+	if len(entries) != 3 || entries[0].Message != "five" || entries[1].Message != "four" || entries[2].Message != "three" {
+		t.Fatalf("ring entries = %#v", entries)
+	}
+}
+
 func TestLogHandlersRedactMessagesErrorsAndNestedValues(t *testing.T) {
 	buffer := &Buffer{limit: 10}
 	level := slog.LevelDebug

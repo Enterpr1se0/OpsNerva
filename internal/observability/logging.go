@@ -97,6 +97,7 @@ type Buffer struct {
 	mu      sync.RWMutex
 	entries []LogEntry
 	limit   int
+	start   int
 }
 
 var activeBuffer atomic.Pointer[Buffer]
@@ -571,8 +572,8 @@ func (b *Buffer) add(entry LogEntry) {
 		b.limit = 2000
 	}
 	if len(b.entries) == b.limit {
-		copy(b.entries, b.entries[1:])
-		b.entries[len(b.entries)-1] = entry
+		b.entries[b.start] = entry
+		b.start = (b.start + 1) % len(b.entries)
 		return
 	}
 	b.entries = append(b.entries, entry)
@@ -592,7 +593,8 @@ func (b *Buffer) recent(filter LogFilter) []LogEntry {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	result := make([]LogEntry, 0, min(limit, len(b.entries)))
-	for index := len(b.entries) - 1; index >= 0 && len(result) < limit; index-- {
+	for logical := len(b.entries) - 1; logical >= 0 && len(result) < limit; logical-- {
+		index := (b.start + logical) % len(b.entries)
 		entry := b.entries[index]
 		entryLevel, _ := parseLevel(entry.Level)
 		if entryLevel < minimum || (component != "" && strings.ToLower(entry.Component) != component) {
