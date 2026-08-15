@@ -16,6 +16,32 @@ import (
 
 const modelRequestMaxRetries = 4
 
+type modelRetryObserverContextKey struct{}
+
+type modelRetryObserver func(err error, attempt int)
+
+func withModelRetryObserver(ctx context.Context, observer modelRetryObserver) context.Context {
+	if observer == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, modelRetryObserverContextKey{}, observer)
+}
+
+func notifyModelRetry(ctx context.Context, retryCtx *adk.RetryContext) {
+	if retryCtx == nil || retryCtx.RetryAttempt > modelRequestMaxRetries {
+		return
+	}
+	observer, _ := ctx.Value(modelRetryObserverContextKey{}).(modelRetryObserver)
+	if observer == nil {
+		return
+	}
+	err := retryCtx.Err
+	if err == nil {
+		err = errors.New("model returned an empty response")
+	}
+	observer(err, retryCtx.RetryAttempt)
+}
+
 func modelRequestRetryConfig() *adk.ModelRetryConfig {
 	return &adk.ModelRetryConfig{
 		MaxRetries: modelRequestMaxRetries,
@@ -23,7 +49,11 @@ func modelRequestRetryConfig() *adk.ModelRetryConfig {
 			if retryCtx == nil || ctx.Err() != nil || modelResponseHasContent(retryCtx.OutputMessage) {
 				return &adk.RetryDecision{}
 			}
-			return &adk.RetryDecision{Retry: retryCtx.Err == nil || isRetryableModelRequestError(retryCtx.Err)}
+			decision := &adk.RetryDecision{Retry: retryCtx.Err == nil || isRetryableModelRequestError(retryCtx.Err)}
+			if decision.Retry {
+				notifyModelRetry(ctx, retryCtx)
+			}
+			return decision
 		},
 	}
 }

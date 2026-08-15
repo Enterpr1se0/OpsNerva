@@ -20,6 +20,29 @@ type transientAfterToolModel struct {
 	calls atomic.Int32
 }
 
+type deadlineThenSuccessModel struct {
+	calls atomic.Int32
+}
+
+func (m *deadlineThenSuccessModel) Generate(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+	if m.calls.Add(1) == 1 {
+		return nil, context.DeadlineExceeded
+	}
+	return schema.AssistantMessage("recovered after model timeout", nil), nil
+}
+
+func (m *deadlineThenSuccessModel) Stream(ctx context.Context, messages []*schema.Message, options ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	message, err := m.Generate(ctx, messages, options...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func (m *deadlineThenSuccessModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return m, nil
+}
+
 func (m *transientAfterToolModel) Generate(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
 	switch m.calls.Add(1) {
 	case 1:
@@ -105,6 +128,73 @@ func TestModelRequestRetryConfigUsesEinoBackoff(t *testing.T) {
 	}
 	if config.BackoffFunc != nil {
 		t.Fatal("custom retry backoff is still configured")
+	}
+}
+
+func TestModelRequestTimeoutRetriesWhileRunContextIsActive(t *testing.T) {
+	observedRetries := atomic.Int32{}
+	ctx := withModelRetryObserver(context.Background(), func(err error, attempt int) {
+		if !errors.Is(err, context.DeadlineExceeded) || attempt != 1 {
+			t.Errorf("retry notification = (%v, %d)", err, attempt)
+		}
+		observedRetries.Add(1)
+	})
+	chatModel := &deadlineThenSuccessModel{}
+	agentInstance, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name: "timeout-retry-test", Description: "model timeout retry regression", Model: chatModel, MaxIterations: 1,
+		ModelRetryConfig: modelRequestRetryConfig(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agentInstance, EnableStreaming: true})
+	iterator := runner.Run(ctx, []*schema.Message{schema.UserMessage("respond")})
+	answer := ""
+	for {
+		event, ok := iterator.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			var retryErr *adk.WillRetryError
+			if errors.As(event.Err, &retryErr) {
+				continue
+			}
+			t.Fatal(event.Err)
+		}
+		if event.Output == nil || event.Output.MessageOutput == nil {
+			continue
+		}
+		output := event.Output.MessageOutput
+		if output.Message != nil && output.Role == schema.Assistant {
+			answer += output.Message.Content
+		}
+		if output.MessageStream != nil && output.Role == schema.Assistant {
+			for {
+				message, recvErr := output.MessageStream.Recv()
+				if errors.Is(recvErr, io.EOF) {
+					break
+				}
+				if recvErr != nil {
+					var retryErr *adk.WillRetryError
+					if errors.As(recvErr, &retryErr) {
+						break
+					}
+					t.Fatal(recvErr)
+				}
+				answer += message.Content
+			}
+			output.MessageStream.Close()
+		}
+	}
+	if answer != "recovered after model timeout" {
+		t.Fatalf("answer = %q", answer)
+	}
+	if calls := chatModel.calls.Load(); calls != 2 {
+		t.Fatalf("model calls = %d, want 2", calls)
+	}
+	if retries := observedRetries.Load(); retries != 1 {
+		t.Fatalf("retry notifications = %d, want 1", retries)
 	}
 }
 

@@ -27,10 +27,11 @@ import (
 )
 
 type scriptedAgentRunner struct {
-	mu       sync.Mutex
-	attempts [][]*adk.AgentEvent
-	calls    int
-	inputs   [][]*schema.Message
+	mu        sync.Mutex
+	attempts  [][]*adk.AgentEvent
+	calls     int
+	inputs    [][]*schema.Message
+	beforeRun func(context.Context)
 }
 
 type blockingAgentRunner struct {
@@ -139,16 +140,20 @@ func (r *blockingAgentRunner) Run(ctx context.Context, _ []*schema.Message, _ ..
 	return iterator
 }
 
-func (r *scriptedAgentRunner) Run(_ context.Context, messages []*schema.Message, _ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+func (r *scriptedAgentRunner) Run(ctx context.Context, messages []*schema.Message, _ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
 	r.mu.Lock()
 	index := r.calls
 	r.calls++
 	r.inputs = append(r.inputs, append([]*schema.Message(nil), messages...))
+	beforeRun := r.beforeRun
 	var events []*adk.AgentEvent
 	if index < len(r.attempts) {
 		events = r.attempts[index]
 	}
 	r.mu.Unlock()
+	if beforeRun != nil {
+		beforeRun(ctx)
+	}
 	iterator, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 	go func() {
 		for _, event := range events {
@@ -646,6 +651,12 @@ func TestQueryEmitsFrameworkRetryWithoutRerunningAgent(t *testing.T) {
 			adk.EventFromMessage(nil, retryStream, schema.Assistant, ""),
 			adk.EventFromMessage(schema.AssistantMessage("recovered", nil), nil, schema.Assistant, ""),
 		},
+	}, beforeRun: func(ctx context.Context) {
+		observer, _ := ctx.Value(modelRetryObserverContextKey{}).(modelRetryObserver)
+		if observer == nil {
+			t.Fatal("model retry observer was not installed")
+		}
+		observer(errors.New("temporary upstream failure"), 1)
 	}}
 	runtime := &Runtime{runner: runner, store: st}
 	var emitted []Event

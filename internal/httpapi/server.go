@@ -1666,9 +1666,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	}
 	streamStarted := streamAgentEvents(w, r, 10*time.Second, func(emit func(agent.Event)) {
 		defer s.chatQueue.finish(sessionID)
-		queryCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Minute)
-		stopQueueCancel := context.AfterFunc(queueCtx, cancel)
-		defer stopQueueCancel()
+		queryCtx, cancel := newChatRunContext(r.Context(), queueCtx)
 		defer cancel()
 		var started atomic.Bool
 		broadcast := func(event agent.Event) {
@@ -1726,6 +1724,18 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	})
 	if !streamStarted {
 		s.chatQueue.finish(sessionID)
+	}
+}
+
+// newChatRunContext keeps an Agent turn alive across browser disconnects and
+// gives model and tool calls enough time to enforce their own retryable
+// timeouts. The conversation queue remains the owner of explicit cancellation.
+func newChatRunContext(requestCtx, queueCtx context.Context) (context.Context, context.CancelFunc) {
+	runCtx, cancel := context.WithCancel(context.WithoutCancel(requestCtx))
+	stopQueueCancel := context.AfterFunc(queueCtx, cancel)
+	return runCtx, func() {
+		stopQueueCancel()
+		cancel()
 	}
 }
 

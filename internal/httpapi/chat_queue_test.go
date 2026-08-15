@@ -1,12 +1,47 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"eino-ops-agent/internal/domain"
 )
+
+type chatRunContextKey struct{}
+
+func TestChatRunContextHasNoAbsoluteDeadlineAndFollowsQueueCancellation(t *testing.T) {
+	requestCtx, cancelRequest := context.WithTimeout(
+		context.WithValue(context.Background(), chatRunContextKey{}, "request-value"),
+		time.Minute,
+	)
+	queueCtx, cancelQueue := context.WithCancel(context.Background())
+	runCtx, cancelRun := newChatRunContext(requestCtx, queueCtx)
+	defer cancelRun()
+
+	if _, hasDeadline := runCtx.Deadline(); hasDeadline {
+		t.Fatal("chat run inherited the HTTP request deadline")
+	}
+	if got := runCtx.Value(chatRunContextKey{}); got != "request-value" {
+		t.Fatalf("chat run request value = %v", got)
+	}
+	cancelRequest()
+	if err := runCtx.Err(); err != nil {
+		t.Fatalf("chat run stopped with the HTTP request: %v", err)
+	}
+
+	cancelQueue()
+	select {
+	case <-runCtx.Done():
+		if !errors.Is(runCtx.Err(), context.Canceled) {
+			t.Fatalf("chat run cancellation = %v", runCtx.Err())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("chat run did not stop with its conversation queue")
+	}
+}
 
 func TestChatMessageQueueAdvancesAfterTurnsInOrder(t *testing.T) {
 	queue := newChatMessageQueue()

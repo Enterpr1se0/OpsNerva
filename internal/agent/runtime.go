@@ -950,8 +950,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 		defer emitMu.Unlock()
 		rawEmit(event)
 	}
-	emitModelRetry := func(retryErr *adk.WillRetryError) {
-		attempt := retryErr.RetryAttempt
+	emitModelRetry := func(retryErr error, attempt int) {
 		if attempt < 1 {
 			attempt = 1
 		}
@@ -1267,6 +1266,9 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 			RunID: result.RunID, Status: result.Status,
 		})
 	})
+	runCtx = withModelRetryObserver(runCtx, func(err error, attempt int) {
+		emitModelRetry(err, attempt)
+	})
 
 	iter := runner.Run(runCtx, messages, adk.WithCheckPointID(sessionID))
 	answerCandidate := ""
@@ -1288,7 +1290,6 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 		if event.Err != nil {
 			var retryErr *adk.WillRetryError
 			if errors.As(event.Err, &retryErr) {
-				emitModelRetry(retryErr)
 				continue
 			}
 			return "", normalizeModelRequestError(event.Err)
@@ -1345,7 +1346,6 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 					var retryErr *adk.WillRetryError
 					if errors.As(recvErr, &retryErr) {
 						retryingStream = true
-						emitModelRetry(retryErr)
 						break
 					}
 					if assistantStreamVisible {
