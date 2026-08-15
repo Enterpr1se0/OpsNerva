@@ -3,12 +3,79 @@ package store
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"eino-ops-agent/internal/domain"
 )
+
+func TestChatMessagePageUsesStableCursorAndProjectsLargeToolResults(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, t.TempDir()+"/chat-page.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	for index := 0; index < 7; index++ {
+		if err := st.AppendChatMessage(ctx, "page-session", "user", fmt.Sprintf("message-%d", index)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := st.ListChatMessagesPage(ctx, "page-session", 3, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Messages) != 3 || !first.HasMore || first.Messages[0].Content != "message-4" || first.Messages[2].Content != "message-6" {
+		t.Fatalf("first page = %#v", first)
+	}
+	second, err := st.ListChatMessagesPage(ctx, "page-session", 3, first.NextCreatedAt, first.NextID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Messages) != 3 || !second.HasMore || second.Messages[0].Content != "message-1" || second.Messages[2].Content != "message-3" {
+		t.Fatalf("second page = %#v", second)
+	}
+	third, err := st.ListChatMessagesPage(ctx, "page-session", 3, second.NextCreatedAt, second.NextID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(third.Messages) != 1 || third.HasMore || third.Messages[0].Content != "message-0" {
+		t.Fatalf("third page = %#v", third)
+	}
+	if _, err := st.ListChatMessagesPage(ctx, "page-session", 3, first.NextCreatedAt, ""); err == nil {
+		t.Fatal("partial chat history cursor was accepted")
+	}
+	if _, err := st.ListChatMessagesPage(ctx, "page-session", 3, first.NextCreatedAt, "missing-message"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown chat history cursor error = %v", err)
+	}
+
+	large := `{"status":"completed","stdout":"` + strings.Repeat("x", maxChatToolMessagePreviewChars+1024) + `"}`
+	if err := st.AppendChatMessage(ctx, "large-tool-session", "tool", large, "ssh_exec"); err != nil {
+		t.Fatal(err)
+	}
+	projected, err := st.ListChatMessagesPage(ctx, "large-tool-session", 10, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projected.Messages) != 1 || !projected.Messages[0].ContentTruncated || len(projected.Messages[0].Content) >= len(large) {
+		t.Fatalf("projected tool message = %#v", projected.Messages)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal([]byte(projected.Messages[0].Content), &envelope); err != nil || envelope["output_limited"] != true {
+		t.Fatalf("projected content = %q, err = %v", projected.Messages[0].Content, err)
+	}
+	full, err := st.GetChatMessage(ctx, "large-tool-session", projected.Messages[0].ID)
+	if err != nil || full.Content != large || full.ContentTruncated {
+		t.Fatalf("full tool message chars=%d truncated=%v err=%v", len(full.Content), full.ContentTruncated, err)
+	}
+	if _, err := st.GetChatMessage(ctx, "another-session", projected.Messages[0].ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-session message lookup error = %v", err)
+	}
+}
 
 func TestChatHistoryHasNoImplicitLimit(t *testing.T) {
 	ctx := context.Background()

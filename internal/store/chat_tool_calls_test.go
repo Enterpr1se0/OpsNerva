@@ -93,3 +93,34 @@ func TestChatToolCallRejectsMismatchedRunAndPreservesConfirmedTerminal(t *testin
 		t.Fatalf("confirmed terminal status was overwritten: %#v", call)
 	}
 }
+
+func TestCountRunningChatToolCallsDoesNotLoadResults(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, t.TempDir()+"/tool-call-count.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := st.CreateChatSession(ctx, "session-count", ""); err != nil {
+		t.Fatal(err)
+	}
+	messageID, err := st.AppendPendingChatMessage(ctx, "session-count", "user", "inspect")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, callID := range []string{"running-one", "running-two", "finished"} {
+		if _, err := st.StartChatToolCall(ctx, domain.ChatToolCall{SessionID: "session-count", UserMessageID: messageID, ToolCallID: callID, ToolName: "ssh_exec"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := st.FinishChatToolCall(ctx, "session-count", "finished", "", domain.ChatToolCallCompleted, strings.Repeat("x", 1<<20), ""); err != nil {
+		t.Fatal(err)
+	}
+	count, err := st.CountRunningChatToolCalls(ctx, "session-count")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("running tool count = %d, want 2", count)
+	}
+}

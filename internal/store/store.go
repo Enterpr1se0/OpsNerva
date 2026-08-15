@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -35,12 +36,25 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", path)
+	// DSN pragmas are applied to every pooled connection. WAL then permits
+	// readers to proceed while the single SQLite writer is committing.
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	dsn := path + separator + "_pragma=foreign_keys%3Don&_pragma=busy_timeout%3D5000&_pragma=journal_mode%3DWAL&_pragma=synchronous%3DNORMAL"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
-	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;"); err != nil {
+	poolSize := 4
+	if path == ":memory:" {
+		// Each :memory: connection owns a different database.
+		poolSize = 1
+	}
+	db.SetMaxOpenConns(poolSize)
+	db.SetMaxIdleConns(poolSize)
+	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000;"); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -266,6 +280,7 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 CREATE INDEX IF NOT EXISTS idx_runs_host_started ON runs(host_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_session_started_id ON runs(session_id, started_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_runs_started_id ON runs(started_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_digest ON runs(request_digest);
 CREATE TABLE IF NOT EXISTS approvals (
   id TEXT PRIMARY KEY,
@@ -291,6 +306,7 @@ CREATE TABLE IF NOT EXISTS audit_events (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_events(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_run_created ON audit_events(run_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS chat_sessions (
   session_id TEXT PRIMARY KEY,
   title TEXT NOT NULL DEFAULT '',
@@ -300,6 +316,7 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_chat_sessions_updated ON chat_sessions(updated_at DESC, session_id DESC);
 CREATE TABLE IF NOT EXISTS chat_messages (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
@@ -311,6 +328,7 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_messages(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_chat_session_role_created ON chat_messages(session_id, role, created_at, id);
 CREATE TABLE IF NOT EXISTS chat_context_summaries (
   session_id TEXT PRIMARY KEY,
   summary TEXT NOT NULL,
@@ -375,7 +393,7 @@ CREATE TABLE IF NOT EXISTS agent_task_files (
   updated_at TEXT NOT NULL,
   PRIMARY KEY(session_id,file_path)
 );
-CREATE INDEX IF NOT EXISTS idx_agent_task_files_session ON agent_task_files(session_id,file_path);
+DROP INDEX IF EXISTS idx_agent_task_files_session;
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL DEFAULT '',
@@ -388,6 +406,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   FOREIGN KEY(host_id) REFERENCES hosts(id)
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_started ON tasks(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tasks_run ON tasks(run_id);
 CREATE TABLE IF NOT EXISTS ssh_shell_sessions (
   id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL UNIQUE,
@@ -429,7 +448,7 @@ CREATE TABLE IF NOT EXISTS ssh_shell_events (
   PRIMARY KEY(shell_id,sequence),
   FOREIGN KEY(shell_id) REFERENCES ssh_shell_sessions(id) ON DELETE CASCADE
 );
-CREATE INDEX IF NOT EXISTS idx_ssh_shell_events_sequence ON ssh_shell_events(shell_id,sequence);
+DROP INDEX IF EXISTS idx_ssh_shell_events_sequence;
 CREATE TABLE IF NOT EXISTS checkpoints (
   id TEXT PRIMARY KEY,
   data BLOB NOT NULL,
@@ -1193,39 +1212,13 @@ func (s *Store) SearchRuns(ctx context.Context, query, hostID, sessionID string,
 }
 
 func (s *Store) SearchRunsFiltered(ctx context.Context, filter domain.RunSearchFilter) ([]domain.Run, error) {
+	where, arguments, err := runSearchWhere(filter, true)
+	if err != nil {
+		return nil, err
+	}
 	statement := `SELECT id,session_id,host_id,tool_name,tool_arguments_json,request_json,request_cipher,request_digest,status,
 exit_code,stdout_redacted,stderr_redacted,stdout_cipher,stderr_cipher,error,ai_review_json,started_at,completed_at
-FROM runs WHERE (?='' OR session_id=?) AND (?='' OR host_id=?) AND (?='' OR tool_name=?) AND (?='' OR status=?)`
-	arguments := []any{
-		filter.SessionID, filter.SessionID, filter.HostID, filter.HostID,
-		filter.ToolName, filter.ToolName, filter.Status, filter.Status,
-	}
-	if !filter.StartedAfter.IsZero() {
-		statement += " AND started_at>=?"
-		arguments = append(arguments, formatTime(filter.StartedAfter.UTC()))
-	}
-	if !filter.StartedBefore.IsZero() {
-		statement += " AND started_at<=?"
-		arguments = append(arguments, formatTime(filter.StartedBefore.UTC()))
-	}
-	if filter.Query != "" {
-		pattern := likePattern(filter.Query)
-		switch filter.QueryScope {
-		case "", "all":
-			statement += ` AND (search_text LIKE ? ESCAPE '\' OR request_json LIKE ? ESCAPE '\' OR tool_arguments_json LIKE ? ESCAPE '\'
-				OR stdout_redacted LIKE ? ESCAPE '\' OR stderr_redacted LIKE ? ESCAPE '\')`
-			arguments = append(arguments, pattern, pattern, pattern, pattern, pattern)
-		case "request":
-			statement += ` AND (search_text LIKE ? ESCAPE '\' OR request_json LIKE ? ESCAPE '\' OR tool_arguments_json LIKE ? ESCAPE '\')`
-			arguments = append(arguments, pattern, pattern, pattern)
-		case "output":
-			statement += ` AND (stdout_redacted LIKE ? ESCAPE '\' OR stderr_redacted LIKE ? ESCAPE '\')`
-			arguments = append(arguments, pattern, pattern)
-		default:
-			return nil, fmt.Errorf("invalid history query_scope: use all, request, or output")
-		}
-	}
-	statement += " ORDER BY started_at DESC"
+FROM runs` + where + " ORDER BY started_at DESC,id DESC"
 	if filter.Limit > 0 {
 		statement += " LIMIT ?"
 		arguments = append(arguments, filter.Limit)
@@ -1312,7 +1305,7 @@ func (s *Store) SearchRunSummariesFilteredPage(ctx context.Context, filter domai
 	if err != nil {
 		return domain.RunSearchPage{}, err
 	}
-	statement := `SELECT id,session_id,host_id,tool_name,request_json,status,exit_code,started_at,completed_at
+	statement := `SELECT id,session_id,host_id,tool_name,request_json,status,exit_code,ai_review_json,started_at,completed_at
 FROM runs` + where + " ORDER BY started_at DESC,id DESC LIMIT ?"
 	arguments = append(arguments, filter.Limit+1)
 	rows, err := s.db.QueryContext(ctx, statement, arguments...)
@@ -1345,12 +1338,19 @@ FROM runs` + where + " ORDER BY started_at DESC,id DESC LIMIT ?"
 
 func scanRunSummary(row scanner) (domain.Run, error) {
 	var run domain.Run
+	var reviewJSON string
 	var started string
 	var completed sql.NullString
 	err := row.Scan(&run.ID, &run.SessionID, &run.HostID, &run.ToolName, &run.RequestJSON,
-		&run.Status, &run.ExitCode, &started, &completed)
+		&run.Status, &run.ExitCode, &reviewJSON, &started, &completed)
 	if err != nil {
 		return domain.Run{}, err
+	}
+	if reviewJSON != "" {
+		var review domain.CommandReview
+		if json.Unmarshal([]byte(reviewJSON), &review) == nil {
+			run.AIReview = &review
+		}
 	}
 	run.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
 	if completed.Valid {
@@ -1548,24 +1548,54 @@ func (s *Store) ListApprovals(ctx context.Context, status string, limit int) ([]
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT approvals.id,approvals.run_id,runs.session_id,approvals.host_id,
+	statement := `SELECT approvals.id,approvals.run_id,runs.session_id,approvals.host_id,
 approvals.request_json,approvals.request_cipher,approvals.request_digest,approvals.status,
-approvals.reason,approvals.created_at,approvals.decided_at FROM approvals
-JOIN runs ON runs.id=approvals.run_id WHERE (?='' OR approvals.status=?)
-ORDER BY approvals.created_at DESC LIMIT ?`, status, status, limit)
+approvals.reason,approvals.created_at,approvals.decided_at,runs.ai_review_json FROM approvals
+JOIN runs ON runs.id=approvals.run_id`
+	arguments := make([]any, 0, 2)
+	if status != "" {
+		statement += " WHERE approvals.status=?"
+		arguments = append(arguments, status)
+	}
+	statement += " ORDER BY approvals.created_at DESC LIMIT ?"
+	arguments = append(arguments, limit)
+	rows, err := s.db.QueryContext(ctx, statement, arguments...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	result := make([]domain.Approval, 0)
 	for rows.Next() {
-		approval, err := scanApproval(rows)
+		approval, err := scanApprovalWithReview(rows)
 		if err != nil {
 			return nil, err
 		}
 		result = append(result, approval)
 	}
 	return result, rows.Err()
+}
+
+func scanApprovalWithReview(row scanner) (domain.Approval, error) {
+	var approval domain.Approval
+	var created string
+	var decided sql.NullString
+	var reviewJSON string
+	err := row.Scan(&approval.ID, &approval.RunID, &approval.SessionID, &approval.HostID, &approval.RequestJSON,
+		&approval.RequestCipher, &approval.RequestDigest, &approval.Status, &approval.Reason, &created, &decided, &reviewJSON)
+	if err != nil {
+		return domain.Approval{}, err
+	}
+	approval.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	if decided.Valid {
+		approval.DecidedAt, _ = time.Parse(time.RFC3339Nano, decided.String)
+	}
+	if reviewJSON != "" {
+		var review domain.CommandReview
+		if json.Unmarshal([]byte(reviewJSON), &review) == nil {
+			approval.AIReview = &review
+		}
+	}
+	return approval, nil
 }
 
 func (s *Store) ListPendingApprovalsForSession(ctx context.Context, sessionID string) ([]domain.Approval, error) {
@@ -1695,8 +1725,15 @@ func (s *Store) ListAudit(ctx context.Context, runID string, limit int) ([]domai
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id,run_id,event_type,actor,data_json,created_at
-FROM audit_events WHERE (?='' OR run_id=?) ORDER BY created_at DESC LIMIT ?`, runID, runID, limit)
+	statement := `SELECT id,run_id,event_type,actor,data_json,created_at FROM audit_events`
+	arguments := make([]any, 0, 2)
+	if runID != "" {
+		statement += " WHERE run_id=?"
+		arguments = append(arguments, runID)
+	}
+	statement += " ORDER BY created_at DESC LIMIT ?"
+	arguments = append(arguments, limit)
+	rows, err := s.db.QueryContext(ctx, statement, arguments...)
 	if err != nil {
 		return nil, err
 	}
@@ -2011,6 +2048,127 @@ func (s *Store) ListChatMessages(ctx context.Context, sessionID string, limit in
 	return s.listChatMessages(ctx, sessionID, limit, false)
 }
 
+const maxChatToolMessagePreviewChars = 64 << 10
+
+func (s *Store) ListChatMessagesPage(ctx context.Context, sessionID string, limit int, beforeCreatedAt, beforeID string) (domain.ChatMessagePage, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if (beforeCreatedAt == "") != (beforeID == "") {
+		return domain.ChatMessagePage{}, fmt.Errorf("chat message cursor requires both before_created_at and before_id")
+	}
+	where := "session_id=?"
+	whereArgs := []any{sessionID}
+	if beforeCreatedAt != "" && beforeID != "" {
+		if _, err := time.Parse(time.RFC3339Nano, beforeCreatedAt); err != nil {
+			return domain.ChatMessagePage{}, fmt.Errorf("invalid chat message cursor time: %w", err)
+		}
+		var cursorRowID int64
+		err := s.db.QueryRowContext(ctx, `SELECT rowid FROM chat_messages WHERE session_id=? AND id=? AND created_at=?`, sessionID, beforeID, beforeCreatedAt).Scan(&cursorRowID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.ChatMessagePage{}, ErrNotFound
+		}
+		if err != nil {
+			return domain.ChatMessagePage{}, err
+		}
+		where += " AND (created_at<? OR (created_at=? AND rowid<?))"
+		whereArgs = append(whereArgs, beforeCreatedAt, beforeCreatedAt, cursorRowID)
+	}
+	args := []any{maxChatToolMessagePreviewChars, maxChatToolMessagePreviewChars}
+	args = append(args, whereArgs...)
+	args = append(args, limit+1)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,role,
+CASE WHEN role='tool' AND length(content)>? THEN substr(content,1,?) ELSE content END,
+length(content),model_extra_json,tool_name,status,created_at
+FROM chat_messages WHERE `+where+` ORDER BY created_at DESC,rowid DESC LIMIT ?`, args...)
+	if err != nil {
+		return domain.ChatMessagePage{}, err
+	}
+	defer rows.Close()
+	messages := make([]domain.ChatMessage, 0, limit+1)
+	for rows.Next() {
+		var message domain.ChatMessage
+		var created, modelExtraJSON string
+		if err := rows.Scan(&message.ID, &message.Role, &message.Content, &message.ContentChars, &modelExtraJSON, &message.ToolName, &message.Status, &created); err != nil {
+			return domain.ChatMessagePage{}, err
+		}
+		if err := json.Unmarshal([]byte(modelExtraJSON), &message.ModelExtra); err != nil {
+			return domain.ChatMessagePage{}, fmt.Errorf("decode chat message model metadata: %w", err)
+		}
+		message.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		message.ContentTruncated = message.Role == "tool" && message.ContentChars > maxChatToolMessagePreviewChars
+		if !message.ContentTruncated {
+			message.ContentChars = 0
+		}
+		messages = append(messages, message)
+	}
+	if err := rows.Err(); err != nil {
+		return domain.ChatMessagePage{}, err
+	}
+	hasMore := len(messages) > limit
+	if hasMore {
+		messages = messages[:limit]
+	}
+	slices.Reverse(messages)
+	if err := s.enrichChatMessages(ctx, sessionID, messages, false); err != nil {
+		return domain.ChatMessagePage{}, err
+	}
+	for index := range messages {
+		if messages[index].ContentTruncated {
+			messages[index].Content = projectedChatToolContent(messages[index])
+		}
+	}
+	page := domain.ChatMessagePage{Messages: messages, HasMore: hasMore}
+	if hasMore && len(messages) > 0 {
+		page.NextCreatedAt = formatTime(messages[0].CreatedAt)
+		page.NextID = messages[0].ID
+	}
+	return page, nil
+}
+
+func projectedChatToolContent(message domain.ChatMessage) string {
+	status := message.ToolStatus
+	if status == "" {
+		status = message.Status
+	}
+	value := map[string]any{
+		"status": status, "output_limited": true, "original_chars": message.ContentChars,
+		"preview": message.Content,
+	}
+	if message.RunID != "" {
+		value["run_id"] = message.RunID
+	}
+	encoded, _ := json.Marshal(value)
+	return string(encoded)
+}
+
+func (s *Store) GetChatMessage(ctx context.Context, sessionID, messageID string) (domain.ChatMessage, error) {
+	var message domain.ChatMessage
+	var created, modelExtraJSON string
+	err := s.db.QueryRowContext(ctx, `SELECT id,role,content,length(content),model_extra_json,tool_name,status,created_at
+FROM chat_messages WHERE session_id=? AND id=?`, sessionID, messageID).Scan(
+		&message.ID, &message.Role, &message.Content, &message.ContentChars, &modelExtraJSON, &message.ToolName, &message.Status, &created,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.ChatMessage{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.ChatMessage{}, err
+	}
+	if err := json.Unmarshal([]byte(modelExtraJSON), &message.ModelExtra); err != nil {
+		return domain.ChatMessage{}, fmt.Errorf("decode chat message model metadata: %w", err)
+	}
+	message.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	messages := []domain.ChatMessage{message}
+	if err := s.enrichChatMessages(ctx, sessionID, messages, false); err != nil {
+		return domain.ChatMessage{}, err
+	}
+	return messages[0], nil
+}
+
 func (s *Store) ListChatModelMessages(ctx context.Context, sessionID string, limit int) ([]domain.ChatMessage, error) {
 	return s.listChatMessages(ctx, sessionID, limit, true)
 }
@@ -2020,7 +2178,7 @@ func (s *Store) ListChatModelMessages(ctx context.Context, sessionID string, lim
 func (s *Store) ListChatContextMessages(ctx context.Context, sessionID string) ([]domain.ChatMessage, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id,role,content,model_extra_json,tool_name,status,created_at FROM chat_messages
 WHERE session_id=? AND role IN ('user','assistant','assistant_progress','tool','reasoning') AND status IN ('completed','failed')
-ORDER BY created_at`, sessionID)
+ORDER BY created_at,rowid`, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -2110,12 +2268,12 @@ func (s *Store) listChatMessages(ctx context.Context, sessionID string, limit in
 	if modelOnly {
 		filter = " AND role IN ('user','assistant') AND status='completed'"
 	}
-	query := `SELECT id,role,content,model_extra_json,tool_name,status,created_at FROM chat_messages WHERE session_id=?` + filter + ` ORDER BY created_at`
+	query := `SELECT id,role,content,model_extra_json,tool_name,status,created_at FROM chat_messages WHERE session_id=?` + filter + ` ORDER BY created_at,rowid`
 	args := []any{sessionID}
 	if limit > 0 {
 		query = `SELECT id,role,content,model_extra_json,tool_name,status,created_at FROM (
-SELECT id,role,content,model_extra_json,tool_name,status,created_at FROM chat_messages WHERE session_id=?` + filter + ` ORDER BY created_at DESC LIMIT ?)
-ORDER BY created_at`
+SELECT id,role,content,model_extra_json,tool_name,status,created_at,rowid AS message_sequence FROM chat_messages WHERE session_id=?` + filter + ` ORDER BY created_at DESC,rowid DESC LIMIT ?)
+ORDER BY created_at,message_sequence`
 		args = append(args, limit)
 	}
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -2142,16 +2300,20 @@ ORDER BY created_at`
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
-	if err := s.loadChatAttachments(ctx, result, false); err != nil {
-		return nil, err
-	}
-	if err := s.loadChatToolMessageState(ctx, result); err != nil {
-		return nil, err
-	}
-	if err := s.loadChatTokenUsage(ctx, sessionID, result); err != nil {
+	if err := s.enrichChatMessages(ctx, sessionID, result, false); err != nil {
 		return nil, err
 	}
 	return result, nil
+}
+
+func (s *Store) enrichChatMessages(ctx context.Context, sessionID string, messages []domain.ChatMessage, includeAttachmentData bool) error {
+	if err := s.loadChatAttachments(ctx, messages, includeAttachmentData); err != nil {
+		return err
+	}
+	if err := s.loadChatToolMessageState(ctx, messages); err != nil {
+		return err
+	}
+	return s.loadChatTokenUsage(ctx, sessionID, messages)
 }
 
 func (s *Store) loadChatTokenUsage(ctx context.Context, sessionID string, messages []domain.ChatMessage) error {
@@ -2159,11 +2321,23 @@ func (s *Store) loadChatTokenUsage(ctx context.Context, sessionID string, messag
 		return nil
 	}
 	byID := make(map[string]*domain.ChatMessage, len(messages))
+	placeholders := make([]string, 0, len(messages))
+	arguments := make([]any, 0, len(messages))
 	for index := range messages {
 		byID[messages[index].ID] = &messages[index]
+		placeholders = append(placeholders, "?")
+		arguments = append(arguments, messages[index].ID)
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT message_id,input_tokens,output_tokens,total_tokens,cached_tokens,reasoning_tokens
-FROM chat_message_context_usage WHERE session_id=? ORDER BY created_at`, sessionID)
+	query := `SELECT message_id,input_tokens,output_tokens,total_tokens,cached_tokens,reasoning_tokens FROM chat_message_context_usage WHERE session_id=? ORDER BY created_at`
+	arguments = []any{sessionID}
+	if len(messages) <= 500 {
+		query = `SELECT message_id,input_tokens,output_tokens,total_tokens,cached_tokens,reasoning_tokens FROM chat_message_context_usage WHERE message_id IN (` + strings.Join(placeholders, ",") + `)`
+		arguments = arguments[:0]
+		for index := range messages {
+			arguments = append(arguments, messages[index].ID)
+		}
+	}
+	rows, err := s.db.QueryContext(ctx, query, arguments...)
 	if err != nil {
 		return err
 	}

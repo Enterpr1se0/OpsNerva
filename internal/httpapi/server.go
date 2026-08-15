@@ -19,6 +19,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -40,15 +41,17 @@ import (
 )
 
 type Server struct {
-	service    *service.Service
-	agent      *agent.Runtime
-	chatEvents *chatEventHub
-	chatQueue  *chatMessageQueue
-	modelTests *modelTestJobs
-	auth       *authManager
-	mux        *http.ServeMux
-	mcpHTTP    http.Handler
-	options    Options
+	service               *service.Service
+	agent                 *agent.Runtime
+	chatEvents            *chatEventHub
+	chatQueue             *chatMessageQueue
+	modelTests            *modelTestJobs
+	auth                  *authManager
+	mux                   *http.ServeMux
+	mcpHTTP               http.Handler
+	options               Options
+	applicationSnapshotMu sync.RWMutex
+	applicationSnapshots  map[string]applicationSnapshotCacheEntry
 }
 
 type Options struct {
@@ -68,6 +71,7 @@ func New(svc *service.Service, agentRuntime *agent.Runtime, options Options) *Se
 	s := &Server{
 		service: svc, agent: agentRuntime, mux: http.NewServeMux(),
 		mcpHTTP: mcpserver.New(svc, options.Version).HTTPHandler(), chatEvents: newChatEventHub(), chatQueue: newChatMessageQueue(), modelTests: newModelTestJobs(), auth: newAuthManager(options.Auth), options: options,
+		applicationSnapshots: make(map[string]applicationSnapshotCacheEntry),
 	}
 	s.routes()
 	return s
@@ -177,6 +181,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/approvals/{id}/approve", s.approve)
 	s.mux.HandleFunc("POST /api/v1/approvals/{id}/reject", s.reject)
 	s.mux.HandleFunc("GET /api/v1/runs", s.searchRuns)
+	s.mux.HandleFunc("GET /api/v1/run-summaries", s.searchRunSummaries)
 	s.mux.HandleFunc("GET /api/v1/runs/{id}", s.getRun)
 	s.mux.HandleFunc("GET /api/v1/audit", s.listAudit)
 	s.mux.HandleFunc("GET /api/v1/logs", s.logs)
@@ -192,6 +197,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/v1/chat/{id}/title", s.renameChatSession)
 	s.mux.HandleFunc("DELETE /api/v1/chat/{id}", s.deleteChatSession)
 	s.mux.HandleFunc("GET /api/v1/chat/{id}/messages", s.chatMessages)
+	s.mux.HandleFunc("GET /api/v1/chat/{id}/messages/{message_id}", s.chatMessage)
 	s.mux.HandleFunc("GET /api/v1/chat/{id}/state", s.chatState)
 	s.mux.HandleFunc("GET /api/v1/chat/{id}/attachments/{attachment_id}", s.chatAttachment)
 	s.mux.HandleFunc("/api/v1/", func(w http.ResponseWriter, _ *http.Request) {
@@ -1597,6 +1603,30 @@ func (s *Server) searchRuns(w http.ResponseWriter, r *http.Request) {
 	respond(w, result, err)
 }
 
+func (s *Server) searchRunSummaries(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	filter := domain.RunSearchFilter{
+		Query: r.URL.Query().Get("q"), QueryScope: "all", HostID: r.URL.Query().Get("host_id"),
+		Status: r.URL.Query().Get("status"), Limit: limit, CursorID: r.URL.Query().Get("cursor_id"),
+	}
+	if cursor := r.URL.Query().Get("cursor_started_at"); cursor != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, cursor)
+		if err != nil {
+			writeErrorStatus(w, fmt.Errorf("invalid run cursor: %w", err), http.StatusBadRequest)
+			return
+		}
+		filter.CursorStarted = parsed
+	}
+	result, err := s.service.SearchRunSummariesMatchingPage(r.Context(), filter, domain.FileSearchLiteral)
+	respond(w, result, err)
+}
+
 func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 	includeRaw := r.URL.Query().Get("raw") == "1"
 	result, err := s.service.GetRun(r.Context(), r.PathValue("id"), includeRaw)
@@ -1889,7 +1919,18 @@ func streamAgentEvents(w http.ResponseWriter, r *http.Request, heartbeatInterval
 }
 
 func (s *Server) chatMessages(w http.ResponseWriter, r *http.Request) {
-	result, err := s.service.ListChatMessages(r.Context(), r.PathValue("id"), 0)
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	result, err := s.service.ListChatMessagesPage(r.Context(), r.PathValue("id"), limit,
+		r.URL.Query().Get("before_created_at"), r.URL.Query().Get("before_id"))
+	respond(w, result, err)
+}
+
+func (s *Server) chatMessage(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.GetChatMessage(r.Context(), r.PathValue("id"), r.PathValue("message_id"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeErrorStatus(w, err, http.StatusNotFound)
+		return
+	}
 	respond(w, result, err)
 }
 
@@ -1911,7 +1952,7 @@ func (s *Server) chatAttachment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) chatState(w http.ResponseWriter, r *http.Request) {
-	state, err := s.applicationChatState(r.Context(), r.PathValue("id"))
+	state, err := s.applicationChatState(r.Context(), r.PathValue("id"), true)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -1919,16 +1960,12 @@ func (s *Server) chatState(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, state)
 }
 
-func (s *Server) applicationChatState(ctx context.Context, sessionID string) (map[string]any, error) {
+func (s *Server) applicationChatState(ctx context.Context, sessionID string, includeMessages bool) (map[string]any, error) {
 	session, err := s.service.GetChatSession(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}
-	messages, err := s.service.ListChatMessages(ctx, sessionID, 0)
-	if err != nil {
-		return nil, err
-	}
-	toolCalls, err := s.service.ListChatToolCalls(ctx, sessionID)
+	runningToolCalls, err := s.service.CountRunningChatToolCalls(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -1944,8 +1981,18 @@ func (s *Server) applicationChatState(ctx context.Context, sessionID string) (ma
 	state := map[string]any{
 		"active": active, "workspace_id": session.WorkspaceID,
 		"context_tokens": session.ContextTokens, "context_window": session.ContextWindow,
-		"messages": messages, "tool_calls": toolCalls, "tasks": tasks,
+		"running_tool_calls": runningToolCalls, "tasks": tasks,
 		"queued_messages": s.chatQueue.snapshot(sessionID),
+	}
+	if includeMessages {
+		messagePage, messageErr := s.service.ListChatMessagesPage(ctx, sessionID, 100, "", "")
+		if messageErr != nil {
+			return nil, messageErr
+		}
+		state["messages"] = messagePage.Messages
+		state["messages_has_more"] = messagePage.HasMore
+		state["messages_next_created_at"] = messagePage.NextCreatedAt
+		state["messages_next_id"] = messagePage.NextID
 	}
 	if summaryErr == nil {
 		state["context_summary"] = contextSummary

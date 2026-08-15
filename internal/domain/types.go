@@ -467,18 +467,27 @@ type ChatContextCompressionResult struct {
 }
 
 type ChatMessage struct {
-	ID          string           `json:"id"`
-	Role        string           `json:"role"`
-	Content     string           `json:"content"`
-	ModelExtra  map[string]any   `json:"-"`
-	TokenUsage  *ChatTokenUsage  `json:"token_usage,omitempty"`
-	ToolName    string           `json:"tool_name,omitempty"`
-	ToolCallID  string           `json:"tool_call_id,omitempty"`
-	RunID       string           `json:"run_id,omitempty"`
-	ToolStatus  string           `json:"tool_status,omitempty"`
-	Status      string           `json:"status"`
-	Attachments []ChatAttachment `json:"attachments,omitempty"`
-	CreatedAt   time.Time        `json:"created_at"`
+	ID               string           `json:"id"`
+	Role             string           `json:"role"`
+	Content          string           `json:"content"`
+	ContentTruncated bool             `json:"content_truncated,omitempty"`
+	ContentChars     int              `json:"content_chars,omitempty"`
+	ModelExtra       map[string]any   `json:"-"`
+	TokenUsage       *ChatTokenUsage  `json:"token_usage,omitempty"`
+	ToolName         string           `json:"tool_name,omitempty"`
+	ToolCallID       string           `json:"tool_call_id,omitempty"`
+	RunID            string           `json:"run_id,omitempty"`
+	ToolStatus       string           `json:"tool_status,omitempty"`
+	Status           string           `json:"status"`
+	Attachments      []ChatAttachment `json:"attachments,omitempty"`
+	CreatedAt        time.Time        `json:"created_at"`
+}
+
+type ChatMessagePage struct {
+	Messages      []ChatMessage `json:"messages"`
+	HasMore       bool          `json:"has_more"`
+	NextCreatedAt string        `json:"next_created_at,omitempty"`
+	NextID        string        `json:"next_id,omitempty"`
 }
 
 const ChatMessageRoleAssistantProgress = "assistant_progress"
@@ -933,11 +942,11 @@ type RunSearchFilter struct {
 // RunSearchPage is the bounded, cursor-based projection used by Agent tools.
 // The existing audit and CLI search paths retain their legacy limit semantics.
 type RunSearchPage struct {
-	Runs          []Run
-	HasMore       bool
-	ScanLimited   bool
-	NextStartedAt time.Time
-	NextID        string
+	Runs          []Run     `json:"runs"`
+	HasMore       bool      `json:"has_more"`
+	ScanLimited   bool      `json:"scan_limited,omitempty"`
+	NextStartedAt time.Time `json:"next_started_at,omitempty,omitzero"`
+	NextID        string    `json:"next_id,omitempty"`
 }
 
 type Approval struct {

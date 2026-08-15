@@ -91,20 +91,10 @@ func (s *Service) publishExecutionEvent(event ExecutionEvent) {
 	if event.SessionID == "" || event.RunID == "" {
 		return
 	}
-	call, callErr := s.store.GetChatToolCallByRun(context.Background(), event.RunID)
-	if callErr == nil {
-		if event.ToolCallID == "" || event.ToolName == "" {
-			if event.ToolCallID == "" {
-				event.ToolCallID = call.ToolCallID
-			}
-			if event.ToolName == "" {
-				event.ToolName = call.ToolName
-			}
-		}
-	}
 	event.Sequence = s.executionEventSequence.Add(1)
 	s.executionEventMu.RLock()
-	if owner, ok := s.executionOwners[event.RunID]; ok {
+	owner, hasOwner := s.executionOwners[event.RunID]
+	if hasOwner {
 		if event.ToolCallID == "" {
 			event.ToolCallID = owner.ToolCallID
 		}
@@ -117,15 +107,29 @@ func (s *Service) publishExecutionEvent(event ExecutionEvent) {
 		subscribers = append(subscribers, subscriber)
 	}
 	s.executionEventMu.RUnlock()
-	if status := persistedToolExecutionStatus(event.Status); status != "" && (callErr != nil || !detachedToolInvocation(call)) {
+	persistedStatus := persistedToolExecutionStatus(event.Status)
+	var call domain.ChatToolCall
+	callErr := store.ErrNotFound
+	if persistedStatus != "" || (!hasOwner && (event.ToolCallID == "" || event.ToolName == "")) {
+		call, callErr = s.store.GetChatToolCallByRun(context.Background(), event.RunID)
+		if callErr == nil {
+			if event.ToolCallID == "" {
+				event.ToolCallID = call.ToolCallID
+			}
+			if event.ToolName == "" {
+				event.ToolName = call.ToolName
+			}
+		}
+	}
+	if persistedStatus != "" && (callErr != nil || !detachedToolInvocation(call)) {
 		content := ""
 		if run, err := s.store.GetRun(context.Background(), event.RunID); err == nil {
 			if encoded, err := json.Marshal(execResultFromRun(run, "", "")); err == nil {
 				content = string(encoded)
 			}
 		}
-		if _, err := s.store.UpdateChatToolCallByRun(context.Background(), event.RunID, status, content, ""); err != nil && !errors.Is(err, store.ErrNotFound) {
-			observability.FromContext(context.Background()).ErrorContext(context.Background(), "persist execution tool status failed", "run_id", event.RunID, "tool_call_id", event.ToolCallID, "status", status, "error", err)
+		if _, err := s.store.UpdateChatToolCallByRun(context.Background(), event.RunID, persistedStatus, content, ""); err != nil && !errors.Is(err, store.ErrNotFound) {
+			observability.FromContext(context.Background()).ErrorContext(context.Background(), "persist execution tool status failed", "run_id", event.RunID, "tool_call_id", event.ToolCallID, "status", persistedStatus, "error", err)
 		}
 	}
 

@@ -27,7 +27,7 @@ func TestPendingApprovalDoesNotExpire(t *testing.T) {
 	}
 	run := domain.Run{
 		ID: "run-approval", HostID: host.ID, RequestJSON: `{}`, RequestDigest: "digest",
-		Status: "approval_required", StartedAt: created,
+		Status: "approval_required", AIReviewJSON: `{"status":"completed","decision":"manual_review"}`, StartedAt: created,
 	}
 	if err := st.CreateRun(ctx, run); err != nil {
 		t.Fatal(err)
@@ -44,7 +44,7 @@ func TestPendingApprovalDoesNotExpire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pending) != 1 || pending[0].ID != approval.ID || pending[0].Status != "pending" {
+	if len(pending) != 1 || pending[0].ID != approval.ID || pending[0].Status != "pending" || pending[0].AIReview == nil || pending[0].AIReview.Decision != "manual_review" {
 		t.Fatalf("old pending approval changed unexpectedly: %#v", pending)
 	}
 }

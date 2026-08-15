@@ -292,6 +292,15 @@ FROM chat_tool_calls WHERE session_id=? ORDER BY started_at,message_id`, session
 	return result, rows.Err()
 }
 
+// CountRunningChatToolCalls keeps the frequently-polled chat state response
+// independent from potentially very large persisted tool results.
+func (s *Store) CountRunningChatToolCalls(ctx context.Context, sessionID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chat_tool_calls WHERE session_id=? AND status=?`,
+		sessionID, domain.ChatToolCallRunning).Scan(&count)
+	return count, err
+}
+
 func (s *Store) ListRunningChatToolCalls(ctx context.Context) ([]domain.ChatToolCall, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT session_id,user_message_id,message_id,tool_call_id,run_id,tool_name,
 arguments_json,status,result_json,error,started_at,updated_at,completed_at

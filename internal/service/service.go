@@ -374,8 +374,23 @@ func (s *Service) ListChatMessages(ctx context.Context, sessionID string, limit 
 	return s.store.ListChatMessages(ctx, sessionID, limit)
 }
 
+func (s *Service) ListChatMessagesPage(ctx context.Context, sessionID string, limit int, beforeCreatedAt, beforeID string) (domain.ChatMessagePage, error) {
+	return s.store.ListChatMessagesPage(ctx, strings.TrimSpace(sessionID), limit, strings.TrimSpace(beforeCreatedAt), strings.TrimSpace(beforeID))
+}
+
+func (s *Service) GetChatMessage(ctx context.Context, sessionID, messageID string) (domain.ChatMessage, error) {
+	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(messageID) == "" {
+		return domain.ChatMessage{}, store.ErrNotFound
+	}
+	return s.store.GetChatMessage(ctx, strings.TrimSpace(sessionID), strings.TrimSpace(messageID))
+}
+
 func (s *Service) ListChatToolCalls(ctx context.Context, sessionID string) ([]domain.ChatToolCall, error) {
 	return s.store.ListChatToolCalls(ctx, strings.TrimSpace(sessionID))
+}
+
+func (s *Service) CountRunningChatToolCalls(ctx context.Context, sessionID string) (int, error) {
+	return s.store.CountRunningChatToolCalls(ctx, strings.TrimSpace(sessionID))
 }
 
 func (s *Service) GetChatAttachment(ctx context.Context, sessionID, attachmentID string) (domain.ChatAttachment, error) {
@@ -2771,9 +2786,6 @@ func (s *Service) ListApprovals(ctx context.Context, status string, limit int) (
 		}
 		if len(plain) > 0 {
 			approvals[index].RequestJSON = string(plain)
-		}
-		if run, runErr := s.store.GetRun(ctx, approvals[index].RunID); runErr == nil {
-			approvals[index].AIReview = run.AIReview
 		}
 	}
 	return approvals, nil

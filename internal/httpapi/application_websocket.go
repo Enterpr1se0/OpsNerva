@@ -18,6 +18,8 @@ import (
 )
 
 const applicationWebSocketMaxMessage = 16 << 10
+const applicationSnapshotCacheTTL = 200 * time.Millisecond
+const applicationSnapshotCacheLimit = 256
 
 var applicationEventIntervals = map[string]time.Duration{
 	"connections": time.Second,
@@ -60,6 +62,11 @@ type applicationWebSocketSubscription struct {
 type applicationTopicState struct {
 	payload []byte
 	next    time.Time
+}
+
+type applicationSnapshotCacheEntry struct {
+	payload []byte
+	expires time.Time
 }
 
 type applicationLogResponse struct {
@@ -156,7 +163,7 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 					}
 					continue
 				}
-				payload, err := s.applicationTopicSnapshot(ctx, topic, subscription)
+				payload, err := s.applicationTopicSnapshotCached(ctx, topic, subscription)
 				if err != nil {
 					_ = websocket.JSON.Send(connection, applicationWebSocketEvent{Type: "error", Topic: topic, Error: err.Error()})
 					states[topic] = state
@@ -175,6 +182,47 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 			}
 		}
 	}
+}
+
+func (s *Server) applicationTopicSnapshotCached(ctx context.Context, topic string, subscription applicationWebSocketSubscription) ([]byte, error) {
+	key := topic
+	if topic == "chat_state" {
+		key += "\x00" + subscription.sessionID
+	}
+	now := time.Now()
+	s.applicationSnapshotMu.RLock()
+	cached, ok := s.applicationSnapshots[key]
+	s.applicationSnapshotMu.RUnlock()
+	if ok && now.Before(cached.expires) {
+		return cached.payload, nil
+	}
+	payload, err := s.applicationTopicSnapshot(ctx, topic, subscription)
+	if err != nil {
+		return nil, err
+	}
+	s.applicationSnapshotMu.Lock()
+	if s.applicationSnapshots == nil {
+		s.applicationSnapshots = make(map[string]applicationSnapshotCacheEntry)
+	}
+	if len(s.applicationSnapshots) >= applicationSnapshotCacheLimit {
+		oldestKey := ""
+		var oldestExpiry time.Time
+		for cachedKey, entry := range s.applicationSnapshots {
+			if !now.Before(entry.expires) {
+				delete(s.applicationSnapshots, cachedKey)
+				continue
+			}
+			if oldestKey == "" || entry.expires.Before(oldestExpiry) {
+				oldestKey, oldestExpiry = cachedKey, entry.expires
+			}
+		}
+		if len(s.applicationSnapshots) >= applicationSnapshotCacheLimit && oldestKey != "" {
+			delete(s.applicationSnapshots, oldestKey)
+		}
+	}
+	s.applicationSnapshots[key] = applicationSnapshotCacheEntry{payload: payload, expires: now.Add(applicationSnapshotCacheTTL)}
+	s.applicationSnapshotMu.Unlock()
+	return payload, nil
 }
 
 func readApplicationWebSocket(ctx context.Context, connection *websocket.Conn, updates chan applicationWebSocketSubscription) error {
@@ -252,7 +300,7 @@ func (s *Server) applicationTopicSnapshot(ctx context.Context, topic string, sub
 	case "health":
 		value = s.applicationHealth()
 	case "chat_state":
-		state, err := s.applicationChatState(ctx, subscription.sessionID)
+		state, err := s.applicationChatState(ctx, subscription.sessionID, false)
 		if err != nil {
 			return nil, err
 		}
