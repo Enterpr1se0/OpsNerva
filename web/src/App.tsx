@@ -2169,13 +2169,14 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	const toolsRunning=useMemo(()=>entries.some(item=>item.kind==='tool'&&item.transient),[entries])
 	const renderEntries=useMemo(()=>groupedTaskToolEntries(entries),[entries])
 	const taskRows=useMemo(()=>tasks?buildSessionTaskRows(tasks):[],[tasks])
-	const latestAssistantEntryID=useMemo(()=>{
+	const latestCompletedAssistantEntryID=useMemo(()=>{
+		if(sessionBusy)return ''
 		for(let index=entries.length-1;index>=0;index--){
 			const entry=entries[index]
 			if(entry.kind==='assistant'&&entry.lifecycle==='committed'&&entry.content)return entry.id
 		}
 		return ''
-	},[entries])
+	},[entries,sessionBusy])
 	const selectedWorkspace=capabilities.workspaces.find(workspace=>workspace.id===workspaceID)||capabilities.workspaces[0]
 	useEffect(()=>{sessionIDRef.current=sessionId},[sessionId])
 	useEffect(()=>{
@@ -2623,7 +2624,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			<div className="messages" ref={messagesRef} onWheel={trackUserScroll} onTouchMove={trackUserScroll} onPointerUp={trackUserScroll}>
 				{historyHasMore&&<button type="button" className="chat-history-more" disabled={loadingOlderMessages} onClick={()=>void loadOlderMessages()}>{loadingOlderMessages?<LoaderCircle className="spin" size={13}/>:<History size={13}/>} {t('chat.loadEarlier')}</button>}
 				{entries.length === 0 && <div className="empty-chat"><div className="radar"><Activity size={35}/></div><h2>{t('chat.emptyTitle')}</h2></div>}
-				{renderEntries.map(item=>item.kind==='task_tool_group'?<TaskToolGroupCard key={item.id} group={item} onDisclosure={preserveToolDisclosurePosition}/>:<ChatBubble key={item.entry.id} sessionID={sessionId} entry={item.entry} showActions={item.entry.id===latestAssistantEntryID} runs={runs} hosts={hosts} onToolDisclosure={preserveToolDisclosurePosition}/>) }
+				{renderEntries.map(item=>item.kind==='task_tool_group'?<TaskToolGroupCard key={item.id} group={item} onDisclosure={preserveToolDisclosurePosition}/>:<ChatBubble key={item.entry.id} sessionID={sessionId} entry={item.entry} showActions={item.entry.id===latestCompletedAssistantEntryID} runs={runs} hosts={hosts} onToolDisclosure={preserveToolDisclosurePosition}/>) }
 				{(sessionBusy||toolsRunning)&&<div className={`model-activity ${stopping?'stopping':''}`} role="status" aria-live="polite"><span className="model-activity-mark" aria-hidden="true">✻</span><b key={stopping||connectionRetry||modelRetry?'priority':workStatusIndex}>{workStatusLabel}</b></div>}
 			</div>
 			{tasks&&tasksExpanded&&<SessionTaskItems rows={taskRows}/>}
