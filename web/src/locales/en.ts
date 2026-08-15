@@ -142,7 +142,7 @@ const en = {
   },
   chat: {
     conversations: 'Conversations',
-    newConversation: 'New conversation', noSaved: 'No conversations',
+    newConversation: 'New conversation', noSaved: 'No conversations', loadEarlier: 'Load earlier messages',
     emptyTitle: 'What should we investigate?',
     retryingModel: 'Retrying model · attempt {{attempt}}/{{max}}', reconnecting: 'Reconnecting · attempt {{attempt}} · {{delay}}s',
     stopping: 'Stopping Agent', cooking: 'Cooking… ( •̀ᴗ•́ )و', pondering: 'Pondering… (｡•̀ᴗ-)✧', brewing: 'Brewing… (っ˘ڡ˘ς)', weaving: 'Weaving… (づ｡◕‿‿◕｡)づ', polishing: 'Polishing… ᕙ(⇀‸↼‶)ᕗ', crunching: 'Crunching… (ง •̀_•́)ง', stopTitle: 'Stop Agent run',
@@ -164,7 +164,7 @@ const en = {
     relativePath: 'Relative upload path', cancelUpload: 'Cancel upload', previewFile: 'Preview file', openDirectory: 'Open directory', revealDirectory: 'Show in file manager', deleteEntry: 'Delete {{type}}',
     emptyDirectory: 'Empty directory',
     uploaded: 'Uploaded · {{path}}', saved: 'Saved · {{path}}', deleted: 'Deleted permanently · {{type}}',
-    deleteTitle: 'Delete "{{path}}"?', closePreview: 'Close preview', binary: 'Binary file',
+    deleteTitle: 'Delete "{{path}}"?', closePreview: 'Close preview', binary: 'Binary file', previewTooLarge: 'File is too large to preview. Download it instead.',
     uploadTo: 'Upload to Workspace {{id}}', uploadedShort: 'Uploaded', uploadFailed: 'Upload failed', dropFilesHere: 'Drop files to upload',
     uploadingFiles: 'Uploading {{count}} files...', uploadedFiles: 'Uploaded {{count}} files', uploadPartial: 'Uploaded {{uploaded}}; {{failed}} failed: {{message}}',
     file: 'file', directory: 'directory',

@@ -317,6 +317,8 @@ export interface ChatMessage {
 	id: string
   role: 'user' | 'assistant' | 'assistant_progress' | 'tool' | 'reasoning'
   content: string
+	content_truncated?: boolean
+	content_chars?: number
   tool_name?: string
 	tool_call_id?: string
 	run_id?: string
@@ -325,6 +327,13 @@ export interface ChatMessage {
   status: 'pending' | 'completed' | 'failed'
 	attachments?: ChatAttachment[]
   created_at: string
+}
+
+export interface ChatMessagePage {
+	messages: ChatMessage[]
+	has_more: boolean
+	next_created_at?: string
+	next_id?: string
 }
 
 export type ChatToolCallStatus = 'running' | 'completed' | 'partial' | 'failed' | 'interrupted' | 'rejected' | 'expired' | 'unknown'
@@ -376,11 +385,28 @@ export interface ChatState {
 	workspace_id: string
 	context_tokens: number
 	context_window: number
-  messages: ChatMessage[]
-	tool_calls: ChatToolCall[]
+	messages?: ChatMessage[]
+	messages_has_more?: boolean
+	messages_next_created_at?: string
+	messages_next_id?: string
+	running_tool_calls: number
   tasks: AgentTaskList
 	queued_messages: QueuedChatMessage[]
 	context_summary?: ChatContextSummary
+}
+
+export interface RunSearchPage {
+  runs: Run[]
+  has_more: boolean
+  scan_limited?: boolean
+  next_started_at?: string
+  next_id?: string
+}
+
+export interface RunDetail {
+  run: Run
+  stdout_raw?: string
+  stderr_raw?: string
 }
 
 export interface QueuedChatMessage {
@@ -689,6 +715,7 @@ export interface WorkspaceFilePreview {
   sha256: string
   content?: string
   binary?: boolean
+	truncated?: boolean
 }
 
 export interface WorkspaceDeleteResult {

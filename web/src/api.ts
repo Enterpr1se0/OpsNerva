@@ -1,7 +1,10 @@
-import type { AgentEvent, Approval, ApprovalExecutionResult, AuthStatus, ChatContextCompressionResult, ChatSession, ChatState, ConfigurationImportResult, Health, Host, HostInput, LLMToolCatalog, ManagedSkill, MCPOAuthStart, MCPServer, MCPServerInput, MCPTestResult, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestJob, ModelTestResult, Proxy, ProxyInput, ProxyTestResult, QueuedChatMessage, Run, ServerLogResponse, SFTPFileList, SFTPMutationResult, SSHHostStatus, SSHShell, SSHShellList, SSHShellSnapshot, SSHShellStartInput, SSHTunnel, SSHTunnelList, SSHTunnelStartInput, SSHTunnelUpdateInput, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchResponse, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceInput, WorkspaceUploadResult } from './types'
+import type { AgentEvent, Approval, ApprovalExecutionResult, AuthStatus, ChatContextCompressionResult, ChatMessage, ChatMessagePage, ChatSession, ChatState, ConfigurationImportResult, Health, Host, HostInput, LLMToolCatalog, ManagedSkill, MCPOAuthStart, MCPServer, MCPServerInput, MCPTestResult, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestJob, ModelTestResult, Proxy, ProxyInput, ProxyTestResult, QueuedChatMessage, Run, RunDetail, RunSearchPage, ServerLogResponse, SFTPFileList, SFTPMutationResult, SSHHostStatus, SSHShell, SSHShellList, SSHShellSnapshot, SSHShellStartInput, SSHTunnel, SSHTunnelList, SSHTunnelStartInput, SSHTunnelUpdateInput, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchResponse, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceInput, WorkspaceUploadResult } from './types'
 
 export type TransferProgress={loaded:number;total:number}
 export type TransferOptions={signal?:AbortSignal;onProgress?:(progress:TransferProgress)=>void;totalBytes?:number}
+type DownloadWritable={write:(data:Uint8Array)=>Promise<void>;close:()=>Promise<void>;abort?:(reason?:unknown)=>Promise<void>}
+type SaveFileHandle={createWritable:()=>Promise<DownloadWritable>}
+type SaveFilePicker=(options:{suggestedName:string})=>Promise<SaveFileHandle>
 
 function transferError(status:number,statusText:string,response:unknown,authHeader:string|null){
 	if(status===401&&authHeader==='required')window.dispatchEvent(new Event('opsnerva:unauthorized'))
@@ -30,6 +33,8 @@ function uploadJSON<T>(method:string,url:string,body:Blob,contentType:string,opt
 }
 
 export function downloadFile(url:string,filename:string,options:TransferOptions={}):Promise<void>{
+	const picker=(window as unknown as{showSaveFilePicker?:SaveFilePicker}).showSaveFilePicker?.bind(window)
+	if(picker)return downloadFileStream(url,filename,options,picker)
 	return new Promise((resolve,reject)=>{
 		const xhr=new XMLHttpRequest()
 		xhr.open('GET',url)
@@ -56,6 +61,33 @@ export function downloadFile(url:string,filename:string,options:TransferOptions=
 		xhr.onloadend=()=>options.signal?.removeEventListener('abort',abort)
 		xhr.send()
 	})
+}
+
+async function downloadFileStream(url:string,filename:string,options:TransferOptions,picker:SaveFilePicker){
+	const handle=await picker({suggestedName:filename})
+	const writable=await handle.createWritable()
+	try{
+		const response=await fetch(url,{credentials:'same-origin',headers:{Accept:'application/octet-stream'},signal:options.signal})
+		if(!response.ok)throw await responseError(response)
+		if(!response.body)throw new Error('Download stream is unavailable')
+		const responseTotal=Number(response.headers.get('Content-Length'))||0
+		const total=responseTotal||options.totalBytes||0
+		const reader=response.body.getReader()
+		let loaded=0
+		options.onProgress?.({loaded,total})
+		for(;;){
+			const {done,value}=await reader.read()
+			if(done)break
+			await writable.write(value)
+			loaded+=value.byteLength
+			options.onProgress?.({loaded,total})
+		}
+		options.onProgress?.({loaded,total:total||loaded})
+		await writable.close()
+	}catch(err){
+		await writable.abort?.(err).catch(()=>undefined)
+		throw err
+	}
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -186,6 +218,8 @@ export const api = {
   approve: (id: string, reason: string) => request<ApprovalExecutionResult>(`/api/v1/approvals/${id}/approve`, { method: 'POST', body: JSON.stringify({ reason }) }),
   reject: (id: string, reason: string) => request(`/api/v1/approvals/${id}/reject`, { method: 'POST', body: JSON.stringify({ reason }) }),
   runs: (query = '') => requestList<Run>(`/api/v1/runs?limit=100&q=${encodeURIComponent(query)}`),
+  runSummaries: (query = '') => request<RunSearchPage>(`/api/v1/run-summaries?limit=100&q=${encodeURIComponent(query)}`),
+  runDetail: (id: string) => request<RunDetail>(`/api/v1/runs/${encodeURIComponent(id)}`),
   logs: (filters: {level?:string;component?:string;q?:string;limit?:number} = {}) => {
     const params=new URLSearchParams()
     if(filters.level)params.set('level',filters.level)
@@ -196,6 +230,12 @@ export const api = {
   },
   chatSessions: () => requestList<ChatSession>('/api/v1/chat/sessions?limit=50'),
 	chatState: (id: string) => request<ChatState>(`/api/v1/chat/${encodeURIComponent(id)}/state`),
+	chatMessages: (id:string,cursor?:{createdAt:string;id:string},limit=100) => {
+		const params=new URLSearchParams({limit:String(limit)})
+		if(cursor?.createdAt&&cursor.id){params.set('before_created_at',cursor.createdAt);params.set('before_id',cursor.id)}
+		return request<ChatMessagePage>(`/api/v1/chat/${encodeURIComponent(id)}/messages?${params}`)
+	},
+	chatMessage: (id:string,messageId:string) => request<ChatMessage>(`/api/v1/chat/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}`),
 	queueChatMessage: (id:string,message:string,images:File[]) => {const body=new FormData();body.set('message',message);for(const image of images)body.append('images',image,image.name);return request<{item:QueuedChatMessage;position:number}>(`/api/v1/chat/${encodeURIComponent(id)}/queue`,{method:'POST',body})},
 	compressChatContext: (id:string) => request<ChatContextCompressionResult>(`/api/v1/chat/${encodeURIComponent(id)}/context/compress`, {method:'POST',body:'{}'}),
 	setChatSessionWorkspace: (id:string,workspaceId:string) => request<ChatSession>(`/api/v1/chat/${encodeURIComponent(id)}/workspace`, { method:'PUT', body:JSON.stringify({workspace_id:workspaceId}) }),

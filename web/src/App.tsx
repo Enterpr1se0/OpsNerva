@@ -1,7 +1,5 @@
-import { FormEvent, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { FormEvent, Suspense, createContext, lazy, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal, flushSync } from 'react-dom'
-import Markdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
 import type { Terminal as XTermInstance } from '@xterm/xterm'
@@ -22,27 +20,26 @@ import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionR
 
 type Page = 'chat' | 'ssh' | 'config' | 'extensions' | 'audit' | 'logs'
 const pageVisualOrder:Page[]=['chat','ssh','extensions','audit','logs','config']
+const maxFilePreviewBytes=1<<20
 type ChatEntryImage = {id:string;name:string;mimeType:string;sizeBytes:number;url:string}
 const workStatusKeys=['chat.cooking','chat.pondering','chat.brewing','chat.weaving','chat.polishing','chat.crunching'] as const
 type PendingChatImage = {id:string;file:File;url:string}
-type ChatEntry = { id: string; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; tool?: string; toolCallId?:string; runId?:string; transient?:boolean; startedAt?:number; liveStdout?:string; liveStderr?:string; liveOutput?:string; liveOutputStream?:'stdout'|'stderr'; transferredBytes?:number; transferTotalBytes?:number; images?:ChatEntryImage[]; tokenUsage?:ChatTokenUsage; active?: boolean; lifecycle?:'streaming'|'committed'; status?: 'pending' | 'completed' | 'failed' }
+type ChatEntry = { id: string; sourceMessageId?:string; persisted?:boolean; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; contentTruncated?:boolean; contentChars?:number; tool?: string; toolCallId?:string; runId?:string; transient?:boolean; startedAt?:number; liveStdout?:string; liveStderr?:string; liveOutput?:string; liveOutputStream?:'stdout'|'stderr'; transferredBytes?:number; transferTotalBytes?:number; images?:ChatEntryImage[]; tokenUsage?:ChatTokenUsage; active?: boolean; lifecycle?:'streaming'|'committed'; status?: 'pending' | 'completed' | 'failed' }
 type TaskToolEntryGroup={kind:'task_tool_group';id:string;tool:'TaskCreate'|'TaskUpdate';entries:ChatEntry[]}
 type ChatRenderItem={kind:'entry';entry:ChatEntry}|TaskToolEntryGroup
 type ModelRetryState = {attempt:number;max:number}
 type ActiveChatStream = { id: string; sessionId: string; controller: AbortController }
 type ConnectionRetryState = {attempt:number;readyAt:number}
 type ContextUsage = {tokens:number;window:number}
+type ChatHistoryCursor = {createdAt:string;id:string}
+const MarkdownMessage=lazy(()=>import('./MarkdownMessage').then(module=>({default:module.MarkdownMessage})))
 
 function historyEntries(messages:ChatMessage[],sessionID:string):ChatEntry[]{
 	return messages.map((item,index)=>{
 		const kind=item.role==='assistant_progress'?'assistant':item.role
 		const toolStatus=item.tool_status||(kind==='tool'?toolContentStatus(item.content):'')
-		return{id:item.tool_call_id?`tool_${item.tool_call_id}`:item.id||`history_${index}_${item.created_at}`,kind,content:item.content,tool:item.tool_name,toolCallId:item.tool_call_id,runId:item.run_id,transient:kind==='tool'&&!settledToolStatus(toolStatus),startedAt:kind==='tool'?Date.parse(item.created_at):undefined,status:item.status,lifecycle:item.role==='assistant'||item.role==='assistant_progress'?'committed':undefined,images:item.attachments?.map(image=>({id:image.id,name:image.name,mimeType:image.mime_type,sizeBytes:image.size_bytes,url:chatAttachmentURL(sessionID,image.id)})),tokenUsage:item.token_usage}
+		return{id:item.tool_call_id?`tool_${item.tool_call_id}`:item.id||`history_${index}_${item.created_at}`,sourceMessageId:item.id,persisted:true,kind,content:item.content,contentTruncated:item.content_truncated,contentChars:item.content_chars,tool:item.tool_name,toolCallId:item.tool_call_id,runId:item.run_id,transient:kind==='tool'&&!settledToolStatus(toolStatus),startedAt:kind==='tool'?Date.parse(item.created_at):undefined,status:item.status,lifecycle:item.role==='assistant'||item.role==='assistant_progress'?'committed':undefined,images:item.attachments?.map(image=>({id:image.id,name:image.name,mimeType:image.mime_type,sizeBytes:image.size_bytes,url:chatAttachmentURL(sessionID,image.id)})),tokenUsage:item.token_usage}
 	})
-}
-
-function reconnectBaseEntries(messages:ChatMessage[],sessionID:string){
-	return historyEntries(messages,sessionID)
 }
 
 function newChatSessionID(){return `session_${clientId().replace(/[^A-Za-z0-9]/g,'')}`}
@@ -140,14 +137,23 @@ function updateToolStatusByRunID(entries:ChatEntry[],status:string,runID?:string
 function settledTurnEntries(messages:ChatMessage[],sessionID:string,current:ChatEntry[],active:boolean){
 	const persisted=historyEntries(messages,sessionID)
 	const persistedCalls=new Set(persisted.filter(item=>item.kind==='tool').map(item=>item.toolCallId).filter(Boolean))
+	const persistedMessageIDs=new Set(persisted.map(item=>item.sourceMessageId).filter(Boolean))
+	const older=current.filter(item=>item.persisted&&item.sourceMessageId&&!persistedMessageIDs.has(item.sourceMessageId))
 	let latestUser=-1
 	for(let index=messages.length-1;index>=0;index--){if(messages[index].role==='user'){latestUser=index;break}}
 	const latestTurnCompleted=latestUser>=0&&messages.slice(latestUser+1).some(item=>item.role==='assistant'&&item.status==='completed')
 	const keepErrors=active||!latestTurnCompleted
 	return[
+		...older,
 		...persisted,
 		...current.filter(item=>item.kind==='error'?keepErrors:item.kind==='tool'&&item.transient&&(!item.toolCallId||!persistedCalls.has(item.toolCallId))),
 	]
+}
+
+function prependHistoryEntries(messages:ChatMessage[],sessionID:string,current:ChatEntry[]){
+	const older=historyEntries(messages,sessionID)
+	const currentMessageIDs=new Set(current.map(item=>item.sourceMessageId).filter(Boolean))
+	return[...older.filter(item=>!item.sourceMessageId||!currentMessageIDs.has(item.sourceMessageId)),...current]
 }
 
 function mergePersistedToolEntries(messages:ChatMessage[],sessionID:string,current:ChatEntry[]){
@@ -448,7 +454,7 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 	},[notify])
 	const refreshExtensions=useCallback(async()=>{await Promise.all([refreshToolCatalog(),refreshSkills(),refreshMCPServers()])},[refreshMCPServers,refreshSkills,refreshToolCatalog])
 	const refreshRuns=useCallback(async()=>{
-		try{setRuns(await api.runs())}
+		try{setRuns((await api.runSummaries()).runs)}
 		catch(err){notify(errorText(err),'error')}
 	},[notify])
 	const refreshAuditSessions=useCallback(async()=>{
@@ -1162,6 +1168,25 @@ function SSHShellTerminal({initialShell,relatedShells=[],onSelect,onClose,onChan
 			let reconnectTimer:number|undefined
 			let terminalEnded=false
 			let socket:WebSocket|null=null
+			let outputFrame:number|undefined
+			let outputBytes=0
+			let outputChunks:Uint8Array[]=[]
+			const outputEncoder=new TextEncoder()
+			const flushOutput=()=>{
+				outputFrame=undefined
+				if(!outputBytes)return
+				const combined=new Uint8Array(outputBytes)
+				let offset=0
+				for(const chunk of outputChunks){combined.set(chunk,offset);offset+=chunk.byteLength}
+				outputChunks=[];outputBytes=0
+				terminal.write(combined)
+			}
+			const queueOutput=(content:string|Uint8Array)=>{
+				const chunk=typeof content==='string'?outputEncoder.encode(content):content
+				if(!chunk.byteLength)return
+				outputChunks.push(chunk);outputBytes+=chunk.byteLength
+				if(outputFrame===undefined)outputFrame=requestAnimationFrame(flushOutput)
+			}
 			const sendCommand=(command:Record<string,unknown>)=>{
 				if(socket?.readyState!==WebSocket.OPEN)return false
 				socket.send(JSON.stringify(command))
@@ -1194,7 +1219,7 @@ function SSHShellTerminal({initialShell,relatedShells=[],onSelect,onClose,onChan
 			const applyEvent=(event:SSHShellEvent)=>{
 				if(event.sequence<=lastSequence.current)return
 				lastSequence.current=event.sequence
-				if(event.content&&(event.stream==='stdout'||event.stream==='stderr'))terminal.write(event.content)
+				if(event.content&&(event.stream==='stdout'||event.stream==='stderr'))queueOutput(event.content)
 				if(event.status&&event.stream==='status'){
 					setShell(current=>({...current,status:event.status as SSHShell['status'],last_sequence:event.sequence}))
 					if(!sshShellActive(event.status)){
@@ -1223,7 +1248,7 @@ function SSHShellTerminal({initialShell,relatedShells=[],onSelect,onClose,onChan
 							const sequence=Number(view.getBigUint64(2))
 							if(sequence<=lastSequence.current)return
 							lastSequence.current=sequence
-							terminal.write(new Uint8Array(message.data,10))
+							queueOutput(new Uint8Array(message.data,10))
 							return
 						}
 						const payload=JSON.parse(String(message.data)) as {type:string;event?:SSHShellEvent;error?:string}
@@ -1239,6 +1264,8 @@ function SSHShellTerminal({initialShell,relatedShells=[],onSelect,onClose,onChan
 			connect()
 			cleanup=()=>{
 				flushInput()
+				if(outputFrame!==undefined)cancelAnimationFrame(outputFrame)
+				flushOutput()
 				terminalEnded=true
 				if(reconnectTimer!==undefined)window.clearTimeout(reconnectTimer)
 				socket?.close()
@@ -1451,6 +1478,7 @@ function SFTPBrowser({host,embedded=false,hosts=[],onHostSelect,onWorkspaceMode,
 		if(openingFile)return
 		setOpeningFile(entry.path);setNotice('');setNoticeError(false)
 		try{
+			if((entry.size||0)>maxFilePreviewBytes)throw new Error(t('workspace.previewTooLarge'))
 			const decoded=decodeTextFile(await api.sftpFile(hostID,entry.path),entry.name)
 			setTextFile({entry,...decoded})
 		}catch(err){setNotice(errorText(err));setNoticeError(true)}
@@ -1857,7 +1885,7 @@ function SkillsPage({skills,refreshSkills,refreshToolCatalog,onToolCatalogChange
 		{uploadOpen&&createPortal(<div className="connection-dialog-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget)closeUpload()}}><form className="connection-dialog compact panel skill-upload-panel skill-upload-dialog" role="dialog" aria-modal="true" aria-labelledby="skill-upload-title" noValidate onSubmit={upload}><header><span><UploadCloud size={19}/><span><h2 id="skill-upload-title">{t('skills.uploadPackage')}</h2></span></span><button type="button" disabled={uploading} onClick={closeUpload} title={t('common.close')}><X size={15}/></button></header><div className="skill-upload-dialog-body">{markdownUpload&&<label><span>{t('skills.skillName')}</span><input value={uploadName} onChange={event=>setUploadName(event.target.value)} autoFocus/></label>}<label className="skill-file-picker"><FileText size={15}/><span><b>{uploadFile?.name||t('skills.choosePackage')}</b><small>{uploadFile?formatFileSize(uploadFile.size):t('skills.maxPackage')}</small></span><input type="file" accept=".md,.markdown,.zip,.7z,text/markdown,application/zip,application/x-7z-compressed" onChange={event=>selectFile(event.target.files?.[0]||null)}/></label></div>{error&&<div className="connection-dialog-error" role="alert"><ShieldAlert size={14}/><span>{error}</span></div>}<footer><button type="button" disabled={uploading} onClick={closeUpload}>{t('common.cancel')}</button><button className="primary" disabled={uploading||!uploadFile||(markdownUpload&&!uploadName.trim())}>{uploading?<LoaderCircle className="spin" size={14}/>:<UploadCloud size={14}/>} {uploading?t('common.uploading'):t('skills.uploadActivate')}</button></footer></form></div>,document.body)}
 		<div className="skill-manager-layout">
 			<section className="skill-list-panel panel"><label className="skill-search"><Search size={14}/><input value={query} onChange={event=>setQuery(event.target.value)} placeholder={t('skills.search')}/></label><div className="skill-list">{filtered.length?filtered.map(skill=><button className={`${selectedName===skill.name?'active':''} ${skill.enabled?'':'disabled'}`} onClick={()=>setSelectedName(skill.name)} key={skill.name}><div className="skill-card-icon"><BookOpen size={16}/></div><span><code>{skill.name}</code>{skill.summary&&<p>{skill.summary}</p>}<small><em className={skill.enabled?'enabled':'disabled'}>{skill.enabled?t('common.enabled'):t('common.disabled')}</em>{skill.file_count||1} {t('common.files')} · {formatFileSize(skill.size_bytes||0)}{skill.updated_at?` · ${new Date(skill.updated_at).toLocaleDateString(localeFor(instance.language))}`:''}</small></span><ChevronRight size={14}/></button>):<div className="skill-list-empty"><BookOpen size={23}/><b>{skills.length?t('skills.noMatch'):t('skills.noneInstalled')}</b></div>}</div></section>
-				<section className="skill-editor panel">{loading?<div className="skill-editor-state"><LoaderCircle className="spin" size={21}/>{t('skills.loading')}</div>:selected?<><header><div><BookOpen size={17}/><span><small>{t('skills.managed')} · {selected.enabled?t('common.enabled'):t('common.disabled')}</small><code>{selected.name}</code></span></div><section><button className={selected.enabled?'skill-disable':'skill-enable'} disabled={toggling} onClick={toggleEnabled}>{toggling?<LoaderCircle className="spin" size={13}/>:selected.enabled?<X size={13}/>:<Check size={13}/>} {selected.enabled?t('common.disable'):t('common.enable')}</button><button disabled={!dirty||saving} onClick={save}>{saving?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {saving?t('common.saving'):t('skills.saveChanges')}</button><button className="danger" onClick={()=>setDeleteName(selected.name)}><Trash2 size={13}/>{t('common.delete')}</button></section></header><div className="skill-editor-meta"><span><b>SHA256</b><code title={selected.content_sha256}>{selected.content_sha256?.slice(0,16)||'—'}</code></span><span><b>{t('common.files')}</b><code>{selected.file_count||1}</code></span><span><b>{t('common.size')}</b><code>{formatFileSize(selected.size_bytes||0)}</code></span><span><b>{t('common.updated')}</b><code>{selected.updated_at?new Date(selected.updated_at).toLocaleString(localeFor(instance.language)):'—'}</code></span></div><div className="skill-editor-split"><label><span>SKILL.md</span><textarea value={draft} spellCheck={false} onChange={event=>setDraft(event.target.value)}/></label><section><span>{t('skills.livePreview')}</span><div className="markdown-body"><Markdown skipHtml remarkPlugins={[remarkGfm]} components={{a:({href,children})=><a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,img:({alt})=><span className="markdown-image-blocked">{t('skills.blockedImage',{alt:alt||t('common.image')})}</span>,pre:({children})=><CopyablePre>{children}</CopyablePre>}}>{draft||t('skills.emptySkill')}</Markdown></div></section></div></>:<div className="skill-editor-state"><BookOpen size={25}/><b>{t('skills.select')}</b></div>}</section>
+				<section className="skill-editor panel">{loading?<div className="skill-editor-state"><LoaderCircle className="spin" size={21}/>{t('skills.loading')}</div>:selected?<><header><div><BookOpen size={17}/><span><small>{t('skills.managed')} · {selected.enabled?t('common.enabled'):t('common.disabled')}</small><code>{selected.name}</code></span></div><section><button className={selected.enabled?'skill-disable':'skill-enable'} disabled={toggling} onClick={toggleEnabled}>{toggling?<LoaderCircle className="spin" size={13}/>:selected.enabled?<X size={13}/>:<Check size={13}/>} {selected.enabled?t('common.disable'):t('common.enable')}</button><button disabled={!dirty||saving} onClick={save}>{saving?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {saving?t('common.saving'):t('skills.saveChanges')}</button><button className="danger" onClick={()=>setDeleteName(selected.name)}><Trash2 size={13}/>{t('common.delete')}</button></section></header><div className="skill-editor-meta"><span><b>SHA256</b><code title={selected.content_sha256}>{selected.content_sha256?.slice(0,16)||'—'}</code></span><span><b>{t('common.files')}</b><code>{selected.file_count||1}</code></span><span><b>{t('common.size')}</b><code>{formatFileSize(selected.size_bytes||0)}</code></span><span><b>{t('common.updated')}</b><code>{selected.updated_at?new Date(selected.updated_at).toLocaleString(localeFor(instance.language)):'—'}</code></span></div><div className="skill-editor-split"><label><span>SKILL.md</span><textarea value={draft} spellCheck={false} onChange={event=>setDraft(event.target.value)}/></label><section><span>{t('skills.livePreview')}</span><div className="markdown-body"><Suspense fallback={draft||t('skills.emptySkill')}><MarkdownMessage content={draft||t('skills.emptySkill')} scope="skills"/></Suspense></div></section></div></>:<div className="skill-editor-state"><BookOpen size={25}/><b>{t('skills.select')}</b></div>}</section>
 		</div>
 		{deleteName&&<DestructiveConfirmDialog title={t('skills.deleteTitle',{name:deleteName})} busy={deleting} onCancel={()=>setDeleteName('')} onConfirm={()=>void permanentlyDelete()}/>}
 	</div>
@@ -2103,6 +2131,9 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	const [renamingSession,setRenamingSession]=useState(false)
 	const [sessionRenameError,setSessionRenameError]=useState('')
   const [loadingSession, setLoadingSession] = useState('')
+	const [historyCursor,setHistoryCursor]=useState<ChatHistoryCursor|null>(null)
+	const [historyHasMore,setHistoryHasMore]=useState(false)
+	const [loadingOlderMessages,setLoadingOlderMessages]=useState(false)
   const [workspacePanelCollapsed,setWorkspacePanelCollapsed]=useState(recalledWorkspacePanelCollapsed)
   const [running, setRunning] = useState(false)
   const [detachedRunning,setDetachedRunning]=useState(false)
@@ -2124,6 +2155,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	const [boundWorkspaceID,setBoundWorkspaceID]=useState('')
 	const [workspaceSwitching,setWorkspaceSwitching]=useState(false)
   const messagesRef=useRef<HTMLDivElement>(null)
+	const sessionIDRef=useRef('')
   const stickToLatest=useRef(true)
 	const userScrollFrame=useRef(0)
 	const disclosureScrollFrame=useRef(0)
@@ -2145,6 +2177,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		return ''
 	},[entries])
 	const selectedWorkspace=capabilities.workspaces.find(workspace=>workspace.id===workspaceID)||capabilities.workspaces[0]
+	useEffect(()=>{sessionIDRef.current=sessionId},[sessionId])
 	useEffect(()=>{
 		if(!visible||!sessionBusy&&!toolsRunning){setWorkStatusIndex(0);return}
 		const timer=window.setInterval(()=>setWorkStatusIndex(current=>(current+1)%workStatusKeys.length),2600)
@@ -2191,11 +2224,29 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
     try {
       const state = await api.chatState(id)
       if(sessionLoadRef.current!==requestID)return
-	      setEntries(historyEntries(state.messages||[],id));setDetachedRunning(!!state.active);setQueuedMessages(state.queued_messages||[]);setQueueingMessage(false);setStopping(false);setModelRetry(null);setConnectionRetry(null);setTasks(state.tasks?.items?.length?state.tasks:null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setWorkspaceID(state.workspace_id||'');setBoundWorkspaceID(state.workspace_id||'')
+	      setEntries(historyEntries(state.messages||[],id));setHistoryHasMore(!!state.messages_has_more);setHistoryCursor(state.messages_next_created_at&&state.messages_next_id?{createdAt:state.messages_next_created_at,id:state.messages_next_id}:null);setDetachedRunning(!!state.active);setQueuedMessages(state.queued_messages||[]);setQueueingMessage(false);setStopping(false);setModelRetry(null);setConnectionRetry(null);setTasks(state.tasks?.items?.length?state.tasks:null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setWorkspaceID(state.workspace_id||'');setBoundWorkspaceID(state.workspace_id||'')
       setSessionId(id); rememberSession(id); setHistoryError('')
 	} catch (err) { if(sessionLoadRef.current===requestID)setHistoryError(errorText(err)) }
 	finally { if(sessionLoadRef.current===requestID)setLoadingSession('') }
 	}, [activeContextWindow])
+
+	const loadOlderMessages=useCallback(async()=>{
+		if(!sessionId||!historyHasMore||!historyCursor||loadingOlderMessages)return
+		const targetSessionID=sessionId
+		const container=messagesRef.current
+		const previousHeight=container?.scrollHeight||0
+		setLoadingOlderMessages(true);setHistoryError('')
+		try{
+			const page=await api.chatMessages(targetSessionID,historyCursor)
+			if(sessionIDRef.current!==targetSessionID)return
+			stickToLatest.current=false
+			flushSync(()=>setEntries(current=>prependHistoryEntries(page.messages||[],targetSessionID,current)))
+			setHistoryHasMore(page.has_more)
+			setHistoryCursor(page.next_created_at&&page.next_id?{createdAt:page.next_created_at,id:page.next_id}:null)
+			if(container)container.scrollTop+=container.scrollHeight-previousHeight
+		}catch(err){if(sessionIDRef.current===targetSessionID)setHistoryError(errorText(err))}
+		finally{if(sessionIDRef.current===targetSessionID)setLoadingOlderMessages(false)}
+	},[historyCursor,historyHasMore,loadingOlderMessages,sessionId])
 
   useLayoutEffect(()=>{
 	    if(!visible||!stickToLatest.current)return
@@ -2244,7 +2295,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
     detachActiveStream()
     sessionLoadRef.current=''
     setLoadingSession('')
-	    stickToLatest.current=true;setSessionId('');setBoundWorkspaceID('');setEntries([]); setMessage('');clearPendingImages(); setHistoryError('');setContextUsage({tokens:0,window:activeContextWindow});setDetachedRunning(false);setQueuedMessages([]);setQueueingMessage(false);setStopping(false);setCompressingContext(false);setModelRetry(null);setConnectionRetry(null);setTasks(null); rememberSession(newSessionMarker)
+	    stickToLatest.current=true;setSessionId('');setBoundWorkspaceID('');setEntries([]);setHistoryHasMore(false);setHistoryCursor(null);setLoadingOlderMessages(false); setMessage('');clearPendingImages(); setHistoryError('');setContextUsage({tokens:0,window:activeContextWindow});setDetachedRunning(false);setQueuedMessages([]);setQueueingMessage(false);setStopping(false);setCompressingContext(false);setModelRetry(null);setConnectionRetry(null);setTasks(null); rememberSession(newSessionMarker)
     void refreshSessions()
   }
 
@@ -2256,12 +2307,12 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
       return
     }
     detachActiveStream()
-		setDetachedRunning(false);setQueuedMessages([]);setQueueingMessage(false);setStopping(false);setConnectionRetry(null)
+		setDetachedRunning(false);setQueuedMessages([]);setQueueingMessage(false);setStopping(false);setConnectionRetry(null);setHistoryHasMore(false);setHistoryCursor(null);setLoadingOlderMessages(false)
     void loadSession(id)
     void refreshSessions()
   }
 
-	const switchWorkspace=async(id:string)=>{
+	const switchWorkspace=useCallback(async(id:string)=>{
 		if(id===selectedWorkspace?.id||sessionBusy||loadingSession||workspaceSwitching)return
 		if(!sessionId){setWorkspaceID(id);return}
 		setWorkspaceSwitching(true);setHistoryError('')
@@ -2272,7 +2323,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			void refreshSessions()
 		}catch(err){setHistoryError(errorText(err))}
 		finally{setWorkspaceSwitching(false)}
-	}
+	},[loadingSession,refreshSessions,selectedWorkspace?.id,sessionBusy,sessionId,workspaceSwitching])
 
   const removeSession = async () => {
     if(!sessionDeleteCandidate)return
@@ -2406,7 +2457,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 						void refreshSessions()
 						return
 					}
-					setEntries(reconnectBaseEntries(state.messages||[],sessionId))
+					setEntries(old=>settledTurnEntries(state.messages||[],sessionId,old,true))
 					setConnectionRetry(null)
 					setHistoryError('')
 					await reconnectChatStream(sessionId,0,frame=>{if(active)handleAgentFrame(frame)},controller.signal)
@@ -2428,15 +2479,28 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 
 	useEffect(()=>{
 		if(!visible||!sessionId||!toolsRunning||running)return
-		return subscribeApplicationEvents<ChatState>('chat_state',event=>{
+		let disposed=false
+		let lastRunningToolCount=-1
+		let refreshInFlight=false
+		const refreshPersistedTools=()=>{
+			if(refreshInFlight)return
+			refreshInFlight=true
+			void api.chatMessages(sessionId).then(page=>{
+				if(!disposed)setEntries(old=>mergePersistedToolEntries(page.messages||[],sessionId,old))
+			}).catch(()=>{/* the next state transition retries */}).finally(()=>{refreshInFlight=false})
+		}
+		const unsubscribe=subscribeApplicationEvents<ChatState>('chat_state',event=>{
 			if(event.type!=='event'||!event.data)return
 			const state=event.data
-			setEntries(old=>mergePersistedToolEntries(state.messages||[],sessionId,old))
+			const messages=state.messages
+			if(messages?.length)setEntries(old=>mergePersistedToolEntries(messages,sessionId,old))
+			else if(state.running_tool_calls!==lastRunningToolCount){lastRunningToolCount=state.running_tool_calls;refreshPersistedTools()}
 			setQueuedMessages(current=>keepEquivalent(current,state.queued_messages||[]))
 			setContextUsage(current=>keepEquivalent(current,{tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)}))
 			if(state.active&&!running)setDetachedRunning(true)
-			if(!state.active&&!(state.tool_calls||[]).some(call=>call.status==='running'))setStopping(false)
+			if(!state.active&&!(state.running_tool_calls>0))setStopping(false)
 		},{sessionId})
+		return()=>{disposed=true;unsubscribe()}
 	},[activeContextWindow,running,sessionId,toolsRunning,visible])
 
 	  const sendQuery = async (query:string,queryImages:PendingChatImage[]) => {
@@ -2512,7 +2576,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			const result=await api.cancelChatSession(targetSessionID)
 			requested=result.cancelled
 			if(result.cancelled)setQueuedMessages([])
-			if(!result.cancelled){const state=await api.chatState(targetSessionID);setDetachedRunning(!!state.active);setQueuedMessages(state.queued_messages||[]);setTasks(state.tasks?.items?.length?state.tasks:null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setEntries(historyEntries(state.messages||[],targetSessionID));void refreshSessions()}
+			if(!result.cancelled){const state=await api.chatState(targetSessionID);setDetachedRunning(!!state.active);setQueuedMessages(state.queued_messages||[]);setTasks(state.tasks?.items?.length?state.tasks:null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setEntries(old=>settledTurnEntries(state.messages||[],targetSessionID,old,!!state.active));void refreshSessions()}
 		}catch(err){setEntries(old=>[...old,{id:clientId(),kind:'error',content:t('chat.stopFailed',{message:errorText(err)})}])}
 		finally{if(!requested)setStopping(false)}
   }
@@ -2535,10 +2599,11 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	const composerEmpty=!message.trim()&&!pendingImages.length
 	const showComposerStop=(sessionBusy||toolsRunning)&&composerEmpty
 	const workStatusLabel=stopping?t('chat.stopping'):connectionRetryLabel||modelRetryLabel||t(workStatusKeys[workStatusIndex])
-	const setWorkspaceCollapsed=(collapsed:boolean)=>{
+	const setWorkspaceCollapsed=useCallback((collapsed:boolean)=>{
 		rememberWorkspacePanelCollapsed(collapsed)
 		setWorkspacePanelCollapsed(collapsed)
-	}
+	},[])
+	const collapseWorkspacePanel=useCallback(()=>setWorkspaceCollapsed(true),[setWorkspaceCollapsed])
 	const sessionSidebar=sidebarTarget&&createPortal(<>
 		<header className="sidebar-conversation-head"><span><History size={15}/>{t('chat.conversations')}</span><button className="new-chat-button" onClick={newChat} disabled={workspaceSwitching} title={t('chat.newConversation')} aria-label={t('chat.newConversation')}><Plus size={14}/><span>{t('common.new')}</span></button></header>
 		<div className="session-list">
@@ -2549,15 +2614,16 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	</>,sidebarTarget)
 
 	return <>{sessionSidebar}<ChatVisibilityContext.Provider value={visible}><div className={`chat-layout ${workspacePanelCollapsed?'workspace-panel-collapsed ':''}${visible?'':'page-hidden'}`}>
-		<ChatWorkspacePanel key={selectedWorkspace?.id||''} active={visible} mode={fileBrowserMode} onModeChange={setFileBrowserMode} workspaces={capabilities.workspaces} workspaceID={selectedWorkspace?.id||''} hosts={hosts} sftpHostID={sftpHostID} onSFTPHostChange={setSFTPHostID} shells={workspaceShells} switching={workspaceSwitching} disabled={sessionBusy||!!loadingSession} bound={!!selectedWorkspace&&boundWorkspaceID===selectedWorkspace.id} onSelect={id=>void switchWorkspace(id)} onCreateShell={onCreateWorkspaceShell} onOpenShell={onOpenWorkspaceShell} onCollapse={()=>setWorkspaceCollapsed(true)}/>
+		<ChatWorkspacePanel key={selectedWorkspace?.id||''} active={visible} mode={fileBrowserMode} onModeChange={setFileBrowserMode} workspaces={capabilities.workspaces} workspaceID={selectedWorkspace?.id||''} hosts={hosts} sftpHostID={sftpHostID} onSFTPHostChange={setSFTPHostID} shells={workspaceShells} switching={workspaceSwitching} disabled={sessionBusy||!!loadingSession} bound={!!selectedWorkspace&&boundWorkspaceID===selectedWorkspace.id} onSelect={switchWorkspace} onCreateShell={onCreateWorkspaceShell} onOpenShell={onOpenWorkspaceShell} onCollapse={collapseWorkspacePanel}/>
 	  {workspacePanelCollapsed&&<button type="button" className="chat-panel-open-button" onClick={()=>setWorkspaceCollapsed(false)} title={t('workspace.expandPanel')} aria-label={t('workspace.expandPanel')}><PanelLeftOpen size={15}/></button>}
     <div className="chat-main panel">
 	  <div className="session-approval-slot">{currentApprovals.length>0&&<ApprovalDialog key={currentApprovals[0].id} approval={currentApprovals[0]} pendingCount={currentApprovals.length} hosts={hosts} running={sessionBusy} stopping={stopping} onStop={()=>void stopAgent()} refreshApprovals={refreshApprovals} onApproved={result=>{setEntries(old=>updateToolRunStatus(old,result.run_id,result.status==='running'?'in_progress':result.status));if(result.shell?.kind==='workspace')onWorkspaceShellStarted(result.shell)}} onNotice={notify}/>}</div>
 	      <div className="session-task-slot">{tasks&&<SessionTasks tasks={tasks} rows={taskRows} expanded={tasksExpanded} onExpanded={setTasksExpanded}/>}</div>
 		<div className="conversation-view">
 			<div className="messages" ref={messagesRef} onWheel={trackUserScroll} onTouchMove={trackUserScroll} onPointerUp={trackUserScroll}>
+				{historyHasMore&&<button type="button" className="chat-history-more" disabled={loadingOlderMessages} onClick={()=>void loadOlderMessages()}>{loadingOlderMessages?<LoaderCircle className="spin" size={13}/>:<History size={13}/>} {t('chat.loadEarlier')}</button>}
 				{entries.length === 0 && <div className="empty-chat"><div className="radar"><Activity size={35}/></div><h2>{t('chat.emptyTitle')}</h2></div>}
-				{renderEntries.map(item=>item.kind==='task_tool_group'?<TaskToolGroupCard key={item.id} group={item} onDisclosure={preserveToolDisclosurePosition}/>:<ChatBubble key={item.entry.id} entry={item.entry} showActions={item.entry.id===latestAssistantEntryID} runs={runs} hosts={hosts} onToolDisclosure={preserveToolDisclosurePosition}/>) }
+				{renderEntries.map(item=>item.kind==='task_tool_group'?<TaskToolGroupCard key={item.id} group={item} onDisclosure={preserveToolDisclosurePosition}/>:<ChatBubble key={item.entry.id} sessionID={sessionId} entry={item.entry} showActions={item.entry.id===latestAssistantEntryID} runs={runs} hosts={hosts} onToolDisclosure={preserveToolDisclosurePosition}/>) }
 				{(sessionBusy||toolsRunning)&&<div className={`model-activity ${stopping?'stopping':''}`} role="status" aria-live="polite"><span className="model-activity-mark" aria-hidden="true">✻</span><b key={stopping||connectionRetry||modelRetry?'priority':workStatusIndex}>{workStatusLabel}</b></div>}
 			</div>
 			{tasks&&tasksExpanded&&<SessionTaskItems rows={taskRows}/>}
@@ -2601,7 +2667,7 @@ function FileBrowserTabs({mode,onChange}:{mode:FileBrowserMode;onChange:(mode:Fi
 	return <div className="file-browser-tabs" role="tablist"><button type="button" className={mode==='workspace'?'active':''} role="tab" aria-selected={mode==='workspace'} onClick={()=>onChange('workspace')}><FolderOpen size={14}/><span>{t('common.workspace')}</span></button><button type="button" className={mode==='sftp'?'active':''} role="tab" aria-selected={mode==='sftp'} onClick={()=>onChange('sftp')}><Server size={14}/><span>SFTP</span></button></div>
 }
 
-function ChatWorkspacePanel({active,mode,onModeChange,workspaces,workspaceID,hosts,sftpHostID,onSFTPHostChange,shells,switching,disabled,bound,onSelect,onCreateShell,onOpenShell,onCollapse}:{active:boolean;mode:FileBrowserMode;onModeChange:(mode:FileBrowserMode)=>void;workspaces:WorkspaceCapability[];workspaceID:string;hosts:Host[];sftpHostID:string;onSFTPHostChange:(id:string)=>void;shells:SSHShell[];switching:boolean;disabled:boolean;bound:boolean;onSelect:(id:string)=>void;onCreateShell:(workspaceID:string)=>Promise<void>;onOpenShell:(shell:SSHShell)=>void;onCollapse:()=>void}){
+const ChatWorkspacePanel=memo(function ChatWorkspacePanel({active,mode,onModeChange,workspaces,workspaceID,hosts,sftpHostID,onSFTPHostChange,shells,switching,disabled,bound,onSelect,onCreateShell,onOpenShell,onCollapse}:{active:boolean;mode:FileBrowserMode;onModeChange:(mode:FileBrowserMode)=>void;workspaces:WorkspaceCapability[];workspaceID:string;hosts:Host[];sftpHostID:string;onSFTPHostChange:(id:string)=>void;shells:SSHShell[];switching:boolean;disabled:boolean;bound:boolean;onSelect:(id:string)=>void|Promise<void>;onCreateShell:(workspaceID:string)=>Promise<void>;onOpenShell:(shell:SSHShell)=>void;onCollapse:()=>void}){
 	const {t}=useTranslation()
 	const workspace=workspaces.find(item=>item.id===workspaceID)||workspaces[0]
 	const sftpHost=hosts.find(item=>item.id===sftpHostID)||hosts[0]
@@ -2754,10 +2820,10 @@ function ChatWorkspacePanel({active,mode,onModeChange,workspaces,workspaceID,hos
 			{notice&&<div className={`chat-workspace-notice ${notice.kind}`}>{notice.text}</div>}
 			{dragging&&<div className="workspace-drop-overlay"><UploadCloud size={27}/><b>{t('workspace.dropFilesHere')}</b><span>{path}</span></div>}
 		</aside>
-		{preview&&<TextFileEditor path={preview.path} meta={`${formatFileSize(preview.size)} · SHA-256 ${preview.sha256}`} content={preview.content||''} binary={preview.binary} editable={workspace.access==='read_write'} onClose={()=>setPreview(null)} onSave={savePreview} onDownload={()=>void download(preview.path,preview.path.split('/').at(-1)||'download',preview.size)}/>}
+		{preview&&<TextFileEditor path={preview.path} meta={`${formatFileSize(preview.size)} · SHA-256 ${preview.sha256}${preview.truncated?` · ${t('common.truncated')}`:''}`} content={preview.content||''} binary={preview.binary} editable={workspace.access==='read_write'&&!preview.truncated} onClose={()=>setPreview(null)} onSave={savePreview} onDownload={()=>void download(preview.path,preview.path.split('/').at(-1)||'download',preview.size)}/>}
 		{deleteCandidate&&<DestructiveConfirmDialog title={t('workspace.deleteTitle',{path:`${deleteCandidate.workspaceID}:${deleteCandidate.path}`})} busy={deleting===deleteCandidate.path} onCancel={()=>setDeleteCandidate(null)} onConfirm={()=>void removeEntry()}/>}
 	</>
-}
+})
 
 type SessionTaskRow={task:AgentTask;blockers:string[];status:AgentTask['status']|'blocked'}
 
@@ -2782,12 +2848,12 @@ const SessionTaskItems=memo(function SessionTaskItems({rows}:{rows:SessionTaskRo
 	return <section className={`session-task-view ${blocked?'blocked':'active'}`}><ul className="session-task-items">{rows.map(({task,blockers,status})=><li className={status} key={task.id}><span className="task-item-marker">{status==='completed'?<Check size={12}/>:status==='in_progress'?<LoaderCircle size={12}/>:status==='blocked'?<ShieldAlert size={12}/>:<CircleDot size={10}/>}</span><div title={task.description}><b>{task.subject}</b>{status==='blocked'&&<small>{t('agentTasks.blocked',{count:blockers.length})}</small>}</div><em>{task.owner||t(`statusLabels.${status}`,{defaultValue:status.replace('_',' ')})}</em></li>)}</ul></section>
 })
 
-const ChatBubble=memo(function ChatBubble({ entry, showActions, runs, hosts, onToolDisclosure }: {entry:ChatEntry;showActions:boolean;runs:Run[];hosts:Host[];onToolDisclosure:(summary:HTMLElement)=>void}) {
+const ChatBubble=memo(function ChatBubble({ sessionID, entry, showActions, runs, hosts, onToolDisclosure }: {sessionID:string;entry:ChatEntry;showActions:boolean;runs:Run[];hosts:Host[];onToolDisclosure:(summary:HTMLElement)=>void}) {
 	const {t}=useTranslation()
-  if (entry.kind === 'tool') return <ToolEventCard entry={entry} runs={runs} hosts={hosts} onDisclosure={onToolDisclosure}/>
+  if (entry.kind === 'tool') return <ToolEventCard sessionID={sessionID} entry={entry} runs={runs} hosts={hosts} onDisclosure={onToolDisclosure}/>
   if (entry.kind === 'reasoning') return <ReasoningCard content={entry.content} active={!!entry.active}/>
   if (entry.kind === 'assistant' && !entry.content) return null
-	return <div className={`bubble ${entry.kind} ${entry.status||''}`}><div className="avatar">{entry.kind === 'user' ? <UserRound size={17}/> : entry.kind === 'error' ? '!' : <Bot size={17}/>}</div><div><span className="bubble-label">{entry.kind === 'user' ? <>{t('chat.operator')}{entry.status==='failed'&&<em>{t('chat.responseFailed')}</em>}{entry.status==='pending'&&<em>{t('chat.processing')}</em>}</> : entry.kind === 'error' ? t('common.error') : 'OpsNerva'}</span>{entry.images&&entry.images.length>0&&<div className="message-images">{entry.images.map(image=><a href={image.url} target="_blank" rel="noopener noreferrer" title={`${image.name} · ${formatFileSize(image.sizeBytes)}`} key={image.id}><img src={image.url} alt={image.name}/><span>{image.name}</span></a>)}</div>}{entry.content&&<div className={`bubble-copy ${entry.kind==='assistant'&&entry.lifecycle!=='streaming'?'markdown-body':''}`}>{entry.kind==='assistant'&&entry.lifecycle!=='streaming'?<Markdown skipHtml remarkPlugins={[remarkGfm]} components={{a:({href,children})=><a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,img:({alt})=><span className="markdown-image-blocked">{t('chat.blockedImage',{alt:alt||t('common.image')})}</span>,pre:({children})=><CopyablePre>{children}</CopyablePre>}}>{entry.content}</Markdown>:entry.content}</div>}{showActions&&<div className="assistant-message-footer"><CopyButton value={entry.content} className="message-copy-button"/>{entry.tokenUsage&&<TokenUsageLine usage={entry.tokenUsage}/>}</div>}</div></div>
+	return <div className={`bubble ${entry.kind} ${entry.status||''}`}><div className="avatar">{entry.kind === 'user' ? <UserRound size={17}/> : entry.kind === 'error' ? '!' : <Bot size={17}/>}</div><div><span className="bubble-label">{entry.kind === 'user' ? <>{t('chat.operator')}{entry.status==='failed'&&<em>{t('chat.responseFailed')}</em>}{entry.status==='pending'&&<em>{t('chat.processing')}</em>}</> : entry.kind === 'error' ? t('common.error') : 'OpsNerva'}</span>{entry.images&&entry.images.length>0&&<div className="message-images">{entry.images.map(image=><a href={image.url} target="_blank" rel="noopener noreferrer" title={`${image.name} · ${formatFileSize(image.sizeBytes)}`} key={image.id}><img src={image.url} alt={image.name}/><span>{image.name}</span></a>)}</div>}{entry.content&&<div className={`bubble-copy ${entry.kind==='assistant'&&entry.lifecycle!=='streaming'?'markdown-body':''}`}>{entry.kind==='assistant'&&entry.lifecycle!=='streaming'?<Suspense fallback={entry.content}><MarkdownMessage content={entry.content}/></Suspense>:entry.content}</div>}{showActions&&<div className="assistant-message-footer"><CopyButton value={entry.content} className="message-copy-button"/>{entry.tokenUsage&&<TokenUsageLine usage={entry.tokenUsage}/>}</div>}</div></div>
 })
 
 function TokenUsageLine({usage}:{usage:ChatTokenUsage}){
@@ -2971,9 +3037,15 @@ function TaskToolGroupCard({group,onDisclosure}:{group:TaskToolEntryGroup;onDisc
 	</details>
 }
 
-function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run[];hosts:Host[];onDisclosure:(summary:HTMLElement)=>void}){
+function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,onDisclosure}:{sessionID:string;entry:ChatEntry;runs:Run[];hosts:Host[];onDisclosure:(summary:HTMLElement)=>void}){
 	const {t}=useTranslation()
 	const chatVisible=useContext(ChatVisibilityContext)
+	const [expanded,setExpanded]=useState(false)
+	const [fullContent,setFullContent]=useState('')
+	const [loadingDetail,setLoadingDetail]=useState(false)
+	const [detailError,setDetailError]=useState('')
+	const entry=fullContent?{...initialEntry,content:fullContent,contentTruncated:false}:initialEntry
+	useEffect(()=>{setFullContent('');setLoadingDetail(false);setDetailError('')},[initialEntry.sourceMessageId])
   const payload=parseRecord(entry.content)
 	const taskPayload=jsonRecord(payload.task)
 	const resultPayload=jsonRecord(payload.result)
@@ -3113,7 +3185,6 @@ function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run
 	}
   const instruction=textValue(payload.operator_instruction)||textValue(taskPayload?.operator_instruction)||textValue(resultPayload?.operator_instruction)
   const rawPayload={...payload};delete rawPayload._display
-	  const [expanded,setExpanded]=useState(false)
 		const firstSeenAt=useRef(Date.now())
 		const persistedStartedAt=run?.started_at?Date.parse(run.started_at):entry.startedAt
 		const startedAt=Number.isFinite(persistedStartedAt)?persistedStartedAt!:firstSeenAt.current
@@ -3129,9 +3200,18 @@ function ToolEventCard({entry,runs,hosts,onDisclosure}:{entry:ChatEntry;runs:Run
 	const exitCode=typeof payload.exit_code==='number'?payload.exit_code:typeof resultExitCode==='number'?resultExitCode:run?.exit_code??'—'
 	const duration=formatDuration(payload.duration??resultPayload?.duration,run)
 	const autoApproved=payload.auto_approved===true||resultPayload?.auto_approved===true||runAutoApproved(run)
+	const toggleExpanded=(summary:HTMLElement)=>{
+		onDisclosure(summary)
+		const opening=!expanded
+		setExpanded(opening)
+		if(!opening||!initialEntry.contentTruncated||!initialEntry.sourceMessageId||loadingDetail||fullContent)return
+		setLoadingDetail(true);setDetailError('')
+		void api.chatMessage(sessionID,initialEntry.sourceMessageId).then(message=>setFullContent(message.content)).catch(error=>setDetailError(errorText(error))).finally(()=>setLoadingDetail(false))
+	}
 		  return <details className={`tool-event tool-event-rich ${status}`} open={expanded}>
-			<summary onClick={event=>{event.preventDefault();onDisclosure(event.currentTarget);setExpanded(value=>!value)}}><div className="tool-summary-icon">{toolSummaryIcon(entry.tool)}</div><div className="tool-summary-copy"><div className="tool-summary-heading"><b>{summaryLabel}</b>{targets.length>0&&<div className="tool-summary-targets">{targets.map((target,index)=><span className={`tool-target-chip tool-target-${target.kind}`} title={`${target.label}: ${[target.name,target.id].filter(Boolean).join(' · ')}`} key={`${target.kind}_${target.id||target.name}_${index}`}>{target.kind==='host'?<Server size={11}/>:target.kind==='workspace'?<FolderOpen size={11}/>:<ListChecks size={11}/>} {(targets.length>1||target.kind==='scope')&&<em>{target.label}</em>}<b>{target.name||target.id}</b></span>)}</div>}</div>{commandSummary!==summaryLabel&&<code title={previewText(commandSummary)}>{previewText(commandSummary)}</code>}</div><div className="tool-summary-statuses">{autoApproved&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}<span className={`tool-status ${status}`} key={status}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight size={14}/>{status==='in_progress'&&<div className={`tool-live-progress ${transferTotal>0?'determinate':''}`} role="progressbar" aria-valuemin={transferTotal>0?0:undefined} aria-valuemax={transferTotal>0?transferTotal:undefined} aria-valuenow={transferTotal>0?transferred:undefined}><i><em style={transferTotal>0?{width:`${transferPercent}%`}:undefined}/></i><span>{transferTotal>0?`${formatFileSize(transferred)} / ${formatFileSize(transferTotal)}`:entry.liveOutputStream?.toUpperCase()||''}</span><time>{elapsed}</time></div>}{outputPreview&&<div className={`tool-summary-preview ${previewStream==='stderr'?'stderr':''}`}><span>{shellAction==='output'?shellActionLabel:(previewStream||'stdout').toUpperCase()}</span><pre>{outputPreview}</pre></div>}</summary>
+			<summary onClick={event=>{event.preventDefault();toggleExpanded(event.currentTarget)}}><div className="tool-summary-icon">{toolSummaryIcon(entry.tool)}</div><div className="tool-summary-copy"><div className="tool-summary-heading"><b>{summaryLabel}</b>{targets.length>0&&<div className="tool-summary-targets">{targets.map((target,index)=><span className={`tool-target-chip tool-target-${target.kind}`} title={`${target.label}: ${[target.name,target.id].filter(Boolean).join(' · ')}`} key={`${target.kind}_${target.id||target.name}_${index}`}>{target.kind==='host'?<Server size={11}/>:target.kind==='workspace'?<FolderOpen size={11}/>:<ListChecks size={11}/>} {(targets.length>1||target.kind==='scope')&&<em>{target.label}</em>}<b>{target.name||target.id}</b></span>)}</div>}</div>{commandSummary!==summaryLabel&&<code title={previewText(commandSummary)}>{previewText(commandSummary)}</code>}</div><div className="tool-summary-statuses">{loadingDetail&&<LoaderCircle className="spin" size={12}/>} {autoApproved&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}<span className={`tool-status ${status}`} key={status}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight size={14}/>{status==='in_progress'&&<div className={`tool-live-progress ${transferTotal>0?'determinate':''}`} role="progressbar" aria-valuemin={transferTotal>0?0:undefined} aria-valuemax={transferTotal>0?transferTotal:undefined} aria-valuenow={transferTotal>0?transferred:undefined}><i><em style={transferTotal>0?{width:`${transferPercent}%`}:undefined}/></i><span>{transferTotal>0?`${formatFileSize(transferred)} / ${formatFileSize(transferTotal)}`:entry.liveOutputStream?.toUpperCase()||''}</span><time>{elapsed}</time></div>}{outputPreview&&<div className={`tool-summary-preview ${previewStream==='stderr'?'stderr':''}`}><span>{shellAction==='output'?shellActionLabel:(previewStream||'stdout').toUpperCase()}</span><pre>{outputPreview}</pre></div>}</summary>
 		{expanded&&<div className="tool-event-body">
+		  {detailError&&<div className="tool-detail-error">{detailError}</div>}
 		  {shellPrimaryAction&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellPrimaryContent||'—'}/><pre>{previewText(shellPrimaryContent||'—',toolOutputPreviewChars)}</pre></div></section>}
 		  {shellOutputAction&&!shellChunks.length&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellOutput||'—'}/><pre>{previewText(shellOutput||'—',toolOutputPreviewChars)}</pre></div></section>}
 		  {!executionTool&&toolArguments&&hasRecordEntries(toolArguments)&&<CompactTable title={t('tool.actualParameters')} columns={[t('tool.parameter'),t('tool.value')]} rows={limitedRecordEntries(toolArguments).entries.map(([key,value])=>[key,safeToolArgument(value,key)])}/>}
@@ -4041,18 +4121,67 @@ function auditOperationSummary(req:JsonRecord,run:Run,hosts:Host[],t:TFunction){
 	}
 }
 
+function AuditRunRow({run,hosts}:{run:Run;hosts:Host[]}){
+	const {t,i18n:instance}=useTranslation()
+	const [detail,setDetail]=useState<Run|null>(null)
+	const [loading,setLoading]=useState(false)
+	const [error,setError]=useState('')
+	const req=requestFromRun(run)||{request:run.request_json}
+	const auditHost=hostIdentity(hosts,run.host_id)
+	const workspaceID=textValue(req.workspace_id)
+	const target=auditHost.name||(run.host_id.startsWith('workspace_')?workspaceID:run.host_id)||'—'
+	const operation=auditOperationSummary(req,run,hosts,t)
+	const open=async()=>{
+		if(detail||loading)return
+		setLoading(true);setError('')
+		try{setDetail((await api.runDetail(run.id)).run)}
+		catch(err){setError(errorText(err))}
+		finally{setLoading(false)}
+	}
+	const resolved=detail||run
+	const resolvedRequest=requestFromRun(resolved)||req
+	return <details onToggle={event=>{if(event.currentTarget.open)void open()}}>
+		<summary className="audit-row">
+			<span>{new Date(run.started_at).toLocaleString(localeFor(instance.language))}</span>
+			<span className="command">{operation}</span>
+			<span className="audit-run-status"><span className={`run-status ${run.status}`}>{t(`statusLabels.${run.status}`,{defaultValue:run.status})}</span>{runAutoApproved(run)&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}</span>
+			<span title={run.host_id}>{target}</span><span>{run.exit_code}</span><ChevronRight className="audit-run-chevron" size={15}/>
+		</summary>
+		<div className="run-detail">
+			{loading?<div className="audit-loading" role="status"><LoaderCircle className="spin" size={16}/><span>{t('common.loading')}</span></div>:error?<div className="inline-error">{error}</div>:detail&&<AuditRunDetail run={resolved} req={resolvedRequest} hosts={hosts}/>}
+		</div>
+	</details>
+}
+
 function AuditPage({runs,hosts,sessions,ready}:{runs:Run[];hosts:Host[];sessions:ChatSession[];ready:boolean}) {
 	const {t,i18n:instance}=useTranslation()
-  const [query,setQuery]=useState('')
-  const filtered=useMemo(()=>{const needle=query.toLowerCase();return runs.filter(run=>{const req=requestFromRun(run);const requestText=req?Object.values(req).flat().filter(value=>typeof value==='string').join('\n'):run.request_json;return(requestText+run.stdout_redacted+run.stderr_redacted).toLowerCase().includes(needle)})},[query,runs])
-  const groups=useMemo(()=>{
-    const titles=new Map(sessions.map(session=>[session.id,session.title]))
-    const grouped=new Map<string,Run[]>()
-    for(const run of filtered){const key=run.session_id||'__direct__';grouped.set(key,[...(grouped.get(key)||[]),run])}
-	return [...grouped.entries()].map(([id,items])=>{items.sort((a,b)=>Date.parse(b.started_at)-Date.parse(a.started_at));return{id,title:id==='__direct__'?t('audit.direct'):titles.get(id)||t('audit.missingConversation'),runs:items,latest:items[0]?.started_at,pending:items.filter(run=>run.status==='approval_required').length}}).sort((a,b)=>Date.parse(b.latest||'')-Date.parse(a.latest||''))
+	const [query,setQuery]=useState('')
+	const filtered=useMemo(()=>{
+		const needle=query.toLowerCase()
+		return runs.filter(run=>{
+			const req=requestFromRun(run)
+			const requestText=req?Object.values(req).flat().filter(value=>typeof value==='string').join('\n'):run.request_json
+			return requestText.toLowerCase().includes(needle)
+		})
+	},[query,runs])
+	const groups=useMemo(()=>{
+		const titles=new Map(sessions.map(session=>[session.id,session.title]))
+		const grouped=new Map<string,Run[]>()
+		for(const run of filtered){const key=run.session_id||'__direct__';grouped.set(key,[...(grouped.get(key)||[]),run])}
+		return [...grouped.entries()].map(([id,items])=>{
+			items.sort((a,b)=>Date.parse(b.started_at)-Date.parse(a.started_at))
+			return{id,title:id==='__direct__'?t('audit.direct'):titles.get(id)||t('audit.missingConversation'),runs:items,latest:items[0]?.started_at,pending:items.filter(run=>run.status==='approval_required').length}
+		}).sort((a,b)=>Date.parse(b.latest||'')-Date.parse(a.latest||''))
 	},[filtered,sessions,t,instance.language])
 	if(!ready)return <div className="audit-loading panel" role="status"><LoaderCircle className="spin" size={16}/><span>{t('common.loading')}</span></div>
-	return <div className="page-stack"><div className="audit-toolbar"><div className="search-box"><Search size={16}/><input aria-label={t('common.search')} value={query} onChange={event=>setQuery(event.target.value)}/></div><span>{t('audit.counts',{sessions:groups.length,runs:filtered.length})}</span></div><div className="audit-groups">{groups.map(group=><details className="audit-session panel" key={group.id}><summary className="audit-session-summary"><div className="audit-session-glyph"><History size={17}/></div><div className="audit-session-name"><b>{group.title}</b><span>{group.id==='__direct__'?t('audit.noSession'):group.id} · {t('audit.lastRun',{date:new Date(group.latest).toLocaleString(localeFor(instance.language))})}</span></div><div className="audit-session-stats"><span><b>{group.runs.length}</b> {t('audit.runs')}</span>{group.pending>0&&<span className="pending-count"><b>{group.pending}</b> {t('audit.pending')}</span>}</div><ChevronRight className="audit-session-chevron" size={17}/></summary><div className="audit-table"><div className="audit-row audit-head"><span>{t('audit.columns.time')}</span><span>{t('audit.columns.operation')}</span><span>{t('audit.columns.status')}</span><span>{t('audit.columns.host')}</span><span>{t('audit.columns.exit')}</span><span aria-hidden="true"/></div>{group.runs.map(run=>{let req:Record<string,unknown>={};try{req=JSON.parse(run.request_json)}catch{req={request:run.request_json}};const auditHost=hostIdentity(hosts,run.host_id);const workspaceID=textValue(req.workspace_id);const target=auditHost.name||(run.host_id.startsWith('workspace_')?workspaceID:run.host_id)||'—';const operation=auditOperationSummary(req,run,hosts,t);return <details key={run.id}><summary className="audit-row"><span>{new Date(run.started_at).toLocaleString(localeFor(instance.language))}</span><span className="command">{operation}</span><span className="audit-run-status"><span className={`run-status ${run.status}`}>{t(`statusLabels.${run.status}`,{defaultValue:run.status})}</span>{runAutoApproved(run)&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}</span><span title={run.host_id}>{target}</span><span>{run.exit_code}</span><ChevronRight className="audit-run-chevron" size={15}/></summary><div className="run-detail"><AuditRunDetail run={run} req={req} hosts={hosts}/></div></details>})}</div></details>)}</div>{!runs.length&&<Empty icon={<History/>} title={t('audit.emptyTitle')}/>} {runs.length>0&&!groups.length&&<Empty icon={<Search/>} title={t('audit.noMatch')}/>}</div>
+	return <div className="page-stack">
+		<div className="audit-toolbar"><div className="search-box"><Search size={16}/><input aria-label={t('common.search')} value={query} onChange={event=>setQuery(event.target.value)}/></div><span>{t('audit.counts',{sessions:groups.length,runs:filtered.length})}</span></div>
+		<div className="audit-groups">{groups.map(group=><details className="audit-session panel" key={group.id}>
+			<summary className="audit-session-summary"><div className="audit-session-glyph"><History size={17}/></div><div className="audit-session-name"><b>{group.title}</b><span>{group.id==='__direct__'?t('audit.noSession'):group.id} · {t('audit.lastRun',{date:new Date(group.latest).toLocaleString(localeFor(instance.language))})}</span></div><div className="audit-session-stats"><span><b>{group.runs.length}</b> {t('audit.runs')}</span>{group.pending>0&&<span className="pending-count"><b>{group.pending}</b> {t('audit.pending')}</span>}</div><ChevronRight className="audit-session-chevron" size={17}/></summary>
+			<div className="audit-table"><div className="audit-row audit-head"><span>{t('audit.columns.time')}</span><span>{t('audit.columns.operation')}</span><span>{t('audit.columns.status')}</span><span>{t('audit.columns.host')}</span><span>{t('audit.columns.exit')}</span><span aria-hidden="true"/></div>{group.runs.map(run=><AuditRunRow key={run.id} run={run} hosts={hosts}/>)}</div>
+		</details>)}</div>
+		{!runs.length&&<Empty icon={<History/>} title={t('audit.emptyTitle')}/>} {runs.length>0&&!groups.length&&<Empty icon={<Search/>} title={t('audit.noMatch')}/>}
+	</div>
 }
 
 function logFieldValue(value:unknown){

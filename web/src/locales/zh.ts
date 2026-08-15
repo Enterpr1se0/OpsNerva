@@ -142,7 +142,7 @@ const zh = {
   },
   chat: {
     conversations: '会话记录',
-    newConversation: '新建会话', noSaved: '没有会话',
+    newConversation: '新建会话', noSaved: '没有会话', loadEarlier: '加载更早消息',
     emptyTitle: '需要排查什么？',
     retryingModel: '模型重试中 · 第 {{attempt}}/{{max}} 次', reconnecting: '正在重连 · 第 {{attempt}} 次 · {{delay}} 秒',
     stopping: '正在停止 Agent', cooking: 'Cooking… ( •̀ᴗ•́ )و', pondering: 'Pondering… (｡•̀ᴗ-)✧', brewing: 'Brewing… (っ˘ڡ˘ς)', weaving: 'Weaving… (づ｡◕‿‿◕｡)づ', polishing: 'Polishing… ᕙ(⇀‸↼‶)ᕗ', crunching: 'Crunching… (ง •̀_•́)ง', stopTitle: '停止 Agent 运行',
@@ -164,7 +164,7 @@ const zh = {
     relativePath: '相对上传路径', cancelUpload: '取消上传', previewFile: '预览文件', openDirectory: '打开目录', revealDirectory: '在文件管理器中打开', deleteEntry: '删除{{type}}',
     emptyDirectory: '目录为空',
     uploaded: '已上传 · {{path}}', saved: '已保存 · {{path}}', deleted: '已彻底删除 · {{type}}',
-    deleteTitle: '删除“{{path}}”？', closePreview: '关闭预览', binary: '二进制文件',
+    deleteTitle: '删除“{{path}}”？', closePreview: '关闭预览', binary: '二进制文件', previewTooLarge: '文件过大，无法预览，请下载后查看。',
     uploadTo: '上传到 Workspace {{id}}', uploadedShort: '已上传', uploadFailed: '上传失败', dropFilesHere: '释放以上传文件',
     uploadingFiles: '正在上传 {{count}} 个文件...', uploadedFiles: '已上传 {{count}} 个文件', uploadPartial: '已上传 {{uploaded}} 个，{{failed}} 个失败：{{message}}',
     file: '文件', directory: '目录',
