@@ -59,9 +59,10 @@ jobs:
             goos: darwin
             goarch: arm64
             artifact: opsnerva-macos-arm64
-            paths: |
-              web/src-tauri/target/release/bundle/dmg/*.dmg
-              web/src-tauri/target/release/bundle/macos/*.app
+            # Upload only the dmg. A .app bundle is a directory; recursive
+            # artifact upload flattens Contents/* into release assets
+            # (icon.icns, Info.plist, ops-agent, opsnerva-desktop).
+            paths: web/src-tauri/target/release/bundle/dmg/*.dmg
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
