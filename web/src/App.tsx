@@ -2412,7 +2412,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		if(frame.type==='session'||frame.type==='title')void refreshSessions()
 		if(frame.type==='retry'){
 			setModelRetry({attempt:frame.retry_attempt||1,max:frame.retry_max||1})
-		}else if(['approval','reasoning','tool','tool_output','message_start','message','message_commit','message_reset','queued','queue_started','turn_done','done','interrupted','model_error','error'].includes(frame.type))setModelRetry(null)
+		}else if(['approval','reasoning','reasoning_reset','tool','tool_output','message_start','message','message_commit','message_reset','queued','queue_started','turn_done','done','interrupted','model_error','error'].includes(frame.type))setModelRetry(null)
 		if(frame.type==='queued'&&frame.message_id){
 			setQueuedMessages(current=>current.some(item=>item.id===frame.message_id)?current:[...current,{id:frame.message_id!,message:frame.content||'',attachment_count:frame.attachment_count||0,created_at:new Date().toISOString()}])
 		}
@@ -2442,6 +2442,10 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 				if(existing)return old.map(item=>item.id===reasoningID?{...item,content:item.content+frame.content,active:true}:item)
 				return[...old.map(deactivateReasoning),{id:reasoningID,kind:'reasoning',content:frame.content!,active:true}]
 			})
+		}
+		if(frame.type==='reasoning_reset'&&frame.segment_id){
+			const reasoningID=`reasoning_${frame.segment_id}`
+			setEntries(old=>old.filter(item=>item.id!==reasoningID))
 		}
 		if(frame.type==='tool'&&frame.content){
 			if(frame.status!=='in_progress'&&['ssh_shell','workspace_shell','ssh_tunnel'].includes(frame.tool_name||''))void refreshConnections()
@@ -2899,7 +2903,7 @@ const ChatBubble=memo(function ChatBubble({ sessionID, entry, showActions, runs,
   if (entry.kind === 'tool') return <ToolEventCard sessionID={sessionID} entry={entry} runs={runs} hosts={hosts} onDisclosure={onToolDisclosure}/>
   if (entry.kind === 'reasoning') return <ReasoningCard content={entry.content} active={!!entry.active}/>
   if (entry.kind === 'assistant' && !entry.content) return null
-	return <div className={`bubble ${entry.kind} ${entry.status||''} ${entry.progress?'progress':''}`}><div className="avatar">{entry.kind === 'user' ? <UserRound size={17}/> : entry.kind === 'error' ? '!' : <Bot size={17}/>}</div><div><span className="bubble-label">{entry.kind === 'user' ? <>{t('chat.operator')}{entry.status==='failed'&&<em>{t('chat.turnIncomplete')}</em>}{entry.status==='pending'&&<em>{t('chat.processing')}</em>}</> : entry.kind === 'error' ? t('common.error') : <>OpsNerva{entry.progress&&<em>{t('chat.progressOutput')}</em>}</>}</span>{entry.images&&entry.images.length>0&&<div className="message-images">{entry.images.map(image=><a href={image.url} target="_blank" rel="noopener noreferrer" title={`${image.name} · ${formatFileSize(image.sizeBytes)}`} key={image.id}><img src={image.url} alt={image.name}/><span>{image.name}</span></a>)}</div>}{entry.content&&<div className={`bubble-copy ${entry.kind==='assistant'&&entry.lifecycle!=='streaming'?'markdown-body':''}`}>{entry.kind==='assistant'&&entry.lifecycle!=='streaming'?<Suspense fallback={entry.content}><MarkdownMessage content={entry.content}/></Suspense>:entry.content}</div>}{showActions&&<div className="assistant-message-footer"><CopyButton value={entry.content} className="message-copy-button"/>{entry.tokenUsage&&<TokenUsageLine usage={entry.tokenUsage}/>}</div>}</div></div>
+	return <div className={`bubble ${entry.kind} ${entry.status||''} ${entry.progress?'progress':''}`}><div className="avatar">{entry.kind === 'user' ? <UserRound size={17}/> : entry.kind === 'error' ? '!' : <Bot size={17}/>}</div><div><span className="bubble-label">{entry.kind === 'user' ? <>{t('chat.operator')}{entry.status==='failed'&&<em>{t('chat.turnIncomplete')}</em>}{entry.status==='pending'&&<em>{t('chat.processing')}</em>}</> : entry.kind === 'error' ? t('common.error') : 'OpsNerva'}</span>{entry.images&&entry.images.length>0&&<div className="message-images">{entry.images.map(image=><a href={image.url} target="_blank" rel="noopener noreferrer" title={`${image.name} · ${formatFileSize(image.sizeBytes)}`} key={image.id}><img src={image.url} alt={image.name}/><span>{image.name}</span></a>)}</div>}{entry.content&&<div className={`bubble-copy ${entry.kind==='assistant'&&entry.lifecycle!=='streaming'?'markdown-body':''}`}>{entry.kind==='assistant'&&entry.lifecycle!=='streaming'?<Suspense fallback={entry.content}><MarkdownMessage content={entry.content}/></Suspense>:entry.content}</div>}{showActions&&<div className="assistant-message-footer"><CopyButton value={entry.content} className="message-copy-button"/>{entry.tokenUsage&&<TokenUsageLine usage={entry.tokenUsage}/>}</div>}</div></div>
 })
 
 function TokenUsageLine({usage}:{usage:ChatTokenUsage}){

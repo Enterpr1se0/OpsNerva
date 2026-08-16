@@ -1351,6 +1351,9 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 					if assistantStreamVisible {
 						resetAssistantMessage(assistantMessageID, role)
 					}
+					if reasoningSegment != "" {
+						emit(Event{Type: "reasoning_reset", Role: role, SegmentID: reasoningSegment, SessionID: sessionID})
+					}
 					stream.Close()
 					return "", normalizeModelRequestError(recvErr)
 				}
@@ -1411,6 +1414,9 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 			if retryingStream {
 				if assistantStreamVisible {
 					resetAssistantMessage(assistantMessageID, role)
+				}
+				if reasoningSegment != "" {
+					emit(Event{Type: "reasoning_reset", Role: role, SegmentID: reasoningSegment, SessionID: sessionID})
 				}
 				continue
 			}

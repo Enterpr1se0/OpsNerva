@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync/atomic"
 	"testing"
@@ -22,6 +23,34 @@ type transientAfterToolModel struct {
 
 type deadlineThenSuccessModel struct {
 	calls atomic.Int32
+}
+
+type partialUnexpectedEOFThenSuccessModel struct {
+	calls atomic.Int32
+}
+
+func (m *partialUnexpectedEOFThenSuccessModel) Generate(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+	return nil, errors.New("Generate is not used in this streaming regression test")
+}
+
+func (m *partialUnexpectedEOFThenSuccessModel) Stream(context.Context, []*schema.Message, ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	call := m.calls.Add(1)
+	reader, writer := schema.Pipe[*schema.Message](2)
+	go func() {
+		if call == 1 {
+			writer.Send(schema.AssistantMessage("discarded partial", nil), nil)
+			writer.Send(nil, fmt.Errorf("failed to receive stream chunk: %w", io.ErrUnexpectedEOF))
+			writer.Close()
+			return
+		}
+		writer.Send(schema.AssistantMessage("recovered after unexpected EOF", nil), nil)
+		writer.Close()
+	}()
+	return reader, nil
+}
+
+func (m *partialUnexpectedEOFThenSuccessModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return m, nil
 }
 
 func (m *deadlineThenSuccessModel) Generate(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
@@ -86,14 +115,17 @@ func TestModelRequestRetryPolicy(t *testing.T) {
 	if !shouldRetry(ctx, nil, errors.New("[NodeRunError] error, status code: 503, status: 503 Service Unavailable")) {
 		t.Fatal("wrapped HTTP 503 was not marked retryable")
 	}
-	if shouldRetry(ctx, schema.AssistantMessage("partial", nil), errors.New("connection reset")) {
-		t.Fatal("partial model output was marked retryable")
+	if !shouldRetry(ctx, schema.AssistantMessage("partial", nil), errors.New("connection reset")) {
+		t.Fatal("retryable stream failure with partial content was not marked retryable")
 	}
-	if shouldRetry(ctx, &schema.Message{Role: schema.Assistant, ReasoningContent: "partial reasoning"}, io.ErrUnexpectedEOF) {
-		t.Fatal("partial reasoning output was marked retryable")
+	if !shouldRetry(ctx, &schema.Message{Role: schema.Assistant, ReasoningContent: "partial reasoning"}, io.ErrUnexpectedEOF) {
+		t.Fatal("unexpected EOF with partial reasoning was not marked retryable")
 	}
-	if shouldRetry(ctx, schema.AssistantMessage("", []schema.ToolCall{{ID: "call-1"}}), io.ErrUnexpectedEOF) {
-		t.Fatal("partial tool-call output was marked retryable")
+	if !shouldRetry(ctx, schema.AssistantMessage("", []schema.ToolCall{{ID: "call-1"}}), io.ErrUnexpectedEOF) {
+		t.Fatal("unexpected EOF with a partial tool call was not marked retryable")
+	}
+	if !shouldRetry(ctx, schema.AssistantMessage("partial", nil), fmt.Errorf("failed to receive stream chunk: %w", io.ErrUnexpectedEOF)) {
+		t.Fatal("wrapped stream unexpected EOF was not marked retryable")
 	}
 	if !shouldRetry(ctx, nil, context.DeadlineExceeded) {
 		t.Fatal("model timeout was not marked retryable")
@@ -188,6 +220,75 @@ func TestModelRequestTimeoutRetriesWhileRunContextIsActive(t *testing.T) {
 		}
 	}
 	if answer != "recovered after model timeout" {
+		t.Fatalf("answer = %q", answer)
+	}
+	if calls := chatModel.calls.Load(); calls != 2 {
+		t.Fatalf("model calls = %d, want 2", calls)
+	}
+	if retries := observedRetries.Load(); retries != 1 {
+		t.Fatalf("retry notifications = %d, want 1", retries)
+	}
+}
+
+func TestModelRequestRetriesUnexpectedEOFAfterPartialStream(t *testing.T) {
+	var observedRetries atomic.Int32
+	ctx := withModelRetryObserver(context.Background(), func(err error, attempt int) {
+		if !errors.Is(err, io.ErrUnexpectedEOF) || attempt != 1 {
+			t.Errorf("retry notification = (%v, %d)", err, attempt)
+		}
+		observedRetries.Add(1)
+	})
+	chatModel := &partialUnexpectedEOFThenSuccessModel{}
+	agentInstance, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name: "partial-stream-retry-test", Description: "partial stream retry regression", Model: chatModel, MaxIterations: 1,
+		ModelRetryConfig: modelRequestRetryConfig(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agentInstance, EnableStreaming: true})
+	iterator := runner.Run(ctx, []*schema.Message{schema.UserMessage("respond")})
+	answer := ""
+	for {
+		event, ok := iterator.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			var retryErr *adk.WillRetryError
+			if errors.As(event.Err, &retryErr) {
+				answer = ""
+				continue
+			}
+			t.Fatal(event.Err)
+		}
+		if event.Output == nil || event.Output.MessageOutput == nil {
+			continue
+		}
+		output := event.Output.MessageOutput
+		if output.MessageStream == nil || output.Role != schema.Assistant {
+			continue
+		}
+		attempt := ""
+		for {
+			message, recvErr := output.MessageStream.Recv()
+			if errors.Is(recvErr, io.EOF) {
+				answer += attempt
+				break
+			}
+			if recvErr != nil {
+				var retryErr *adk.WillRetryError
+				if errors.As(recvErr, &retryErr) {
+					attempt = ""
+					break
+				}
+				t.Fatal(recvErr)
+			}
+			attempt += message.Content
+		}
+		output.MessageStream.Close()
+	}
+	if answer != "recovered after unexpected EOF" {
 		t.Fatalf("answer = %q", answer)
 	}
 	if calls := chatModel.calls.Load(); calls != 2 {

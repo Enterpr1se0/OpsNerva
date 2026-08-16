@@ -643,7 +643,10 @@ func TestQueryEmitsFrameworkRetryWithoutRerunningAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	retryStream, retryWriter := schema.Pipe[*schema.Message](1)
+	retryStream, retryWriter := schema.Pipe[*schema.Message](2)
+	partialReasoning := schema.AssistantMessage("", nil)
+	partialReasoning.ReasoningContent = "discarded partial reasoning"
+	retryWriter.Send(partialReasoning, nil)
 	retryWriter.Send(nil, &adk.WillRetryError{ErrStr: "temporary upstream failure", RetryAttempt: 1})
 	retryWriter.Close()
 	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{
@@ -697,6 +700,19 @@ func TestQueryEmitsFrameworkRetryWithoutRerunningAgent(t *testing.T) {
 	}
 	if len(retries) != 1 || retries[0].RetryAttempt != 1 || retries[0].RetryMax != modelRequestMaxRetries {
 		t.Fatalf("retry events = %#v", retries)
+	}
+	reasoningSegment := ""
+	reasoningResets := 0
+	for _, event := range emitted {
+		if event.Type == "reasoning" {
+			reasoningSegment = event.SegmentID
+		}
+		if event.Type == "reasoning_reset" && event.SegmentID == reasoningSegment && reasoningSegment != "" {
+			reasoningResets++
+		}
+	}
+	if reasoningSegment == "" || reasoningResets != 1 {
+		t.Fatalf("partial reasoning lifecycle was not reset: %#v", emitted)
 	}
 }
 

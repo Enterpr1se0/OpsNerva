@@ -46,7 +46,10 @@ func modelRequestRetryConfig() *adk.ModelRetryConfig {
 	return &adk.ModelRetryConfig{
 		MaxRetries: modelRequestMaxRetries,
 		ShouldRetry: func(ctx context.Context, retryCtx *adk.RetryContext) *adk.RetryDecision {
-			if retryCtx == nil || ctx.Err() != nil || modelResponseHasContent(retryCtx.OutputMessage) {
+			if retryCtx == nil || ctx.Err() != nil {
+				return &adk.RetryDecision{}
+			}
+			if retryCtx.Err == nil && modelResponseHasContent(retryCtx.OutputMessage) {
 				return &adk.RetryDecision{}
 			}
 			decision := &adk.RetryDecision{Retry: retryCtx.Err == nil || isRetryableModelRequestError(retryCtx.Err)}

@@ -152,7 +152,7 @@ const zh = {
     approvalCount: '{{count}} 个审批', runningBadge: '运行中', messageCount: '{{count}} 条消息', renameConversation: '重命名会话', sessionTitle: '会话标题', deleteConversation: '删除会话',
     deleteTitle: '删除会话“{{title}}”？', cannotDelete: 'Agent 仍在运行', stopFailed: '无法停止 Agent：{{message}}',
     stopped: '操作员已在完成前停止 Agent 运行。', agentError: 'Agent 错误',
-    operator: '操作员', turnIncomplete: '未完成', progressOutput: '过程输出', processing: '处理中', blockedImage: '[已阻止图片：{{alt}}]',
+    operator: '操作员', turnIncomplete: '未完成', processing: '处理中', blockedImage: '[已阻止图片：{{alt}}]',
 	addImages: '添加图片', removeImage: '移除图片', imageTypeRejected: '部分图片格式未启用。',
     reasoning: '思考过程', reasoningActive: '思考中', reasoningFallback: '正在思考...', contextUsage: '上下文 {{used}} / {{limit}} tokens', contextUsageUnknown: '上下文 {{used}} / -- tokens', compressContext: '压缩上下文', contextCompressed: '上下文已压缩 · {{before}} → {{after}}',
     tokenInput: '输入', tokenOutput: '输出', tokenTotal: '总计',

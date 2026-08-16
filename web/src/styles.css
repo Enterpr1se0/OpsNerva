@@ -352,7 +352,7 @@
 
 .workspace-browser-panel.dragging{position:relative;border-color:#4aa979;box-shadow:0 0 0 1px #4aa97955,0 0 28px #5df2a31a}.workspace-drop-overlay{position:absolute;z-index:8;inset:49px 0 0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:7px;padding:18px;border:2px dashed #54bd87;background:#07130feb;color:var(--green);pointer-events:none;backdrop-filter:blur(3px)}.workspace-drop-overlay b{color:#bcebd3;font-size:var(--text-body)}.workspace-drop-overlay span{max-width:90%;overflow:hidden;text-overflow:ellipsis;color:#789d8b;font:var(--text-caption) DM Mono,'Noto Sans SC Variable',monospace;white-space:nowrap}
 
-/* Turn and lifecycle labels distinguish incomplete runs from intermediate output. */
+/* Turn labels distinguish pending and incomplete user messages. */
 .bubble-label{display:flex;align-items:center;gap:7px}.bubble-label em{padding:2px 5px;border-radius:8px;background:#27342f;color:#80968c;font:var(--text-micro) DM Mono,'Noto Sans SC Variable',monospace;font-style:normal;letter-spacing:0;text-transform:none}.bubble.user.failed .avatar{background:#3a2020;color:#ff9b9b}.bubble.user.failed .bubble-label em{background:#351b1b;color:#ff9292}.bubble.user.failed .bubble-copy{color:#899b94}.bubble.user.pending .bubble-label em{background:#2d2919;color:var(--amber)}.bubble.assistant.progress .avatar{background:#11201b;color:#829b90}.bubble.assistant.progress .bubble-copy{color:#9bafa6}
 
 /* The composer status bar shows live forwarding routes; Workspace actions live in the file panel. */

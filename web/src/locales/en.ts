@@ -152,7 +152,7 @@ const en = {
     approvalCount: '{{count}} approval', runningBadge: 'running', messageCount: '{{count}} messages', renameConversation: 'Rename conversation', sessionTitle: 'Conversation title', deleteConversation: 'Delete conversation',
     deleteTitle: 'Delete conversation “{{title}}”?', cannotDelete: 'Agent is still running', stopFailed: 'Unable to stop Agent: {{message}}',
     stopped: 'Agent run stopped by the operator before completion.', agentError: 'Agent error',
-    operator: 'Operator', turnIncomplete: 'incomplete', progressOutput: 'progress', processing: 'processing', blockedImage: '[Blocked image: {{alt}}]',
+    operator: 'Operator', turnIncomplete: 'incomplete', processing: 'processing', blockedImage: '[Blocked image: {{alt}}]',
 	addImages: 'Add images', removeImage: 'Remove image', imageTypeRejected: 'Some image formats are not enabled.',
     reasoning: 'Reasoning', reasoningActive: 'Reasoning...', reasoningFallback: 'Thinking...', contextUsage: 'Context {{used}} / {{limit}} tokens', contextUsageUnknown: 'Context {{used}} / -- tokens', compressContext: 'Compress context', contextCompressed: 'Context compressed · {{before}} → {{after}}',
     tokenInput: 'Input', tokenOutput: 'Output', tokenTotal: 'Total',
