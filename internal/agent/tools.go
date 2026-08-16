@@ -1940,12 +1940,6 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_host_list", "List registered SSH host IDs and capabilities; excludes connection data and secrets.", func(ctx context.Context, _ struct{}) (any, error) {
-		hosts, err := svc.ListHostCapabilities(ctx)
-		return normalizeValueToolResult(ctx, "ssh_host_list", HostListOutput{Hosts: hosts}, err)
-	})); err != nil {
-		return nil, err
-	}
 	if err := appendTool(toolutils.InferTool("ssh_exec", SSHExecToolDescription, func(ctx context.Context, input ExecInput) (ExecToolResult, error) {
 		request := domain.ExecRequest{HostID: input.HostID, Mode: domain.ExecProgram, Program: input.Program, Args: input.Args, Background: input.Background, Cwd: input.Cwd, Env: input.Env, Elevated: input.Elevated, TimeoutSeconds: input.TimeoutSeconds, MaxOutputBytes: input.MaxOutputBytes, OutputView: input.OutputView, Reason: input.Reason}
 		return RunExecutionTool(ctx, svc, request, "eino-agent")

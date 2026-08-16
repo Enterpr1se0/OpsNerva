@@ -36,6 +36,7 @@ func TestServerExposesMergedBackgroundTaskTools(t *testing.T) {
 	fileTransferFound := false
 	fileReadFound := false
 	fileEditFound := false
+	hostListFound := false
 	backgroundInputs := map[string]bool{"ssh_exec": false, "ssh_run_script": false}
 	for _, registered := range result.Tools {
 		for _, retired := range []string{"ssh_approval_status", "ssh_task_start", "ssh_task_status", "ssh_task_tail", "ssh_task_list", "ssh_task_get", "ssh_task_cancel", "ssh_file_write", "ssh_file_apply_patch", "ssh_file_restore", "ssh_file_create", "ssh_file_stat", "ssh_config_apply", "ssh_config_restore", "workspace_list", "workspace_file_list", "workspace_file_read", "workspace_file_edit", "workspace_file_upload", "workspace_shell", "workspace_file_apply_patch", "workspace_file_create", "ssh_file_search", "workspace_file_search", "ssh_history", "ssh_history_search", "ssh_history_get", "skill", "ops_skill", "ops_skill_list", "ops_skill_get"} {
@@ -67,6 +68,9 @@ func TestServerExposesMergedBackgroundTaskTools(t *testing.T) {
 			tunnelFound = strings.Contains(string(schemaJSON), `"remote_port"`) && strings.Contains(string(schemaJSON), `"tunnel_id"`)
 		}
 		readOnly := registered.Name == "ssh_host_inspect" || registered.Name == "ssh_host_list" || registered.Name == "ssh_file_read" || registered.Name == "ssh_file_list"
+		if registered.Name == "ssh_host_list" {
+			hostListFound = true
+		}
 		if readOnly && (registered.Annotations == nil || !registered.Annotations.ReadOnlyHint || registered.Annotations.DestructiveHint == nil || *registered.Annotations.DestructiveHint) {
 			t.Fatalf("read-only MCP tool %s has inaccurate annotations: %#v", registered.Name, registered.Annotations)
 		}
@@ -105,6 +109,9 @@ func TestServerExposesMergedBackgroundTaskTools(t *testing.T) {
 	}
 	if !fileEditFound {
 		t.Fatal("ssh_file_edit is missing from the MCP catalog")
+	}
+	if !hostListFound {
+		t.Fatal("ssh_host_list is missing from the MCP Server catalog")
 	}
 	if !taskFound || !backgroundInputs["ssh_exec"] || !backgroundInputs["ssh_run_script"] {
 		t.Fatalf("merged background task interface is incomplete: task=%v inputs=%#v", taskFound, backgroundInputs)

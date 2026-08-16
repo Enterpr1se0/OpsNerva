@@ -299,6 +299,7 @@ func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("build Eino skill middleware: %w", err)
 	}
+	hostCatalogMiddleware := newHostCatalogMiddleware(svc)
 	plantaskDescriptors, err := DescribeTools(ctx, plantaskTools)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("describe Eino plantask tools: %w", err)
@@ -351,7 +352,7 @@ func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st
 			Tools: tools, ExecuteSequentially: true, UnknownToolsHandler: unknownToolResult,
 			ToolCallMiddlewares: middlewares,
 		}},
-		Handlers: []adk.ChatModelAgentMiddleware{toolReductionMiddleware, contextSummarizer, plantaskMiddleware, skillMiddleware},
+		Handlers: []adk.ChatModelAgentMiddleware{hostCatalogMiddleware, toolReductionMiddleware, contextSummarizer, plantaskMiddleware, skillMiddleware},
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("create Eino agent: %w", err)

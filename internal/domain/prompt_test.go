@@ -60,3 +60,12 @@ func TestDefaultSystemPromptKeepsHardOperationalRules(t *testing.T) {
 		}
 	}
 }
+
+func TestDefaultSystemPromptUsesInjectedHostCatalog(t *testing.T) {
+	if !strings.Contains(DefaultSystemPrompt, "Use the injected SSH host catalog") || !strings.Contains(DefaultSystemPrompt, "use ssh_host_inspect for live host facts") {
+		t.Fatalf("default system prompt does not use the injected host catalog: %s", DefaultSystemPrompt)
+	}
+	if strings.Contains(DefaultSystemPrompt, "ssh_host_list") {
+		t.Fatalf("default system prompt still tells the Agent to call ssh_host_list: %s", DefaultSystemPrompt)
+	}
+}
