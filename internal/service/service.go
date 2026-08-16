@@ -2081,7 +2081,7 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 		if approvedReq.Mode == domain.ExecWorkspaceEdit {
 			path = approvedReq.RelativePath
 		}
-		metadata := parseFileEditOutput(path, approvedReq.Validator, result.Stdout)
+		metadata := parseFileEditOutput(path, approvedReq.Validator, result.Stdout, run.Status == "completed")
 		result.File = &metadata
 	}
 	if approvedReq.Mode == domain.ExecWorkspaceDownload && run.Status == "completed" {

@@ -225,7 +225,7 @@ func (s *Service) EditRemoteFile(ctx context.Context, hostID, path, oldText, new
 	}, actor)
 	result.Change = &change
 	if result.Stdout != "" {
-		metadata := parseFileEditOutput(path, validatorID, result.Stdout)
+		metadata := parseFileEditOutput(path, validatorID, result.Stdout, result.Status == "completed")
 		result.File = &metadata
 	}
 	if result.ExitCode == 74 {
@@ -255,45 +255,100 @@ func (s *Service) prepareRemoteFileChange(req domain.ExecRequest) (domain.ExecRe
 	}
 	prepared := req
 	prepared.Mode = domain.ExecScript
-	prepared.Script = buildRemoteFileChangeScript(req.RemotePath, tempPath, *req.Change, *req.TextEdit, validatorCommand)
+	prepared.Script = buildRemoteFileChangeScript(req.RemotePath, tempPath, *req.TextEdit, validatorCommand)
 	return prepared, nil
 }
 
-func buildRemoteFileChangeScript(path, tempPath string, change domain.FileChange, edit domain.TextEdit, validatorCommand string) string {
+func buildRemoteFileChangeScript(path, tempPath string, edit domain.TextEdit, validatorCommand string) string {
+	// The diff is review-only. Locate the approved lines, then splice the original
+	// bytes so untouched BOM, line endings, and final-newline state remain intact.
 	pathQ, tempQ := shellQuote(path), shellQuote(tempPath)
-	normalizedPath := tempPath + ".normalized"
-	normalizedQ := shellQuote(normalizedPath)
-	marker := fileEditHeredocMarker(change.Diff)
+	oldPath := tempPath + ".old"
+	oldQ := shellQuote(oldPath)
+	newPath := tempPath + ".new"
+	newQ := shellQuote(newPath)
+	outputPath := tempPath + ".output"
+	outputQ := shellQuote(outputPath)
 	lines := []string{
 		"set -eu",
 		"test ! -e " + tempQ,
-		"test ! -e " + normalizedQ,
-		"trap " + shellQuote("test ! -e "+tempQ+" || unlink -- "+tempQ+"; test ! -e "+normalizedQ+" || unlink -- "+normalizedQ) + " EXIT",
-		"test -f " + pathQ,
-		"cp -p -- " + pathQ + " " + tempQ,
-		"if [ \"$(head -c 3 -- " + tempQ + " | od -An -tx1 | tr -d ' \\n')\" = efbbbf ]; then",
-		"  tail -c +4 -- " + tempQ + " > " + normalizedQ,
-		"else",
-		"  cat -- " + tempQ + " > " + normalizedQ,
-		"fi",
-		"sed $'s/\\r$//' -- " + normalizedQ + " > " + tempQ,
-		"unlink -- " + normalizedQ,
-		"awk " + shellQuote(remoteTextEditMatchProgram(edit.OldText)) + " " + tempQ,
-		"patch --batch --forward --fuzz=0 --no-backup-if-mismatch " + tempQ + " <<'" + marker + "'",
-		change.Diff,
-		marker,
+		"test ! -e " + oldQ,
+		"test ! -e " + newQ,
+		"test ! -e " + outputQ,
+		"trap " + shellQuote("test ! -e "+tempQ+" || unlink -- "+tempQ+"; test ! -e "+oldQ+" || unlink -- "+oldQ+"; test ! -e "+newQ+" || unlink -- "+newQ+"; test ! -e "+outputQ+" || unlink -- "+outputQ) + " EXIT",
+		writeRemoteText(edit.OldText, oldQ),
+		writeRemoteText(edit.NewText, newQ),
 	}
+	if edit.OldText == "" {
+		lines = append(lines,
+			"if [ -e "+pathQ+" ]; then printf 'file edit conflict: create target already exists; read it and retry\\n' >&2; exit 75; fi",
+			"umask 077",
+			"cat -- "+newQ+" > "+tempQ,
+		)
+	} else {
+		lines = append(lines,
+			"test -f "+pathQ,
+			"original_sha256=$(sha256sum -- "+pathQ+")",
+			"original_sha256=${original_sha256%% *}",
+			"cp -p -- "+pathQ+" "+tempQ,
+			"file_size=$(wc -c < "+pathQ+")",
+			"match_info=$(LC_ALL=C awk -v old_path="+oldQ+" -v old_count="+strconv.Itoa(len(strings.Split(edit.OldText, "\n")))+" -v file_size=\"$file_size\" "+shellQuote(remoteTextEditLocateProgram())+" "+pathQ+")",
+			"set -- $match_info",
+			"match_start=$1; match_end=$2; delete_start=$3; delete_end=$4; match_eol=$5",
+		)
+		if edit.NewText == "" {
+			lines = append(lines, "splice_start=$delete_start", "splice_end=$delete_end")
+		} else {
+			lines = append(lines, "splice_start=$match_start", "splice_end=$match_end")
+		}
+		lines = append(lines,
+			"{",
+			"  head -c \"$splice_start\" -- "+pathQ,
+		)
+		if edit.NewText != "" {
+			lines = append(lines, "  LC_ALL=C awk -v eol=\"$match_eol\" "+shellQuote(remoteTextEditOutputProgram())+" "+newQ)
+		}
+		lines = append(lines,
+			"  tail -c +$((splice_end + 1)) -- "+pathQ,
+			"} > "+outputQ,
+			"cat -- "+outputQ+" > "+tempQ,
+			"unlink -- "+outputQ,
+		)
+	}
+	lines = append(lines, "unlink -- "+oldQ, "unlink -- "+newQ)
 	lines = append(lines, "sync -f -- "+tempQ)
 	if validatorCommand != "" {
-		lines = append(lines, "if ! "+validatorCommand+"; then", "  unlink -- "+tempQ, "  exit 74", "fi", "printf '"+fileValidationMarker+"\\n'")
+		lines = append(lines, "if ! "+validatorCommand+"; then", "  unlink -- "+tempQ, "  exit 74", "fi")
 	}
-	lines = append(lines, "mv -f -- "+tempQ+" "+pathQ)
+	if edit.OldText == "" {
+		lines = append(lines,
+			"if ! ln -- "+tempQ+" "+pathQ+"; then printf 'file edit conflict: create target appeared during validation; read it and retry\\n' >&2; exit 75; fi",
+			"unlink -- "+tempQ,
+		)
+	} else {
+		lines = append(lines,
+			"current_sha256=$(sha256sum -- "+pathQ+")",
+			"current_sha256=${current_sha256%% *}",
+			"if [ \"$current_sha256\" != \"$original_sha256\" ]; then",
+			"  printf 'file edit conflict: target changed during validation; read the current file and retry\\n' >&2",
+			"  exit 75",
+			"fi",
+			"mv -f -- "+tempQ+" "+pathQ,
+		)
+	}
+	if validatorCommand != "" {
+		lines = append(lines, "printf '"+fileValidationMarker+"\\n'")
+	}
 	lines = append(lines, "trap - EXIT", "sync -f -- "+pathQ, "sync -f -- "+shellQuote(posixpath.Dir(path)), "printf '"+fileAfterMarker+"\\n'", "sha256sum -- "+pathQ)
 	return strings.Join(lines, "\n")
 }
 
+func writeRemoteText(value, quotedPath string) string {
+	return "printf '%s' " + shellQuote(value) + " > " + quotedPath
+}
+
 func buildTextEdit(path, oldText, newText string) (domain.TextEdit, domain.FileChange, error) {
-	oldText, err := normalizeTextEditBlock(oldText, false)
+	oldText, err := normalizeTextEditBlock(oldText, true)
 	if err != nil {
 		return domain.TextEdit{}, domain.FileChange{}, fmt.Errorf("invalid old_text: %w", err)
 	}
@@ -305,7 +360,10 @@ func buildTextEdit(path, oldText, newText string) (domain.TextEdit, domain.FileC
 		return domain.TextEdit{}, domain.FileChange{}, fmt.Errorf("old_text and new_text must be different")
 	}
 
-	oldLines := strings.Split(oldText, "\n")
+	var oldLines []string
+	if oldText != "" {
+		oldLines = strings.Split(oldText, "\n")
+	}
 	var newLines []string
 	if newText != "" {
 		newLines = strings.Split(newText, "\n")
@@ -335,8 +393,7 @@ func buildTextEdit(path, oldText, newText string) (domain.TextEdit, domain.FileC
 			body = append(body, " "+line)
 		}
 	}
-	header := "@@ -" + formatPatchRange(1, len(oldLines)) + " +" + formatPatchRange(1, len(newLines)) + " @@"
-	diff := "--- " + path + "\n+++ " + path + "\n" + header + "\n" + strings.Join(body, "\n") + "\n"
+	diff := "--- " + path + "\n+++ " + path + "\n@@ unique block @@\n" + strings.Join(body, "\n") + "\n"
 	return domain.TextEdit{OldText: oldText, NewText: newText}, domain.FileChange{
 		Diff: diff, Additions: len(newChanged), Deletions: len(oldChanged),
 	}, nil
@@ -366,66 +423,79 @@ func normalizeTextEditBlock(value string, allowEmpty bool) (string, error) {
 	return value, nil
 }
 
-func formatPatchRange(start, count int) string {
-	if count == 1 {
-		return strconv.Itoa(start)
-	}
-	return strconv.Itoa(start) + "," + strconv.Itoa(count)
-}
-
-func remoteTextEditMatchProgram(oldText string) string {
-	oldLines := strings.Split(oldText, "\n")
-	program := []string{"BEGIN {", "  expected_count = " + strconv.Itoa(len(oldLines))}
-	for index, line := range oldLines {
-		program = append(program, "  expected["+strconv.Itoa(index+1)+"] = "+awkByteString(line))
-	}
-	program = append(program,
+func remoteTextEditLocateProgram() string {
+	return strings.Join([]string{
+		"BEGIN {",
+		"  while ((read_status = getline line < old_path) > 0) { expected[++expected_count] = line }",
+		"  close(old_path)",
+		"  if (read_status < 0) { print \"file edit failed to read old_text\" > \"/dev/stderr\"; exit 76 }",
+		"  if (expected_count != old_count || expected_count == 0) { print \"file edit old_text encoding is invalid\" > \"/dev/stderr\"; exit 76 }",
+		"  bom = sprintf(\"%c%c%c\", 239, 187, 191)",
+		"  byte_offset = 0",
+		"  previous_content_end = 0",
 		"}",
 		"{",
-		"  window[(NR - 1) % expected_count] = $0",
+		"  raw = $0",
+		"  record_has_newline = (byte_offset + length(raw) < file_size)",
+		"  has_crlf = record_has_newline && length(raw) > 0 && substr(raw, length(raw), 1) == \"\\r\"",
+		"  normalized = has_crlf ? substr(raw, 1, length(raw) - 1) : raw",
+		"  line_start = byte_offset",
+		"  if (NR == 1 && substr(normalized, 1, 3) == bom) { normalized = substr(normalized, 4); line_start += 3 }",
+		"  line_content_end = byte_offset + length(raw) - (has_crlf ? 1 : 0)",
+		"  line_after_end = byte_offset + length(raw) + (record_has_newline ? 1 : 0)",
+		"  slot = (NR - 1) % expected_count",
+		"  window[slot] = normalized",
+		"  starts[slot] = line_start",
+		"  content_ends[slot] = line_content_end",
+		"  after_ends[slot] = line_after_end",
+		"  before_ends[slot] = previous_content_end",
+		"  eols[slot] = has_crlf ? 2 : (record_has_newline ? 1 : 0)",
 		"  if (NR >= expected_count) {",
 		"    matched = 1",
 		"    for (offset = 1; offset <= expected_count; offset++) {",
 		"      slot = (NR - expected_count + offset - 1) % expected_count",
 		"      if (window[slot] != expected[offset]) { matched = 0; break }",
 		"    }",
-		"    if (matched) { matches++ }",
+		"    if (matched) {",
+		"      matches++",
+		"      first_slot = (NR - expected_count) % expected_count",
+		"      last_slot = (NR - 1) % expected_count",
+		"      match_start = starts[first_slot]",
+		"      match_end = content_ends[last_slot]",
+		"      delete_start = match_start",
+		"      delete_end = content_ends[last_slot]",
+		"      if (after_ends[last_slot] > content_ends[last_slot]) { delete_end = after_ends[last_slot] }",
+		"      else if (match_start > 0) { delete_start = before_ends[first_slot] }",
+		"      match_eol = 0",
+		"      for (offset = 1; offset <= expected_count; offset++) {",
+		"        slot = (NR - expected_count + offset - 1) % expected_count",
+		"        if (match_eol == 0 && eols[slot] > 0) { match_eol = eols[slot] }",
+		"      }",
+		"      if (match_eol == 0 && match_start > before_ends[first_slot]) { match_eol = match_start - before_ends[first_slot] }",
+		"      if (match_eol != 2) { match_eol = 1 }",
+		"    }",
 		"  }",
+		"  previous_content_end = line_content_end",
+		"  byte_offset = line_after_end",
 		"}",
 		"END {",
+		"  if (read_status < 0 || expected_count != old_count || expected_count == 0) { exit 76 }",
 		"  if (matches != 1) {",
 		"    printf \"file edit conflict: old_text matched %d blocks; read the current file and retry with a unique block\\n\", matches > \"/dev/stderr\"",
 		"    exit 75",
 		"  }",
+		"  print match_start, match_end, delete_start, delete_end, match_eol",
 		"}",
-	)
-	return strings.Join(program, "\n")
+	}, "\n")
 }
 
-func awkByteString(value string) string {
-	var encoded strings.Builder
-	encoded.WriteByte('"')
-	for index := 0; index < len(value); index++ {
-		fmt.Fprintf(&encoded, "\\%03o", value[index])
-	}
-	encoded.WriteByte('"')
-	return encoded.String()
-}
-
-func fileEditHeredocMarker(content string) string {
-	for {
-		marker := "__OPS_FILE_EDIT_" + strings.TrimPrefix(ids.New("edit"), "edit_") + "__"
-		conflict := false
-		for _, line := range strings.Split(content, "\n") {
-			if line == marker {
-				conflict = true
-				break
-			}
-		}
-		if !conflict {
-			return marker
-		}
-	}
+func remoteTextEditOutputProgram() string {
+	return strings.Join([]string{
+		"BEGIN {",
+		"  separator = eol == 2 ? \"\\r\\n\" : \"\\n\"",
+		"}",
+		"{ if (NR > 1) { printf \"%s\", separator }; printf \"%s\", $0 }",
+	}, "\n")
 }
 
 func (s *Service) validatorCommandFor(id, scope, allowedPath, executionPath string) (string, error) {
@@ -504,8 +574,8 @@ func parseFileReadOutput(path, output string) (domain.FileMetadata, string) {
 	return metadata, output[contentIndex+len(fileContentMarker)+1:]
 }
 
-func parseFileEditOutput(path, validatorID, output string) domain.FileMetadata {
-	metadata := domain.FileMetadata{Path: path, Validator: validatorID, ValidationOK: validatorID == "" || strings.Contains(output, fileValidationMarker)}
+func parseFileEditOutput(path, validatorID, output string, succeeded bool) domain.FileMetadata {
+	metadata := domain.FileMetadata{Path: path, Validator: validatorID, ValidationOK: succeeded && validatorID != "" && strings.Contains(output, fileValidationMarker)}
 	lines := strings.Split(output, "\n")
 	for index, line := range lines {
 		if index+1 >= len(lines) {

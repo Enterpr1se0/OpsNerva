@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,9 +13,13 @@ import (
 
 	"eino-ops-agent/internal/config"
 	"eino-ops-agent/internal/domain"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 func TestRemoteFileReadScriptDoesNotExposeMetadataMarkersOnMissingFile(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is unavailable")
+	}
 	target := filepath.Join(t.TempDir(), "missing.conf")
 	script := buildRemoteFileReadScript(domain.ExecRequest{
 		Mode: domain.ExecRemoteRead, RemotePath: target,
@@ -39,6 +44,9 @@ func TestRemoteFileReadScriptDoesNotExposeMetadataMarkersOnMissingFile(t *testin
 }
 
 func TestRemoteFileReadScriptKeepsParseableMetadata(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is unavailable")
+	}
 	target := filepath.Join(t.TempDir(), "config.conf")
 	content := "enabled=true\n"
 	if err := os.WriteFile(target, []byte(content), 0o640); err != nil {
@@ -102,12 +110,12 @@ func TestRemoteFileEditBuildsReviewedDiffAndScriptAfterApproval(t *testing.T) {
 		t.Fatalf("edit executed %d remote calls", len(transport.calls))
 	}
 	script := transport.calls[0].Script
-	for _, required := range []string{"awk ", "patch --batch --forward --fuzz=0", "nginx", "sync -f", "mv -f", fileAfterMarker, "-events {}", "+events { worker_connections 1024; }"} {
+	for _, required := range []string{"awk -v old_path=", "match_info=", "original_sha256=", "current_sha256=", "printf '%s'", "nginx", "sync -f", "mv -f", fileAfterMarker} {
 		if !strings.Contains(script, required) {
 			t.Fatalf("edit script missing %q:\n%s", required, script)
 		}
 	}
-	for _, removed := range []string{"sha256sum -c", "cmp -s", ".bak", "__OPS_FILE_BEFORE__", "__OPS_FILE_BACKUP__"} {
+	for _, removed := range []string{"patch ", "sha256sum -c", "cmp -s", ".bak", "__OPS_FILE_BEFORE__", "__OPS_FILE_BACKUP__"} {
 		if removed != "" && strings.Contains(script, removed) {
 			t.Fatalf("removed conflict/backup logic %q remains:\n%s", removed, script)
 		}
@@ -115,6 +123,9 @@ func TestRemoteFileEditBuildsReviewedDiffAndScriptAfterApproval(t *testing.T) {
 }
 
 func TestRemoteFileSearchSupportsExplicitModesAndNoMatchSuccess(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is unavailable")
+	}
 	directory := t.TempDir()
 	target := filepath.Join(directory, "config.yaml")
 	if err := os.WriteFile(target, []byte("port: 7890\nsocks-port: 7891\nport|socks: literal\n"), 0o640); err != nil {
@@ -196,21 +207,26 @@ func TestRemoteFileSearchReturnsStructuredNoMatchResult(t *testing.T) {
 	}
 }
 
-func TestFileEditHeredocMarkerCannotTerminateFromDiff(t *testing.T) {
+func TestFileEditHeredocMarkerCannotTerminateFromContent(t *testing.T) {
 	edit, change, err := buildTextEdit("/etc/app.conf", "old", "__OPS_FILE_EDIT_known__")
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := buildRemoteFileChangeScript("/etc/app.conf", "/etc/.app.tmp", change, edit, "")
-	if strings.Contains(script, "<<'__OPS_FILE_EDIT_known__'") {
-		t.Fatal("edit reused a delimiter controlled by diff content")
+	script := buildRemoteFileChangeScript("/etc/app.conf", "/etc/.app.tmp", edit, "")
+	if _, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(script), "remote-edit.sh"); err != nil {
+		t.Fatalf("generated remote edit script is invalid: %v\n%s", err, script)
 	}
-	if !strings.Contains(script, change.Diff) {
-		t.Fatal("edit lost the normalized diff")
+	if strings.Contains(script, change.Diff) {
+		t.Fatal("remote script still sends the display-only diff")
 	}
-	for _, required := range []string{"head -c 3", "efbbbf", "sed $'s/\\r$//'"} {
+	for _, required := range []string{"printf '%s'", "head -c", "tail -c", "match_info=$(LC_ALL=C awk"} {
 		if !strings.Contains(script, required) {
-			t.Fatalf("remote edit script does not normalize Windows text with %q", required)
+			t.Fatalf("remote edit script does not preserve original bytes with %q", required)
+		}
+	}
+	for _, forbidden := range []string{"sed $'s/\\r$//'", "patch "} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("remote edit script still rewrites the whole file with %q", forbidden)
 		}
 	}
 }
@@ -220,7 +236,6 @@ func TestRemoteFileEditRejectsSecretsAndInvalidReplacements(t *testing.T) {
 	for _, testCase := range []struct{ oldText, newText string }{
 		{oldText: "password=old", newText: "password=super-secret"},
 		{oldText: "token=old", newText: "token=[REDACTED]"},
-		{oldText: "", newText: "new"},
 		{oldText: "same", newText: "same"},
 	} {
 		if _, err := svc.EditRemoteFile(context.Background(), host.ID, "/etc/app.conf", testCase.oldText, testCase.newText, "", false, "change", "test"); err == nil {
@@ -237,7 +252,7 @@ func TestBuildTextEditNormalizesInputAndBuildsMinimalDiff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if edit.OldText != "a\nb" || edit.NewText != "a\nc\nd" || change.Additions != 2 || change.Deletions != 1 || !strings.Contains(change.Diff, "@@ -1,2 +1,3 @@\n a\n-b\n+c\n+d\n") || strings.ContainsAny(change.Diff, "\ufeff\r") {
+	if edit.OldText != "a\nb" || edit.NewText != "a\nc\nd" || change.Additions != 2 || change.Deletions != 1 || !strings.Contains(change.Diff, "@@ unique block @@\n a\n-b\n+c\n+d\n") || strings.ContainsAny(change.Diff, "\ufeff\r") {
 		t.Fatalf("unexpected normalized edit=%#v change=%#v", edit, change)
 	}
 	if err := validateTextEditChange("app.conf", edit, change); err != nil {
@@ -249,20 +264,83 @@ func TestBuildTextEditNormalizesInputAndBuildsMinimalDiff(t *testing.T) {
 	}
 }
 
+func TestRemoteFileChangePreservesLineEndingsAndFinalNewlineState(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is unavailable")
+	}
+	for _, testCase := range []struct {
+		name, original, oldText, newText, expected string
+	}{
+		{name: "crlf", original: "a\r\nb\r\nc\r\n", oldText: "b", newText: "b-edited", expected: "a\r\nb-edited\r\nc\r\n"},
+		{name: "no final newline", original: "only-one-line-no-nl", oldText: "only-one-line-no-nl", newText: "only-one-line-edited", expected: "only-one-line-edited"},
+		{name: "direct deletion", original: "a\r\nb\r\nc\r\n", oldText: "b", newText: "", expected: "a\r\nc\r\n"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			directory := t.TempDir()
+			target := filepath.Join(directory, "app.conf")
+			if err := os.WriteFile(target, []byte(testCase.original), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			edit, _, err := buildTextEdit(target, testCase.oldText, testCase.newText)
+			if err != nil {
+				t.Fatal(err)
+			}
+			script := buildRemoteFileChangeScript(target, filepath.Join(directory, ".edit.tmp"), edit, "")
+			command := exec.Command("bash", "-se")
+			command.Stdin = strings.NewReader(script)
+			if output, err := command.CombinedOutput(); err != nil {
+				t.Fatalf("edit script failed: %v\n%s\n%s", err, output, script)
+			}
+			content, err := os.ReadFile(target)
+			if err != nil || string(content) != testCase.expected {
+				t.Fatalf("edited bytes=% x want=% x err=%v", content, []byte(testCase.expected), err)
+			}
+		})
+	}
+}
+
+func TestRemoteFileChangeCreatesMissingFileWithoutPatch(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is unavailable")
+	}
+	directory := t.TempDir()
+	target := filepath.Join(directory, "created.conf")
+	edit, change, err := buildTextEdit(target, "", "enabled=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if change.Additions != 1 || change.Deletions != 0 {
+		t.Fatalf("create change = %#v", change)
+	}
+	script := buildRemoteFileChangeScript(target, filepath.Join(directory, ".create.tmp"), edit, "")
+	command := exec.Command("bash", "-se")
+	command.Stdin = strings.NewReader(script)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("create script failed: %v\n%s\n%s", err, output, script)
+	}
+	content, err := os.ReadFile(target)
+	if err != nil || string(content) != "enabled=true" {
+		t.Fatalf("created bytes=%q err=%v", content, err)
+	}
+}
+
 func TestRemoteFileChangeScriptsApplyWithoutPersistentBackups(t *testing.T) {
-	if _, err := exec.LookPath("patch"); err != nil {
-		t.Skip("patch is unavailable")
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is unavailable")
 	}
 	directory := t.TempDir()
 	target := filepath.Join(directory, "app.conf")
 	if err := os.WriteFile(target, []byte("header\n状态=关闭\nfooter\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	edit, change, err := buildTextEdit(target, "状态=关闭", "状态=开启")
+	edit, _, err := buildTextEdit(target, "状态=关闭", "状态=开启")
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := buildRemoteFileChangeScript(target, filepath.Join(directory, ".edit.tmp"), change, edit, "")
+	script := buildRemoteFileChangeScript(target, filepath.Join(directory, ".edit.tmp"), edit, "")
+	if strings.Contains(script, "patch ") {
+		t.Fatalf("remote edit still depends on patch:\n%s", script)
+	}
 	command := exec.Command("bash", "-se")
 	command.Stdin = strings.NewReader(script)
 	if output, err := command.CombinedOutput(); err != nil {
@@ -284,19 +362,19 @@ func TestRemoteFileChangeScriptsApplyWithoutPersistentBackups(t *testing.T) {
 }
 
 func TestRemoteFileChangeRejectsAmbiguousOldText(t *testing.T) {
-	if _, err := exec.LookPath("patch"); err != nil {
-		t.Skip("patch is unavailable")
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is unavailable")
 	}
 	directory := t.TempDir()
 	target := filepath.Join(directory, "app.conf")
 	if err := os.WriteFile(target, []byte("enabled=false\nenabled=false\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	edit, change, err := buildTextEdit(target, "enabled=false", "enabled=true")
+	edit, _, err := buildTextEdit(target, "enabled=false", "enabled=true")
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := buildRemoteFileChangeScript(target, filepath.Join(directory, ".edit.tmp"), change, edit, "")
+	script := buildRemoteFileChangeScript(target, filepath.Join(directory, ".edit.tmp"), edit, "")
 	command := exec.Command("bash", "-se")
 	command.Stdin = strings.NewReader(script)
 	output, err := command.CombinedOutput()
@@ -306,5 +384,50 @@ func TestRemoteFileChangeRejectsAmbiguousOldText(t *testing.T) {
 	content, readErr := os.ReadFile(target)
 	if readErr != nil || string(content) != "enabled=false\nenabled=false\n" {
 		t.Fatalf("ambiguous edit touched target: content=%q err=%v", content, readErr)
+	}
+}
+
+func TestRemoteFileChangeRejectsConcurrentTargetChange(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is unavailable")
+	}
+	directory := t.TempDir()
+	target := filepath.Join(directory, "app.conf")
+	if err := os.WriteFile(target, []byte("enabled=false\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	edit, _, err := buildTextEdit(target, "enabled=false", "enabled=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	validatorCommand := "sh -c " + shellQuote("printf 'external=true\\n' > "+shellQuote(target))
+	script := buildRemoteFileChangeScript(target, filepath.Join(directory, ".edit.tmp"), edit, validatorCommand)
+	command := exec.Command("bash", "-se")
+	command.Stdin = strings.NewReader(script)
+	output, err := command.CombinedOutput()
+	var exitError *exec.ExitError
+	if err == nil || !errors.As(err, &exitError) || exitError.ExitCode() != 75 || !strings.Contains(string(output), "target changed during validation") {
+		t.Fatalf("concurrent edit output=%q err=%v", output, err)
+	}
+	content, readErr := os.ReadFile(target)
+	if readErr != nil || string(content) != "external=true\n" {
+		t.Fatalf("concurrent edit was overwritten: content=%q err=%v", content, readErr)
+	}
+}
+
+func TestParseFileEditOutputOnlyMarksConfiguredValidatorSuccess(t *testing.T) {
+	withoutValidator := parseFileEditOutput("/etc/app.conf", "", fileAfterMarker+"\nabc  /etc/app.conf\n", true)
+	if withoutValidator.ValidationOK {
+		t.Fatal("edit without a validator was reported as validated")
+	}
+
+	failedValidator := parseFileEditOutput("/etc/app.conf", "nginx", fileValidationMarker+"\n", false)
+	if failedValidator.ValidationOK {
+		t.Fatal("failed validator was reported as validated")
+	}
+
+	succeededValidator := parseFileEditOutput("/etc/app.conf", "nginx", fileValidationMarker+"\n"+fileAfterMarker+"\nabc  /etc/app.conf\n", true)
+	if !succeededValidator.ValidationOK {
+		t.Fatal("successful configured validator was not reported as validated")
 	}
 }

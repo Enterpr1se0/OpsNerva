@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -454,13 +455,15 @@ func TestWorkspaceFileEditPreservesMode(t *testing.T) {
 	if err != nil || string(content) != "enabled=true\n" {
 		t.Fatalf("replacement content=%q err=%v", content, err)
 	}
-	info, err := os.Stat(existingPath)
-	if err != nil || info.Mode().Perm() != 0o640 {
-		t.Fatalf("replacement mode=%v err=%v", info, err)
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(existingPath)
+		if err != nil || info.Mode().Perm() != 0o640 {
+			t.Fatalf("replacement mode=%v err=%v", info, err)
+		}
 	}
 }
 
-func TestWorkspaceFileEditNormalizesUTF8BOMAndCRLF(t *testing.T) {
+func TestWorkspaceFileEditPreservesUTF8BOMAndCRLF(t *testing.T) {
 	svc, root := newWorkspaceService(t, "read_write")
 	path := filepath.Join(root, "windows.conf")
 	original := append([]byte{0xef, 0xbb, 0xbf}, []byte("enabled=false\r\nname=demo\r\n")...)
@@ -475,8 +478,9 @@ func TestWorkspaceFileEditNormalizesUTF8BOMAndCRLF(t *testing.T) {
 		t.Fatal(err)
 	}
 	content, err := os.ReadFile(path)
-	if err != nil || string(content) != "enabled=true\nname=demo\n" {
-		t.Fatalf("normalized edit result=%q err=%v", content, err)
+	expected := append([]byte{0xef, 0xbb, 0xbf}, []byte("enabled=true\r\nname=demo\r\n")...)
+	if err != nil || !bytes.Equal(content, expected) {
+		t.Fatalf("preserved edit bytes=% x want=% x err=%v", content, expected, err)
 	}
 }
 
@@ -508,6 +512,30 @@ func TestApplyTextEditRequiresOneExactBlock(t *testing.T) {
 	deleted, err := applyTextEdit("a\nb\n", domain.TextEdit{OldText: "a", NewText: ""})
 	if err != nil || deleted != "b\n" {
 		t.Fatalf("line deletion failed: updated=%q err=%v", deleted, err)
+	}
+	withoutFinalNewline, err := applyTextEdit("only-one-line-no-nl", domain.TextEdit{OldText: "only-one-line-no-nl", NewText: "edited"})
+	if err != nil || withoutFinalNewline != "edited" {
+		t.Fatalf("final-newline state changed: updated=%q err=%v", withoutFinalNewline, err)
+	}
+	crlf, err := applyTextEdit("a\r\nb\r\nc\r\n", domain.TextEdit{OldText: "b", NewText: "b-edited"})
+	if err != nil || crlf != "a\r\nb-edited\r\nc\r\n" {
+		t.Fatalf("CRLF bytes changed: updated=%q err=%v", crlf, err)
+	}
+}
+
+func TestWorkspaceFileEditCreatesMissingFile(t *testing.T) {
+	svc, root := newWorkspaceService(t, "read_write")
+	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "created.conf", "", "enabled=true", "", "create config", "eino-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed", "operator")
+	if err != nil || result.Status != "completed" {
+		t.Fatalf("create result=%#v err=%v", result, err)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "created.conf"))
+	if err != nil || string(content) != "enabled=true" {
+		t.Fatalf("created content=%q err=%v", content, err)
 	}
 }
 

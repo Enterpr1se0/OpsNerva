@@ -975,11 +975,14 @@ func (s *Service) EditWorkspaceFile(ctx context.Context, workspaceID, relativePa
 	}, actor)
 	result.Change = &change
 	if result.Stdout != "" {
-		metadata := parseFileEditOutput(relativePath, validatorID, result.Stdout)
+		metadata := parseFileEditOutput(relativePath, validatorID, result.Stdout, result.Status == "completed")
 		result.File = &metadata
 	}
 	if result.ExitCode == 74 {
 		return result, fmt.Errorf("workspace validation failed; the target file was not changed")
+	}
+	if result.ExitCode == 75 {
+		return result, fmt.Errorf("workspace file edit conflict; read the current path and retry")
 	}
 	return result, submitErr
 }
@@ -2190,28 +2193,39 @@ func (s *Service) editWorkspaceFile(ctx context.Context, workspace config.Worksp
 	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
 		return sshx.RawResult{}, statErr
 	}
-	if !existed {
+	creating := req.TextEdit.OldText == ""
+	if !existed && !creating {
 		return sshx.RawResult{ExitCode: 1, Stderr: []byte("workspace edit target does not exist"), Duration: time.Since(started)}, fmt.Errorf("workspace edit target does not exist")
 	}
-	if !info.Mode().IsRegular() {
+	if existed && creating {
+		message := "workspace create target already exists"
+		return sshx.RawResult{ExitCode: 75, Stderr: []byte(message), Duration: time.Since(started)}, fmt.Errorf("%s", message)
+	}
+	if existed && !info.Mode().IsRegular() {
 		return sshx.RawResult{}, fmt.Errorf("workspace edit target is not a regular file")
 	}
-	mode := info.Mode().Perm()
-	original, err := os.ReadFile(path)
-	if err != nil {
-		return sshx.RawResult{}, err
-	}
-	normalizedOriginal, err := normalizeEditableText(original)
-	if err != nil {
-		return sshx.RawResult{ExitCode: 1, Stderr: []byte(err.Error()), Duration: time.Since(started)}, err
-	}
-	updated, err := applyTextEdit(normalizedOriginal, *req.TextEdit)
-	if err != nil {
-		return sshx.RawResult{ExitCode: 1, Stderr: []byte(err.Error()), Duration: time.Since(started)}, err
+	mode := os.FileMode(0o600)
+	var original []byte
+	var originalDigest [sha256.Size]byte
+	var updated []byte
+	var err error
+	if existed {
+		mode = info.Mode().Perm()
+		original, err = os.ReadFile(path)
+		if err != nil {
+			return sshx.RawResult{}, err
+		}
+		originalDigest = sha256.Sum256(original)
+		updated, err = applyTextEditBytes(original, *req.TextEdit)
+		if err != nil {
+			return sshx.RawResult{ExitCode: 1, Stderr: []byte(err.Error()), Duration: time.Since(started)}, err
+		}
+	} else {
+		updated = []byte(req.TextEdit.NewText)
 	}
 	suffix := time.Now().UTC().Format("20060102T150405Z") + "-" + ids.New("file")
 	temporary := filepath.Join(filepath.Dir(path), ".opsnerva-"+filepath.Base(path)+"-"+suffix+".tmp")
-	if err := writeSyncedFile(temporary, []byte(updated), mode); err != nil {
+	if err := writeSyncedFile(temporary, updated, mode); err != nil {
 		return sshx.RawResult{}, err
 	}
 	defer os.Remove(temporary)
@@ -2220,15 +2234,35 @@ func (s *Service) editWorkspaceFile(ctx context.Context, workspace config.Worksp
 		_ = os.Remove(temporary)
 		return sshx.RawResult{ExitCode: 74, Stdout: validationOutput, Stderr: []byte(err.Error()), Duration: time.Since(started)}, err
 	}
-	err = os.Rename(temporary, path)
-	if err != nil {
-		return sshx.RawResult{}, err
+	if existed {
+		current, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return sshx.RawResult{}, readErr
+		}
+		if sha256.Sum256(current) != originalDigest {
+			message := "workspace file edit conflict: target changed during validation"
+			return sshx.RawResult{ExitCode: 75, Stderr: []byte(message), Duration: time.Since(started)}, fmt.Errorf("%s", message)
+		}
+		if err = os.Rename(temporary, path); err != nil {
+			return sshx.RawResult{}, err
+		}
+	} else {
+		if err = os.Link(temporary, path); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				message := "workspace file edit conflict: create target appeared during validation"
+				return sshx.RawResult{ExitCode: 75, Stderr: []byte(message), Duration: time.Since(started)}, fmt.Errorf("%s", message)
+			}
+			return sshx.RawResult{}, err
+		}
+		if err = os.Remove(temporary); err != nil {
+			return sshx.RawResult{}, err
+		}
 	}
 	_ = os.Remove(temporary)
 	if err := syncLocalDirectory(filepath.Dir(path)); err != nil {
 		return sshx.RawResult{ExitCode: 74, Stderr: []byte(err.Error()), Duration: time.Since(started)}, err
 	}
-	afterDigest := sha256.Sum256([]byte(updated))
+	afterDigest := sha256.Sum256(updated)
 	stdout := ""
 	if req.Validator != "" {
 		stdout = fileValidationMarker + "\n"
@@ -2236,14 +2270,6 @@ func (s *Service) editWorkspaceFile(ctx context.Context, workspace config.Worksp
 	stdout += fmt.Sprintf("%s\n%x  %s\n", fileAfterMarker, afterDigest, req.RelativePath)
 	stdout += string(validationOutput)
 	return sshx.RawResult{ExitCode: 0, Stdout: []byte(stdout), Duration: time.Since(started)}, nil
-}
-
-func normalizeEditableText(content []byte) (string, error) {
-	if bytes.HasPrefix(content, []byte{0xff, 0xfe}) || bytes.HasPrefix(content, []byte{0xfe, 0xff}) {
-		return "", fmt.Errorf("UTF-16 file editing is unsupported; convert the file to UTF-8 first")
-	}
-	text := strings.TrimPrefix(string(content), "\ufeff")
-	return strings.ReplaceAll(text, "\r\n", "\n"), nil
 }
 
 func (s *Service) workspaceValidator(id string, workspace config.Workspace, relative string) (config.Validator, error) {
@@ -2314,11 +2340,49 @@ func writeSyncedFile(path string, content []byte, mode os.FileMode) error {
 	return nil
 }
 
-func applyTextEdit(original string, edit domain.TextEdit) (string, error) {
-	originalTrailingNewline := strings.HasSuffix(original, "\n")
-	var originalLines []string
-	if original != "" {
-		originalLines = strings.Split(strings.TrimSuffix(original, "\n"), "\n")
+type editableTextLine struct {
+	text              string
+	start, contentEnd int
+	afterEnd          int
+	eol               []byte
+}
+
+func editableTextLines(original []byte) ([]editableTextLine, error) {
+	if bytes.HasPrefix(original, []byte{0xff, 0xfe}) || bytes.HasPrefix(original, []byte{0xfe, 0xff}) {
+		return nil, fmt.Errorf("UTF-16 file editing is unsupported; convert the file to UTF-8 first")
+	}
+	if bytes.IndexByte(original, 0) >= 0 {
+		return nil, fmt.Errorf("binary file editing is unsupported")
+	}
+	start := 0
+	if bytes.HasPrefix(original, []byte{0xef, 0xbb, 0xbf}) {
+		start = 3
+	}
+	lines := make([]editableTextLine, 0, bytes.Count(original[start:], []byte{'\n'})+1)
+	for start < len(original) {
+		newlineOffset := bytes.IndexByte(original[start:], '\n')
+		if newlineOffset < 0 {
+			lines = append(lines, editableTextLine{text: string(original[start:]), start: start, contentEnd: len(original), afterEnd: len(original)})
+			break
+		}
+		newline := start + newlineOffset
+		contentEnd := newline
+		if contentEnd > start && original[contentEnd-1] == '\r' {
+			contentEnd--
+		}
+		lines = append(lines, editableTextLine{
+			text: string(original[start:contentEnd]), start: start, contentEnd: contentEnd, afterEnd: newline + 1,
+			eol: append([]byte(nil), original[contentEnd:newline+1]...),
+		})
+		start = newline + 1
+	}
+	return lines, nil
+}
+
+func applyTextEditBytes(original []byte, edit domain.TextEdit) ([]byte, error) {
+	originalLines, err := editableTextLines(original)
+	if err != nil {
+		return nil, err
 	}
 	oldLines := strings.Split(edit.OldText, "\n")
 	var newLines []string
@@ -2329,7 +2393,7 @@ func applyTextEdit(original string, edit domain.TextEdit) (string, error) {
 	for start := 0; start+len(oldLines) <= len(originalLines); start++ {
 		matched := true
 		for offset := range oldLines {
-			if originalLines[start+offset] != oldLines[offset] {
+			if originalLines[start+offset].text != oldLines[offset] {
 				matched = false
 				break
 			}
@@ -2339,16 +2403,48 @@ func applyTextEdit(original string, edit domain.TextEdit) (string, error) {
 		}
 	}
 	if len(matches) != 1 {
-		return "", fmt.Errorf("file edit conflict: old_text matched %d blocks; read the current file and retry with a unique block", len(matches))
+		return nil, fmt.Errorf("file edit conflict: old_text matched %d blocks; read the current file and retry with a unique block", len(matches))
 	}
 	start := matches[0]
-	result := make([]string, 0, len(originalLines)-len(oldLines)+len(newLines))
-	result = append(result, originalLines[:start]...)
-	result = append(result, newLines...)
-	result = append(result, originalLines[start+len(oldLines):]...)
-	updated := strings.Join(result, "\n")
-	if originalTrailingNewline && len(result) > 0 {
-		updated += "\n"
+	first := originalLines[start]
+	last := originalLines[start+len(oldLines)-1]
+	spliceStart, spliceEnd := first.start, last.contentEnd
+	if len(newLines) == 0 {
+		if last.afterEnd > last.contentEnd {
+			spliceEnd = last.afterEnd
+		} else if start > 0 {
+			spliceStart = originalLines[start-1].contentEnd
+		}
+		updated := make([]byte, 0, len(original)-(spliceEnd-spliceStart))
+		updated = append(updated, original[:spliceStart]...)
+		updated = append(updated, original[spliceEnd:]...)
+		return updated, nil
 	}
+	eol := []byte{'\n'}
+	for index := start; index <= start+len(oldLines)-1; index++ {
+		if len(originalLines[index].eol) > 0 {
+			eol = originalLines[index].eol
+			break
+		}
+	}
+	if len(last.eol) == 0 && start > 0 && len(originalLines[start-1].eol) > 0 {
+		eol = originalLines[start-1].eol
+	}
+	var replacement bytes.Buffer
+	for index, line := range newLines {
+		if index > 0 {
+			replacement.Write(eol)
+		}
+		replacement.WriteString(line)
+	}
+	updated := make([]byte, 0, len(original)-(spliceEnd-spliceStart)+replacement.Len())
+	updated = append(updated, original[:spliceStart]...)
+	updated = append(updated, replacement.Bytes()...)
+	updated = append(updated, original[spliceEnd:]...)
 	return updated, nil
+}
+
+func applyTextEdit(original string, edit domain.TextEdit) (string, error) {
+	updated, err := applyTextEditBytes([]byte(original), edit)
+	return string(updated), err
 }

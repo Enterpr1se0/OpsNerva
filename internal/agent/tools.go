@@ -271,8 +271,8 @@ type FileListInput struct {
 
 type FileEditInput struct {
 	HostID      string `json:"host_id" jsonschema:"registered host identifier"`
-	Path        string `json:"path" jsonschema:"existing absolute remote file"`
-	OldText     string `json:"old_text" jsonschema:"exact complete lines from latest read; must match once"`
+	Path        string `json:"path" jsonschema:"absolute remote file"`
+	OldText     string `json:"old_text" jsonschema:"exact complete lines from latest read; must match once; empty creates a new file"`
 	NewText     string `json:"new_text" jsonschema:"replacement lines; empty deletes old_text"`
 	ValidatorID string `json:"validator_id,omitempty" jsonschema:"listed validator ID only; never a command"`
 	Elevated    bool   `json:"elevated,omitempty" jsonschema:"edit with managed root access"`
@@ -306,8 +306,8 @@ type WorkspaceReadInput struct {
 }
 
 type WorkspaceFileEditInput struct {
-	Path        string `json:"path" jsonschema:"existing Workspace-relative file"`
-	OldText     string `json:"old_text" jsonschema:"exact complete lines from latest read; must match once"`
+	Path        string `json:"path" jsonschema:"Workspace-relative file"`
+	OldText     string `json:"old_text" jsonschema:"exact complete lines from latest read; must match once; empty creates a new file"`
 	NewText     string `json:"new_text" jsonschema:"replacement lines; empty deletes old_text"`
 	ValidatorID string `json:"validator_id,omitempty" jsonschema:"listed Workspace validator ID only; never a command"`
 	Reason      string `json:"reason" jsonschema:"one-sentence purpose"`
@@ -1978,7 +1978,7 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_file_edit", "Replace an exact unique line block in an existing remote file; read it first."+validatorHint(remoteValidatorIDs), func(ctx context.Context, input FileEditInput) (ExecToolResult, error) {
+	if err := appendTool(toolutils.InferTool("ssh_file_edit", "Create a remote text file or replace/delete one exact unique line block; read existing files first."+validatorHint(remoteValidatorIDs), func(ctx context.Context, input FileEditInput) (ExecToolResult, error) {
 		result, err := svc.EditRemoteFile(ctx, input.HostID, input.Path, input.OldText, input.NewText, input.ValidatorID, input.Elevated, input.Reason, "eino-agent")
 		return CompactExecToolResult(result, err)
 	})); err != nil {
@@ -2005,7 +2005,7 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	}, fileSearchSchemaOption())); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("workspace_file_edit", "Replace an exact unique line block in an existing current Workspace file; read it first."+validatorHint(workspaceValidatorIDs), func(ctx context.Context, input WorkspaceFileEditInput) (ExecToolResult, error) {
+	if err := appendTool(toolutils.InferTool("workspace_file_edit", "Create a text file or replace/delete one exact unique line block in the current Workspace; read existing files first."+validatorHint(workspaceValidatorIDs), func(ctx context.Context, input WorkspaceFileEditInput) (ExecToolResult, error) {
 		workspace, err := svc.SessionWorkspace(ctx)
 		if err != nil {
 			return CompactExecToolResult(domain.ExecResult{}, err)

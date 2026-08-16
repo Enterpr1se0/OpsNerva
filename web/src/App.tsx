@@ -3030,14 +3030,15 @@ function recordTableRows(value:JsonRecord){
 
 type DiffRow={kind:'header'|'hunk'|'add'|'delete'|'context'|'meta';oldLine?:number;newLine?:number;text:string}
 function parseDiffRows(diff:string):DiffRow[]{
-	let oldLine=0,newLine=0
+	let oldLine:number|undefined,newLine:number|undefined
 	return diff.replace(/\n$/, '').split('\n').map(line=>{
 		const hunk=line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/)
 		if(hunk){oldLine=Number(hunk[1]);newLine=Number(hunk[2]);return{kind:'hunk',text:line}}
+		if(line.startsWith('@@ ')){oldLine=undefined;newLine=undefined;return{kind:'hunk',text:line}}
 		if(line.startsWith('--- ')||line.startsWith('+++ '))return{kind:'header',text:line}
-		if(line.startsWith('+'))return{kind:'add',newLine:newLine++,text:line}
-		if(line.startsWith('-'))return{kind:'delete',oldLine:oldLine++,text:line}
-		if(line.startsWith(' ')){const row={kind:'context' as const,oldLine,newLine,text:line};oldLine++;newLine++;return row}
+		if(line.startsWith('+')){const row={kind:'add' as const,newLine,text:line};if(newLine!==undefined)newLine++;return row}
+		if(line.startsWith('-')){const row={kind:'delete' as const,oldLine,text:line};if(oldLine!==undefined)oldLine++;return row}
+		if(line.startsWith(' ')){const row={kind:'context' as const,oldLine,newLine,text:line};if(oldLine!==undefined)oldLine++;if(newLine!==undefined)newLine++;return row}
 		return{kind:'meta',text:line}
 	})
 }

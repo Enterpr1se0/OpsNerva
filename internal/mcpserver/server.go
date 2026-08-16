@@ -56,7 +56,7 @@ func New(svc *service.Service, version string) *Server {
 			compact, err := agent.CompactExecToolResult(output, err)
 			return nil, compact, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_edit", Description: "Replace an exact unique line block in an existing remote file; read it first.", Annotations: changeAnnotations("Edit SSH file", true)},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_edit", Description: "Create a remote text file or replace/delete one exact unique line block; read existing files first.", Annotations: changeAnnotations("Edit SSH file", true)},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.FileEditInput) (*mcp.CallToolResult, agent.ExecToolResult, error) {
 			output, err := svc.EditRemoteFile(ctx, input.HostID, input.Path, input.OldText, input.NewText, input.ValidatorID, input.Elevated, input.Reason, "mcp-client")
 			compact, err := agent.CompactExecToolResult(output, err)
