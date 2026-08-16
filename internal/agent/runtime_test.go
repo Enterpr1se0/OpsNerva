@@ -1645,17 +1645,20 @@ func TestNextQueryReceivesToolResultsFromFailedTurn(t *testing.T) {
 		t.Fatalf("answer = %q", answer)
 	}
 	_, inputs := runner.snapshot()
-	if len(inputs) != 2 || len(inputs[1]) != 3 {
+	if len(inputs) != 2 || len(inputs[1]) != 4 {
 		t.Fatalf("model inputs = %#v", inputs)
 	}
 	if inputs[1][0].Role != schema.User || inputs[1][0].Content != "inspect disk" {
 		t.Fatalf("failed turn user context = %#v", inputs[1][0])
 	}
-	if inputs[1][1].Role != schema.Assistant || !strings.Contains(inputs[1][1].Content, persistedToolResultsHeader) || !strings.Contains(inputs[1][1].Content, "disk is healthy") {
-		t.Fatalf("failed turn tool context = %#v", inputs[1][1])
+	if inputs[1][1].Role != schema.Assistant || len(inputs[1][1].ToolCalls) != 1 || inputs[1][1].ToolCalls[0].Function.Name != "ssh_exec" {
+		t.Fatalf("failed turn Tool call context = %#v", inputs[1][1])
 	}
-	if inputs[1][2].Role != schema.User || inputs[1][2].Content != "continue" {
-		t.Fatalf("current query context = %#v", inputs[1][2])
+	if inputs[1][2].Role != schema.Tool || !strings.Contains(inputs[1][2].Content, "disk is healthy") || inputs[1][2].ToolCallID != inputs[1][1].ToolCalls[0].ID {
+		t.Fatalf("failed turn Tool result context = %#v", inputs[1][2])
+	}
+	if inputs[1][3].Role != schema.User || inputs[1][3].Content != "continue" {
+		t.Fatalf("current query context = %#v", inputs[1][3])
 	}
 }
 
@@ -1714,18 +1717,15 @@ func TestNextQueryRestoresAnthropicThinkingMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, inputs := runner.snapshot()
-	if len(inputs) != 2 || len(inputs[1]) != 4 {
+	if len(inputs) != 2 || len(inputs[1]) != 3 {
 		t.Fatalf("second model input = %#v", inputs)
 	}
 	thinking := inputs[1][1]
-	if thinking.Role != schema.Assistant || thinking.Content != "" || thinking.ReasoningContent != first.ReasoningContent {
+	if thinking.Role != schema.Assistant || thinking.Content != first.Content || thinking.ReasoningContent != first.ReasoningContent {
 		t.Fatalf("restored Anthropic thinking = %#v", thinking)
 	}
 	if thinking.Extra[claudeThinkingExtraKey] != first.ReasoningContent || thinking.Extra[claudeSignatureExtraKey] != "signed-thinking" {
 		t.Fatalf("restored Anthropic metadata = %#v", thinking.Extra)
-	}
-	if inputs[1][2].Role != schema.Assistant || inputs[1][2].Content != first.Content {
-		t.Fatalf("restored assistant reply = %#v", inputs[1][2])
 	}
 }
 
@@ -1738,20 +1738,20 @@ func TestBuildModelContextPreservesTurnBoundaries(t *testing.T) {
 		{Role: "user", Content: "hello", Status: "completed"},
 	}
 	messages, stats := buildModelContext(history, "what is the current state?")
-	if len(messages) != 7 {
+	if len(messages) != 9 {
 		t.Fatalf("model messages = %#v", messages)
 	}
-	wantRoles := []schema.RoleType{schema.User, schema.Assistant, schema.User, schema.Assistant, schema.User, schema.Assistant, schema.User}
+	wantRoles := []schema.RoleType{schema.User, schema.Assistant, schema.Tool, schema.User, schema.Assistant, schema.Tool, schema.User, schema.Assistant, schema.User}
 	for index, role := range wantRoles {
 		if messages[index].Role != role {
 			t.Fatalf("message %d role = %s, want %s", index, messages[index].Role, role)
 		}
 	}
-	if !strings.Contains(messages[1].Content, "docker installed") || !strings.Contains(messages[3].Content, "mihomo updated") {
+	if !strings.Contains(messages[2].Content, "docker installed") || !strings.Contains(messages[5].Content, "mihomo updated") {
 		t.Fatalf("tool results were not retained: %#v", messages)
 	}
-	if messages[5].Content != incompleteTurnContext {
-		t.Fatalf("incomplete turn marker = %q", messages[5].Content)
+	if messages[7].Content != incompleteTurnContext {
+		t.Fatalf("incomplete turn marker = %q", messages[7].Content)
 	}
 	if stats.StoredTurns != 3 || stats.IncludedTurns != 3 || stats.ToolResults != 2 {
 		t.Fatalf("context stats = %#v", stats)
@@ -1767,10 +1767,10 @@ func TestBuildModelContextCompactsOversizedToolResults(t *testing.T) {
 		{Role: "tool", ToolName: "workspace_shell", Content: second, Status: "completed"},
 	}
 	messages, stats := buildModelContext(history, "continue")
-	if len(messages) != 3 {
+	if len(messages) != 5 {
 		t.Fatalf("model messages = %#v", messages)
 	}
-	results := messages[1].Content
+	results := messages[2].Content + messages[3].Content
 	if len(results) >= len(first)+len(second) {
 		t.Fatalf("oversized tool results were not compacted: result_bytes=%d", len(results))
 	}
@@ -1803,15 +1803,23 @@ func TestBuildModelContextUsesBoundedRecentHistory(t *testing.T) {
 func TestBuildModelContextPreservesFinalAnswerAndCompletedToolResults(t *testing.T) {
 	history := []domain.ChatMessage{
 		{Role: "user", Content: "inspect host", Status: "completed"},
-		{Role: "tool", ToolName: "ssh_exec", Content: `{"status":"completed","stdout":"complete output"}`, Status: "completed"},
+		{Role: "tool", ToolName: "ssh_exec", ToolCallID: "call-history", ToolArguments: `{"host_id":"host-one","program":"uptime"}`, Content: `{"status":"completed","stdout":"complete output"}`, Status: "completed"},
 		{Role: "assistant", Content: "The host is healthy.", Status: "completed"},
 	}
 	messages, stats := buildModelContext(history, "continue")
-	if len(messages) != 3 || messages[1].Role != schema.Assistant || !strings.Contains(messages[1].Content, "The host is healthy.") {
+	if len(messages) != 5 || messages[3].Role != schema.Assistant || !strings.Contains(messages[3].Content, "The host is healthy.") {
 		t.Fatalf("model messages = %#v", messages)
 	}
-	if !strings.Contains(messages[1].Content, "complete output") || !containsInternalContextMarker(messages[1].Content) {
-		t.Fatalf("completed Tool results were omitted from Assistant context: %q", messages[1].Content)
+	if messages[1].Role != schema.Assistant || len(messages[1].ToolCalls) != 1 || messages[2].Role != schema.Tool || !strings.Contains(messages[2].Content, "complete output") {
+		t.Fatalf("completed Tool results were not restored as Tool context: %#v", messages)
+	}
+	if messages[1].ToolCalls[0].ID != "call-history" || messages[1].ToolCalls[0].Function.Arguments != `{"host_id":"host-one","program":"uptime"}` || messages[2].ToolCallID != "call-history" {
+		t.Fatalf("persisted Tool call identity was not restored: %#v", messages)
+	}
+	for _, message := range messages {
+		if containsInternalContextMarker(message.Content) {
+			t.Fatalf("internal context marker was exposed to the model: %#v", messages)
+		}
 	}
 	if stats.ToolResults != 1 {
 		t.Fatalf("context stats = %#v", stats)
@@ -1828,21 +1836,16 @@ func TestBuildModelContextPreservesToolReasoningAndVisibleReplies(t *testing.T) 
 		{Role: "assistant", Content: "Memory is healthy.", Status: "completed"},
 	}
 	messages, stats := buildModelContext(history, "continue")
-	if len(messages) != 3 {
+	if len(messages) != 5 {
 		t.Fatalf("model messages = %#v", messages)
 	}
-	assistant := messages[1]
-	for _, expected := range []string{"I will inspect memory.", "memory is stable", "Memory is healthy."} {
-		if !strings.Contains(assistant.Content, expected) {
-			t.Fatalf("assistant context omitted %q: %#v", expected, assistant)
-		}
+	if !strings.Contains(messages[1].Content, "I will inspect memory.") || !strings.Contains(messages[2].Content, "memory is stable") || !strings.Contains(messages[3].Content, "Memory is healthy.") {
+		t.Fatalf("Tool turn context was not restored in order: %#v", messages)
 	}
-	for _, expected := range []string{"I should inspect memory before answering.", "The result confirms memory is healthy."} {
-		if !strings.Contains(assistant.ReasoningContent, expected) {
-			t.Fatalf("reasoning context omitted %q: %#v", expected, assistant)
-		}
+	if !strings.Contains(messages[1].ReasoningContent, "I should inspect memory before answering.") || !strings.Contains(messages[3].ReasoningContent, "The result confirms memory is healthy.") {
+		t.Fatalf("reasoning context was not restored in order: %#v", messages)
 	}
-	if stats.ToolResults != 1 || stats.Bytes < len(assistant.Content)+len(assistant.ReasoningContent) {
+	if stats.ToolResults != 1 || stats.Bytes < len(messages[1].Content)+len(messages[1].ReasoningContent)+len(messages[2].Content)+len(messages[3].Content) {
 		t.Fatalf("context stats = %#v", stats)
 	}
 }
@@ -1865,16 +1868,17 @@ func TestBuildAnthropicContextPreservesEverySignedToolReasoningSegment(t *testin
 		t.Fatalf("Anthropic model messages = %#v", messages)
 	}
 	for index, expected := range []struct {
+		message   int
 		content   string
 		signature string
-	}{{"First inspection.", "signature-one"}, {"Interpret result.", "signature-two"}} {
-		message := messages[index+1]
+	}{{1, "First inspection.", "signature-one"}, {3, "Interpret result.", "signature-two"}} {
+		message := messages[expected.message]
 		if message.ReasoningContent != expected.content || message.Extra[claudeSignatureExtraKey] != expected.signature {
 			t.Fatalf("Anthropic reasoning message %d = %#v", index, message)
 		}
 	}
-	if !strings.Contains(messages[3].Content, "Checking memory.") || !strings.Contains(messages[3].Content, "stable") || !strings.Contains(messages[3].Content, "Memory is healthy.") {
-		t.Fatalf("Anthropic assistant context = %#v", messages[3])
+	if !strings.Contains(messages[1].Content, "Checking memory.") || len(messages[1].ToolCalls) != 1 || !strings.Contains(messages[2].Content, "stable") || !strings.Contains(messages[3].Content, "Memory is healthy.") {
+		t.Fatalf("Anthropic Tool context = %#v", messages)
 	}
 }
 
@@ -1884,7 +1888,7 @@ func TestBuildModelContextExcludesUIToolDisplayMetadata(t *testing.T) {
 		{Role: "tool", ToolName: "ssh_host_inspect", Content: `{"status":"completed","hostname":"demo","_display":{"arguments":{"host_id":"host-demo"},"request":{"host_id":"host-demo","program":"uname"}}}`, Status: "completed"},
 	}
 	messages, _ := buildModelContext(history, "continue")
-	if len(messages) != 3 || strings.Contains(messages[1].Content, "_display") || strings.Contains(messages[1].Content, "arguments") || !strings.Contains(messages[1].Content, `"hostname":"demo"`) {
+	if len(messages) != 4 || strings.Contains(messages[2].Content, "_display") || strings.Contains(messages[2].Content, "arguments") || !strings.Contains(messages[2].Content, `"hostname":"demo"`) {
 		t.Fatalf("UI-only Tool display metadata leaked into model context: %#v", messages)
 	}
 }
@@ -1895,10 +1899,10 @@ func TestBuildModelContextExcludesCommandExplainerDataFromStoredSSHHistory(t *te
 		{Role: "tool", ToolName: "ssh_history", Content: `{"runs":[{"id":"run-demo","request_json":"{\"program\":\"uname\"}","stdout_redacted":"Linux","ai_review":{"status":"completed","model":"PRIVATE_REVIEW_MODEL","explanation":{"summary":"PRIVATE_REVIEW_SUMMARY","mechanism":"PRIVATE_REVIEW_MECHANISM","risks":["PRIVATE_REVIEW_RISK"]}}}],"_display":{"arguments":{"query":"uname"}}}`, Status: "completed"},
 	}
 	messages, _ := buildModelContext(history, "continue")
-	if len(messages) != 3 {
+	if len(messages) != 4 {
 		t.Fatalf("model messages = %#v", messages)
 	}
-	results := messages[1].Content
+	results := messages[2].Content
 	for _, leaked := range []string{"ai_review", "PRIVATE_REVIEW_MODEL", "PRIVATE_REVIEW_SUMMARY", "PRIVATE_REVIEW_MECHANISM", "PRIVATE_REVIEW_RISK", "_display"} {
 		if strings.Contains(results, leaked) {
 			t.Fatalf("stored SSH history leaked private metadata %q: %s", leaked, results)

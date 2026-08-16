@@ -49,7 +49,8 @@ func TestChatToolCallPersistsStableLifecycleAndContextResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 2 || messages[1].Role != "tool" || messages[1].ToolCallID != "call-tool" || messages[1].RunID != "run-tool" || !strings.Contains(messages[1].Content, `"stdout":"up"`) {
+	if len(messages) != 2 || messages[1].Role != "tool" || messages[1].ToolCallID != "call-tool" || messages[1].RunID != "run-tool" ||
+		messages[1].ToolArguments != `{"host_id":"host-one","program":"uptime"}` || !strings.Contains(messages[1].Content, `"stdout":"up"`) {
 		t.Fatalf("context messages = %#v", messages)
 	}
 }

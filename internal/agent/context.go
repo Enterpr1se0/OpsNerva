@@ -38,13 +38,11 @@ type storedModelTurn struct {
 }
 
 type preparedModelTurn struct {
-	user              string
-	attachments       []domain.ChatAttachment
-	assistant         string
-	reasoning         string
-	providerReasoning []*schema.Message
-	toolResults       int
-	boundaryID        string
+	user        string
+	attachments []domain.ChatAttachment
+	messages    []*schema.Message
+	toolResults int
+	boundaryID  string
 }
 
 type modelWorkspaceState struct {
@@ -154,8 +152,8 @@ func buildMultimodalModelContextWithSummaryForProvider(history []domain.ChatMess
 	turns := groupStoredModelTurns(history)
 	stats.StoredTurns = len(turns)
 	prepared := make([]preparedModelTurn, 0, len(turns))
-	for _, turn := range turns {
-		item, ok := prepareModelTurn(turn)
+	for turnIndex, turn := range turns {
+		item, ok := prepareModelTurn(turn, providerKind, turnIndex)
 		if ok {
 			prepared = append(prepared, item)
 		}
@@ -186,33 +184,22 @@ func buildMultimodalModelContextWithSummaryForProvider(history []domain.ChatMess
 		}
 	}
 
-	messages := make([]*schema.Message, 0, len(selected)*2+2)
+	messages := make([]*schema.Message, 0, len(selected)*3+2)
 	if summary.Summary != "" {
 		messages = append(messages, schema.SystemMessage(durableContextSummaryPrefix+summary.Summary))
 	}
 	for _, turn := range selected {
-		assistant := schema.AssistantMessage(turn.assistant, nil)
 		messages = append(messages, multimodalUserMessage(turn.user, turn.attachments))
-		if providerKind == "anthropic" {
-			assistant.ReasoningContent = turn.reasoning
-			messages = append(messages, turn.providerReasoning...)
-		} else {
-			reasoning := make([]string, 0, len(turn.providerReasoning)+1)
-			for _, providerMessage := range turn.providerReasoning {
-				reasoning = append(reasoning, providerMessage.ReasoningContent)
-			}
-			if turn.reasoning != "" {
-				reasoning = append(reasoning, turn.reasoning)
-			}
-			assistant.ReasoningContent = strings.Join(reasoning, "\n\n")
-		}
-		messages = append(messages, assistant)
+		messages = append(messages, turn.messages...)
 		stats.ToolResults += turn.toolResults
 	}
 	messages = append(messages, multimodalUserMessage(current.Content, current.Attachments))
 	stats.IncludedTurns = len(selected)
 	for _, message := range messages {
 		stats.Bytes += len(message.Content) + len(message.ReasoningContent)
+		for _, toolCall := range message.ToolCalls {
+			stats.Bytes += len(toolCall.ID) + len(toolCall.Function.Name) + len(toolCall.Function.Arguments)
+		}
 		for _, part := range message.UserInputMultiContent {
 			if part.Type == schema.ChatMessagePartTypeText {
 				stats.Bytes += len(part.Text)
@@ -237,7 +224,7 @@ func groupStoredModelTurns(history []domain.ChatMessage) []storedModelTurn {
 	return turns
 }
 
-func prepareModelTurn(turn storedModelTurn) (preparedModelTurn, bool) {
+func prepareModelTurn(turn storedModelTurn, providerKind string, turnIndex int) (preparedModelTurn, bool) {
 	user := strings.TrimSpace(turn.user.Content)
 	if user == "" && len(turn.user.Attachments) == 0 {
 		return preparedModelTurn{}, false
@@ -245,17 +232,61 @@ func prepareModelTurn(turn storedModelTurn) (preparedModelTurn, bool) {
 	if turn.user.Status == "failed" && len(turn.messages) == 0 {
 		return preparedModelTurn{}, false
 	}
-	assistant := make([]string, 0, len(turn.messages))
+	messages := make([]*schema.Message, 0, len(turn.messages)+1)
+	content := make([]string, 0, len(turn.messages))
 	reasoning := make([]string, 0, len(turn.messages))
-	providerReasoning := make([]*schema.Message, 0)
+	providerReasoning := make([]*schema.Message, 0, len(turn.messages))
 	toolBatch := make([]domain.ChatMessage, 0)
 	toolResults := 0
-	flushTools := func() {
-		content, count := formatPersistedToolResults(toolBatch)
-		if content != "" {
-			assistant = append(assistant, content)
-			toolResults += count
+	toolSequence := 0
+	appendAssistant := func(toolCalls []schema.ToolCall) {
+		assistant := schema.AssistantMessage(strings.Join(content, "\n\n"), toolCalls)
+		if providerKind == "anthropic" && len(providerReasoning) > 0 {
+			messages = append(messages, providerReasoning[:len(providerReasoning)-1]...)
+			last := providerReasoning[len(providerReasoning)-1]
+			assistant.ReasoningContent = last.ReasoningContent
+			assistant.Extra = cloneModelExtra(last.Extra)
+		} else {
+			combined := make([]string, 0, len(providerReasoning)+len(reasoning))
+			for _, providerMessage := range providerReasoning {
+				combined = append(combined, providerMessage.ReasoningContent)
+			}
+			combined = append(combined, reasoning...)
+			assistant.ReasoningContent = strings.Join(combined, "\n\n")
 		}
+		messages = append(messages, assistant)
+		content = content[:0]
+		reasoning = reasoning[:0]
+		providerReasoning = providerReasoning[:0]
+	}
+	flushTools := func() {
+		if len(toolBatch) == 0 {
+			return
+		}
+		toolCalls := make([]schema.ToolCall, 0, len(toolBatch))
+		toolMessages := make([]*schema.Message, 0, len(toolBatch))
+		for _, toolResult := range toolBatch {
+			toolName := strings.TrimSpace(toolResult.ToolName)
+			if toolName == "" {
+				toolName = "unknown"
+			}
+			toolCallID := strings.TrimSpace(toolResult.ToolCallID)
+			if toolCallID == "" {
+				toolCallID = fmt.Sprintf("history_tool_%d_%d", turnIndex, toolSequence)
+			}
+			toolSequence++
+			arguments := strings.TrimSpace(toolResult.ToolArguments)
+			if arguments == "" || !json.Valid([]byte(arguments)) {
+				arguments = "{}"
+			}
+			result := strings.TrimSpace(stripToolContextMetadata(toolResult.ToolName, toolResult.Content))
+			result = compactModelPayload(result, modelStoredToolResultMaxBytes, true)
+			toolCalls = append(toolCalls, schema.ToolCall{ID: toolCallID, Type: "function", Function: schema.FunctionCall{Name: toolName, Arguments: arguments}})
+			toolMessages = append(toolMessages, schema.ToolMessage(result, toolCallID, schema.WithToolName(toolName)))
+		}
+		appendAssistant(toolCalls)
+		messages = append(messages, toolMessages...)
+		toolResults += len(toolBatch)
 		toolBatch = toolBatch[:0]
 	}
 	for _, message := range turn.messages {
@@ -264,35 +295,33 @@ func prepareModelTurn(turn storedModelTurn) (preparedModelTurn, bool) {
 			continue
 		}
 		flushTools()
-		content := strings.TrimSpace(message.Content)
-		if content == "" || containsInternalContextMarker(content) {
+		messageContent := strings.TrimSpace(message.Content)
+		if messageContent == "" || containsInternalContextMarker(messageContent) {
 			continue
 		}
 		if message.Role == "reasoning" {
 			if len(message.ModelExtra) > 0 {
 				providerMessage := schema.AssistantMessage("", nil)
-				providerMessage.ReasoningContent = content
+				providerMessage.ReasoningContent = messageContent
 				providerMessage.Extra = cloneModelExtra(message.ModelExtra)
 				providerReasoning = append(providerReasoning, providerMessage)
 				continue
 			}
-			reasoning = append(reasoning, content)
+			reasoning = append(reasoning, messageContent)
 			continue
 		}
-		assistant = append(assistant, content)
+		content = append(content, messageContent)
 	}
 	flushTools()
-	if len(assistant) == 0 {
-		assistant = append(assistant, incompleteTurnContext)
+	if len(content) > 0 || len(reasoning) > 0 || len(providerReasoning) > 0 {
+		appendAssistant(nil)
+	}
+	if len(messages) == 0 {
+		messages = append(messages, schema.AssistantMessage(incompleteTurnContext, nil))
 	}
 	return preparedModelTurn{
-		user:              user,
-		attachments:       turn.user.Attachments,
-		assistant:         strings.Join(assistant, "\n\n"),
-		reasoning:         strings.Join(reasoning, "\n\n"),
-		providerReasoning: providerReasoning,
-		toolResults:       toolResults,
-		boundaryID:        modelTurnBoundaryID(turn),
+		user: user, attachments: turn.user.Attachments, messages: messages,
+		toolResults: toolResults, boundaryID: modelTurnBoundaryID(turn),
 	}, true
 }
 
@@ -355,29 +384,14 @@ func multimodalUserMessage(text string, attachments []domain.ChatAttachment) *sc
 	return &schema.Message{Role: schema.User, UserInputMultiContent: parts}
 }
 
-func formatPersistedToolResults(tools []domain.ChatMessage) (string, int) {
-	if len(tools) == 0 {
-		return "", 0
-	}
-	records := make([]string, 0, len(tools))
-	for _, toolResult := range tools {
-		toolName := strings.TrimSpace(toolResult.ToolName)
-		if toolName == "" {
-			toolName = "unknown"
-		}
-		content := strings.TrimSpace(stripToolContextMetadata(toolResult.ToolName, toolResult.Content))
-		content = compactModelPayload(content, modelStoredToolResultMaxBytes, true)
-		record := fmt.Sprintf("Tool: %s\nResult:\n%s", toolName, content)
-		records = append(records, record)
-	}
-	return persistedToolResultsHeader + "\n\n" + strings.Join(records, "\n\n") + "\n\n" + persistedToolResultsTrailer, len(records)
-}
-
 func preparedModelTurnBytes(turn preparedModelTurn) int {
-	total := len(turn.user) + len(turn.assistant) + len(turn.reasoning)
-	for _, message := range turn.providerReasoning {
+	total := len(turn.user)
+	for _, message := range turn.messages {
 		if message != nil {
 			total += len(message.Content) + len(message.ReasoningContent)
+			for _, toolCall := range message.ToolCalls {
+				total += len(toolCall.ID) + len(toolCall.Function.Name) + len(toolCall.Function.Arguments)
+			}
 		}
 	}
 	for _, attachment := range turn.attachments {

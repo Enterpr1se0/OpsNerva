@@ -353,18 +353,19 @@ func (s *Store) loadChatToolMessageState(ctx context.Context, messages []domain.
 	if len(byID) == 0 {
 		return nil
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT message_id,tool_call_id,run_id,status FROM chat_tool_calls WHERE message_id IN (`+sqlPlaceholders(len(byID))+`)`, mapKeys(byID)...)
+	rows, err := s.db.QueryContext(ctx, `SELECT message_id,tool_call_id,run_id,status,arguments_json FROM chat_tool_calls WHERE message_id IN (`+sqlPlaceholders(len(byID))+`)`, mapKeys(byID)...)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var messageID, toolCallID, runID, status string
-		if err := rows.Scan(&messageID, &toolCallID, &runID, &status); err != nil {
+		var messageID, toolCallID, runID, status, argumentsJSON string
+		if err := rows.Scan(&messageID, &toolCallID, &runID, &status, &argumentsJSON); err != nil {
 			return err
 		}
 		if message := byID[messageID]; message != nil {
 			message.ToolCallID = toolCallID
+			message.ToolArguments = argumentsJSON
 			message.RunID = runID
 			message.ToolStatus = status
 		}

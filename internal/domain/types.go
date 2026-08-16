@@ -476,6 +476,7 @@ type ChatMessage struct {
 	TokenUsage       *ChatTokenUsage  `json:"token_usage,omitempty"`
 	ToolName         string           `json:"tool_name,omitempty"`
 	ToolCallID       string           `json:"tool_call_id,omitempty"`
+	ToolArguments    string           `json:"-"`
 	RunID            string           `json:"run_id,omitempty"`
 	ToolStatus       string           `json:"tool_status,omitempty"`
 	Status           string           `json:"status"`
