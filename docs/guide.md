@@ -90,8 +90,8 @@ Linux / macOS 的快捷构建命令还需要 `make`。内置 SSH 不依赖系统
 ### Linux / macOS
 
 ```bash
-git clone https://github.com/Enterpr1se0/eino-ops-agent.git
-cd eino-ops-agent
+git clone https://github.com/Enterpr1se0/opsnerva.git
+cd opsnerva
 make build
 ./bin/ops-agent
 ```
@@ -103,8 +103,8 @@ make build
 Windows 不需要安装 `make`：
 
 ```powershell
-git clone https://github.com/Enterpr1se0/eino-ops-agent.git
-Set-Location eino-ops-agent
+git clone https://github.com/Enterpr1se0/opsnerva.git
+Set-Location opsnerva
 npm --prefix web install
 npm --prefix web run build
 New-Item -ItemType Directory -Force bin | Out-Null

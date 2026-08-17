@@ -128,7 +128,7 @@ flowchart LR
 
 ### 桌面 App（Windows / Linux）
 
-从 [GitHub Releases](https://github.com/Enterpr1se0/eino-ops-agent/releases) 下载对应平台的安装包，由 GitHub Actions 自动构建发布。
+从 [GitHub Releases](https://github.com/Enterpr1se0/opsnerva/releases) 下载对应平台的安装包，由 GitHub Actions 自动构建发布。
 
 | 平台 | 格式 | 安装 |
 |---|---|---|
@@ -153,8 +153,8 @@ docker run --rm -p 8080:8080 \
 需要 Git、Go 1.26+、Node.js 22.13+（Linux / macOS 另需 `make`）：
 
 ```bash
-git clone https://github.com/Enterpr1se0/eino-ops-agent.git
-cd eino-ops-agent
+git clone https://github.com/Enterpr1se0/opsnerva.git
+cd opsnerva
 make build
 ./bin/ops-agent
 ```
