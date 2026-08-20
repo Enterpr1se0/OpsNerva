@@ -64,7 +64,7 @@ pub fn run() {
                 let tray = window.state::<TrayState>();
                 if !tray.exiting.load(Ordering::Acquire) {
                     api.prevent_close();
-                    let _ = window.minimize();
+                    let _ = window.hide();
                 }
             }
         })
