@@ -804,7 +804,7 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 	  <section className="sidebar-conversations active"><div ref={setChatSidebarTarget}/></section>
       <div className="sidebar-foot">
 		{auth.enabled&&<button type="button" className="auth-logout" title={t('auth.signOut')} aria-label={t('auth.signOut')} onClick={()=>void logout()}><LogOut size={14}/><span>{auth.username||t('auth.signOut')}</span></button>}
-        <div className="build">v0.3.0</div>
+        <div className="build">v0.3.1</div>
       </div>
     </aside>
     <main>
