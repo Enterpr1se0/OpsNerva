@@ -217,7 +217,6 @@
 .logs-toolbar .app-select-trigger{height:37px;border-color:var(--line);border-radius:7px;background:#0a1712;color:#a9beb4;font-size:var(--text-caption)}
 .live-toggle,.log-refresh,.log-export{height:37px;display:flex;align-items:center;justify-content:center;gap:6px;border:1px solid #263d34;border-radius:7px;padding:0 11px;background:#0d1d17;color:#789087;cursor:pointer;font-size:var(--text-caption);text-decoration:none;white-space:nowrap}
 .live-toggle.active{border-color:#2b674d;background:#10271e;color:var(--green)}
-.live-toggle.active svg{animation:log-live-pulse 1.8s infinite}
 .log-refresh:hover,.log-export:hover{color:#b8ccc2;border-color:#385649}.log-refresh:disabled{opacity:.55;cursor:wait}.log-refresh .spin{animation:log-spin .8s linear infinite}
 .logs-meta{display:flex;align-items:center;gap:8px;color:#587168;font:var(--text-caption) DM Mono,'Noto Sans SC Variable',monospace}.logs-meta span{padding:5px 8px;border:1px solid #1c3128;border-radius:10px;background:#091410}.logs-meta span:nth-child(2){color:var(--green);border-color:#27513f}
 .log-hint{display:flex;align-items:center;gap:8px;padding:10px 12px;border:1px solid #5a4729;border-radius:7px;background:#251c10;color:#d1a865;font-size:var(--text-caption)}.log-hint code{color:var(--amber);font:var(--text-caption) DM Mono,'Noto Sans SC Variable',monospace}
@@ -230,7 +229,7 @@
 .log-component{display:block;width:max-content;max-width:100%;overflow:hidden;text-overflow:ellipsis;padding:3px 5px;border:1px solid #20382e;border-radius:4px;color:#85a397;background:#0a1813;font:var(--text-caption) DM Mono,'Noto Sans SC Variable',monospace}
 .log-event{min-width:0}.log-event>b{display:block;color:#b8cbc2;font-size:var(--text-caption);line-height:1.45}.log-entry.error .log-event>b{color:#f0a0a0}.log-entry.warn .log-event>b{color:#d8ba80}
 .log-fields{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}.log-fields>span{min-width:0;max-width:100%;display:flex;align-items:center;border:1px solid #1b3027;border-radius:4px;background:#091511;overflow:hidden}.log-fields em{padding:3px 5px;background:#0e2019;color:#536e63;font:var(--text-micro) DM Mono,'Noto Sans SC Variable',monospace;font-style:normal}.log-fields code{max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 5px;color:#8ea69b;font:var(--text-caption) DM Mono,'Noto Sans SC Variable',monospace}
-@keyframes log-live-pulse{50%{opacity:.35}}@keyframes log-spin{to{transform:rotate(360deg)}}
+@keyframes log-spin{to{transform:rotate(360deg)}}
 @media(max-width:1250px){.logs-toolbar{grid-template-columns:minmax(260px,1fr) 130px 150px}.live-toggle,.log-refresh,.log-export{grid-row:2}.log-row{grid-template-columns:105px 64px 90px minmax(0,1fr)}}
 
 /* Persistent Agent task list. */

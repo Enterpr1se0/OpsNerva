@@ -338,6 +338,12 @@ function errorText(error: unknown) {
 function isAbortError(error:unknown){return error instanceof DOMException&&error.name==='AbortError'}
 
 function keepEquivalent<T>(current:T,next:T){return JSON.stringify(current)===JSON.stringify(next)?current:next}
+function keepEquivalentHealth(current:Health|null,next:Health){
+	if(!current)return next
+	const currentState=[current.status,current.agent_available,current.model]
+	const nextState=[next.status,next.agent_available,next.model]
+	return JSON.stringify(currentState)===JSON.stringify(nextState)?current:next
+}
 
 type AuditPageCursor={hasMore:boolean;timestamp:string;id:string}
 function mergeLatestPage<T extends{id:string}>(latest:T[],current:T[],hasMore:boolean,timestamp:(item:T)=>string){
@@ -386,7 +392,7 @@ function DesktopTitlebar(){
 		<div className="desktop-window-controls">
 			<button type="button" onClick={()=>void desktopWindow.minimize().catch(()=>{})} title={t('shell.minimize')} aria-label={t('shell.minimize')}><Minus size={15}/></button>
 			<button type="button" onClick={()=>void desktopWindow.toggleMaximize().catch(()=>{})} title={t('shell.maximize')} aria-label={t('shell.maximize')}><Maximize2 size={13}/></button>
-			<button type="button" className="desktop-window-close" onClick={()=>void desktopWindow.close().catch(()=>{})} title={t('common.close')} aria-label={t('common.close')}><X size={15}/></button>
+			<button type="button" className="desktop-window-close" onClick={()=>void desktopWindow.minimize().catch(()=>{})} title={t('shell.minimize')} aria-label={t('shell.minimize')}><X size={15}/></button>
 		</div>
 	</header>
 }
@@ -532,7 +538,7 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 		catch(err){notify(errorText(err),'error')}
 	},[notify])
 	const refreshHealth=useCallback(async()=>{
-		try{const next=await api.health();setHealth(current=>keepEquivalent(current,next))}
+		try{const next=await api.health();setHealth(current=>keepEquivalentHealth(current,next))}
 		catch(err){notify(errorText(err),'error')}
 	},[notify])
 	const refreshHosts=useCallback(async()=>{
@@ -634,9 +640,9 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 		return()=>window.removeEventListener('storage',sync)
 	},[])
 	useEffect(()=>{
-		const sync=()=>{document.documentElement.dataset.windowActive=document.hasFocus()?'true':'false'}
-		sync();window.addEventListener('focus',sync);window.addEventListener('blur',sync)
-		return()=>{window.removeEventListener('focus',sync);window.removeEventListener('blur',sync)}
+		const sync=()=>{document.documentElement.dataset.windowActive=document.hasFocus()&&document.visibilityState==='visible'?'true':'false'}
+		sync();window.addEventListener('focus',sync);window.addEventListener('blur',sync);document.addEventListener('visibilitychange',sync)
+		return()=>{window.removeEventListener('focus',sync);window.removeEventListener('blur',sync);document.removeEventListener('visibilitychange',sync)}
 	},[])
 	useEffect(() => { void refreshBootstrap();void refreshConnections() }, [refreshBootstrap,refreshConnections])
 	useEffect(()=>subscribeApplicationEvents<{tunnels:SSHTunnel[];shells:SSHShell[]}>('connections',event=>{
@@ -648,7 +654,7 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 		if(event.type==='event'&&event.data)setApprovals(current=>keepEquivalent(current,event.data!))
 	}),[])
 	useEffect(()=>subscribeApplicationEvents<Health>('health',event=>{
-		if(event.type==='event'&&event.data)setHealth(current=>keepEquivalent(current,event.data!))
+		if(event.type==='event'&&event.data)setHealth(current=>keepEquivalentHealth(current,event.data!))
 	}),[])
 	useEffect(()=>{
 		if(page!=='audit')return
@@ -779,7 +785,7 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 	const hostChanged=useCallback((host:Host)=>setHosts(current=>current.map(item=>item.id===host.id?host:item)),[])
 	const modelChanged=useCallback((provider:ModelProvider)=>{
 		setProviders(current=>current.map(item=>item.id===provider.id?provider:{...item,active:provider.active?false:item.active}))
-		void api.health().then(next=>setHealth(current=>keepEquivalent(current,next))).catch(err=>reportError(errorText(err)))
+		void api.health().then(next=>setHealth(current=>keepEquivalentHealth(current,next))).catch(err=>reportError(errorText(err)))
 	},[reportError])
 	const workspaceShells=useMemo(()=>sshShells.filter(shell=>shell.kind==='workspace'),[sshShells])
 	const topbarShells=useMemo(()=>sshShells.filter(topbarShell),[sshShells])

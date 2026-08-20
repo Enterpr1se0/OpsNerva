@@ -62,9 +62,9 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let tray = window.state::<TrayState>();
-                if tray.enabled.load(Ordering::Acquire) && !tray.exiting.load(Ordering::Acquire) {
+                if !tray.exiting.load(Ordering::Acquire) {
                     api.prevent_close();
-                    let _ = window.hide();
+                    let _ = window.minimize();
                 }
             }
         })

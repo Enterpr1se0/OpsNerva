@@ -670,10 +670,6 @@ body {
   animation: app-alert-in var(--motion-view) var(--motion-ease) both;
 }
 
-.status.online > svg {
-  animation: app-online-breathe 2.4s ease-in-out infinite;
-}
-
 .ssh-terminal-tab {
   transition:
     background-color var(--motion-view) var(--motion-ease),
@@ -686,11 +682,6 @@ body {
 
 .ssh-terminal-tab.active {
   box-shadow: inset 0 -2px color-mix(in srgb, var(--green) 72%, transparent);
-}
-
-.ssh-terminal-tab i.running,
-.workspace-shell-sessions i.running {
-  animation: app-session-breathe 1.8s ease-in-out infinite;
 }
 
 .ssh-terminal-stage > .ssh-shell-terminal-dialog.embedded,
@@ -740,14 +731,6 @@ body {
 
 @keyframes app-terminal-stage-in {
   from { opacity: 0; transform: translateY(4px); }
-}
-
-@keyframes app-online-breathe {
-  50% { opacity: .55; filter: drop-shadow(0 0 5px currentColor); }
-}
-
-@keyframes app-session-breathe {
-  50% { opacity: .62; box-shadow: 0 0 11px #46d99aaa; }
 }
 
 .workspace {
@@ -810,6 +793,12 @@ body {
 
 :root[data-runtime='desktop'][data-window-active='false'] .desktop-titlebar {
   opacity: .72;
+}
+
+:root[data-window-active='false'] *,
+:root[data-window-active='false'] *::before,
+:root[data-window-active='false'] *::after {
+  animation-play-state: paused !important;
 }
 
 .desktop-titlebar-brand {
