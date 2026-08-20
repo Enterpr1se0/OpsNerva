@@ -183,7 +183,6 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/runs", s.searchRuns)
 	s.mux.HandleFunc("GET /api/v1/run-summaries", s.searchRunSummaries)
 	s.mux.HandleFunc("GET /api/v1/runs/{id}", s.getRun)
-	s.mux.HandleFunc("DELETE /api/v1/audit/runs/{id}", s.deleteAuditRun)
 	s.mux.HandleFunc("DELETE /api/v1/audit/runs", s.deleteAuditRuns)
 	s.mux.HandleFunc("GET /api/v1/audit", s.listAudit)
 	s.mux.HandleFunc("GET /api/v1/audit-events", s.listAuditEvents)
@@ -1660,15 +1659,6 @@ func (s *Server) listAuditEvents(w http.ResponseWriter, r *http.Request) {
 		cursorCreated = parsed
 	}
 	result, err := s.service.ListAuditPage(r.Context(), r.URL.Query().Get("run_id"), limit, cursorCreated, r.URL.Query().Get("cursor_id"))
-	respond(w, result, err)
-}
-
-func (s *Server) deleteAuditRun(w http.ResponseWriter, r *http.Request) {
-	result, err := s.service.DeleteAuditRun(r.Context(), r.PathValue("id"), actor(r))
-	if errors.Is(err, store.ErrInUse) {
-		writeErrorStatus(w, fmt.Errorf("active audit runs cannot be deleted"), http.StatusConflict)
-		return
-	}
 	respond(w, result, err)
 }
 

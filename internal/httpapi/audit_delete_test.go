@@ -16,7 +16,7 @@ import (
 	"eino-ops-agent/internal/store"
 )
 
-func TestDeleteAuditRunEndpointRejectsActiveRun(t *testing.T) {
+func TestDeleteAuditRunsEndpointRetainsActiveRun(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
 	st, err := store.Open(ctx, filepath.Join(dataDir, "audit-delete.db"))
@@ -47,7 +47,7 @@ func TestDeleteAuditRunEndpointRejectsActiveRun(t *testing.T) {
 	httpServer := httptest.NewServer(New(svc, nil, Options{}).Handler())
 	defer httpServer.Close()
 
-	request, err := http.NewRequest(http.MethodDelete, httpServer.URL+"/api/v1/audit/runs/run-http-finished", nil)
+	request, err := http.NewRequest(http.MethodDelete, httpServer.URL+"/api/v1/audit/runs?session_id=", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,20 +60,7 @@ func TestDeleteAuditRunEndpointRejectsActiveRun(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
 		t.Fatal(err)
 	}
-	if response.StatusCode != http.StatusOK || result.Deleted != 1 {
+	if response.StatusCode != http.StatusOK || result.Deleted != 1 || result.Retained != 1 {
 		t.Fatalf("delete status=%d result=%#v", response.StatusCode, result)
-	}
-
-	request, err = http.NewRequest(http.MethodDelete, httpServer.URL+"/api/v1/audit/runs/run-http-active", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	response, err = httpServer.Client().Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusConflict {
-		t.Fatalf("active delete status=%d", response.StatusCode)
 	}
 }

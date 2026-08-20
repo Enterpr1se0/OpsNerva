@@ -1819,22 +1819,6 @@ AND NOT EXISTS (SELECT 1 FROM approvals WHERE approvals.run_id=runs.id AND appro
 AND NOT EXISTS (SELECT 1 FROM tasks WHERE tasks.run_id=runs.id AND tasks.status IN ('created','pending','active','running','retrying','stopping','waiting_for_approval','approval_required'))
 AND NOT EXISTS (SELECT 1 FROM ssh_shell_sessions WHERE ssh_shell_sessions.run_id=runs.id AND ssh_shell_sessions.status IN ('starting','running','stopping'))`
 
-// DeleteAuditRun removes one completed execution record and its audit-owned
-// dependants. Chat messages remain, but their tool-call linkage is detached.
-func (s *Store) DeleteAuditRun(ctx context.Context, runID, actor string) (domain.AuditRunDeleteResult, error) {
-	result, total, err := s.deleteAuditRuns(ctx, "runs.id=?", []any{strings.TrimSpace(runID)}, actor, "run")
-	if err != nil {
-		return domain.AuditRunDeleteResult{}, err
-	}
-	if total == 0 {
-		return domain.AuditRunDeleteResult{}, ErrNotFound
-	}
-	if result.Deleted == 0 {
-		return result, ErrInUse
-	}
-	return result, nil
-}
-
 // DeleteAuditRuns removes completed audit runs in one conversation, direct
 // operations (an empty session ID), or all scopes when sessionID is nil.
 func (s *Store) DeleteAuditRuns(ctx context.Context, sessionID *string, actor string) (domain.AuditRunDeleteResult, error) {

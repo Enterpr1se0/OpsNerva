@@ -34,7 +34,7 @@ func TestAuditPagesUseStableCursor(t *testing.T) {
 	}
 }
 
-func TestDeleteAuditRunIsTransactionalAndPreservesChat(t *testing.T) {
+func TestDeleteAuditRunsIsTransactionalAndPreservesChat(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(ctx, t.TempDir()+"/audit-delete.db")
 	if err != nil {
@@ -77,7 +77,8 @@ func TestDeleteAuditRunIsTransactionalAndPreservesChat(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := st.DeleteAuditRun(ctx, run.ID, "test")
+	sessionID := run.SessionID
+	result, err := st.DeleteAuditRuns(ctx, &sessionID, "test")
 	if err != nil || result.Deleted != 1 || result.Retained != 0 {
 		t.Fatalf("delete result=%#v err=%v", result, err)
 	}
@@ -143,8 +144,5 @@ func TestDeleteAuditRunsRetainsActiveRecords(t *testing.T) {
 	}
 	if _, err := st.GetRun(ctx, "run-active-shell"); err != nil {
 		t.Fatalf("run with an active shell was deleted: %v", err)
-	}
-	if _, err := st.DeleteAuditRun(ctx, "run-active", "test"); !errors.Is(err, ErrInUse) {
-		t.Fatalf("active single delete error=%v", err)
 	}
 }

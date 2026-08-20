@@ -2817,10 +2817,6 @@ func (s *Service) ListAuditPage(ctx context.Context, runID string, limit int, cu
 	return s.store.ListAuditPage(ctx, runID, limit, cursorCreated, cursorID)
 }
 
-func (s *Service) DeleteAuditRun(ctx context.Context, runID, actor string) (domain.AuditRunDeleteResult, error) {
-	return s.store.DeleteAuditRun(ctx, runID, actor)
-}
-
 func (s *Service) DeleteAuditRuns(ctx context.Context, sessionID *string, actor string) (domain.AuditRunDeleteResult, error) {
 	return s.store.DeleteAuditRuns(ctx, sessionID, actor)
 }
