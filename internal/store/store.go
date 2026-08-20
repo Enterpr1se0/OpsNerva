@@ -19,6 +19,7 @@ import (
 	"eino-ops-agent/internal/domain"
 	"eino-ops-agent/internal/ids"
 
+	"github.com/klauspost/compress/zstd"
 	_ "modernc.org/sqlite"
 )
 
@@ -29,7 +30,9 @@ var (
 )
 
 type Store struct {
-	db *sql.DB
+	db                *sql.DB
+	shellEventEncoder *zstd.Encoder
+	shellEventDecoder *zstd.Decoder
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -58,15 +61,37 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	st := &Store{db: db}
+	shellEventEncoder, err := zstd.NewWriter(nil,
+		zstd.WithEncoderConcurrency(1),
+		zstd.WithEncoderLevel(zstd.SpeedFastest),
+	)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("initialize shell event compressor: %w", err)
+	}
+	shellEventDecoder, err := zstd.NewReader(nil,
+		zstd.WithDecoderConcurrency(1),
+		zstd.WithDecoderMaxMemory(maxSSHShellEventDecodedBytes),
+	)
+	if err != nil {
+		shellEventEncoder.Close()
+		db.Close()
+		return nil, fmt.Errorf("initialize shell event decompressor: %w", err)
+	}
+	st := &Store{db: db, shellEventEncoder: shellEventEncoder, shellEventDecoder: shellEventDecoder}
 	if err := st.initializeSchema(ctx); err != nil {
+		shellEventDecoder.Close()
+		shellEventEncoder.Close()
 		db.Close()
 		return nil, err
 	}
 	return st, nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	s.shellEventDecoder.Close()
+	return errors.Join(s.shellEventEncoder.Close(), s.db.Close())
+}
 
 func (s *Store) UpsertTask(ctx context.Context, task domain.Task, result domain.ExecResult, taskError string) error {
 	resultJSON, err := json.Marshal(result)
@@ -307,6 +332,8 @@ CREATE TABLE IF NOT EXISTS audit_events (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_events(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_run_created ON audit_events(run_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_created_id ON audit_events(created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_run_created_id ON audit_events(run_id, created_at DESC, id DESC);
 CREATE TABLE IF NOT EXISTS chat_sessions (
   session_id TEXT PRIMARY KEY,
   title TEXT NOT NULL DEFAULT '',
@@ -441,6 +468,7 @@ CREATE TABLE IF NOT EXISTS ssh_shell_events (
   source TEXT NOT NULL DEFAULT '',
   content_redacted TEXT NOT NULL DEFAULT '',
   content_readable TEXT,
+  content_encoding TEXT NOT NULL DEFAULT '',
   sensitive INTEGER NOT NULL DEFAULT 0,
   input_bytes INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT '',
@@ -547,6 +575,9 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
 		return err
 	}
 	if err := s.ensureColumn(ctx, "ssh_shell_events", "content_readable", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "ssh_shell_events", "content_encoding", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "ssh_shell_sessions", "response_sequence", "INTEGER NOT NULL DEFAULT 0"); err != nil {
@@ -1294,9 +1325,9 @@ func runSearchWhere(filter domain.RunSearchFilter, literalQuery bool) (string, [
 	return statement, arguments, nil
 }
 
-// SearchRunSummariesFilteredPage is the model-facing literal history search.
+// SearchRunSummariesFilteredPage is the bounded literal history search.
 // It only selects fields needed for summaries and always requires a bounded
-// page size; audit and CLI callers continue to use SearchRunsFiltered.
+// page size; detail and legacy CLI callers continue to use SearchRunsFiltered.
 func (s *Store) SearchRunSummariesFilteredPage(ctx context.Context, filter domain.RunSearchFilter) (domain.RunSearchPage, error) {
 	if filter.Limit <= 0 {
 		return domain.RunSearchPage{}, fmt.Errorf("history page limit must be positive")
@@ -1545,7 +1576,7 @@ JOIN runs ON runs.id=approvals.run_id WHERE approvals.id=?`, id)
 }
 
 func (s *Store) ListApprovals(ctx context.Context, status string, limit int) ([]domain.Approval, error) {
-	if limit <= 0 || limit > 200 {
+	if limit <= 0 || limit > 500 {
 		limit = 50
 	}
 	statement := `SELECT approvals.id,approvals.run_id,runs.session_id,approvals.host_id,
@@ -1725,31 +1756,147 @@ func (s *Store) ListAudit(ctx context.Context, runID string, limit int) ([]domai
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
+	page, err := s.ListAuditPage(ctx, runID, limit, time.Time{}, "")
+	return page.Events, err
+}
+
+func (s *Store) ListAuditPage(ctx context.Context, runID string, limit int, cursorCreated time.Time, cursorID string) (domain.AuditEventPage, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	if cursorCreated.IsZero() != (strings.TrimSpace(cursorID) == "") {
+		return domain.AuditEventPage{}, fmt.Errorf("invalid audit cursor boundary")
+	}
 	statement := `SELECT id,run_id,event_type,actor,data_json,created_at FROM audit_events`
-	arguments := make([]any, 0, 2)
+	arguments := make([]any, 0, 6)
+	conditions := make([]string, 0, 2)
 	if runID != "" {
-		statement += " WHERE run_id=?"
+		conditions = append(conditions, "run_id=?")
 		arguments = append(arguments, runID)
 	}
-	statement += " ORDER BY created_at DESC LIMIT ?"
-	arguments = append(arguments, limit)
+	if !cursorCreated.IsZero() {
+		conditions = append(conditions, "(created_at<? OR (created_at=? AND id<?))")
+		created := formatTime(cursorCreated.UTC())
+		arguments = append(arguments, created, created, strings.TrimSpace(cursorID))
+	}
+	if len(conditions) > 0 {
+		statement += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	statement += " ORDER BY created_at DESC,id DESC LIMIT ?"
+	arguments = append(arguments, limit+1)
 	rows, err := s.db.QueryContext(ctx, statement, arguments...)
 	if err != nil {
-		return nil, err
+		return domain.AuditEventPage{}, err
 	}
 	defer rows.Close()
-	events := make([]domain.AuditEvent, 0)
+	page := domain.AuditEventPage{Events: make([]domain.AuditEvent, 0, limit+1)}
 	for rows.Next() {
 		var event domain.AuditEvent
 		var data, created string
 		if err := rows.Scan(&event.ID, &event.RunID, &event.Type, &event.Actor, &data, &created); err != nil {
-			return nil, err
+			return domain.AuditEventPage{}, err
 		}
 		_ = json.Unmarshal([]byte(data), &event.Data)
 		event.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-		events = append(events, event)
+		page.Events = append(page.Events, event)
 	}
-	return events, rows.Err()
+	if err := rows.Err(); err != nil {
+		return domain.AuditEventPage{}, err
+	}
+	if len(page.Events) > limit {
+		page.HasMore = true
+		page.Events = page.Events[:limit]
+	}
+	if page.HasMore && len(page.Events) > 0 {
+		last := page.Events[len(page.Events)-1]
+		page.NextCreatedAt, page.NextID = last.CreatedAt, last.ID
+	}
+	return page, nil
+}
+
+const deletableAuditRunSQL = `runs.status IN ('completed','failed','partial','interrupted','rejected','denied','expired','stopped','closed','skipped','cancelled','canceled','unavailable')
+AND NOT EXISTS (SELECT 1 FROM approvals WHERE approvals.run_id=runs.id AND approvals.status='pending')
+AND NOT EXISTS (SELECT 1 FROM tasks WHERE tasks.run_id=runs.id AND tasks.status IN ('created','pending','active','running','retrying','stopping','waiting_for_approval','approval_required'))
+AND NOT EXISTS (SELECT 1 FROM ssh_shell_sessions WHERE ssh_shell_sessions.run_id=runs.id AND ssh_shell_sessions.status IN ('starting','running','stopping'))`
+
+// DeleteAuditRun removes one completed execution record and its audit-owned
+// dependants. Chat messages remain, but their tool-call linkage is detached.
+func (s *Store) DeleteAuditRun(ctx context.Context, runID, actor string) (domain.AuditRunDeleteResult, error) {
+	result, total, err := s.deleteAuditRuns(ctx, "runs.id=?", []any{strings.TrimSpace(runID)}, actor, "run")
+	if err != nil {
+		return domain.AuditRunDeleteResult{}, err
+	}
+	if total == 0 {
+		return domain.AuditRunDeleteResult{}, ErrNotFound
+	}
+	if result.Deleted == 0 {
+		return result, ErrInUse
+	}
+	return result, nil
+}
+
+// DeleteAuditRuns removes completed audit runs in one conversation, direct
+// operations (an empty session ID), or all scopes when sessionID is nil.
+func (s *Store) DeleteAuditRuns(ctx context.Context, sessionID *string, actor string) (domain.AuditRunDeleteResult, error) {
+	where := "1=1"
+	var arguments []any
+	scope := "all"
+	if sessionID != nil {
+		where = "runs.session_id=?"
+		arguments = []any{strings.TrimSpace(*sessionID)}
+		scope = "session"
+		if strings.TrimSpace(*sessionID) == "" {
+			scope = "direct"
+		}
+	}
+	result, _, err := s.deleteAuditRuns(ctx, where, arguments, actor, scope)
+	return result, err
+}
+
+func (s *Store) deleteAuditRuns(ctx context.Context, where string, arguments []any, actor, scope string) (domain.AuditRunDeleteResult, int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.AuditRunDeleteResult{}, 0, err
+	}
+	defer tx.Rollback()
+	var total, deletable int
+	countStatement := `SELECT COUNT(*),COALESCE(SUM(CASE WHEN ` + deletableAuditRunSQL + ` THEN 1 ELSE 0 END),0) FROM runs WHERE ` + where
+	if err := tx.QueryRowContext(ctx, countStatement, arguments...).Scan(&total, &deletable); err != nil {
+		return domain.AuditRunDeleteResult{}, 0, err
+	}
+	result := domain.AuditRunDeleteResult{Deleted: deletable, Retained: total - deletable}
+	if deletable == 0 {
+		return result, total, tx.Commit()
+	}
+	selection := `SELECT runs.id FROM runs WHERE (` + where + `) AND (` + deletableAuditRunSQL + `)`
+	statements := []string{
+		`UPDATE chat_tool_calls SET run_id='' WHERE run_id IN (` + selection + `)`,
+		`DELETE FROM ssh_shell_sessions WHERE run_id IN (` + selection + `)`,
+		`DELETE FROM approvals WHERE run_id IN (` + selection + `)`,
+		`DELETE FROM tasks WHERE run_id IN (` + selection + `)`,
+		`DELETE FROM audit_events WHERE run_id IN (` + selection + `)`,
+		`DELETE FROM runs WHERE id IN (` + selection + `)`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement, arguments...); err != nil {
+			return domain.AuditRunDeleteResult{}, total, err
+		}
+	}
+	if actor == "" {
+		actor = "local-user"
+	}
+	data, err := json.Marshal(map[string]any{"deleted": result.Deleted, "retained": result.Retained, "scope": scope})
+	if err != nil {
+		return domain.AuditRunDeleteResult{}, total, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO audit_events(id,run_id,event_type,actor,data_json,created_at) VALUES(?,?,?,?,?,?)`,
+		ids.New("evt"), "", "audit_records_deleted", actor, string(data), formatTime(time.Now().UTC())); err != nil {
+		return domain.AuditRunDeleteResult{}, total, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.AuditRunDeleteResult{}, total, err
+	}
+	return result, total, nil
 }
 
 func (s *Store) AppendChatMessage(ctx context.Context, sessionID, role, content string, toolName ...string) error {
@@ -2542,11 +2689,6 @@ func (s *Store) DeleteChatSession(ctx context.Context, sessionID string) error {
 	if count == 0 {
 		return ErrNotFound
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM audit_events
-WHERE run_id IN (SELECT id FROM runs WHERE session_id=?)
-   OR (json_valid(data_json) AND json_extract(data_json,'$.session_id')=?)`, sessionID, sessionID); err != nil {
-		return err
-	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM approvals WHERE run_id IN (SELECT id FROM runs WHERE session_id=?)`, sessionID); err != nil {
 		return err
 	}
@@ -2570,9 +2712,6 @@ WHERE session_id=? OR run_id IN (SELECT id FROM runs WHERE session_id=?)`, sessi
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM agent_task_files WHERE session_id=?`, sessionID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM runs WHERE session_id=?`, sessionID); err != nil {
 		return err
 	}
 	return tx.Commit()

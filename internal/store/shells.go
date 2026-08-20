@@ -4,12 +4,19 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"eino-ops-agent/internal/domain"
 )
 
-const maxSSHShellModelPageEvents = 512
+const (
+	maxSSHShellModelPageEvents    = 512
+	maxSSHShellEventDecodedBytes  = 2 << 20
+	minSSHShellEventCompressBytes = 512
+	minSSHShellEventCompressSave  = 32
+	sshShellEventEncodingZstd     = "zstd"
+)
 
 func (s *Store) CreateSSHShell(ctx context.Context, shell domain.SSHShell) error {
 	if shell.Kind == "" {
@@ -74,13 +81,10 @@ func (s *Store) AppendSSHShellEvents(ctx context.Context, events []domain.SSHShe
 	}
 	defer tx.Rollback()
 	for _, event := range events {
-		var readable any
-		if event.ReadableContent != nil {
-			readable = *event.ReadableContent
-		}
+		content, readable, encoding := s.encodeSSHShellEventContent(event)
 		if _, err := tx.ExecContext(ctx, `INSERT INTO ssh_shell_events(
-shell_id,sequence,stream,source,content_redacted,content_readable,sensitive,input_bytes,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-			event.ShellID, event.Sequence, event.Stream, event.Source, event.Content, readable, event.Sensitive,
+shell_id,sequence,stream,source,content_redacted,content_readable,content_encoding,sensitive,input_bytes,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+			event.ShellID, event.Sequence, event.Stream, event.Source, content, readable, encoding, event.Sensitive,
 			event.InputBytes, event.Status, formatTime(event.CreatedAt)); err != nil {
 			return err
 		}
@@ -135,7 +139,8 @@ func (s *Store) ListSSHShellEvents(ctx context.Context, shellID string, after ui
 }
 
 func (s *Store) ListSSHShellEventsPage(ctx context.Context, shellID string, after uint64, maxOutputBytes int) ([]domain.SSHShellEvent, bool, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT shell_id,sequence,stream,source,content_redacted,content_readable,sensitive,input_bytes,status,created_at
+	rows, err := s.db.QueryContext(ctx, `SELECT shell_id,sequence,stream,source,content_redacted,content_readable,
+content_readable IS NOT NULL,content_encoding,sensitive,input_bytes,status,created_at
 FROM ssh_shell_events WHERE shell_id=? AND sequence>? ORDER BY sequence`, shellID, after)
 	if err != nil {
 		return nil, false, err
@@ -150,15 +155,23 @@ FROM ssh_shell_events WHERE shell_id=? AND sequence>? ORDER BY sequence`, shellI
 			break
 		}
 		var event domain.SSHShellEvent
-		var sensitive int
-		var readable sql.NullString
-		var created string
+		var content, readable []byte
+		var readablePresent, sensitiveValue int
+		var encoding, created string
 		if err := rows.Scan(&event.ShellID, &event.Sequence, &event.Stream, &event.Source,
-			&event.Content, &readable, &sensitive, &event.InputBytes, &event.Status, &created); err != nil {
+			&content, &readable, &readablePresent, &encoding, &sensitiveValue, &event.InputBytes, &event.Status, &created); err != nil {
 			return nil, false, err
 		}
-		if readable.Valid {
-			value := readable.String
+		decoded, err := s.decodeSSHShellEventContent(content, encoding)
+		if err != nil {
+			return nil, false, fmt.Errorf("decode SSH shell event %s/%d content: %w", event.ShellID, event.Sequence, err)
+		}
+		event.Content = decoded
+		if readablePresent != 0 {
+			value, err := s.decodeSSHShellEventContent(readable, encoding)
+			if err != nil {
+				return nil, false, fmt.Errorf("decode SSH shell event %s/%d readable content: %w", event.ShellID, event.Sequence, err)
+			}
 			event.ReadableContent = &value
 		}
 		eventBytes := 0
@@ -172,7 +185,7 @@ FROM ssh_shell_events WHERE shell_id=? AND sequence>? ORDER BY sequence`, shellI
 			hasMore = true
 			break
 		}
-		event.Sensitive = sensitive != 0
+		event.Sensitive = sensitiveValue != 0
 		event.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 		result = append(result, event)
 		outputBytes += eventBytes
@@ -181,6 +194,49 @@ FROM ssh_shell_events WHERE shell_id=? AND sequence>? ORDER BY sequence`, shellI
 		return nil, false, err
 	}
 	return result, hasMore, nil
+}
+
+func (s *Store) encodeSSHShellEventContent(event domain.SSHShellEvent) (content any, readable any, encoding string) {
+	content = event.Content
+	sourceBytes := len(event.Content)
+	if event.ReadableContent != nil {
+		readable = *event.ReadableContent
+		sourceBytes += len(*event.ReadableContent)
+	}
+	if sourceBytes < minSSHShellEventCompressBytes {
+		return content, readable, ""
+	}
+	compressedContent := s.shellEventEncoder.EncodeAll([]byte(event.Content), nil)
+	var compressedReadable []byte
+	if event.ReadableContent != nil {
+		compressedReadable = s.shellEventEncoder.EncodeAll([]byte(*event.ReadableContent), nil)
+	}
+	if len(compressedContent)+len(compressedReadable)+minSSHShellEventCompressSave >= sourceBytes {
+		return content, readable, ""
+	}
+	content = compressedContent
+	if event.ReadableContent != nil {
+		readable = compressedReadable
+	}
+	return content, readable, sshShellEventEncodingZstd
+}
+
+func (s *Store) decodeSSHShellEventContent(content []byte, encoding string) (string, error) {
+	switch encoding {
+	case "":
+		return string(content), nil
+	case sshShellEventEncodingZstd:
+		if len(content) == 0 {
+			return "", nil
+		}
+		decoded, err := s.shellEventDecoder.DecodeAll(content, nil)
+		if err != nil {
+			return "", err
+		}
+		return string(decoded), nil
+	default:
+		return "", fmt.Errorf("unsupported content encoding %q", encoding)
+	}
 }
 
 func (s *Store) GetSSHShellRecentOutput(ctx context.Context, shellID string) (string, error) {

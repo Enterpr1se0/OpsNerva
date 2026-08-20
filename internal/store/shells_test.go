@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,6 +44,73 @@ func TestAppendSSHShellEventsCommitsBatchAndSessionCursor(t *testing.T) {
 	}
 	if shell.LastSequence != 2 || len(stored) != 2 || stored[1].Content != "second" || recent != "firstsecond" {
 		t.Fatalf("batch persistence mismatch: shell=%#v events=%#v recent=%q", shell, stored, recent)
+	}
+}
+
+func TestAppendSSHShellEventsCompressesAndRestoresOutput(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "shell-compressed.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now().UTC()
+	if err := st.CreateSSHShell(ctx, domain.SSHShell{ID: "shell-compressed", RunID: "run-compressed", Kind: domain.SSHShellKindSSH, Status: "running", Cols: 80, Rows: 24, StartedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	content := strings.Repeat("\x1b[32mservice healthy\x1b[0m\r\n", 600)
+	readable := strings.Repeat("service healthy\n", 600)
+	if err := st.AppendSSHShellEvent(ctx, domain.SSHShellEvent{
+		ShellID: "shell-compressed", Sequence: 1, Stream: "stdout", Content: content,
+		ReadableContent: &readable, Status: "running", CreatedAt: now,
+	}, readable); err != nil {
+		t.Fatal(err)
+	}
+	var storageType, encoding string
+	var storedBytes int
+	if err := st.db.QueryRowContext(ctx, `SELECT typeof(content_redacted),content_encoding,
+length(content_redacted)+length(content_readable) FROM ssh_shell_events WHERE shell_id=? AND sequence=1`, "shell-compressed").Scan(
+		&storageType, &encoding, &storedBytes,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if storageType != "blob" || encoding != sshShellEventEncodingZstd {
+		t.Fatalf("compressed storage = type %q encoding %q", storageType, encoding)
+	}
+	if storedBytes >= (len(content)+len(readable))/4 {
+		t.Fatalf("compressed bytes = %d, source bytes = %d", storedBytes, len(content)+len(readable))
+	}
+	events, err := st.ListSSHShellEvents(ctx, "shell-compressed", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Content != content || events[0].ReadableContent == nil || *events[0].ReadableContent != readable {
+		t.Fatalf("restored event does not match source: %#v", events)
+	}
+}
+
+func TestListSSHShellEventsReadsLegacyTextContent(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "shell-legacy.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now().UTC()
+	if err := st.CreateSSHShell(ctx, domain.SSHShell{ID: "shell-legacy", RunID: "run-legacy", Kind: domain.SSHShellKindSSH, Status: "running", Cols: 80, Rows: 24, StartedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.ExecContext(ctx, `INSERT INTO ssh_shell_events(
+shell_id,sequence,stream,content_redacted,content_readable,status,created_at) VALUES(?,?,?,?,?,?,?)`,
+		"shell-legacy", 1, "stdout", "legacy raw", "legacy readable", "running", formatTime(now)); err != nil {
+		t.Fatal(err)
+	}
+	events, err := st.ListSSHShellEvents(ctx, "shell-legacy", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Content != "legacy raw" || events[0].ReadableContent == nil || *events[0].ReadableContent != "legacy readable" {
+		t.Fatalf("legacy event = %#v", events)
 	}
 }
 
@@ -94,12 +162,15 @@ CREATE TABLE chat_messages (
 		t.Fatal(err)
 	}
 	defer st.Close()
-	for table, column := range map[string]string{
-		"ssh_shell_sessions": "response_sequence",
-		"ssh_shell_events":   "content_readable",
-		"model_providers":    "reasoning_effort",
-		"chat_messages":      "model_extra_json",
-	} {
+	columns := []struct{ table, column string }{
+		{"ssh_shell_sessions", "response_sequence"},
+		{"ssh_shell_events", "content_readable"},
+		{"ssh_shell_events", "content_encoding"},
+		{"model_providers", "reasoning_effort"},
+		{"chat_messages", "model_extra_json"},
+	}
+	for _, expected := range columns {
+		table, column := expected.table, expected.column
 		rows, err := st.db.QueryContext(context.Background(), "PRAGMA table_info("+table+")")
 		if err != nil {
 			t.Fatal(err)
