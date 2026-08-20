@@ -225,7 +225,6 @@ export const api = {
 	  if(input.cursorID)params.set('cursor_id',input.cursorID)
 	  return request<RunSearchPage>(`/api/v1/run-summaries?${params}`)
 	},
-  deleteAuditRun: (id:string) => request<AuditRunDeleteResult>(`/api/v1/audit/runs/${encodeURIComponent(id)}`,{method:'DELETE'}),
   deleteAuditRuns: (sessionID?:string|null) => {
 	  const suffix=sessionID===undefined?'':`?session_id=${encodeURIComponent(sessionID||'')}`
 	  return request<AuditRunDeleteResult>(`/api/v1/audit/runs${suffix}`,{method:'DELETE'})

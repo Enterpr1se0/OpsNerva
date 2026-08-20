@@ -612,7 +612,6 @@
   .tool-summary-preview,
   .tool-context-grid dt,
   .tool-generic-grid dt,
-  .tool-reason,
   .tool-instruction,
   .tool-compact-table th,
   .reasoning-title span,
@@ -673,6 +672,28 @@
 
 :root[data-theme='light'] .tool-live-progress > time {
   color: var(--light-text-secondary);
+}
+
+:root[data-theme='light'] .tool-event summary .tool-summary-meta > span {
+  border-color: var(--light-border);
+  background: var(--light-surface-subtle);
+}
+
+:root[data-theme='light'] .tool-event summary .tool-summary-meta :where(em, b) {
+  color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] .tool-summary-permission.root {
+  border-color: var(--light-danger-border);
+  background: var(--light-danger-soft);
+}
+
+:root[data-theme='light'] .tool-summary-permission.root b {
+  color: var(--light-danger);
+}
+
+:root[data-theme='light'] .tool-summary-permission.user b {
+  color: var(--light-accent);
 }
 
 :root[data-theme='light'] .tool-summary-preview.stderr {

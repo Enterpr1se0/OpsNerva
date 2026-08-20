@@ -22,7 +22,7 @@ type Page = 'chat' | 'ssh' | 'config' | 'extensions' | 'audit' | 'logs'
 const pageVisualOrder:Page[]=['chat','ssh','extensions','audit','logs','config']
 const maxFilePreviewBytes=1<<20
 const liveToolOutputBufferChars=128<<10
-type ChatEntryImage = {id:string;name:string;mimeType:string;sizeBytes:number;url:string}
+type ChatEntryImage = {id:string;name:string;mimeType:string;sizeBytes:number;url?:string}
 const workStatusKeys=['chat.cooking','chat.pondering','chat.brewing','chat.weaving','chat.polishing','chat.crunching'] as const
 type PendingChatImage = {id:string;file:File;url:string}
 type ChatEntry = { id: string; sourceMessageId?:string; persisted?:boolean; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; contentTruncated?:boolean; contentChars?:number; tool?: string; toolCallId?:string; runId?:string; transient?:boolean; progress?:boolean; startedAt?:number; liveStdout?:string; liveStderr?:string; liveOutput?:string; liveOutputStream?:'stdout'|'stderr'; transferredBytes?:number; transferTotalBytes?:number; images?:ChatEntryImage[]; tokenUsage?:ChatTokenUsage; active?: boolean; lifecycle?:'streaming'|'committed'; status?: 'pending' | 'completed' | 'failed' }
@@ -36,11 +36,27 @@ type ChatHistoryCursor = {createdAt:string;id:string}
 const MarkdownMessage=lazy(()=>import('./MarkdownMessage').then(module=>({default:module.MarkdownMessage})))
 
 function insertQueuedMessage(current:QueuedChatMessage[],item:QueuedChatMessage,position=0){
-	if(current.some(existing=>existing.id===item.id))return current
+	const existingIndex=current.findIndex(existing=>existing.id===item.id)
+	if(existingIndex>=0){
+		const existing=current[existingIndex]
+		const merged={...existing,...item,attachments:item.attachments||existing.attachments,attachment_count:item.attachment_count??existing.attachment_count}
+		if(merged.message===existing.message&&merged.mode===existing.mode&&merged.created_at===existing.created_at&&merged.attachments===existing.attachments&&merged.attachment_count===existing.attachment_count)return current
+		return current.map((candidate,index)=>index===existingIndex?merged:candidate)
+	}
 	const next=[...current]
 	const index=position>0?Math.min(position-1,next.length):next.length
 	next.splice(index,0,item)
 	return next
+}
+
+function queuedMessageEntries(messages:QueuedChatMessage[],imageFallback:(count:number)=>string):ChatEntry[]{
+	return messages.map(item=>{
+		const attachmentCount=item.attachments?.length||item.attachment_count||0
+		return{
+			id:`queued_${item.id}`,kind:'user',content:item.message||(attachmentCount?imageFallback(attachmentCount):''),
+			images:item.attachments?.map(image=>({id:image.id,name:image.name,mimeType:image.mime_type,sizeBytes:image.size_bytes})),
+		}
+	})
 }
 
 function historyEntries(messages:ChatMessage[],sessionID:string):ChatEntry[]{
@@ -574,14 +590,6 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 		}catch(err){notify(errorText(err),'error')}
 		finally{setLoadingMoreAudit(false)}
 	},[auditRunCursor,loadingMoreAudit,notify])
-	const deleteAuditRun=useCallback(async(id:string)=>{
-		try{
-			const result=await api.deleteAuditRun(id)
-			setRuns(current=>current.filter(run=>run.id!==id))
-			await refreshRuns(true)
-			notify(t('audit.deleted',{count:result.deleted}))
-		}catch(err){notify(errorText(err),'error');throw err}
-	},[notify,refreshRuns,t])
 	const deleteAuditRuns=useCallback(async(sessionID?:string|null)=>{
 		try{
 			const result=await api.deleteAuditRuns(sessionID)
@@ -818,7 +826,7 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 			/>}
 		{page === 'config' && <ConfigurationPage authEnabled={auth.enabled} hosts={hosts} providers={providers} proxies={proxies} settings={settings} capabilities={capabilities} health={health} refreshModels={refreshModels} refreshHosts={refreshHosts} refreshProxies={refreshProxies} refreshCapabilities={refreshCapabilities} refreshHealth={refreshHealth} onSettingsChanged={setSettings}/>}
 		{page === 'extensions' && <ExtensionsPage skills={skills} mcpServers={mcpServers} toolCatalog={toolCatalog} refreshSkills={refreshSkills} refreshMCPServers={refreshMCPServers} refreshToolCatalog={refreshToolCatalog} onToolCatalogChanged={setToolCatalog}/>}
-		{page === 'audit' && <AuditPage runs={runs} hosts={hosts} sessions={auditSessions} ready={auditReady} runsHasMore={auditRunCursor.hasMore} loadingMore={loadingMoreAudit} onLoadMoreRuns={loadMoreAuditRuns} onDeleteRun={deleteAuditRun} onDeleteRuns={deleteAuditRuns}/>}
+		{page === 'audit' && <AuditPage runs={runs} hosts={hosts} sessions={auditSessions} ready={auditReady} runsHasMore={auditRunCursor.hasMore} loadingMore={loadingMoreAudit} onLoadMoreRuns={loadMoreAuditRuns} onDeleteRuns={deleteAuditRuns}/>}
         {page === 'logs' && <LogsPage/>}
       </section>
 	      {selectedShell&&<SSHShellTerminal
@@ -2280,7 +2288,8 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	const sessionBusy=running||detachedRunning
 	const queueingMessage=queueingMode!==null
 	const toolsRunning=useMemo(()=>entries.some(item=>item.kind==='tool'&&item.transient),[entries])
-	const renderEntries=useMemo(()=>groupedTaskToolEntries(entries),[entries])
+	const conversationEntries=useMemo(()=>[...entries,...queuedMessageEntries(queuedMessages,count=>t('chat.queuedImages',{count}))],[entries,queuedMessages,t])
+	const renderEntries=useMemo(()=>groupedTaskToolEntries(conversationEntries),[conversationEntries])
 	const taskRows=useMemo(()=>tasks?buildSessionTaskRows(tasks):[],[tasks])
 	const latestCompletedAssistantEntryID=useMemo(()=>{
 		if(sessionBusy)return ''
@@ -2373,7 +2382,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			if(container&&stickToLatest.current){container.scrollTop=container.scrollHeight;lastMessagesScrollTop.current=container.scrollTop}
 		})
 		return()=>window.cancelAnimationFrame(autoScrollFrame.current)
-	},[entries,loadingSession,visible])
+	},[entries,loadingSession,queuedMessages,visible])
 
 	const trackUserScroll=useCallback(()=>{
 		const container=messagesRef.current
@@ -2501,7 +2510,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		if(frame.type==='queue_started'&&frame.message_id){
 			startedQueueMessageIDsRef.current.add(frame.message_id)
 			setQueuedMessages(current=>current.filter(item=>item.id!==frame.message_id))
-			setEntries(old=>[...old.map(deactivateReasoning),{id:`queued_${frame.message_id}`,kind:'user',content:frame.content||'',status:'pending'}])
+			setEntries(old=>[...old.map(deactivateReasoning),{id:`queued_${frame.message_id}`,kind:'user',content:frame.content||(frame.attachment_count?t('chat.queuedImages',{count:frame.attachment_count}):''),status:'pending'}])
 		}
 		if(frame.type==='turn_done')setEntries(old=>updateTurnUserStatus(old.map(deactivateReasoning),'completed',frame.user_message_id,userEntryID))
 		if(frame.type==='turn_steered')setEntries(old=>updateTurnUserStatus(old.map(deactivateReasoning),'completed',frame.user_message_id,userEntryID))
@@ -2759,14 +2768,13 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		<div className="conversation-view">
 			<div className="messages" ref={messagesRef} onScroll={trackUserScroll} onWheel={pauseLatestOnWheel} onTouchMove={pauseLatestOnTouch}>
 				{historyHasMore&&<button type="button" className="chat-history-more" disabled={loadingOlderMessages} onClick={()=>void loadOlderMessages()}>{loadingOlderMessages?<LoaderCircle className="spin" size={13}/>:<History size={13}/>} {t('chat.loadEarlier')}</button>}
-				{entries.length === 0 && <div className="empty-chat"><div className="radar"><Activity size={35}/></div><h2>{t('chat.emptyTitle')}</h2></div>}
+				{conversationEntries.length === 0 && <div className="empty-chat"><div className="radar"><Activity size={35}/></div><h2>{t('chat.emptyTitle')}</h2></div>}
 				{renderEntries.map(item=>item.kind==='task_tool_group'?<TaskToolGroupCard key={item.id} group={item} onDisclosure={preserveToolDisclosurePosition}/>:<ChatBubble key={item.entry.id} sessionID={sessionId} entry={item.entry} showActions={item.entry.id===latestCompletedAssistantEntryID} runs={runs} hosts={hosts} onToolDisclosure={preserveToolDisclosurePosition}/>) }
 				{(sessionBusy||toolsRunning)&&<div className={`model-activity ${stopping?'stopping':''}`} role="status" aria-live="polite"><span className="model-activity-mark" aria-hidden="true">✻</span><b key={stopping||connectionRetry||modelRetry?'priority':workStatusIndex}>{workStatusLabel}</b></div>}
 			</div>
 			{tasks&&tasksExpanded&&<SessionTaskItems rows={taskRows}/>}
 		</div>
 		  <form className="composer" onSubmit={submit}>
-			  {queuedMessages.length>0&&<div className="message-queue" role="status"><header><ListPlus size={13}/><b>{t('chat.queueCount',{count:queuedMessages.length})}</b></header><div>{queuedMessages.map((item,index)=>{const imageCount=item.attachments?.length||item.attachment_count||0;return <span key={item.id}><em className={item.mode==='steering'?'steering':''}>{item.mode==='steering'?t('chat.steeringShort'):index+1}</em><b>{item.message||t('chat.queuedImages',{count:imageCount})}</b>{imageCount>0&&item.message&&<small>{t('chat.imageCount',{count:imageCount})}</small>}</span>})}</div></div>}
 			  <div className="context-line"><ApprovalModeStatus settings={settings} onChanged={onSettingsChanged} onError={onError}/><ComposerHostSelector hosts={hosts} disabled={sessionBusy} onChanged={onHostChanged} onError={onError}/><div className="composer-model-controls"><button type="button" className="context-compress-button" disabled={!sessionId||sessionBusy||!!loadingSession||compressingContext} onClick={()=>void compressContext()} title={t('chat.compressContext')} aria-label={t('chat.compressContext')}>{compressingContext?<LoaderCircle className="spin" size={13}/>:<Minimize2 size={13}/>}</button><ContextUsageRing usage={contextUsage}/><ComposerReasoningSelector providers={providers} disabled={sessionBusy} onChanged={onModelChanged} onError={onError}/><ComposerModelSelector providers={providers} fallbackModel={modelName} disabled={sessionBusy} onChanged={onModelChanged} onError={onError}/></div></div>
 			  {pendingImages.length>0&&<div className="composer-images">{pendingImages.map(image=><div key={image.id}><img src={image.url} alt={image.file.name}/><span title={image.file.name}>{image.file.name}</span><button type="button" onClick={()=>removePendingImage(image.id)} title={t('chat.removeImage')}><X size={11}/></button></div>)}</div>}
 			  {imageNotice&&<div className="composer-image-notice">{imageNotice}<button type="button" onClick={()=>setImageNotice('')}><X size={11}/></button></div>}
@@ -2990,7 +2998,7 @@ const ChatBubble=memo(function ChatBubble({ sessionID, entry, showActions, runs,
   if (entry.kind === 'tool') return <ToolEventCard sessionID={sessionID} entry={entry} runs={runs} hosts={hosts} onDisclosure={onToolDisclosure}/>
   if (entry.kind === 'reasoning') return <ReasoningCard content={entry.content} active={!!entry.active}/>
   if (entry.kind === 'assistant' && !entry.content) return null
-	return <div className={`bubble ${entry.kind} ${entry.status||''} ${entry.progress?'progress':''}`}><div className="avatar">{entry.kind === 'user' ? <UserRound size={17}/> : entry.kind === 'error' ? '!' : <Bot size={17}/>}</div><div><span className="bubble-label">{entry.kind === 'user' ? <>{t('chat.operator')}{entry.status==='failed'&&<em>{t('chat.turnIncomplete')}</em>}{entry.status==='pending'&&<em>{t('chat.processing')}</em>}</> : entry.kind === 'error' ? t('common.error') : 'OpsNerva'}</span>{entry.images&&entry.images.length>0&&<div className="message-images">{entry.images.map(image=><a href={image.url} target="_blank" rel="noopener noreferrer" title={`${image.name} · ${formatFileSize(image.sizeBytes)}`} key={image.id}><img src={image.url} alt={image.name}/><span>{image.name}</span></a>)}</div>}{entry.content&&<div className={`bubble-copy ${entry.kind==='assistant'&&entry.lifecycle!=='streaming'?'markdown-body':''}`}>{entry.kind==='assistant'&&entry.lifecycle!=='streaming'?<Suspense fallback={entry.content}><MarkdownMessage content={entry.content}/></Suspense>:entry.content}</div>}{showActions&&<div className="assistant-message-footer"><CopyButton value={entry.content} className="message-copy-button"/>{entry.tokenUsage&&<TokenUsageLine usage={entry.tokenUsage}/>}</div>}</div></div>
+	return <div className={`bubble ${entry.kind} ${entry.status||''} ${entry.progress?'progress':''}`}><div className="avatar">{entry.kind === 'user' ? <UserRound size={17}/> : entry.kind === 'error' ? '!' : <Bot size={17}/>}</div><div><span className="bubble-label">{entry.kind === 'user' ? <>{t('chat.operator')}{entry.status==='failed'&&<em>{t('chat.turnIncomplete')}</em>}{entry.status==='pending'&&<em>{t('chat.processing')}</em>}</> : entry.kind === 'error' ? t('common.error') : 'OpsNerva'}</span>{entry.images&&entry.images.length>0&&<div className="message-images">{entry.images.map(image=>image.url?<a href={image.url} target="_blank" rel="noopener noreferrer" title={`${image.name} · ${formatFileSize(image.sizeBytes)}`} key={image.id}><img src={image.url} alt={image.name}/><span>{image.name}</span></a>:<span className="message-image-placeholder" title={`${image.name} · ${formatFileSize(image.sizeBytes)}`} key={image.id}><ImagePlus size={18}/><span>{image.name}</span></span>)}</div>}{entry.content&&<div className={`bubble-copy ${entry.kind==='assistant'&&entry.lifecycle!=='streaming'?'markdown-body':''}`}>{entry.kind==='assistant'&&entry.lifecycle!=='streaming'?<Suspense fallback={entry.content}><MarkdownMessage content={entry.content}/></Suspense>:entry.content}</div>}{showActions&&<div className="assistant-message-footer"><CopyButton value={entry.content} className="message-copy-button"/>{entry.tokenUsage&&<TokenUsageLine usage={entry.tokenUsage}/>}</div>}</div></div>
 })
 
 function TokenUsageLine({usage}:{usage:ChatTokenUsage}){
@@ -3101,7 +3109,11 @@ function cleanFileChangeOutput(value:string){const lines=value.split(/\r?\n/),re
 type ToolTarget={kind:'host'|'workspace'|'scope';label:string;name:string;id?:string}
 function hostIdentity(hosts:Host[],hostID:string){
 	const host=hosts.find(item=>item.id===hostID||item.name===hostID)
-	return {name:host?.name||'',id:host?.id||hostID}
+	return {name:host?.name||'',id:host?.id||hostID,user:host?.user||''}
+}
+function executionPermission(request:JsonRecord|undefined,hosts:Host[],...hostIDs:string[]){
+	if(request?.elevated===true)return'root'
+	return hostIDs.some(hostID=>hosts.find(host=>host.id===hostID||host.name===hostID)?.user.trim().toLowerCase()==='root')?'root':'user'
 }
 function recordArray(value:unknown,fromEnd=false){
 	if(!Array.isArray(value))return[]
@@ -3171,7 +3183,7 @@ const TaskToolGroupCard=memo(function TaskToolGroupCard({group,onDisclosure}:{gr
 	})
 	const summary=operations.map(operation=>operation.summary).join(' · ')
 	return <details className={`tool-event tool-event-rich task-tool-group ${status}`} open={expanded}>
-		<summary onClick={event=>{event.preventDefault();onDisclosure(event.currentTarget);setExpanded(value=>!value)}}><div className="tool-summary-icon"><ListChecks size={15}/></div><div className="tool-summary-copy"><div className="tool-summary-heading"><b>{toolLabel(group.tool)}</b><span className="task-tool-group-count">{t('agentTasks.operationCount',{count:group.entries.length})}</span></div><code title={summary}>{summary}</code></div><div className="tool-summary-statuses"><span className={`tool-status ${status}`} key={status}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight size={14}/></summary>
+		<summary onClick={event=>{event.preventDefault();onDisclosure(event.currentTarget);setExpanded(value=>!value)}}><div className="tool-summary-icon"><ListChecks size={15}/></div><div className="tool-summary-copy"><div className="tool-summary-heading"><b>{toolLabel(group.tool)}</b><span className="task-tool-group-count">{t('agentTasks.operationCount',{count:group.entries.length})}</span><code title={summary}>{summary}</code></div></div><div className="tool-summary-statuses"><span className={`tool-status ${status}`} key={status}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight className="tool-summary-chevron" size={14}/></summary>
 		{expanded&&<div className="tool-event-body"><CompactTable title={t('agentTasks.operations')} columns={[t('agentTasks.operation'),t('tool.actualParameters'),t('common.status')]} rows={operations.map(operation=>[operation.summary,operation.arguments,t(`statusLabels.${operation.status}`,{defaultValue:operation.status.replaceAll('_',' ')})])}/></div>}
 	</details>
 },(previous,next)=>previous.onDisclosure===next.onDisclosure&&previous.group.tool===next.group.tool&&previous.group.entries.length===next.group.entries.length&&previous.group.entries.every((entry,index)=>entry===next.group.entries[index]))
@@ -3339,6 +3351,8 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,onDisclosure}:{s
 	const exitCode=typeof payload.exit_code==='number'?payload.exit_code:typeof resultExitCode==='number'?resultExitCode:run?.exit_code??'—'
 	const duration=formatDuration(payload.duration??resultPayload?.duration,run)
 	const autoApproved=payload.auto_approved===true||resultPayload?.auto_approved===true||runAutoApproved(run)
+	const permission=executionPermission(request,hosts,destinationHostID,...(sshTransfer?[sourceHostID]:[]))
+	const purpose=request?textValue(request.reason):''
 	const toggleExpanded=(summary:HTMLElement)=>{
 		onDisclosure(summary)
 		const opening=!expanded
@@ -3348,7 +3362,7 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,onDisclosure}:{s
 		void api.chatMessage(sessionID,initialEntry.sourceMessageId).then(message=>setFullContent(message.content)).catch(error=>setDetailError(errorText(error))).finally(()=>setLoadingDetail(false))
 	}
 		  return <details className={`tool-event tool-event-rich ${status}`} open={expanded}>
-			<summary onClick={event=>{event.preventDefault();toggleExpanded(event.currentTarget)}}><div className="tool-summary-icon">{toolSummaryIcon(entry.tool)}</div><div className="tool-summary-copy"><div className="tool-summary-heading"><b>{summaryLabel}</b>{targets.length>0&&<div className="tool-summary-targets">{targets.map((target,index)=><span className={`tool-target-chip tool-target-${target.kind}`} title={`${target.label}: ${[target.name,target.id].filter(Boolean).join(' · ')}`} key={`${target.kind}_${target.id||target.name}_${index}`}>{target.kind==='host'?<Server size={11}/>:target.kind==='workspace'?<FolderOpen size={11}/>:<ListChecks size={11}/>} {(targets.length>1||target.kind==='scope')&&<em>{target.label}</em>}<b>{target.name||target.id}</b></span>)}</div>}</div>{commandSummary!==summaryLabel&&<code title={previewText(commandSummary)}>{previewText(commandSummary)}</code>}</div><div className="tool-summary-statuses">{loadingDetail&&<LoaderCircle className="spin" size={12}/>} {autoApproved&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}<span className={`tool-status ${status}`} key={status}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight size={14}/>{status==='in_progress'&&<div className={`tool-live-progress ${transferTotal>0?'determinate':''}`} role="progressbar" aria-valuemin={transferTotal>0?0:undefined} aria-valuemax={transferTotal>0?transferTotal:undefined} aria-valuenow={transferTotal>0?transferred:undefined}><i><em style={transferTotal>0?{width:`${transferPercent}%`}:undefined}/></i><span>{transferTotal>0?`${formatFileSize(transferred)} / ${formatFileSize(transferTotal)}`:entry.liveOutputStream?.toUpperCase()||''}</span><time>{elapsed}</time></div>}{outputPreview&&<div className={`tool-summary-preview ${previewStream==='stderr'?'stderr':''}`}><span>{shellAction==='output'?shellActionLabel:(previewStream||'stdout').toUpperCase()}</span><pre>{outputPreview}</pre></div>}</summary>
+			<summary onClick={event=>{event.preventDefault();toggleExpanded(event.currentTarget)}}><div className="tool-summary-icon">{toolSummaryIcon(entry.tool)}</div><div className="tool-summary-copy"><div className="tool-summary-heading"><b>{summaryLabel}</b>{targets.length>0&&<div className="tool-summary-targets">{targets.map((target,index)=><span className={`tool-target-chip tool-target-${target.kind}`} title={`${target.label}: ${[target.name,target.id].filter(Boolean).join(' · ')}`} key={`${target.kind}_${target.id||target.name}_${index}`}>{target.kind==='host'?<Server size={11}/>:target.kind==='workspace'?<FolderOpen size={11}/>:<ListChecks size={11}/>} {(targets.length>1||target.kind==='scope')&&<em>{target.label}</em>}<b>{target.name||target.id}</b></span>)}</div>}{commandSummary!==summaryLabel&&<code title={previewText(commandSummary)}>{previewText(commandSummary)}</code>}</div></div><div className="tool-summary-statuses">{loadingDetail&&<LoaderCircle className="spin" size={12}/>} {autoApproved&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}<span className={`tool-status ${status}`} key={status}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight className="tool-summary-chevron" size={14}/>{request&&<div className="tool-summary-meta"><span className={`tool-summary-permission ${permission}`}><em>{t('tool.permission')}</em><b>{permission}</b></span>{purpose&&<span className="tool-summary-purpose" title={purpose}><em>{t('tool.reason')}</em><b>{purpose}</b></span>}</div>}{status==='in_progress'&&<div className={`tool-live-progress ${transferTotal>0?'determinate':''}`} role="progressbar" aria-valuemin={transferTotal>0?0:undefined} aria-valuemax={transferTotal>0?transferTotal:undefined} aria-valuenow={transferTotal>0?transferred:undefined}><i><em style={transferTotal>0?{width:`${transferPercent}%`}:undefined}/></i><span>{transferTotal>0?`${formatFileSize(transferred)} / ${formatFileSize(transferTotal)}`:entry.liveOutputStream?.toUpperCase()||''}</span><time>{elapsed}</time></div>}{outputPreview&&<div className={`tool-summary-preview ${previewStream==='stderr'?'stderr':''}`}><span>{shellAction==='output'?shellActionLabel:(previewStream||'stdout').toUpperCase()}</span><pre>{outputPreview}</pre></div>}</summary>
 		{expanded&&<div className="tool-event-body">
 		  {detailError&&<div className="tool-detail-error">{detailError}</div>}
 		  {shellPrimaryAction&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellPrimaryContent||'—'}/><pre>{previewText(shellPrimaryContent||'—',toolOutputPreviewChars)}</pre></div></section>}
@@ -3356,15 +3370,12 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,onDisclosure}:{s
 		  {!executionTool&&toolArguments&&hasRecordEntries(toolArguments)&&<CompactTable title={t('tool.actualParameters')} columns={[t('tool.parameter'),t('tool.value')]} rows={limitedRecordEntries(toolArguments).entries.map(([key,value])=>[key,safeToolArgument(value,key)])}/>}
       {request?<div className="tool-execution-layout">
         <section className="tool-command-pane">
-		  <div className="tool-command-head"><span>{shellOperation?t('sshShell.title'):tunnelOperation?t('tunnels.forwarding'):structuredFileOperation?t(fileSearchMode?'tool.searchOperation':'tool.readOperation'):filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}{request.elevated===true&&<em><ShieldAlert size={12}/>sudo / root</em>}</div>
+		  <div className="tool-command-head"><span>{shellOperation?t('sshShell.title'):tunnelOperation?t('tunnels.forwarding'):structuredFileOperation?t(fileSearchMode?'tool.searchOperation':'tool.readOperation'):filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}</div>
 			  <div className="tool-command-block"><CopyButton value={script||(program?()=>fullProgram(request,true):commandSummary)}/>{shellOperation?<pre>{shellSummary}</pre>:tunnelOperation?<pre>{tunnelRoute||requestMode}</pre>:workspaceUpload?<pre>workspace_upload {workspaceID}:{relativePath} → {hostName}:{remotePath}</pre>:workspaceDownload?<pre>workspace_download {hostName}:{remotePath} → {workspaceID}:{relativePath}</pre>:sshTransfer?<pre>{sourceHostName}:{sourcePath} → {hostName}:{remotePath}</pre>:structuredFileOperation?<pre>{fileSearchMode?'search':'read'} {fileTarget}</pre>:filePath?<pre>{requestMode} {workspaceID?`${workspaceID}:`:''}{filePath}</pre>:script?<pre>{previewText(script,toolOutputPreviewChars)}</pre>:program?<pre><span className="prompt-sign">$</span> {previewText(program)}</pre>:<pre>{requestMode} {remotePath}</pre>}</div>
 		  {change&&textValue(change.diff)&&<DiffViewer change={change}/>}
 		  {env&&hasRecordEntries(env)&&<CompactTable title={t('tool.environment')} columns={[t('tool.key'),t('tool.value')]} rows={recordTableRows(env)}/>}
         </section>
-        <aside className="tool-context-pane">
-		  <dl className="tool-context-grid"><div><dt>{t('tool.permission')}</dt><dd>{workspaceShellBackend==='host'?t('tool.hostAuthority'):workspaceShellBackend==='sandbox'?t('tool.sandbox'):request.elevated===true?t('tool.managedSudo'):t('tool.normalUser')}</dd></div>{exitCode!=='—'&&<div><dt>{t('tool.exitCode')}</dt><dd>{exitCode}</dd></div>}{duration!=='—'&&<div><dt>{t('tool.duration')}</dt><dd>{duration}</dd></div>}{(waitDeadlineReached||shellHasMore)&&<div><dt>{t('common.status')}</dt><dd>{waitDeadlineReached?t('tool.waitDeadline'):t('tool.moreOutput')}</dd></div>}</dl>
-		  {textValue(request.reason)&&<div className="tool-reason"><span>{t('tool.reason')}</span><p>{textValue(request.reason)}</p></div>}
-        </aside>
+		{(exitCode!=='—'||duration!=='—'||waitDeadlineReached||shellHasMore)&&<aside className="tool-context-pane"><dl className="tool-context-grid">{exitCode!=='—'&&<div><dt>{t('tool.exitCode')}</dt><dd>{exitCode}</dd></div>}{duration!=='—'&&<div><dt>{t('tool.duration')}</dt><dd>{duration}</dd></div>}{(waitDeadlineReached||shellHasMore)&&<div><dt>{t('common.status')}</dt><dd>{waitDeadlineReached?t('tool.waitDeadline'):t('tool.moreOutput')}</dd></div>}</dl></aside>}
       </div>:!shellPrimaryAction&&!shellOutputAction&&(webTool?<WebToolResult tool={entry.tool!} payload={payload}/>:<GenericToolResult payload={payload}/>)}
 	  {file&&<FileMetadataPanel file={file}/>}
 	  {fileSearchMode&&searchResult&&<div className={`file-search-result ${searchFound?'found':'empty'}`}><Search size={15}/><div><b>{t(searchFound?'tool.searchMatched':'tool.searchNoMatches')}</b><span>{searchMatchModeLabel} · {searchPattern}</span></div></div>}
@@ -3625,18 +3636,19 @@ function ApprovalDialog({
   const sourceHostID = textValue(request.source_host_id);
   const sourcePath = textValue(request.source_path);
   const elevated = request.elevated === true;
+  const rootExecution = executionPermission(request, hosts, approval.host_id, ...(sshTransfer ? [sourceHostID] : [])) === "root";
   const actionKind = script
     ? t("approval.actionScript")
     : t("approval.actionCommand");
   const approvalTitle = fileReadApproval
-    ? elevated
+    ? rootExecution
       ? t(fileSearchApproval ? "approval.sudoSearchTitle" : "approval.sudoReadTitle")
       : t(fileSearchApproval ? "approval.searchTitle" : "approval.readTitle")
     : tunnelApproval
       ? t("approval.tunnelTitle")
     : interactiveShellApproval
       ? t("approval.sshShellTitle")
-    : elevated
+    : rootExecution
     ? filePath
       ? t("approval.sudoFileTitle")
       : t("approval.sudoTitle", { kind: actionKind })
@@ -3654,7 +3666,7 @@ function ApprovalDialog({
           ? t("approval.fileTitle")
           : t("approval.executeTitle", { kind: actionKind });
   const commandLabel = fileReadApproval
-    ? elevated
+    ? rootExecution
       ? t(fileSearchApproval ? "approval.rootSearchLabel" : "approval.rootReadLabel")
       : t(fileSearchApproval ? "approval.searchLabel" : "approval.readLabel")
     : interactiveShellApproval
@@ -3665,7 +3677,7 @@ function ApprovalDialog({
       ? t("approval.uploadLabel")
     : workspaceDownload
       ? t("approval.downloadLabel")
-    : elevated
+    : rootExecution
       ? filePath
         ? t("approval.rootFileLabel")
         : t("approval.rootCommandLabel", { kind: actionKind })
@@ -3705,9 +3717,7 @@ function ApprovalDialog({
     : workspaceID
       ? `Workspace / ${workspaceID}`
       : targetHostIdentity;
-  const executionIdentity = elevated
-    ? t("approval.rootViaSudo")
-    : target?.user || t("approval.serviceUser");
+  const executionIdentity = rootExecution ? "root" : "user";
   const expectedSHA = textValue(request.expected_sha256),
     expectedDestinationSHA = textValue(request.expected_destination_sha256),
     validator = textValue(request.validator);
@@ -3799,7 +3809,7 @@ function ApprovalDialog({
   return (
     <div className="approval-modal-backdrop">
       <section
-        className={`approval-dialog ${elevated ? "elevated" : ""}`}
+        className={`approval-dialog ${rootExecution ? "elevated" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="approval-dialog-title"
@@ -3823,14 +3833,14 @@ function ApprovalDialog({
         <div className="approval-operation">
           <span className="approval-command-label">
             {commandLabel}
-            {elevated && (
+            {rootExecution && (
               <em>
                 <ShieldAlert size={12} />
-                sudo / root
+                root
               </em>
             )}
           </span>
-          {elevated && (
+          {rootExecution && (
             <div className="approval-root-warning">
               <ShieldAlert size={18} />
               <div>
@@ -3969,7 +3979,7 @@ function ApprovalDialog({
               <b>
                 {decisionBusy === "once"
                   ? t("approval.executing")
-                  : elevated
+                  : rootExecution
                     ? t("approval.allowSudo")
                     : t("approval.allowOnce")}
               </b>
@@ -4065,7 +4075,7 @@ function HostsPage({ hosts, proxies, showAddresses, onToggleAddresses, refresh }
 	  <label><span>{t('hosts.sudoPolicy')}</span><AppSelect value={form.sudo_mode} ariaLabel={t('hosts.sudoPolicy')} onChange={value=>{setFormErrors(current=>({...current,sudo_password:''}));setForm({...form,sudo_mode:value as HostSudoMode,sudo_password:''})}} options={(['none','nopasswd','password'] as HostSudoMode[]).map(mode=>({value:mode,label:sudoLabel(mode)}))}/></label>
 	  {form.sudo_mode==='password'&&<label className={formErrors.sudo_password?'invalid':''}><span>{t('hosts.sudoPasswordLabel')}</span><PasswordInput autoComplete="new-password" value={form.sudo_password} aria-invalid={!!formErrors.sudo_password} onChange={event=>updateHostForm('sudo_password',event.target.value)} placeholder={editing?t('hosts.keepPassword'):t('common.required')}/>{formErrors.sudo_password&&<small className="form-field-error">{formErrors.sudo_password}</small>}</label>}
 		</div><div className="form-actions"><button type="button" onClick={()=>setShowForm(false)}>{t('common.cancel')}</button><button className="primary" disabled={saving||!!privateKeyError||missingPrivateKey}>{saving?t('common.saving'):editing?t('hosts.update'):t('hosts.save')}</button></div></form></ConfigurationEditorPage>}
-		{!showForm&&<div className="host-grid">{hosts.map(host=>{const key=hostKeys[host.id]||host.host_key,keyError=hostKeyErrors[host.id],scanning=hostKeyBusy===`scan-${host.id}`,trusting=hostKeyBusy===`trust-${host.id}`,proxy=proxies.find(item=>item.id===host.proxy_id);return <article className="host-card panel" key={host.id}><div className="host-top"><div className="server-glyph"><Server size={22}/></div><div><h3>{host.name}</h3><span>{`${host.user}@${showAddresses?host.address:'••••••'}:${host.port}`}</span></div><div className="host-top-states"><span className={`host-agent-state ${host.agent_enabled?'active':''}`} title="Agent"><Bot size={13}/></span><span className={`host-key-state ${key?.trusted?'trusted':key?'untrusted':'unchecked'}`}>{scanning?t('hosts.checkingKey'):key?.trusted?t('hosts.trustedKey'):key?t('hosts.untrustedKey'):t('hosts.uncheckedKey')}</span></div></div><dl><div><dt>{t('hosts.authentication')}</dt><dd>{authLabel(host.auth_type||'agent')}</dd></div>{proxy&&<div><dt>{t('hosts.proxy')}</dt><dd title={showAddresses?proxy.url:undefined}>{proxy.name}</dd></div>}<div><dt>Sudo</dt><dd>{sudoLabel(host.sudo_mode||'none')}</dd></div><div><dt>{t('hosts.hostId')}</dt><dd>{host.id}</dd></div></dl>{(key||keyError)&&<div className={`host-key-review ${key?.trusted?'trusted':'untrusted'}`}>{key&&<><div><KeyRound size={14}/><span><b>{key.algorithm||t('hosts.hostKey')}</b><code title={key.fingerprint}>{key.fingerprint}</code></span></div>{!key.trusted&&<button className="trust" disabled={trusting} onClick={()=>void trust(host)}>{trusting?<LoaderCircle className="spin" size={13}/>:<ShieldCheck size={13}/>} {trusting?t('hosts.trustingKey'):t('hosts.trustKey')}</button>}</>}{keyError&&<span className="host-key-error">{keyError}</span>}</div>}<div className="card-actions"><button onClick={()=>void probe(host)}><Activity size={15}/>{t('hosts.probe')}</button><button disabled={scanning||trusting} onClick={()=>void scan(host)}>{scanning?<LoaderCircle className="spin" size={15}/>:<KeyRound size={15}/>} {t('hosts.checkKey')}</button><button onClick={()=>openEdit(host)}><Edit3 size={15}/>{t('common.edit')}</button><button className="danger" disabled={deletingHost===host.id} title={t('common.delete')} onClick={()=>setDeleteCandidate(host)}>{deletingHost===host.id?<LoaderCircle className="spin" size={15}/>:<Trash2 size={15}/>}</button></div></article>})}</div>}
+		{!showForm&&<div className="host-grid">{hosts.map(host=>{const key=hostKeys[host.id]||host.host_key,keyError=hostKeyErrors[host.id],scanning=hostKeyBusy===`scan-${host.id}`,trusting=hostKeyBusy===`trust-${host.id}`,proxy=proxies.find(item=>item.id===host.proxy_id);return <article className="host-card panel" key={host.id}><div className="host-top"><div className="server-glyph"><Server size={22}/></div><div><h3>{host.name}</h3><span>{`${host.user}@${showAddresses?host.address:'••••••'}:${host.port}`}</span></div><div className="host-top-states"><span className={`host-agent-state ${host.agent_enabled?'active':''}`} title="Agent"><Bot size={13}/></span><span className={`host-key-state ${key?.trusted?'trusted':key?'untrusted':'unchecked'}`}>{scanning?t('hosts.checkingKey'):key?.trusted?t('hosts.trustedKey'):key?t('hosts.untrustedKey'):t('hosts.uncheckedKey')}</span></div></div><dl><div><dt>{t('hosts.authentication')}</dt><dd>{authLabel(host.auth_type||'agent')}</dd></div>{proxy&&<div><dt>{t('hosts.proxy')}</dt><dd title={showAddresses?proxy.url:undefined}>{proxy.name}</dd></div>}<div><dt>{t('hosts.sudoPolicy')}</dt><dd>{sudoLabel(host.sudo_mode||'none')}</dd></div><div><dt>{t('hosts.hostId')}</dt><dd>{host.id}</dd></div></dl>{(key||keyError)&&<div className={`host-key-review ${key?.trusted?'trusted':'untrusted'}`}>{key&&<><div><KeyRound size={14}/><span><b>{key.algorithm||t('hosts.hostKey')}</b><code title={key.fingerprint}>{key.fingerprint}</code></span></div>{!key.trusted&&<button className="trust" disabled={trusting} onClick={()=>void trust(host)}>{trusting?<LoaderCircle className="spin" size={13}/>:<ShieldCheck size={13}/>} {trusting?t('hosts.trustingKey'):t('hosts.trustKey')}</button>}</>}{keyError&&<span className="host-key-error">{keyError}</span>}</div>}<div className="card-actions"><button onClick={()=>void probe(host)}><Activity size={15}/>{t('hosts.probe')}</button><button disabled={scanning||trusting} onClick={()=>void scan(host)}>{scanning?<LoaderCircle className="spin" size={15}/>:<KeyRound size={15}/>} {t('hosts.checkKey')}</button><button onClick={()=>openEdit(host)}><Edit3 size={15}/>{t('common.edit')}</button><button className="danger" disabled={deletingHost===host.id} title={t('common.delete')} onClick={()=>setDeleteCandidate(host)}>{deletingHost===host.id?<LoaderCircle className="spin" size={15}/>:<Trash2 size={15}/>}</button></div></article>})}</div>}
 	{!showForm&&!hosts.length && <Empty icon={<Server/>} title={t('hosts.emptyTitle')}/>}
 	{deleteCandidate&&<DestructiveConfirmDialog title={t('hosts.deleteTitle',{name:deleteCandidate.name})} busy={deletingHost===deleteCandidate.id} onCancel={()=>setDeleteCandidate(null)} onConfirm={()=>void remove()}/>}
   </div>
@@ -4193,6 +4203,8 @@ function AuditRunDetail({run,req,hosts}:{run:Run;req:JsonRecord;hosts:Host[]}){
 	const workspaceDownload=mode==='workspace_download'
 	const workspaceTransfer=workspaceUpload||workspaceDownload
 	const sshTransfer=mode==='ssh_file_transfer'
+	const permission=executionPermission(req,hosts,run.host_id,...(sshTransfer?[textValue(req.source_host_id)]:[]))
+	const rootExecution=permission==='root'
 	const tunnelMode=mode==='ssh_tunnel_start'
 	const shellMode=mode==='ssh_shell_start'||mode==='workspace_shell_start'
 	const shellModeLabel=mode==='ssh_shell_start'?`SSH Shell · ${t('sshShell.toolActions.start')}`:`Workspace Shell · ${t('sshShell.toolActions.start')}`
@@ -4203,7 +4215,7 @@ function AuditRunDetail({run,req,hosts}:{run:Run;req:JsonRecord;hosts:Host[]}){
 	return <div className="audit-run-detail">
 		<div className="audit-run-primary">
 			<section className="audit-operation-pane">
-				<div className="tool-command-head"><span>{shellMode?shellModeLabel:tunnelMode?t('tunnels.forwarding'):searchMode?t('tool.searchOperation'):readMode?t('tool.readOperation'):workspaceTransfer||sshTransfer||filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{(workspaceShellBackend||req.elevated===true)&&<div className="audit-operation-badges">{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}{req.elevated===true&&<em><ShieldAlert size={12}/>sudo / root</em>}</div>}</div>
+				<div className="tool-command-head"><span>{shellMode?shellModeLabel:tunnelMode?t('tunnels.forwarding'):searchMode?t('tool.searchOperation'):readMode?t('tool.readOperation'):workspaceTransfer||sshTransfer||filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{(workspaceShellBackend||rootExecution)&&<div className="audit-operation-badges">{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}{rootExecution&&<em><ShieldAlert size={12}/>root</em>}</div>}</div>
 				<div className="tool-command-block"><CopyButton value={program&&commandText===program?()=>fullProgram(req,true):commandText}/><pre>{program&&commandText===program?<><span className="prompt-sign">$</span> {previewText(program)}</>:previewText(commandText,toolOutputPreviewChars)}</pre></div>
 				{change&&textValue(change.diff)&&<DiffViewer change={change}/>}
 			</section>
@@ -4212,7 +4224,7 @@ function AuditRunDetail({run,req,hosts}:{run:Run;req:JsonRecord;hosts:Host[]}){
 					<div><dt>{workspaceID&&!sshTransfer?t('common.workspace'):t('tool.targetHost')}</dt><dd>{workspaceID&&!sshTransfer?workspaceID:[destinationHost.name,destinationHost.id].filter(Boolean).join(' · ')||'—'}</dd></div>
 					{sshTransfer&&<div><dt>{t('tool.sourceHost')}</dt><dd>{[sourceHost.name,sourceHost.id].filter(Boolean).join(' · ')||'—'}</dd></div>}
 					<div><dt>{tunnelMode?t('tunnels.remoteEndpoint'):filePath?t('tool.filePath'):t('tool.workingDirectory')}</dt><dd>{tunnelMode?`${textValue(req.remote_host)}:${numberValue(req.remote_port)}`:filePath||textValue(req.cwd)||t('tool.defaultDirectory')}</dd></div>
-					<div><dt>{t('tool.permission')}</dt><dd>{workspaceShellBackend==='host'?t('tool.hostAuthority'):workspaceShellBackend==='sandbox'?t('tool.sandbox'):req.elevated===true?t('tool.managedSudo'):t('tool.normalUser')}</dd></div>
+					<div><dt>{t('tool.permission')}</dt><dd>{permission}</dd></div>
 					<div><dt>{t('tool.duration')}</dt><dd>{formatDuration(undefined,run)}</dd></div>
 				</dl>
 				{textValue(req.reason)&&<div className="audit-run-purpose"><span>{t('tool.reason')}</span><p>{textValue(req.reason)}</p></div>}
@@ -4260,9 +4272,7 @@ function auditOperationSummary(req:JsonRecord,run:Run,hosts:Host[],t:TFunction){
 	}
 }
 
-const deletableAuditRunStatuses=new Set(['completed','failed','partial','interrupted','rejected','denied','expired','stopped','closed','skipped','cancelled','canceled','unavailable'])
-
-function AuditRunRow({run,hosts,onDelete}:{run:Run;hosts:Host[];onDelete:(run:Run)=>void}){
+function AuditRunRow({run,hosts}:{run:Run;hosts:Host[]}){
 	const {t,i18n:instance}=useTranslation()
 	const [detail,setDetail]=useState<Run|null>(null)
 	const [loading,setLoading]=useState(false)
@@ -4290,14 +4300,13 @@ function AuditRunRow({run,hosts,onDelete}:{run:Run;hosts:Host[];onDelete:(run:Ru
 		</summary>
 		<div className="run-detail">
 			{loading?<div className="audit-loading" role="status"><LoaderCircle className="spin" size={16}/><span>{t('common.loading')}</span></div>:error?<div className="inline-error">{error}</div>:detail&&<AuditRunDetail run={resolved} req={resolvedRequest} hosts={hosts}/>}
-			{deletableAuditRunStatuses.has(run.status)&&<div className="audit-run-actions"><button type="button" className="danger" onClick={()=>onDelete(run)}><Trash2 size={13}/>{t('common.delete')}</button></div>}
 		</div>
 	</details>
 }
 
-type AuditDeleteTarget={kind:'run';run:Run}|{kind:'session';id:string;title:string}|{kind:'all'}
+type AuditDeleteTarget={kind:'session';id:string;title:string}|{kind:'all'}
 
-function AuditPage({runs,hosts,sessions,ready,runsHasMore,loadingMore,onLoadMoreRuns,onDeleteRun,onDeleteRuns}:{runs:Run[];hosts:Host[];sessions:ChatSession[];ready:boolean;runsHasMore:boolean;loadingMore:boolean;onLoadMoreRuns:()=>Promise<void>;onDeleteRun:(id:string)=>Promise<void>;onDeleteRuns:(sessionID?:string|null)=>Promise<void>}) {
+function AuditPage({runs,hosts,sessions,ready,runsHasMore,loadingMore,onLoadMoreRuns,onDeleteRuns}:{runs:Run[];hosts:Host[];sessions:ChatSession[];ready:boolean;runsHasMore:boolean;loadingMore:boolean;onLoadMoreRuns:()=>Promise<void>;onDeleteRuns:(sessionID?:string|null)=>Promise<void>}) {
 	const {t,i18n:instance}=useTranslation()
 	const [query,setQuery]=useState('')
 	const [deleteTarget,setDeleteTarget]=useState<AuditDeleteTarget|null>(null)
@@ -4323,21 +4332,20 @@ function AuditPage({runs,hosts,sessions,ready,runsHasMore,loadingMore,onLoadMore
 		if(!deleteTarget||deleting)return
 		setDeleting(true)
 		try{
-			if(deleteTarget.kind==='run')await onDeleteRun(deleteTarget.run.id)
-			else if(deleteTarget.kind==='session')await onDeleteRuns(deleteTarget.id)
+			if(deleteTarget.kind==='session')await onDeleteRuns(deleteTarget.id)
 			else await onDeleteRuns(undefined)
 			setDeleteTarget(null)
 		}catch{/* the application notification channel presents the actionable error */}
 		finally{setDeleting(false)}
 	}
-	const deleteTitle=deleteTarget?.kind==='run'?t('audit.deleteRunTitle'):deleteTarget?.kind==='session'?t('audit.deleteSessionTitle',{title:deleteTarget.title}):t('audit.deleteAllTitle')
+	const deleteTitle=deleteTarget?.kind==='session'?t('audit.deleteSessionTitle',{title:deleteTarget.title}):t('audit.deleteAllTitle')
 	if(!ready)return <div className="audit-loading panel" role="status"><LoaderCircle className="spin" size={16}/><span>{t('common.loading')}</span></div>
 	return <div className="page-stack">
 		<div className="audit-toolbar"><div className="search-box"><Search size={16}/><input aria-label={t('common.search')} value={query} onChange={event=>setQuery(event.target.value)}/></div><span>{t('audit.counts',{sessions:groups.length,runs:filtered.length})}</span>{runs.length>0&&<button type="button" className="audit-clear-button" onClick={()=>setDeleteTarget({kind:'all'})}><Trash2 size={13}/>{t('audit.clear')}</button>}</div>
 		<div className="audit-groups">{groups.map(group=><details className="audit-session panel" key={group.id}>
 			<summary className="audit-session-summary"><div className="audit-session-glyph"><History size={17}/></div><div className="audit-session-name"><b>{group.title}</b><span>{group.id==='__direct__'?t('audit.noSession'):group.id} · {t('audit.lastRun',{date:new Date(group.latest).toLocaleString(localeFor(instance.language))})}</span></div><div className="audit-session-stats"><span><b>{group.runs.length}</b> {t('audit.runs')}</span>{group.pending>0&&<span className="pending-count"><b>{group.pending}</b> {t('audit.pending')}</span>}</div><ChevronRight className="audit-session-chevron" size={17}/></summary>
 			<div className="audit-session-actions"><button type="button" className="danger" onClick={()=>setDeleteTarget({kind:'session',id:group.id==='__direct__'?'':group.id,title:group.title})}><Trash2 size={13}/>{t('audit.deleteSession')}</button></div>
-			<div className="audit-table"><div className="audit-row audit-head"><span>{t('audit.columns.time')}</span><span>{t('audit.columns.operation')}</span><span>{t('audit.columns.status')}</span><span>{t('audit.columns.host')}</span><span>{t('audit.columns.exit')}</span><span aria-hidden="true"/></div>{group.runs.map(run=><AuditRunRow key={run.id} run={run} hosts={hosts} onDelete={run=>setDeleteTarget({kind:'run',run})}/>)}</div>
+			<div className="audit-table"><div className="audit-row audit-head"><span>{t('audit.columns.time')}</span><span>{t('audit.columns.operation')}</span><span>{t('audit.columns.status')}</span><span>{t('audit.columns.host')}</span><span>{t('audit.columns.exit')}</span><span aria-hidden="true"/></div>{group.runs.map(run=><AuditRunRow key={run.id} run={run} hosts={hosts}/>)}</div>
 		</details>)}</div>
 		{runsHasMore&&<button type="button" className="audit-load-more panel" disabled={loadingMore} onClick={()=>void onLoadMoreRuns()}>{loadingMore?<LoaderCircle className="spin" size={14}/>:<History size={14}/>} {t('audit.loadMore')}</button>}
 		{!runs.length&&<Empty icon={<History/>} title={t('audit.emptyTitle')}/>}
