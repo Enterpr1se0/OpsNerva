@@ -59,6 +59,7 @@ type sshShellState struct {
 	persistBytes   int
 	persistTimer   *time.Timer
 	persistAbort   sync.Once
+	history        shellHistory
 }
 
 type sshShellSubscriber struct {
@@ -67,6 +68,24 @@ type sshShellSubscriber struct {
 	done         chan struct{}
 	overflowOnce sync.Once
 	cancelOnce   sync.Once
+}
+
+func (s *Service) historyForState(state *sshShellState) shellHistory {
+	if state.history != nil {
+		return state.history
+	}
+	return &persistentShellHistory{store: s.store, shellID: state.shell.ID}
+}
+
+func (s *Service) historyForShell(id string) (shellHistory, *sshShellState) {
+	id = strings.TrimSpace(id)
+	s.shellMu.RLock()
+	state := s.shells[id]
+	s.shellMu.RUnlock()
+	if state != nil {
+		return s.historyForState(state), state
+	}
+	return &persistentShellHistory{store: s.store, shellID: id}, nil
 }
 
 func (s *Service) SubscribeSSHShellEvents(id string) (<-chan domain.SSHShellEvent, <-chan struct{}, func()) {
@@ -120,32 +139,72 @@ func (s *Service) StartOperatorSSHShell(ctx context.Context, hostID, surface, ac
 	if surface != domain.SSHShellSurfaceQuick && surface != domain.SSHShellSurfaceWorkspace {
 		return domain.SSHShell{}, fmt.Errorf("invalid SSH shell surface %q", surface)
 	}
-	result, err := s.executeOperatorRun(ctx, domain.ExecRequest{
+	req := domain.ExecRequest{
 		HostID:       strings.TrimSpace(hostID),
 		Mode:         domain.ExecSSHShellStart,
 		Reason:       webOperatorReason,
 		ShellSurface: surface,
-	}, actor)
+	}
+	normalizeRequest(&req, s.limits)
+	if err := validateRequestLimits(req, s.limits, s.redactor); err != nil {
+		return domain.SSHShell{}, err
+	}
+	host, err := s.store.GetHost(ctx, req.HostID)
 	if err != nil {
 		return domain.SSHShell{}, err
 	}
-	if result.Shell == nil {
-		return domain.SSHShell{}, fmt.Errorf("SSH shell start completed without shell state")
+	connection, digest, err := s.resolveSSHConnection(ctx, host)
+	if err != nil {
+		return domain.SSHShell{}, err
 	}
-	return *result.Shell, nil
+	bindSSHRequest(&req, digest)
+	if err := validateExecutionRequest(host, req); err != nil {
+		return domain.SSHShell{}, err
+	}
+	connection, err = s.hydrateSSHConnection(connection, false)
+	if err != nil {
+		return domain.SSHShell{}, err
+	}
+	release, err := s.acquire(ctx, host.ID)
+	if err != nil {
+		return domain.SSHShell{}, err
+	}
+	defer release()
+	return s.openOperatorSSHTerminal(ctx, host, connection, req, actor)
 }
 
 func (s *Service) ListSSHShells(ctx context.Context, sessionID string, activeOnly bool, reason, actor string) (domain.SSHShellList, error) {
-	shells, err := s.store.ListSSHShells(ctx, strings.TrimSpace(sessionID), activeOnly)
+	sessionID = strings.TrimSpace(sessionID)
+	shells, err := s.store.ListSSHShells(ctx, sessionID, activeOnly)
 	if err != nil {
 		return domain.SSHShellList{}, err
 	}
-	if reason = strings.TrimSpace(reason); reason != "" {
+	seen := make(map[string]struct{}, len(shells))
+	for _, shell := range shells {
+		seen[shell.ID] = struct{}{}
+	}
+	s.shellMu.RLock()
+	for _, state := range s.shells {
+		state.mu.Lock()
+		shell := state.shell
+		transient := !s.historyForState(state).Persistent()
+		state.mu.Unlock()
+		if !transient || (sessionID != "" && shell.SessionID != sessionID) || (activeOnly && !shellStatusActive(shell.Status)) {
+			continue
+		}
+		if _, exists := seen[shell.ID]; !exists {
+			shells = append(shells, shell)
+			seen[shell.ID] = struct{}{}
+		}
+	}
+	s.shellMu.RUnlock()
+	sort.Slice(shells, func(i, j int) bool { return shells[i].StartedAt.Before(shells[j].StartedAt) })
+	if reason = strings.TrimSpace(reason); reason != "" && (actor == "eino-agent" || actor == "mcp-client") {
 		if len(reason) > maxSSHShellReasonBytes {
 			return domain.SSHShellList{}, fmt.Errorf("reason must not exceed %d bytes", maxSSHShellReasonBytes)
 		}
 		s.audit(context.WithoutCancel(ctx), "", "ssh_shell_list", actor, map[string]any{
-			"session_id": strings.TrimSpace(sessionID), "active_only": activeOnly, "reason": s.redactor.Redact(reason),
+			"session_id": sessionID, "active_only": activeOnly, "reason": s.redactor.Redact(reason),
 		})
 	}
 	return domain.SSHShellList{Shells: shells, Count: len(shells)}, nil
@@ -161,16 +220,14 @@ func (s *Service) GetSSHShellHostStatus(ctx context.Context, id string) (sshx.Ho
 	if id == "" {
 		return sshx.HostStatus{}, fmt.Errorf("shell_id is required")
 	}
-	shell, err := s.store.GetSSHShell(ctx, id)
+	history, state := s.historyForShell(id)
+	shell, err := history.Get(ctx)
 	if err != nil {
 		return sshx.HostStatus{}, err
 	}
 	if shell.Kind != domain.SSHShellKindSSH {
 		return sshx.HostStatus{}, fmt.Errorf("%w: shell %q is not an SSH host shell", ErrSSHShellHostStatusUnavailable, id)
 	}
-	s.shellMu.RLock()
-	state := s.shells[id]
-	s.shellMu.RUnlock()
 	if state == nil {
 		return sshx.HostStatus{}, fmt.Errorf("%w: shell %q is not active", ErrSSHShellHostStatusUnavailable, id)
 	}
@@ -198,7 +255,8 @@ func (s *Service) getSSHShellSnapshotPage(ctx context.Context, id, expectedSessi
 	if err := s.flushLiveSSHShellEvents(id); err != nil {
 		return domain.SSHShellSnapshot{}, false, err
 	}
-	shell, err := s.store.GetSSHShell(ctx, id)
+	history, state := s.historyForShell(id)
+	shell, err := history.Get(ctx)
 	if err != nil {
 		return domain.SSHShellSnapshot{}, false, err
 	}
@@ -208,7 +266,7 @@ func (s *Service) getSSHShellSnapshotPage(ctx context.Context, id, expectedSessi
 	if after > shell.LastSequence {
 		return domain.SSHShellSnapshot{}, false, fmt.Errorf("invalid after_sequence: must not exceed the shell's last sequence")
 	}
-	events, hasMore, err := s.store.ListSSHShellEventsPage(ctx, id, after, maxOutputBytes)
+	events, hasMore, err := history.ListPage(ctx, after, maxOutputBytes)
 	if err != nil {
 		return domain.SSHShellSnapshot{}, false, err
 	}
@@ -217,9 +275,6 @@ func (s *Service) getSSHShellSnapshotPage(ctx context.Context, id, expectedSessi
 			wait = 30 * time.Second
 		}
 		var notify <-chan struct{}
-		s.shellMu.RLock()
-		state := s.shells[id]
-		s.shellMu.RUnlock()
 		if state != nil {
 			state.mu.Lock()
 			notify = state.notify
@@ -234,17 +289,17 @@ func (s *Service) getSSHShellSnapshotPage(ctx context.Context, id, expectedSessi
 			case <-timer.C:
 			case <-notify:
 			}
-			shell, err = s.store.GetSSHShell(ctx, id)
+			shell, err = history.Get(ctx)
 			if err != nil {
 				return domain.SSHShellSnapshot{}, false, err
 			}
-			events, hasMore, err = s.store.ListSSHShellEventsPage(ctx, id, after, maxOutputBytes)
+			events, hasMore, err = history.ListPage(ctx, after, maxOutputBytes)
 			if err != nil {
 				return domain.SSHShellSnapshot{}, false, err
 			}
 		}
 	}
-	recent, err := s.store.GetSSHShellRecentOutput(ctx, id)
+	recent, err := history.RecentOutput(ctx)
 	if err != nil {
 		return domain.SSHShellSnapshot{}, false, err
 	}
@@ -384,23 +439,21 @@ func (s *Service) QuerySSHShellOutput(ctx context.Context, id, expectedSessionID
 }
 
 func (s *Service) sshShellResponseCursor(ctx context.Context, id, expectedSessionID string) (uint64, error) {
-	shell, err := s.store.GetSSHShell(ctx, strings.TrimSpace(id))
+	history, state := s.historyForShell(id)
+	shell, err := history.Get(ctx)
 	if err != nil {
 		return 0, err
 	}
 	if expectedSessionID != "" && shell.SessionID != expectedSessionID {
 		return 0, store.ErrNotFound
 	}
-	cursor, err := s.store.LastSSHShellAgentInputSequence(ctx, shell.ID)
+	cursor, err := history.LastAgentInputSequence(ctx)
 	if err != nil {
 		return 0, err
 	}
 	if shell.ResponseSequence > cursor {
 		cursor = shell.ResponseSequence
 	}
-	s.shellMu.RLock()
-	state := s.shells[shell.ID]
-	s.shellMu.RUnlock()
 	if state != nil {
 		state.mu.Lock()
 		if state.responseCursor > cursor {
@@ -413,13 +466,11 @@ func (s *Service) sshShellResponseCursor(ctx context.Context, id, expectedSessio
 
 func (s *Service) markSSHShellResponseRead(id, expectedSessionID string, sequence uint64) {
 	id = strings.TrimSpace(id)
-	if err := s.store.AdvanceSSHShellResponseSequence(context.Background(), id, expectedSessionID, sequence); err != nil {
+	history, state := s.historyForShell(id)
+	if err := history.AdvanceResponseSequence(context.Background(), expectedSessionID, sequence); err != nil {
 		observability.FromContext(context.Background()).ErrorContext(context.Background(), "persist SSH shell response cursor failed",
 			"component", "ssh_shell", "shell_id", id, "sequence", sequence, "error", err)
 	}
-	s.shellMu.RLock()
-	state := s.shells[id]
-	s.shellMu.RUnlock()
 	if state == nil {
 		return
 	}
@@ -474,22 +525,28 @@ func (s *Service) SendSSHShellInput(ctx context.Context, id, expectedSessionID, 
 	if input == "" {
 		return fmt.Errorf("input is required")
 	}
-	if len(input) > maxSSHShellInputBytes || strings.ContainsRune(input, '\x00') {
-		return fmt.Errorf("shell input must contain 1-%d bytes and no NUL characters", maxSSHShellInputBytes)
-	}
-	if s.redactor.Redact(input) != input {
-		return fmt.Errorf("shell input appears to contain a credential; the operator must use the private Web terminal input")
+	if len(input) > maxSSHShellInputBytes {
+		return fmt.Errorf("shell input must contain 1-%d bytes", maxSSHShellInputBytes)
 	}
 	state, _, err := s.liveSSHShell(id, expectedSessionID)
 	if err != nil {
 		return err
 	}
-	s.setSSHShellOutputOwner(ctx, id, expectedSessionID, actor)
+	persistent := s.historyForState(state).Persistent()
+	if persistent && strings.ContainsRune(input, '\x00') {
+		return fmt.Errorf("Agent shell input must not contain NUL characters")
+	}
+	if persistent && s.redactor.Redact(input) != input {
+		return fmt.Errorf("shell input appears to contain a credential; the operator must use the private Web terminal input")
+	}
+	if persistent {
+		s.setSSHShellOutputOwner(ctx, id, expectedSessionID, actor)
+	}
 	state.mu.Lock()
 	secretPrompt := state.secretPrompt
 	shell := state.shell
 	state.mu.Unlock()
-	if secretPrompt {
+	if persistent && secretPrompt {
 		return fmt.Errorf("the remote terminal is requesting a credential; wait for the operator to use the private Web terminal input")
 	}
 	if reason = strings.TrimSpace(reason); len(reason) > maxSSHShellReasonBytes {
@@ -499,14 +556,18 @@ func (s *Service) SendSSHShellInput(ctx context.Context, id, expectedSessionID, 
 	if actor == "eino-agent" || actor == "mcp-client" {
 		source = "agent"
 	}
-	s.appendSSHShellInputEvent(state, source, s.redactor.Redact(input), false, len(input))
+	if persistent {
+		s.appendSSHShellInputEvent(state, source, s.redactor.Redact(input), false, len(input))
+	}
 	if _, err := state.session.Write([]byte(input)); err != nil {
 		return fmt.Errorf("write SSH shell input: %w", err)
 	}
-	s.audit(context.WithoutCancel(ctx), shell.RunID, interactiveShellComponent(shell.Kind)+"_input", actor, map[string]any{
-		"shell_id": shell.ID, "host_id": shell.HostID, "input": s.redactor.Redact(input),
-		"source": source, "reason": s.redactor.Redact(reason),
-	})
+	if persistent {
+		s.audit(context.WithoutCancel(ctx), shell.RunID, interactiveShellComponent(shell.Kind)+"_input", actor, map[string]any{
+			"shell_id": shell.ID, "host_id": shell.HostID, "input": s.redactor.Redact(input),
+			"source": source, "reason": s.redactor.Redact(reason),
+		})
+	}
 	return nil
 }
 
@@ -514,12 +575,21 @@ func (s *Service) WriteSensitiveSSHShellInput(ctx context.Context, id, input, ac
 	if input == "" {
 		return fmt.Errorf("sensitive input is required")
 	}
-	if len(input) > maxSSHShellInputBytes || strings.ContainsRune(input, '\x00') {
-		return fmt.Errorf("sensitive shell input must contain 1-%d bytes and no NUL characters", maxSSHShellInputBytes)
+	if len(input) > maxSSHShellInputBytes {
+		return fmt.Errorf("sensitive shell input must contain 1-%d bytes", maxSSHShellInputBytes)
 	}
 	state, _, err := s.liveSSHShell(id, "")
 	if err != nil {
 		return err
+	}
+	if !s.historyForState(state).Persistent() {
+		if _, err := state.session.Write([]byte(input)); err != nil {
+			return fmt.Errorf("write terminal input: %w", err)
+		}
+		return nil
+	}
+	if strings.ContainsRune(input, '\x00') {
+		return fmt.Errorf("sensitive Agent shell input must not contain NUL characters")
 	}
 	secret := strings.TrimRight(input, "\r\n")
 	if secret != "" {
@@ -552,12 +622,15 @@ func (s *Service) ResizeSSHShell(ctx context.Context, id string, cols, rows int,
 	state.shell.Cols, state.shell.Rows = cols, rows
 	shell := state.shell
 	state.mu.Unlock()
-	if err := s.store.UpdateSSHShell(ctx, shell); err != nil {
+	history := s.historyForState(state)
+	if err := history.Update(ctx, shell); err != nil {
 		return domain.SSHShell{}, err
 	}
-	s.audit(context.WithoutCancel(ctx), shell.RunID, interactiveShellComponent(shell.Kind)+"_resized", actor, map[string]any{
-		"shell_id": shell.ID, "cols": cols, "rows": rows,
-	})
+	if history.Persistent() {
+		s.audit(context.WithoutCancel(ctx), shell.RunID, interactiveShellComponent(shell.Kind)+"_resized", actor, map[string]any{
+			"shell_id": shell.ID, "cols": cols, "rows": rows,
+		})
+	}
 	return shell, nil
 }
 
@@ -573,16 +646,21 @@ func (s *Service) InterruptSSHShell(ctx context.Context, id, expectedSessionID, 
 	if actor == "eino-agent" || actor == "mcp-client" {
 		source = "agent"
 	}
-	s.appendSSHShellInputEvent(state, source, "\x03", false, 1)
+	history := s.historyForState(state)
+	if history.Persistent() {
+		s.appendSSHShellInputEvent(state, source, "\x03", false, 1)
+	}
 	if err := state.session.Interrupt(); err != nil {
 		return domain.SSHShell{}, err
 	}
 	state.mu.Lock()
 	shell := state.shell
 	state.mu.Unlock()
-	s.audit(context.WithoutCancel(ctx), shell.RunID, interactiveShellComponent(shell.Kind)+"_interrupted", actor, map[string]any{
-		"shell_id": shell.ID, "input": "Ctrl+C", "reason": s.redactor.Redact(reason),
-	})
+	if history.Persistent() {
+		s.audit(context.WithoutCancel(ctx), shell.RunID, interactiveShellComponent(shell.Kind)+"_interrupted", actor, map[string]any{
+			"shell_id": shell.ID, "input": "Ctrl+C", "reason": s.redactor.Redact(reason),
+		})
+	}
 	return shell, nil
 }
 
@@ -603,16 +681,27 @@ func (s *Service) CloseSSHShell(ctx context.Context, id, expectedSessionID, reas
 	shell := state.shell
 	cancel := state.cancel
 	state.mu.Unlock()
-	_ = s.store.UpdateSSHShell(context.WithoutCancel(ctx), shell)
+	history := s.historyForState(state)
+	_ = history.Update(context.WithoutCancel(ctx), shell)
 	cancel()
 	_ = state.session.Close()
-	s.audit(context.WithoutCancel(ctx), shell.RunID, interactiveShellComponent(shell.Kind)+"_close_requested", actor, map[string]any{
-		"shell_id": shell.ID, "host_id": shell.HostID, "reason": s.redactor.Redact(reason),
-	})
+	if history.Persistent() {
+		s.audit(context.WithoutCancel(ctx), shell.RunID, interactiveShellComponent(shell.Kind)+"_close_requested", actor, map[string]any{
+			"shell_id": shell.ID, "host_id": shell.HostID, "reason": s.redactor.Redact(reason),
+		})
+	}
 	return shell, nil
 }
 
 func (s *Service) openSSHShell(ctx context.Context, host domain.Host, connection sshx.ConnectionSpec, req domain.ExecRequest, run domain.Run, actor string) (domain.SSHShell, error) {
+	return s.openSSHShellRuntime(ctx, host, connection, req, run, actor, false)
+}
+
+func (s *Service) openOperatorSSHTerminal(ctx context.Context, host domain.Host, connection sshx.ConnectionSpec, req domain.ExecRequest, actor string) (domain.SSHShell, error) {
+	return s.openSSHShellRuntime(ctx, host, connection, req, domain.Run{}, actor, true)
+}
+
+func (s *Service) openSSHShellRuntime(ctx context.Context, host domain.Host, connection sshx.ConnectionSpec, req domain.ExecRequest, run domain.Run, actor string, transient bool) (domain.SSHShell, error) {
 	transport, ok := s.transport.(sshx.InteractiveTransport)
 	if !ok {
 		return domain.SSHShell{}, fmt.Errorf("configured SSH transport does not support interactive PTY sessions")
@@ -621,11 +710,11 @@ func (s *Service) openSSHShell(ctx context.Context, host domain.Host, connection
 		return domain.SSHShell{}, err
 	}
 	secrets := []string(nil)
-	if req.Elevated && connection.Target.SudoPassword != "" {
+	if !transient && req.Elevated && connection.Target.SudoPassword != "" {
 		secrets = append(secrets, connection.Target.SudoPassword)
 	}
 	return s.openInteractiveShell(ctx, host, req, run, actor, interactiveShellOptions{
-		kind: domain.SSHShellKindSSH, user: host.User, secrets: secrets,
+		kind: domain.SSHShellKindSSH, user: host.User, secrets: secrets, transient: transient,
 	}, func(shellCtx context.Context, output func(string, []byte)) (sshx.ShellSession, error) {
 		return transport.OpenShell(shellCtx, connection, req, req.ShellCols, req.ShellRows, output)
 	})
@@ -637,6 +726,7 @@ type interactiveShellOptions struct {
 	backend     string
 	user        string
 	secrets     []string
+	transient   bool
 }
 
 func (s *Service) openInteractiveShell(
@@ -692,6 +782,11 @@ func (s *Service) openInteractiveShell(
 		},
 		cancel: cancel, pending: make(map[string]string), notify: make(chan struct{}),
 	}
+	if options.transient {
+		state.history = newMemoryShellHistory(state.shell)
+	} else {
+		state.history = &persistentShellHistory{store: s.store, shellID: state.shell.ID}
+	}
 	if owner, ok := executionOwnerFromContext(ctx); ok {
 		state.outputOwner = owner
 	}
@@ -703,7 +798,7 @@ func (s *Service) openInteractiveShell(
 	}
 	s.shells[state.shell.ID] = state
 	s.shellMu.Unlock()
-	if err := s.store.CreateSSHShell(ctx, state.shell); err != nil {
+	if err := state.history.Create(ctx, state.shell); err != nil {
 		cancel()
 		s.shellMu.Lock()
 		delete(s.shells, state.shell.ID)
@@ -740,7 +835,7 @@ func (s *Service) openInteractiveShell(
 	state.shell.Status = "running"
 	shell := state.shell
 	state.mu.Unlock()
-	if err := s.store.UpdateSSHShell(ctx, shell); err != nil {
+	if err := state.history.Update(ctx, shell); err != nil {
 		cancel()
 		_ = interactive.Close()
 		s.failSSHShellStart(state, err)
@@ -750,10 +845,12 @@ func (s *Service) openInteractiveShell(
 	workerStarted = true
 	go s.runSSHShell(shellCtx, state)
 	component := interactiveShellComponent(options.kind)
-	s.audit(context.WithoutCancel(ctx), run.ID, component+"_started", actor, map[string]any{
-		"shell_id": shell.ID, "host_id": shell.HostID, "elevated": shell.Elevated,
-		"workspace_id": shell.WorkspaceID, "cwd": shell.Cwd,
-	})
+	if state.history.Persistent() {
+		s.audit(context.WithoutCancel(ctx), run.ID, component+"_started", actor, map[string]any{
+			"shell_id": shell.ID, "host_id": shell.HostID, "elevated": shell.Elevated,
+			"workspace_id": shell.WorkspaceID, "cwd": shell.Cwd,
+		})
+	}
 	observability.FromContext(ctx).InfoContext(ctx, "interactive shell started",
 		"component", component, "shell_id", shell.ID, "run_id", run.ID,
 		"session_id", run.SessionID, "host_id", host.ID, "elevated", shell.Elevated)
@@ -839,7 +936,8 @@ func (s *Service) runSSHShell(ctx context.Context, state *sshShellState) {
 	state.mu.Lock()
 	shell = state.shell
 	state.mu.Unlock()
-	_ = s.store.UpdateSSHShell(context.Background(), shell)
+	history := s.historyForState(state)
+	_ = history.Update(context.Background(), shell)
 	state.cancel()
 	_ = state.session.Close()
 	s.shellMu.Lock()
@@ -847,10 +945,12 @@ func (s *Service) runSSHShell(ctx context.Context, state *sshShellState) {
 		delete(s.shells, shell.ID)
 	}
 	s.shellMu.Unlock()
-	s.audit(context.Background(), shell.RunID, interactiveShellComponent(shell.Kind)+"_stopped", "control-plane", map[string]any{
-		"shell_id": shell.ID, "host_id": shell.HostID, "status": status,
-		"termination_reason": termination, "exit_code": exitCode,
-	})
+	if history.Persistent() {
+		s.audit(context.Background(), shell.RunID, interactiveShellComponent(shell.Kind)+"_stopped", "control-plane", map[string]any{
+			"shell_id": shell.ID, "host_id": shell.HostID, "status": status,
+			"termination_reason": termination, "exit_code": exitCode,
+		})
+	}
 }
 
 func (s *Service) failSSHShellStart(state *sshShellState, cause error) {
@@ -865,7 +965,7 @@ func (s *Service) failSSHShellStart(state *sshShellState, cause error) {
 	state.mu.Lock()
 	shell = state.shell
 	state.mu.Unlock()
-	_ = s.store.UpdateSSHShell(context.Background(), shell)
+	_ = s.historyForState(state).Update(context.Background(), shell)
 	s.shellMu.Lock()
 	if current := s.shells[shell.ID]; current == state {
 		delete(s.shells, shell.ID)
@@ -879,6 +979,12 @@ func (s *Service) appendSSHShellOutput(state *sshShellState, stream string, data
 	}
 	if stream != "stderr" {
 		stream = "stdout"
+	}
+	if !s.historyForState(state).Persistent() {
+		state.eventMu.Lock()
+		s.appendSSHShellOutputEventsLocked(state, stream, string(data))
+		state.eventMu.Unlock()
+		return
 	}
 	state.eventMu.Lock()
 	combined := state.pending[stream] + string(data)
@@ -1036,7 +1142,7 @@ func (s *Service) flushSSHShellEventsLocked(state *sshShellState) error {
 	if len(state.persistEvents) == 0 {
 		return nil
 	}
-	if err := s.store.AppendSSHShellEvents(context.Background(), state.persistEvents, state.persistRecent); err != nil {
+	if err := s.historyForState(state).Append(context.Background(), state.persistEvents, state.persistRecent); err != nil {
 		return err
 	}
 	state.persistEvents = state.persistEvents[:0]

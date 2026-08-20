@@ -1128,14 +1128,16 @@ func (s *Service) StartOperatorWorkspaceShell(ctx context.Context, workspaceID, 
 		return domain.SSHShell{}, err
 	}
 	req.ShellSurface = domain.WorkspaceShellSurfaceOperator
-	result, err := s.executeOperatorRun(ctx, req, actor)
+	host, err := s.workspaceHost(ctx, req.WorkspaceID)
 	if err != nil {
 		return domain.SSHShell{}, err
 	}
-	if result.Shell == nil {
-		return domain.SSHShell{}, fmt.Errorf("Workspace shell start completed without shell state")
+	release, err := s.acquire(ctx, host.ID)
+	if err != nil {
+		return domain.SSHShell{}, err
 	}
-	return *result.Shell, nil
+	defer release()
+	return s.openOperatorWorkspaceTerminal(ctx, host, req, actor)
 }
 
 func (s *Service) workspaceShellStartRequest(ctx context.Context, workspaceID, cwd string, env map[string]string, cols, rows int, reason string) (domain.ExecRequest, error) {
@@ -1174,6 +1176,14 @@ func (s *Service) workspaceShellStartRequest(ctx context.Context, workspaceID, c
 }
 
 func (s *Service) openWorkspaceShell(ctx context.Context, host domain.Host, req domain.ExecRequest, run domain.Run, actor string) (domain.SSHShell, error) {
+	return s.openWorkspaceShellRuntime(ctx, host, req, run, actor, false)
+}
+
+func (s *Service) openOperatorWorkspaceTerminal(ctx context.Context, host domain.Host, req domain.ExecRequest, actor string) (domain.SSHShell, error) {
+	return s.openWorkspaceShellRuntime(ctx, host, req, domain.Run{}, actor, true)
+}
+
+func (s *Service) openWorkspaceShellRuntime(ctx context.Context, host domain.Host, req domain.ExecRequest, run domain.Run, actor string, transient bool) (domain.SSHShell, error) {
 	if req.Mode != domain.ExecWorkspaceShellStart {
 		return domain.SSHShell{}, fmt.Errorf("invalid Workspace shell request mode")
 	}
@@ -1204,7 +1214,7 @@ func (s *Service) openWorkspaceShell(ctx context.Context, host domain.Host, req 
 	}
 	return s.openInteractiveShell(ctx, host, req, run, actor, interactiveShellOptions{
 		kind: domain.SSHShellKindWorkspace, workspaceID: workspace.ID,
-		backend: req.WorkspaceShellBackend, user: user,
+		backend: req.WorkspaceShellBackend, user: user, transient: transient,
 	}, func(shellCtx context.Context, output func(string, []byte)) (sshx.ShellSession, error) {
 		return startWorkspacePTY(shellCtx, program, args, directory, environment, req.ShellCols, req.ShellRows, output)
 	})

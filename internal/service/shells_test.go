@@ -117,16 +117,59 @@ func TestWriteSSHShellDelaysBeforeReadingOutput(t *testing.T) {
 
 func TestOperatorCanStartShellWithoutAgentConversation(t *testing.T) {
 	svc, _, host := newTestService(t)
-
-	shell, err := svc.StartOperatorSSHShell(context.Background(), host.ID, domain.SSHShellSurfaceWorkspace, "admin-web")
+	ctx := context.Background()
+	runsBefore, err := svc.store.SearchRuns(ctx, "", "", "", 500)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if shell.HostID != host.ID || shell.SessionID != "" || shell.Surface != domain.SSHShellSurfaceWorkspace || shell.Status != "running" || shell.Elevated {
+	auditBefore, err := svc.store.ListAudit(ctx, "", 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	shell, err := svc.StartOperatorSSHShell(ctx, host.ID, domain.SSHShellSurfaceWorkspace, "admin-web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shell.HostID != host.ID || shell.RunID != "" || shell.SessionID != "" || shell.Surface != domain.SSHShellSurfaceWorkspace || shell.Status != "running" || shell.Elevated {
 		t.Fatalf("unexpected operator shell: %#v", shell)
 	}
 	assertNoPendingApprovals(t, svc)
-	if _, err := svc.CloseSSHShell(context.Background(), shell.ID, "", "", "admin-web"); err != nil {
+	stored, err := svc.store.ListSSHShells(ctx, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 0 {
+		t.Fatalf("operator terminal was persisted: %#v", stored)
+	}
+	svc.shellMu.RLock()
+	operatorSession := svc.shells[shell.ID].session.(*fakeShellSession)
+	svc.shellMu.RUnlock()
+	operatorSession.callback("stdout", []byte("Password:"))
+	credentialInput := "password=operator-secret\r"
+	if err := svc.SendSSHShellInput(ctx, shell.ID, "", credentialInput, "", "admin-web"); err != nil {
+		t.Fatalf("operator terminal reused Agent credential isolation: %v", err)
+	}
+	if err := svc.SendSSHShellInput(ctx, shell.ID, "", "\x00", "", "admin-web"); err != nil {
+		t.Fatalf("operator terminal rejected a PTY control byte: %v", err)
+	}
+	snapshot, err := svc.GetSSHShellSnapshot(ctx, shell.ID, "", 0, 0, false, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output strings.Builder
+	for _, event := range snapshot.Events {
+		if event.Stream == "input" {
+			t.Fatalf("operator input was retained as an event: %#v", event)
+		}
+		if event.Stream == "stdout" {
+			output.WriteString(event.Content)
+		}
+	}
+	if !strings.Contains(output.String(), credentialInput) {
+		t.Fatalf("operator terminal output was filtered: %q", output.String())
+	}
+	if _, err := svc.CloseSSHShell(ctx, shell.ID, "", "", "admin-web"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -142,6 +185,17 @@ func TestOperatorCanStartShellWithoutAgentConversation(t *testing.T) {
 	}
 	if _, err := svc.StartOperatorSSHShell(context.Background(), host.ID, "invalid", "admin-web"); err == nil {
 		t.Fatal("invalid shell surface was accepted")
+	}
+	runsAfter, err := svc.store.SearchRuns(ctx, "", "", "", 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditAfter, err := svc.store.ListAudit(ctx, "", 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runsAfter) != len(runsBefore) || len(auditAfter) != len(auditBefore) {
+		t.Fatalf("operator terminal changed durable execution history: runs %d -> %d, audit %d -> %d", len(runsBefore), len(runsAfter), len(auditBefore), len(auditAfter))
 	}
 }
 

@@ -11,11 +11,12 @@ import (
 
 const webOperatorReason = "started directly by the operator from the Web console"
 
-// executeOperatorRun executes the connection modes exposed directly by the
-// authenticated Web console without entering the Agent approval flow.
+// executeOperatorRun persists operator-managed connections that need durable
+// lifecycle state. Interactive App terminals use the separate in-memory shell
+// runtime and must not pass through this Run/Audit path.
 func (s *Service) executeOperatorRun(ctx context.Context, req domain.ExecRequest, actor string) (domain.ExecResult, error) {
 	normalizeRequest(&req, s.limits)
-	if req.Mode != domain.ExecSSHTunnelStart && req.Mode != domain.ExecSSHShellStart && req.Mode != domain.ExecWorkspaceShellStart {
+	if req.Mode != domain.ExecSSHTunnelStart {
 		return domain.ExecResult{}, fmt.Errorf("invalid operator connection mode")
 	}
 	if err := validateRequestLimits(req, s.limits, s.redactor); err != nil {
