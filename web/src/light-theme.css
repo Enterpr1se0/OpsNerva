@@ -647,6 +647,17 @@
   color: var(--light-accent);
 }
 
+:root[data-theme='light'] .tool-event summary .tool-transfer-route > span > b {
+  border-color: var(--light-accent-border);
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
+}
+
+:root[data-theme='light'] .tool-summary-copy .tool-transfer-route code,
+:root[data-theme='light'] .tool-event summary .tool-transfer-route > i {
+  color: var(--light-text-muted);
+}
+
 :root[data-theme='light'] .tool-event summary .tool-target-chip.tool-target-workspace {
   border-color: #a9c5dc;
   background: #edf5fb;
