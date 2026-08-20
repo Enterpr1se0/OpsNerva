@@ -183,7 +183,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/runs", s.searchRuns)
 	s.mux.HandleFunc("GET /api/v1/run-summaries", s.searchRunSummaries)
 	s.mux.HandleFunc("GET /api/v1/runs/{id}", s.getRun)
+	s.mux.HandleFunc("DELETE /api/v1/audit/runs/{id}", s.deleteAuditRun)
+	s.mux.HandleFunc("DELETE /api/v1/audit/runs", s.deleteAuditRuns)
 	s.mux.HandleFunc("GET /api/v1/audit", s.listAudit)
+	s.mux.HandleFunc("GET /api/v1/audit-events", s.listAuditEvents)
 	s.mux.HandleFunc("GET /api/v1/logs", s.logs)
 	s.mux.HandleFunc("GET /api/v1/logs/export", s.exportLogs)
 	s.mux.HandleFunc("GET /api/v1/events/ws", s.applicationWebSocket)
@@ -1639,6 +1642,46 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) {
 	respond(w, result, err)
 }
 
+func (s *Server) listAuditEvents(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	var cursorCreated time.Time
+	if cursor := r.URL.Query().Get("cursor_created_at"); cursor != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, cursor)
+		if err != nil {
+			writeErrorStatus(w, fmt.Errorf("invalid audit cursor: %w", err), http.StatusBadRequest)
+			return
+		}
+		cursorCreated = parsed
+	}
+	result, err := s.service.ListAuditPage(r.Context(), r.URL.Query().Get("run_id"), limit, cursorCreated, r.URL.Query().Get("cursor_id"))
+	respond(w, result, err)
+}
+
+func (s *Server) deleteAuditRun(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.DeleteAuditRun(r.Context(), r.PathValue("id"), actor(r))
+	if errors.Is(err, store.ErrInUse) {
+		writeErrorStatus(w, fmt.Errorf("active audit runs cannot be deleted"), http.StatusConflict)
+		return
+	}
+	respond(w, result, err)
+}
+
+func (s *Server) deleteAuditRuns(w http.ResponseWriter, r *http.Request) {
+	var sessionID *string
+	if r.URL.Query().Has("session_id") {
+		value := r.URL.Query().Get("session_id")
+		sessionID = &value
+	}
+	result, err := s.service.DeleteAuditRuns(r.Context(), sessionID, actor(r))
+	respond(w, result, err)
+}
+
 func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	if s.agent == nil || !s.agent.Available() {
 		writeErrorStatus(w, agent.ErrUnavailable, http.StatusServiceUnavailable)
@@ -2119,7 +2162,7 @@ func (s *Server) deleteChatSession(w http.ResponseWriter, r *http.Request) {
 		writeErrorStatus(w, fmt.Errorf("cannot delete a conversation while its Agent run is active"), http.StatusConflict)
 		return
 	}
-	if err := s.service.DeleteChatSession(r.Context(), r.PathValue("id")); err != nil {
+	if err := s.service.DeleteChatSession(r.Context(), r.PathValue("id"), actor(r)); err != nil {
 		writeError(w, err)
 		return
 	}

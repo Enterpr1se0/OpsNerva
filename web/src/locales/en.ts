@@ -237,7 +237,10 @@ const en = {
     direct: 'Direct / legacy operations', missingConversation: 'Deleted or unavailable conversation',
     counts: '{{sessions}} SESSIONS · {{runs}} RUNS', noSession: 'No Agent session context', lastRun: 'Last run {{date}}', runs: 'runs', pending: 'pending',
     columns: { time: 'Time', operation: 'Operation', status: 'Status', host: 'Host', exit: 'Exit' }, unknownOperation: 'Unknown operation',
-    emptyTitle: 'No audit history', noMatch: 'No matching audit runs',
+		loadMore: 'Load earlier records', clear: 'Delete all', deleteSession: 'Delete records',
+		deleteRunTitle: 'Delete this audit record?', deleteSessionTitle: 'Delete audit records for “{{title}}”?', deleteAllTitle: 'Delete all audit records?',
+		deleted: '{{count}} audit record(s) deleted', deletedWithRetained: '{{deleted}} deleted · {{retained}} active retained',
+    emptyTitle: 'No audit history', noMatch: 'No matching audit records',
   },
   logs: {
     search: 'Search messages, IDs, hosts, status...', minimumLevel: 'Level', component: 'Component', allComponents: 'All components', live: 'Live · 3s', paused: 'Paused',

@@ -315,6 +315,20 @@ function isAbortError(error:unknown){return error instanceof DOMException&&error
 
 function keepEquivalent<T>(current:T,next:T){return JSON.stringify(current)===JSON.stringify(next)?current:next}
 
+type AuditPageCursor={hasMore:boolean;timestamp:string;id:string}
+function mergeLatestPage<T extends{id:string}>(latest:T[],current:T[],hasMore:boolean,timestamp:(item:T)=>string){
+	if(!hasMore)return latest
+	const tail=latest.at(-1)
+	if(!tail)return current
+	const tailTime=timestamp(tail)
+	const retained=current.filter(item=>{
+		const value=timestamp(item)
+		return value<tailTime||value===tailTime&&item.id<tail.id
+	})
+	const seen=new Set(latest.map(item=>item.id))
+	return [...latest,...retained.filter(item=>!seen.has(item.id))]
+}
+
 const newSessionMarker = '__new__'
 const defaultChatImageTypes=['image/png','image/jpeg','image/webp','image/gif']
 const desktopRuntime='__TAURI_INTERNALS__' in window
@@ -431,6 +445,8 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 	const [mcpServers,setMCPServers]=useState<MCPServer[]>([])
   const [approvals, setApprovals] = useState<Approval[]>([])
   const [runs, setRuns] = useState<Run[]>([])
+	const [auditRunCursor,setAuditRunCursor]=useState<AuditPageCursor>({hasMore:false,timestamp:'',id:''})
+	const [loadingMoreAudit,setLoadingMoreAudit]=useState(false)
 	const [auditSessions,setAuditSessions]=useState<ChatSession[]>([])
 	const [auditReady,setAuditReady]=useState(false)
   const [sshTunnels,setSSHTunnels]=useState<SSHTunnel[]>([])
@@ -439,6 +455,10 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
   const [openConnectionPanel,setOpenConnectionPanel]=useState<'tunnel'|'shell'|null>(null)
 	const [notifications,setNotifications]=useState<AppNotification[]>([])
 	const connectionRefreshRef=useRef<Promise<void>|null>(null)
+	const auditRefreshRef=useRef<Promise<void>|null>(null)
+	const auditRefreshQueuedRef=useRef(false)
+	const auditInitializedRef=useRef(false)
+	const auditRunsExtendedRef=useRef(false)
 	const dismissNotification=useCallback((id:string)=>setNotifications(current=>current.filter(item=>item.id!==id)),[])
 	const notify=useCallback<NotificationSink>((message,tone='success')=>{
 		const normalized=message.trim()
@@ -476,9 +496,12 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 		catch(err){notify(errorText(err),'error')}
 	},[notify])
 	const refreshExtensions=useCallback(async()=>{await Promise.all([refreshToolCatalog(),refreshSkills(),refreshMCPServers()])},[refreshMCPServers,refreshSkills,refreshToolCatalog])
-	const refreshRuns=useCallback(async()=>{
-		try{setRuns((await api.runSummaries()).runs)}
-		catch(err){notify(errorText(err),'error')}
+	const refreshRuns=useCallback(async(reset=false)=>{
+		try{
+			const page=await api.runSummaries()
+			setRuns(current=>reset?page.runs:mergeLatestPage(page.runs,current,page.has_more,item=>item.started_at))
+			if(reset||!auditRunsExtendedRef.current){setAuditRunCursor({hasMore:page.has_more,timestamp:page.next_started_at||'',id:page.next_id||''});auditRunsExtendedRef.current=false}
+		}catch(err){notify(errorText(err),'error')}
 	},[notify])
 	const refreshAuditSessions=useCallback(async()=>{
 		try{setAuditSessions(await api.chatSessions())}
@@ -520,16 +543,49 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 	const refreshConfiguration=useCallback(async()=>{
 		await Promise.all([refreshHealth(),refreshHosts(),refreshProviders(),refreshProxies(),refreshSettings(),refreshCapabilities()])
 	},[refreshCapabilities,refreshHealth,refreshHosts,refreshProviders,refreshProxies,refreshSettings])
-	const refreshAudit=useCallback(async()=>{
-		await Promise.all([refreshRuns(),refreshHosts(),refreshAuditSessions()])
-		setAuditReady(true)
+	const refreshAudit=useCallback(function refreshAudit():Promise<void>{
+		if(auditRefreshRef.current){auditRefreshQueuedRef.current=true;return auditRefreshRef.current}
+		auditRefreshQueuedRef.current=false
+		const reset=!auditInitializedRef.current
+		const task=Promise.all([refreshRuns(reset),refreshHosts(),refreshAuditSessions()]).then(()=>{auditInitializedRef.current=true;setAuditReady(true)})
+		auditRefreshRef.current=task
+		void task.finally(()=>{
+			if(auditRefreshRef.current===task)auditRefreshRef.current=null
+			if(auditRefreshQueuedRef.current){auditRefreshQueuedRef.current=false;void refreshAudit()}
+		})
+		return task
 	},[refreshAuditSessions,refreshHosts,refreshRuns])
+	const loadMoreAuditRuns=useCallback(async()=>{
+		if(loadingMoreAudit||!auditRunCursor.hasMore||!auditRunCursor.timestamp||!auditRunCursor.id)return
+		setLoadingMoreAudit(true)
+		try{
+			const page=await api.runSummaries({cursorStartedAt:auditRunCursor.timestamp,cursorID:auditRunCursor.id})
+			setRuns(current=>[...current,...page.runs.filter(item=>!current.some(existing=>existing.id===item.id))])
+			auditRunsExtendedRef.current=true
+			setAuditRunCursor({hasMore:page.has_more,timestamp:page.next_started_at||'',id:page.next_id||''})
+		}catch(err){notify(errorText(err),'error')}
+		finally{setLoadingMoreAudit(false)}
+	},[auditRunCursor,loadingMoreAudit,notify])
+	const deleteAuditRun=useCallback(async(id:string)=>{
+		try{
+			const result=await api.deleteAuditRun(id)
+			setRuns(current=>current.filter(run=>run.id!==id))
+			await refreshRuns(true)
+			notify(t('audit.deleted',{count:result.deleted}))
+		}catch(err){notify(errorText(err),'error');throw err}
+	},[notify,refreshRuns,t])
+	const deleteAuditRuns=useCallback(async(sessionID?:string|null)=>{
+		try{
+			const result=await api.deleteAuditRuns(sessionID)
+			await refreshRuns(true)
+			notify(result.retained?t('audit.deletedWithRetained',{deleted:result.deleted,retained:result.retained}):t('audit.deleted',{count:result.deleted}))
+		}catch(err){notify(errorText(err),'error');throw err}
+	},[notify,refreshRuns,t])
 	const refreshChat=useCallback(async()=>{
 		await Promise.all([refreshHealth(),refreshHosts(),refreshProviders(),refreshSettings(),refreshCapabilities(),refreshApprovals()])
 	},[refreshApprovals,refreshCapabilities,refreshHealth,refreshHosts,refreshProviders,refreshSettings])
 	const removeSessionState=useCallback((sessionID:string)=>{
 		setApprovals(current=>current.filter(item=>item.session_id!==sessionID))
-		setRuns(current=>current.filter(item=>item.session_id!==sessionID))
 		setSSHShells(current=>current.filter(item=>item.session_id!==sessionID))
 	},[])
 
@@ -578,6 +634,14 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 	useEffect(()=>subscribeApplicationEvents<Health>('health',event=>{
 		if(event.type==='event'&&event.data)setHealth(current=>keepEquivalent(current,event.data!))
 	}),[])
+	useEffect(()=>{
+		if(page!=='audit')return
+		return subscribeApplicationEvents<{id?:string;type?:string}>('audit',event=>{
+			if(event.type!=='event')return
+			if(event.data?.type==='audit_records_deleted')void refreshRuns(true)
+			else void refreshAudit()
+		})
+	},[page,refreshAudit,refreshRuns])
 	useEffect(()=>{
 		if(page==='extensions')void refreshExtensions()
 		else if(page==='audit')void refreshAudit()
@@ -746,7 +810,7 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 			/>}
 		{page === 'config' && <ConfigurationPage authEnabled={auth.enabled} hosts={hosts} providers={providers} proxies={proxies} settings={settings} capabilities={capabilities} health={health} refreshModels={refreshModels} refreshHosts={refreshHosts} refreshProxies={refreshProxies} refreshCapabilities={refreshCapabilities} refreshHealth={refreshHealth} onSettingsChanged={setSettings}/>}
 		{page === 'extensions' && <ExtensionsPage skills={skills} mcpServers={mcpServers} toolCatalog={toolCatalog} refreshSkills={refreshSkills} refreshMCPServers={refreshMCPServers} refreshToolCatalog={refreshToolCatalog} onToolCatalogChanged={setToolCatalog}/>}
-		{page === 'audit' && <AuditPage runs={runs} hosts={hosts} sessions={auditSessions} ready={auditReady}/>}
+		{page === 'audit' && <AuditPage runs={runs} hosts={hosts} sessions={auditSessions} ready={auditReady} runsHasMore={auditRunCursor.hasMore} loadingMore={loadingMoreAudit} onLoadMoreRuns={loadMoreAuditRuns} onDeleteRun={deleteAuditRun} onDeleteRuns={deleteAuditRuns}/>}
         {page === 'logs' && <LogsPage/>}
       </section>
 	      {selectedShell&&<SSHShellTerminal
@@ -1322,6 +1386,7 @@ function SSHShellTerminal({initialShell,relatedShells=[],onSelect,onClose,onChan
 	const stop=async()=>{setClosing(true);try{setShell(await api.closeSSHShell(shell.id));onChanged();onClose()}catch(err){onError(errorText(err))}finally{setClosing(false)}}
 	const titleID=`ssh-shell-terminal-title-${shell.id}`
 	const workspaceShell=shell.kind==='workspace'
+	const managedShell=['agent','mcp','workspace_agent'].includes(shell.surface)
 		const terminal=<section className={`ssh-shell-terminal-dialog ${embedded?'embedded':''} ${workspaceShell?'':'monitored'}`} role={embedded?undefined:'dialog'} aria-modal={embedded?undefined:true} aria-labelledby={embedded?undefined:titleID}>
 			{!embedded&&<header>
 				<div><TerminalSquare size={20}/><span>{workspaceShell&&<small>{t('workspace.terminal')}</small>}<h2 id={titleID}>{workspaceShell?shell.workspace_id:shell.host_name||shell.host_id}</h2></span></div>
@@ -1330,7 +1395,7 @@ function SSHShellTerminal({initialShell,relatedShells=[],onSelect,onClose,onChan
 			<div className="ssh-shell-terminal-screen" ref={terminalElement}/>
 			{!workspaceShell&&<SSHHostStatusBar shell={shell}/>}
 			<footer>
-				<form onSubmit={sendSecret}><LockKeyhole size={14}/><PasswordInput value={secret} onChange={event=>setSecret(event.target.value)} disabled={!active||sendingSecret} placeholder={t('sshShell.sensitivePlaceholder')} autoComplete="off"/><button className="primary" disabled={!secret||!active||sendingSecret}>{sendingSecret?<LoaderCircle className="spin" size={13}/>:<Send size={13}/>} {t('sshShell.sendSensitive')}</button></form>
+				{managedShell&&<form onSubmit={sendSecret}><LockKeyhole size={14}/><PasswordInput value={secret} onChange={event=>setSecret(event.target.value)} disabled={!active||sendingSecret} placeholder={t('sshShell.sensitivePlaceholder')} autoComplete="off"/><button className="primary" disabled={!secret||!active||sendingSecret}>{sendingSecret?<LoaderCircle className="spin" size={13}/>:<Send size={13}/>} {t('sshShell.sendSensitive')}</button></form>}
 				<div><button type="button" disabled={!active} onClick={()=>void interrupt()}><Square size={10}/>{t('sshShell.interrupt')}</button><button type="button" className="danger" disabled={!active||closing} onClick={()=>void stop()}>{closing?<LoaderCircle className="spin" size={13}/>:<Power size={13}/>} {t('sshShell.closeSession')}</button></div>
 			</footer>
 			{shell.error&&<p className="ssh-shell-terminal-error"><ShieldAlert size={13}/>{shell.error}</p>}
@@ -2192,7 +2257,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
   const messagesRef=useRef<HTMLDivElement>(null)
 	const sessionIDRef=useRef('')
   const stickToLatest=useRef(true)
-	const userScrollFrame=useRef(0)
+	const lastMessagesScrollTop=useRef(0)
 	const disclosureScrollFrame=useRef(0)
 	const autoScrollFrame=useRef(0)
 	  const activeStreamRef=useRef<ActiveChatStream|null>(null)
@@ -2231,7 +2296,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		const timer=window.setInterval(()=>setRetryClock(Date.now()),1000)
 		return()=>window.clearInterval(timer)
 	},[connectionRetry,visible])
-	useEffect(()=>()=>{sessionLoadRef.current='';const stream=activeStreamRef.current;activeStreamRef.current=null;stream?.controller.abort();window.cancelAnimationFrame(userScrollFrame.current);window.cancelAnimationFrame(disclosureScrollFrame.current);window.cancelAnimationFrame(autoScrollFrame.current)},[])
+	useEffect(()=>()=>{sessionLoadRef.current='';const stream=activeStreamRef.current;activeStreamRef.current=null;stream?.controller.abort();window.cancelAnimationFrame(disclosureScrollFrame.current);window.cancelAnimationFrame(autoScrollFrame.current)},[])
 	useEffect(()=>()=>{for(const url of imageURLsRef.current)URL.revokeObjectURL(url);imageURLsRef.current.clear()},[])
 	const addImages=(files:File[])=>{const accepted=files.filter(file=>imageTypes.includes(file.type));if(accepted.length!==files.length)setImageNotice(t('chat.imageTypeRejected'));if(!accepted.length)return;const next=accepted.map(file=>{const url=URL.createObjectURL(file);imageURLsRef.current.add(url);return{id:clientId(),file,url}});setPendingImages(current=>[...current,...next])}
 	const removePendingImage=(id:string)=>{setPendingImages(current=>{const target=current.find(image=>image.id===id);if(target){URL.revokeObjectURL(target.url);imageURLsRef.current.delete(target.url)}return current.filter(image=>image.id!==id)});setImageInputKey(value=>value+1)}
@@ -2260,6 +2325,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
     sessionLoadRef.current=requestID
     setLoadingSession(id)
     stickToLatest.current=true
+		lastMessagesScrollTop.current=0
     try {
       const state = await api.chatState(id)
       if(sessionLoadRef.current!==requestID)return
@@ -2283,7 +2349,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			flushSync(()=>setEntries(current=>prependHistoryEntries(page.messages||[],targetSessionID,current)))
 			setHistoryHasMore(page.has_more)
 			setHistoryCursor(page.next_created_at&&page.next_id?{createdAt:page.next_created_at,id:page.next_id}:null)
-			if(container)container.scrollTop+=container.scrollHeight-previousHeight
+			if(container){container.scrollTop+=container.scrollHeight-previousHeight;lastMessagesScrollTop.current=container.scrollTop}
 		}catch(err){if(sessionIDRef.current===targetSessionID)setHistoryError(errorText(err))}
 		finally{if(sessionIDRef.current===targetSessionID)setLoadingOlderMessages(false)}
 	},[historyCursor,historyHasMore,loadingOlderMessages,sessionId])
@@ -2293,23 +2359,27 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		if(!visible||!stickToLatest.current)return
 		autoScrollFrame.current=window.requestAnimationFrame(()=>{
 			const container=messagesRef.current
-			if(container&&stickToLatest.current)container.scrollTop=container.scrollHeight
+			if(container&&stickToLatest.current){container.scrollTop=container.scrollHeight;lastMessagesScrollTop.current=container.scrollTop}
 		})
 		return()=>window.cancelAnimationFrame(autoScrollFrame.current)
 	},[entries,loadingSession,visible])
 
-	const trackUserScroll=()=>{
-		window.cancelAnimationFrame(userScrollFrame.current)
-		userScrollFrame.current=window.requestAnimationFrame(()=>{
-			const container=messagesRef.current
-			if(container)stickToLatest.current=container.scrollHeight-container.scrollTop-container.clientHeight<90
-		})
-	}
+	const trackUserScroll=useCallback(()=>{
+		const container=messagesRef.current
+		if(!container)return
+		const nextScrollTop=container.scrollTop
+		const movingUp=nextScrollTop<lastMessagesScrollTop.current-1
+		const atLatest=container.scrollHeight-nextScrollTop-container.clientHeight<24
+		if(movingUp)stickToLatest.current=false
+		else if(atLatest)stickToLatest.current=true
+		lastMessagesScrollTop.current=nextScrollTop
+	},[])
+	const pauseLatestOnWheel=useCallback((event:React.WheelEvent<HTMLDivElement>)=>{if(event.deltaY<0)stickToLatest.current=false},[])
+	const pauseLatestOnTouch=useCallback(()=>{stickToLatest.current=false},[])
 
 	const preserveToolDisclosurePosition=useCallback((summary:HTMLElement)=>{
 		const container=messagesRef.current
 		if(!container||!container.contains(summary))return
-		window.cancelAnimationFrame(userScrollFrame.current)
 		stickToLatest.current=false
 		const top=summary.getBoundingClientRect().top
 		window.cancelAnimationFrame(disclosureScrollFrame.current)
@@ -2340,7 +2410,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		lastAgentEventSessionRef.current='';lastAgentEventIDRef.current=0
 		sessionLoadRef.current=''
     setLoadingSession('')
-	    stickToLatest.current=true;setSessionId('');setBoundWorkspaceID('');setEntries([]);setHistoryHasMore(false);setHistoryCursor(null);setLoadingOlderMessages(false); setMessage('');clearPendingImages(); setHistoryError('');setContextUsage({tokens:0,window:activeContextWindow});setDetachedRunning(false);setQueuedMessages([]);setQueueingMessage(false);setStopping(false);setCompressingContext(false);setModelRetry(null);setConnectionRetry(null);setTasks(null); rememberSession(newSessionMarker)
+	    stickToLatest.current=true;lastMessagesScrollTop.current=0;setSessionId('');setBoundWorkspaceID('');setEntries([]);setHistoryHasMore(false);setHistoryCursor(null);setLoadingOlderMessages(false); setMessage('');clearPendingImages(); setHistoryError('');setContextUsage({tokens:0,window:activeContextWindow});setDetachedRunning(false);setQueuedMessages([]);setQueueingMessage(false);setStopping(false);setCompressingContext(false);setModelRetry(null);setConnectionRetry(null);setTasks(null); rememberSession(newSessionMarker)
     void refreshSessions()
 	},[activeContextWindow,clearPendingImages,detachActiveStream,onActivate,refreshSessions,workspaceSwitching])
 
@@ -2670,7 +2740,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	  <div className="session-approval-slot">{currentApprovals.length>0&&<ApprovalDialog key={currentApprovals[0].id} approval={currentApprovals[0]} pendingCount={currentApprovals.length} hosts={hosts} running={sessionBusy} stopping={stopping} onStop={()=>void stopAgent()} refreshApprovals={refreshApprovals} onApproved={result=>{setEntries(old=>updateToolRunStatus(old,result.run_id,result.status==='running'?'in_progress':result.status));if(result.shell?.kind==='workspace')onWorkspaceShellStarted(result.shell)}} onNotice={notify}/>}</div>
 	      <div className="session-task-slot">{tasks&&<SessionTasks tasks={tasks} rows={taskRows} expanded={tasksExpanded} onExpanded={setTasksExpanded}/>}</div>
 		<div className="conversation-view">
-			<div className="messages" ref={messagesRef} onWheel={trackUserScroll} onTouchMove={trackUserScroll} onPointerUp={trackUserScroll}>
+			<div className="messages" ref={messagesRef} onScroll={trackUserScroll} onWheel={pauseLatestOnWheel} onTouchMove={pauseLatestOnTouch}>
 				{historyHasMore&&<button type="button" className="chat-history-more" disabled={loadingOlderMessages} onClick={()=>void loadOlderMessages()}>{loadingOlderMessages?<LoaderCircle className="spin" size={13}/>:<History size={13}/>} {t('chat.loadEarlier')}</button>}
 				{entries.length === 0 && <div className="empty-chat"><div className="radar"><Activity size={35}/></div><h2>{t('chat.emptyTitle')}</h2></div>}
 				{renderEntries.map(item=>item.kind==='task_tool_group'?<TaskToolGroupCard key={item.id} group={item} onDisclosure={preserveToolDisclosurePosition}/>:<ChatBubble key={item.entry.id} sessionID={sessionId} entry={item.entry} showActions={item.entry.id===latestCompletedAssistantEntryID} runs={runs} hosts={hosts} onToolDisclosure={preserveToolDisclosurePosition}/>) }
@@ -4173,7 +4243,9 @@ function auditOperationSummary(req:JsonRecord,run:Run,hosts:Host[],t:TFunction){
 	}
 }
 
-function AuditRunRow({run,hosts}:{run:Run;hosts:Host[]}){
+const deletableAuditRunStatuses=new Set(['completed','failed','partial','interrupted','rejected','denied','expired','stopped','closed','skipped','cancelled','canceled','unavailable'])
+
+function AuditRunRow({run,hosts,onDelete}:{run:Run;hosts:Host[];onDelete:(run:Run)=>void}){
 	const {t,i18n:instance}=useTranslation()
 	const [detail,setDetail]=useState<Run|null>(null)
 	const [loading,setLoading]=useState(false)
@@ -4201,13 +4273,18 @@ function AuditRunRow({run,hosts}:{run:Run;hosts:Host[]}){
 		</summary>
 		<div className="run-detail">
 			{loading?<div className="audit-loading" role="status"><LoaderCircle className="spin" size={16}/><span>{t('common.loading')}</span></div>:error?<div className="inline-error">{error}</div>:detail&&<AuditRunDetail run={resolved} req={resolvedRequest} hosts={hosts}/>}
+			{deletableAuditRunStatuses.has(run.status)&&<div className="audit-run-actions"><button type="button" className="danger" onClick={()=>onDelete(run)}><Trash2 size={13}/>{t('common.delete')}</button></div>}
 		</div>
 	</details>
 }
 
-function AuditPage({runs,hosts,sessions,ready}:{runs:Run[];hosts:Host[];sessions:ChatSession[];ready:boolean}) {
+type AuditDeleteTarget={kind:'run';run:Run}|{kind:'session';id:string;title:string}|{kind:'all'}
+
+function AuditPage({runs,hosts,sessions,ready,runsHasMore,loadingMore,onLoadMoreRuns,onDeleteRun,onDeleteRuns}:{runs:Run[];hosts:Host[];sessions:ChatSession[];ready:boolean;runsHasMore:boolean;loadingMore:boolean;onLoadMoreRuns:()=>Promise<void>;onDeleteRun:(id:string)=>Promise<void>;onDeleteRuns:(sessionID?:string|null)=>Promise<void>}) {
 	const {t,i18n:instance}=useTranslation()
 	const [query,setQuery]=useState('')
+	const [deleteTarget,setDeleteTarget]=useState<AuditDeleteTarget|null>(null)
+	const [deleting,setDeleting]=useState(false)
 	const filtered=useMemo(()=>{
 		const needle=query.toLowerCase()
 		return runs.filter(run=>{
@@ -4225,14 +4302,30 @@ function AuditPage({runs,hosts,sessions,ready}:{runs:Run[];hosts:Host[];sessions
 			return{id,title:id==='__direct__'?t('audit.direct'):titles.get(id)||t('audit.missingConversation'),runs:items,latest:items[0]?.started_at,pending:items.filter(run=>run.status==='approval_required').length}
 		}).sort((a,b)=>Date.parse(b.latest||'')-Date.parse(a.latest||''))
 	},[filtered,sessions,t,instance.language])
+	const confirmDelete=async()=>{
+		if(!deleteTarget||deleting)return
+		setDeleting(true)
+		try{
+			if(deleteTarget.kind==='run')await onDeleteRun(deleteTarget.run.id)
+			else if(deleteTarget.kind==='session')await onDeleteRuns(deleteTarget.id)
+			else await onDeleteRuns(undefined)
+			setDeleteTarget(null)
+		}catch{/* the application notification channel presents the actionable error */}
+		finally{setDeleting(false)}
+	}
+	const deleteTitle=deleteTarget?.kind==='run'?t('audit.deleteRunTitle'):deleteTarget?.kind==='session'?t('audit.deleteSessionTitle',{title:deleteTarget.title}):t('audit.deleteAllTitle')
 	if(!ready)return <div className="audit-loading panel" role="status"><LoaderCircle className="spin" size={16}/><span>{t('common.loading')}</span></div>
 	return <div className="page-stack">
-		<div className="audit-toolbar"><div className="search-box"><Search size={16}/><input aria-label={t('common.search')} value={query} onChange={event=>setQuery(event.target.value)}/></div><span>{t('audit.counts',{sessions:groups.length,runs:filtered.length})}</span></div>
+		<div className="audit-toolbar"><div className="search-box"><Search size={16}/><input aria-label={t('common.search')} value={query} onChange={event=>setQuery(event.target.value)}/></div><span>{t('audit.counts',{sessions:groups.length,runs:filtered.length})}</span>{runs.length>0&&<button type="button" className="audit-clear-button" onClick={()=>setDeleteTarget({kind:'all'})}><Trash2 size={13}/>{t('audit.clear')}</button>}</div>
 		<div className="audit-groups">{groups.map(group=><details className="audit-session panel" key={group.id}>
 			<summary className="audit-session-summary"><div className="audit-session-glyph"><History size={17}/></div><div className="audit-session-name"><b>{group.title}</b><span>{group.id==='__direct__'?t('audit.noSession'):group.id} · {t('audit.lastRun',{date:new Date(group.latest).toLocaleString(localeFor(instance.language))})}</span></div><div className="audit-session-stats"><span><b>{group.runs.length}</b> {t('audit.runs')}</span>{group.pending>0&&<span className="pending-count"><b>{group.pending}</b> {t('audit.pending')}</span>}</div><ChevronRight className="audit-session-chevron" size={17}/></summary>
-			<div className="audit-table"><div className="audit-row audit-head"><span>{t('audit.columns.time')}</span><span>{t('audit.columns.operation')}</span><span>{t('audit.columns.status')}</span><span>{t('audit.columns.host')}</span><span>{t('audit.columns.exit')}</span><span aria-hidden="true"/></div>{group.runs.map(run=><AuditRunRow key={run.id} run={run} hosts={hosts}/>)}</div>
+			<div className="audit-session-actions"><button type="button" className="danger" onClick={()=>setDeleteTarget({kind:'session',id:group.id==='__direct__'?'':group.id,title:group.title})}><Trash2 size={13}/>{t('audit.deleteSession')}</button></div>
+			<div className="audit-table"><div className="audit-row audit-head"><span>{t('audit.columns.time')}</span><span>{t('audit.columns.operation')}</span><span>{t('audit.columns.status')}</span><span>{t('audit.columns.host')}</span><span>{t('audit.columns.exit')}</span><span aria-hidden="true"/></div>{group.runs.map(run=><AuditRunRow key={run.id} run={run} hosts={hosts} onDelete={run=>setDeleteTarget({kind:'run',run})}/>)}</div>
 		</details>)}</div>
-		{!runs.length&&<Empty icon={<History/>} title={t('audit.emptyTitle')}/>} {runs.length>0&&!groups.length&&<Empty icon={<Search/>} title={t('audit.noMatch')}/>}
+		{runsHasMore&&<button type="button" className="audit-load-more panel" disabled={loadingMore} onClick={()=>void onLoadMoreRuns()}>{loadingMore?<LoaderCircle className="spin" size={14}/>:<History size={14}/>} {t('audit.loadMore')}</button>}
+		{!runs.length&&<Empty icon={<History/>} title={t('audit.emptyTitle')}/>}
+		{runs.length>0&&!groups.length&&<Empty icon={<Search/>} title={t('audit.noMatch')}/>}
+		{deleteTarget&&<DestructiveConfirmDialog title={deleteTitle} busy={deleting} onCancel={()=>setDeleteTarget(null)} onConfirm={()=>void confirmDelete()}/>}
 	</div>
 }
 

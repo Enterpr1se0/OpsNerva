@@ -404,6 +404,11 @@ export interface RunSearchPage {
   next_id?: string
 }
 
+export interface AuditRunDeleteResult {
+  deleted: number
+  retained: number
+}
+
 export interface RunDetail {
   run: Run
   stdout_raw?: string

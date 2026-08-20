@@ -1,6 +1,6 @@
 import type { ServerLogResponse } from './types'
 
-export type ApplicationEventTopic='connections'|'approvals'|'sessions'|'chat_state'|'health'|'logs'
+export type ApplicationEventTopic='connections'|'approvals'|'sessions'|'chat_state'|'audit'|'health'|'logs'
 export type ApplicationLogSubscription={level?:string;component?:string;q?:string;limit?:number}
 export type ApplicationEventSubscription={logs?:ApplicationLogSubscription;sessionId?:string}
 export type ApplicationEvent<T=unknown>={type:'event'|'error'|'heartbeat';topic?:ApplicationEventTopic;mode?:'snapshot'|'delta';sequence?:number;data?:T;error?:string}

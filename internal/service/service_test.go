@@ -2747,8 +2747,8 @@ func TestChatSessionsCanBeListedLoadedAndDeleted(t *testing.T) {
 	if err != nil || len(messages) != 0 {
 		t.Fatalf("deleted messages still exist: %#v err=%v", messages, err)
 	}
-	if _, err := svc.store.GetRun(ctx, run.ID); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("conversation run survived deletion: %v", err)
+	if retained, err := svc.store.GetRun(ctx, run.ID); err != nil || retained.SessionID != "session-one" {
+		t.Fatalf("conversation audit run was not retained: run=%#v err=%v", retained, err)
 	}
 	if _, err := svc.store.GetApproval(ctx, approval.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("conversation approval survived deletion: %v", err)
@@ -2763,10 +2763,11 @@ func TestChatSessionsCanBeListedLoadedAndDeleted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	keptDeletedSession := false
 	keptOtherSession := false
 	for _, event := range audit {
 		if event.RunID == run.ID || event.Data["session_id"] == "session-one" {
-			t.Fatalf("conversation audit survived deletion: %#v", event)
+			keptDeletedSession = true
 		}
 		if event.Data["session_id"] == "session-two" {
 			keptOtherSession = true
@@ -2775,8 +2776,22 @@ func TestChatSessionsCanBeListedLoadedAndDeleted(t *testing.T) {
 	if !keptOtherSession {
 		t.Fatalf("another conversation's audit was deleted: %#v", audit)
 	}
+	if !keptDeletedSession {
+		t.Fatalf("deleted conversation's audit was not retained: %#v", audit)
+	}
 	if err := svc.DeleteChatSession(ctx, "session-one"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("expected not found on second delete, got %v", err)
+	}
+}
+
+func TestAuditPersistsAfterRequestCancellation(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	svc.audit(ctx, "run-cancelled", "request_finished", "test", map[string]any{"status": "completed"})
+	events, err := svc.ListAudit(context.Background(), "run-cancelled", 10)
+	if err != nil || len(events) != 1 || events[0].Type != "request_finished" {
+		t.Fatalf("audit after request cancellation = %#v, err=%v", events, err)
 	}
 }
 

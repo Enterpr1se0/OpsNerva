@@ -26,6 +26,7 @@ var applicationEventIntervals = map[string]time.Duration{
 	"approvals":   time.Second,
 	"sessions":    2 * time.Second,
 	"chat_state":  2 * time.Second,
+	"audit":       time.Second,
 	"health":      30 * time.Second,
 	"logs":        time.Second,
 }
@@ -305,6 +306,17 @@ func (s *Server) applicationTopicSnapshot(ctx context.Context, topic string, sub
 			return nil, err
 		}
 		value = state
+	case "audit":
+		page, err := s.service.ListAuditPage(ctx, "", 1, time.Time{}, "")
+		if err != nil {
+			return nil, err
+		}
+		if len(page.Events) == 0 {
+			value = map[string]any{}
+		} else {
+			latest := page.Events[0]
+			value = map[string]any{"id": latest.ID, "type": latest.Type, "created_at": latest.CreatedAt}
+		}
 	default:
 		return nil, fmt.Errorf("unsupported application event topic %q", topic)
 	}

@@ -1,4 +1,4 @@
-import type { AgentEvent, Approval, ApprovalExecutionResult, AuthStatus, ChatContextCompressionResult, ChatMessage, ChatMessagePage, ChatSession, ChatState, ConfigurationImportResult, Health, Host, HostInput, LLMToolCatalog, ManagedSkill, MCPOAuthStart, MCPServer, MCPServerInput, MCPTestResult, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestJob, ModelTestResult, Proxy, ProxyInput, ProxyTestResult, QueuedChatMessage, Run, RunDetail, RunSearchPage, ServerLogResponse, SFTPFileList, SFTPMutationResult, SSHHostStatus, SSHShell, SSHShellList, SSHShellSnapshot, SSHShellStartInput, SSHTunnel, SSHTunnelList, SSHTunnelStartInput, SSHTunnelUpdateInput, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchResponse, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceInput, WorkspaceUploadResult } from './types'
+import type { AgentEvent, Approval, ApprovalExecutionResult, AuditRunDeleteResult, AuthStatus, ChatContextCompressionResult, ChatMessage, ChatMessagePage, ChatSession, ChatState, ConfigurationImportResult, Health, Host, HostInput, LLMToolCatalog, ManagedSkill, MCPOAuthStart, MCPServer, MCPServerInput, MCPTestResult, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestJob, ModelTestResult, Proxy, ProxyInput, ProxyTestResult, QueuedChatMessage, Run, RunDetail, RunSearchPage, ServerLogResponse, SFTPFileList, SFTPMutationResult, SSHHostStatus, SSHShell, SSHShellList, SSHShellSnapshot, SSHShellStartInput, SSHTunnel, SSHTunnelList, SSHTunnelStartInput, SSHTunnelUpdateInput, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchResponse, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceInput, WorkspaceUploadResult } from './types'
 
 export type TransferProgress={loaded:number;total:number}
 export type TransferOptions={signal?:AbortSignal;onProgress?:(progress:TransferProgress)=>void;totalBytes?:number}
@@ -218,7 +218,18 @@ export const api = {
   approve: (id: string, reason: string) => request<ApprovalExecutionResult>(`/api/v1/approvals/${id}/approve`, { method: 'POST', body: JSON.stringify({ reason }) }),
   reject: (id: string, reason: string) => request(`/api/v1/approvals/${id}/reject`, { method: 'POST', body: JSON.stringify({ reason }) }),
   runs: (query = '') => requestList<Run>(`/api/v1/runs?limit=100&q=${encodeURIComponent(query)}`),
-  runSummaries: (query = '') => request<RunSearchPage>(`/api/v1/run-summaries?limit=100&q=${encodeURIComponent(query)}`),
+  runSummaries: (input:{query?:string;limit?:number;cursorStartedAt?:string;cursorID?:string}={}) => {
+	  const params=new URLSearchParams({limit:String(input.limit||100)})
+	  if(input.query)params.set('q',input.query)
+	  if(input.cursorStartedAt)params.set('cursor_started_at',input.cursorStartedAt)
+	  if(input.cursorID)params.set('cursor_id',input.cursorID)
+	  return request<RunSearchPage>(`/api/v1/run-summaries?${params}`)
+	},
+  deleteAuditRun: (id:string) => request<AuditRunDeleteResult>(`/api/v1/audit/runs/${encodeURIComponent(id)}`,{method:'DELETE'}),
+  deleteAuditRuns: (sessionID?:string|null) => {
+	  const suffix=sessionID===undefined?'':`?session_id=${encodeURIComponent(sessionID||'')}`
+	  return request<AuditRunDeleteResult>(`/api/v1/audit/runs${suffix}`,{method:'DELETE'})
+	},
   runDetail: (id: string) => request<RunDetail>(`/api/v1/runs/${encodeURIComponent(id)}`),
   logs: (filters: {level?:string;component?:string;q?:string;limit?:number} = {}) => {
     const params=new URLSearchParams()

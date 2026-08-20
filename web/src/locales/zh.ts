@@ -237,7 +237,10 @@ const zh = {
     direct: '直接操作 / 旧操作', missingConversation: '会话已删除或不可用',
     counts: '{{sessions}} 个会话 · {{runs}} 次运行', noSession: '没有 Agent 会话上下文', lastRun: '最近运行 {{date}}', runs: '次运行', pending: '待审批',
     columns: { time: '时间', operation: '操作', status: '状态', host: '主机', exit: '退出码' }, unknownOperation: '未知操作',
-    emptyTitle: '没有审计记录', noMatch: '没有匹配的审计运行',
+		loadMore: '加载更早记录', clear: '全部删除', deleteSession: '删除记录',
+		deleteRunTitle: '删除这条审计记录？', deleteSessionTitle: '删除“{{title}}”的审计记录？', deleteAllTitle: '删除全部审计记录？',
+		deleted: '已删除 {{count}} 条审计记录', deletedWithRetained: '已删除 {{deleted}} 条 · 保留 {{retained}} 条活动记录',
+    emptyTitle: '没有审计记录', noMatch: '没有匹配的审计记录',
   },
   logs: {
     search: '搜索消息、ID、主机和状态...', minimumLevel: '级别', component: '组件', allComponents: '全部组件', live: '实时 · 3 秒', paused: '已暂停',

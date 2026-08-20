@@ -400,7 +400,7 @@ func (s *Service) GetChatAttachment(ctx context.Context, sessionID, attachmentID
 	return s.store.GetChatAttachment(ctx, sessionID, attachmentID)
 }
 
-func (s *Service) DeleteChatSession(ctx context.Context, sessionID string) error {
+func (s *Service) DeleteChatSession(ctx context.Context, sessionID string, actors ...string) error {
 	if calls, err := s.store.ListChatToolCalls(ctx, sessionID); err != nil {
 		return err
 	} else {
@@ -416,7 +416,15 @@ func (s *Service) DeleteChatSession(ctx context.Context, sessionID string) error
 	if s.hasActiveTaskForSession(sessionID) {
 		return fmt.Errorf("conversation %q has an active background task; cancel it before deleting the conversation", sessionID)
 	}
-	return s.store.DeleteChatSession(ctx, sessionID)
+	if err := s.store.DeleteChatSession(ctx, sessionID); err != nil {
+		return err
+	}
+	actor := ""
+	if len(actors) > 0 {
+		actor = actors[0]
+	}
+	s.audit(ctx, "", "chat_session_deleted", actor, map[string]any{"session_id": sessionID})
+	return nil
 }
 
 func (s *Service) hasActiveTaskForSession(sessionID string) bool {
@@ -2805,6 +2813,18 @@ func (s *Service) ListAudit(ctx context.Context, runID string, limit int) ([]dom
 	return s.store.ListAudit(ctx, runID, limit)
 }
 
+func (s *Service) ListAuditPage(ctx context.Context, runID string, limit int, cursorCreated time.Time, cursorID string) (domain.AuditEventPage, error) {
+	return s.store.ListAuditPage(ctx, runID, limit, cursorCreated, cursorID)
+}
+
+func (s *Service) DeleteAuditRun(ctx context.Context, runID, actor string) (domain.AuditRunDeleteResult, error) {
+	return s.store.DeleteAuditRun(ctx, runID, actor)
+}
+
+func (s *Service) DeleteAuditRuns(ctx context.Context, sessionID *string, actor string) (domain.AuditRunDeleteResult, error) {
+	return s.store.DeleteAuditRuns(ctx, sessionID, actor)
+}
+
 func (s *Service) acquire(ctx context.Context, hostIDs ...string) (func(), error) {
 	uniqueHostIDs := make([]string, 0, len(hostIDs))
 	seen := make(map[string]struct{}, len(hostIDs))
@@ -2861,7 +2881,12 @@ func (s *Service) audit(ctx context.Context, runID, eventType, actor string, dat
 	if actor == "" {
 		actor = "local-user"
 	}
-	_ = s.store.AppendAudit(ctx, domain.AuditEvent{RunID: runID, Type: eventType, Actor: actor, Data: data})
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := s.store.AppendAudit(persistCtx, domain.AuditEvent{RunID: runID, Type: eventType, Actor: actor, Data: data}); err != nil {
+		observability.FromContext(ctx).ErrorContext(context.WithoutCancel(ctx), "persist audit event failed",
+			"component", "audit", "run_id", runID, "event_type", eventType, "actor", actor, "error", err)
+	}
 }
 
 func normalizeRequest(req *domain.ExecRequest, limits config.Limits) {

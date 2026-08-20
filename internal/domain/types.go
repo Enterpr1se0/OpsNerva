@@ -941,14 +941,18 @@ type RunSearchFilter struct {
 	ScanLimit     int
 }
 
-// RunSearchPage is the bounded, cursor-based projection used by Agent tools.
-// The existing audit and CLI search paths retain their legacy limit semantics.
+// RunSearchPage is the bounded, cursor-based projection used by audit and Agent history clients.
 type RunSearchPage struct {
 	Runs          []Run     `json:"runs"`
 	HasMore       bool      `json:"has_more"`
 	ScanLimited   bool      `json:"scan_limited,omitempty"`
 	NextStartedAt time.Time `json:"next_started_at,omitempty,omitzero"`
 	NextID        string    `json:"next_id,omitempty"`
+}
+
+type AuditRunDeleteResult struct {
+	Deleted  int `json:"deleted"`
+	Retained int `json:"retained"`
 }
 
 type Approval struct {
@@ -984,4 +988,11 @@ type AuditEvent struct {
 	Actor     string         `json:"actor"`
 	Data      map[string]any `json:"data"`
 	CreatedAt time.Time      `json:"created_at"`
+}
+
+type AuditEventPage struct {
+	Events        []AuditEvent `json:"events"`
+	HasMore       bool         `json:"has_more"`
+	NextCreatedAt time.Time    `json:"next_created_at,omitempty,omitzero"`
+	NextID        string       `json:"next_id,omitempty"`
 }
