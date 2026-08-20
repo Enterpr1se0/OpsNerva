@@ -7,6 +7,11 @@
 - Put task-owned temporary artifacts that need an explicit location in a task-specific directory under the system temporary directory, and clean them after the task.
 - Repository-managed build outputs such as `web/dist` are product artifacts, not caches.
 
+## Change preparation
+
+- Before modifying code, collect enough information to identify the root cause, affected paths, existing behavior, and relevant constraints.
+- Inspect the surrounding implementation and current changes before editing; do not implement a fix from the visible symptom alone.
+
 ## Frontend copy
 
 - Keep frontend text concise and limited to labels, values, statuses, actionable errors, and instructions required to complete an operation.
