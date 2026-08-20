@@ -1736,6 +1736,20 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 			}
 			_, err := s.agent.QueryWithAttachments(queryCtx, sessionID, currentMessage, currentAttachments, publish)
 			if err != nil {
+				if errors.Is(err, agent.ErrSteered) {
+					next, ok := s.chatQueue.nextAfterTurn(sessionID)
+					if !ok {
+						broadcast(agent.Event{Type: "done", SessionID: sessionID, UserMessageID: currentUserMessageID})
+						return
+					}
+					broadcast(agent.Event{Type: "turn_steered", SessionID: sessionID, UserMessageID: currentUserMessageID})
+					broadcast(agent.Event{
+						Type: "queue_started", MessageID: next.ID, SessionID: sessionID, Content: next.Message,
+						Status: "in_progress", QueueMode: next.Mode, QueueCount: len(s.chatQueue.snapshot(sessionID)), AttachmentCount: len(next.Attachments),
+					})
+					currentMessage, currentAttachments = next.Message, next.Attachments
+					continue
+				}
 				_, _ = s.chatQueue.clear(sessionID)
 				if !errors.Is(err, context.Canceled) {
 					event := agent.Event{Type: "model_error", Error: err.Error(), SessionID: sessionID, UserMessageID: currentUserMessageID}
@@ -1760,7 +1774,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 			broadcast(agent.Event{Type: "turn_done", SessionID: sessionID, UserMessageID: currentUserMessageID, Content: completedContent(completed)})
 			broadcast(agent.Event{
 				Type: "queue_started", MessageID: next.ID, SessionID: sessionID, Content: next.Message,
-				Status: "in_progress", QueueCount: len(s.chatQueue.snapshot(sessionID)), AttachmentCount: len(next.Attachments),
+				Status: "in_progress", QueueMode: next.Mode, QueueCount: len(s.chatQueue.snapshot(sessionID)), AttachmentCount: len(next.Attachments),
 			})
 			currentMessage, currentAttachments = next.Message, next.Attachments
 		}
@@ -1799,6 +1813,14 @@ func (s *Server) queueChatMessage(w http.ResponseWriter, r *http.Request) {
 		writeErrorStatus(w, fmt.Errorf("session id is required"), http.StatusBadRequest)
 		return
 	}
+	mode := strings.TrimSpace(r.URL.Query().Get("mode"))
+	if mode == "" {
+		mode = chatQueueModeFollowup
+	}
+	if mode != chatQueueModeFollowup && mode != chatQueueModeSteering {
+		writeErrorStatus(w, fmt.Errorf("queue mode must be followup or steering"), http.StatusBadRequest)
+		return
+	}
 	_, _, message, attachments, ok := s.decodeChatInput(w, r)
 	if !ok {
 		return
@@ -1807,16 +1829,18 @@ func (s *Server) queueChatMessage(w http.ResponseWriter, r *http.Request) {
 		writeErrorStatus(w, fmt.Errorf("message or image is required"), http.StatusBadRequest)
 		return
 	}
-	item, position, err := s.chatQueue.enqueue(sessionID, message, attachments)
+	item, position, err := s.chatQueue.enqueue(sessionID, message, mode, attachments)
 	if err != nil {
 		writeErrorStatus(w, err, http.StatusConflict)
 		return
 	}
 	s.chatEvents.publish(sessionID, agent.Event{
 		Type: "queued", MessageID: item.ID, SessionID: sessionID, Content: item.Message,
-		Status: "pending", QueuePosition: position, QueueCount: position, AttachmentCount: len(item.Attachments),
+		Status: "pending", QueueMode: item.Mode, QueuePosition: position,
+		QueueCount: len(s.chatQueue.snapshot(sessionID)), AttachmentCount: len(item.Attachments),
 	})
-	writeJSON(w, http.StatusAccepted, map[string]any{"item": item, "position": position})
+	steeringRequested := mode == chatQueueModeSteering && s.agent.SteerSession(sessionID)
+	writeJSON(w, http.StatusAccepted, map[string]any{"item": item, "position": position, "steering_requested": steeringRequested})
 }
 
 func (s *Server) decodeChatInput(w http.ResponseWriter, r *http.Request) (string, string, string, []domain.ChatAttachment, bool) {

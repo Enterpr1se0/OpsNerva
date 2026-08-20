@@ -101,6 +101,17 @@ func TestQueuedTurnCompletionDoesNotCloseChatEventStream(t *testing.T) {
 	}
 }
 
+func TestSteeredTurnDoesNotCloseChatEventStream(t *testing.T) {
+	hub := newChatEventHub()
+	hub.publish("session_test", agent.Event{Type: "turn_steered", UserMessageID: "msg_current"})
+	hub.publish("session_test", agent.Event{Type: "queue_started", MessageID: "queue_steer", QueueMode: chatQueueModeSteering})
+	replay, events, done, unsubscribe := hub.subscribe("session_test", 0)
+	defer unsubscribe()
+	if done || events == nil || len(replay) != 2 || replay[0].Type != "turn_steered" || replay[1].QueueMode != chatQueueModeSteering {
+		t.Fatalf("steering replay = %#v, done = %t", replay, done)
+	}
+}
+
 func TestChatEventsStreamReturnsReplayWithSSEEventIDs(t *testing.T) {
 	hub := newChatEventHub()
 	const userMessageID = "msg_user"

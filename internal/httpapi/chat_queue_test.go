@@ -52,11 +52,11 @@ func TestChatMessageQueueAdvancesAfterTurnsInOrder(t *testing.T) {
 	if _, duplicate := queue.begin("session-test"); duplicate {
 		t.Fatal("queue did not enforce one active driver")
 	}
-	first, position, err := queue.enqueue("session-test", " first ", []domain.ChatAttachment{{Name: "screen.png", MIMEType: "image/png", SizeBytes: 3, Data: []byte("png")}})
-	if err != nil || position != 1 || first.Message != "first" || len(first.Attachments) != 1 || first.Attachments[0].Data != nil {
+	first, position, err := queue.enqueue("session-test", " first ", "", []domain.ChatAttachment{{Name: "screen.png", MIMEType: "image/png", SizeBytes: 3, Data: []byte("png")}})
+	if err != nil || position != 1 || first.Message != "first" || first.Mode != chatQueueModeFollowup || len(first.Attachments) != 1 || first.Attachments[0].Data != nil {
 		t.Fatalf("first queued message = %#v, position = %d, err = %v", first, position, err)
 	}
-	second, position, err := queue.enqueue("session-test", "second", nil)
+	second, position, err := queue.enqueue("session-test", "second", chatQueueModeFollowup, nil)
 	if err != nil || position != 2 {
 		t.Fatalf("second queued message = %#v, position = %d, err = %v", second, position, err)
 	}
@@ -74,7 +74,7 @@ func TestChatMessageQueueAdvancesAfterTurnsInOrder(t *testing.T) {
 	if _, ok := queue.nextAfterTurn("session-test"); ok || !queue.active("session-test") {
 		t.Fatal("draining queue did not retain its driver until the terminal event")
 	}
-	if _, _, err := queue.enqueue("session-test", "late", nil); !errors.Is(err, errChatQueueInactive) {
+	if _, _, err := queue.enqueue("session-test", "late", chatQueueModeFollowup, nil); !errors.Is(err, errChatQueueInactive) {
 		t.Fatalf("draining queue accepted another message: %v", err)
 	}
 	queue.finish("session-test")
@@ -83,9 +83,32 @@ func TestChatMessageQueueAdvancesAfterTurnsInOrder(t *testing.T) {
 	}
 }
 
+func TestChatMessageQueuePrioritizesSteeringWithoutReorderingItsMessages(t *testing.T) {
+	queue := newChatMessageQueue()
+	if _, started := queue.begin("session-test"); !started {
+		t.Fatal("queue did not start")
+	}
+	followup, _, err := queue.enqueue("session-test", "later", chatQueueModeFollowup, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstSteer, position, err := queue.enqueue("session-test", "change direction", chatQueueModeSteering, nil)
+	if err != nil || position != 1 {
+		t.Fatalf("first steering position = %d, err = %v", position, err)
+	}
+	secondSteer, position, err := queue.enqueue("session-test", "one more constraint", chatQueueModeSteering, nil)
+	if err != nil || position != 2 {
+		t.Fatalf("second steering position = %d, err = %v", position, err)
+	}
+	snapshot := queue.snapshot("session-test")
+	if len(snapshot) != 3 || snapshot[0].ID != firstSteer.ID || snapshot[1].ID != secondSteer.ID || snapshot[2].ID != followup.ID {
+		t.Fatalf("prioritized queue = %#v", snapshot)
+	}
+}
+
 func TestChatMessageQueueIsBoundedAndCancelClearsIt(t *testing.T) {
 	queue := newChatMessageQueue()
-	if _, _, err := queue.enqueue("missing", "message", nil); !errors.Is(err, errChatQueueInactive) {
+	if _, _, err := queue.enqueue("missing", "message", chatQueueModeFollowup, nil); !errors.Is(err, errChatQueueInactive) {
 		t.Fatalf("inactive queue error = %v", err)
 	}
 	queueCtx, started := queue.begin("session-test")
@@ -93,11 +116,11 @@ func TestChatMessageQueueIsBoundedAndCancelClearsIt(t *testing.T) {
 		t.Fatal("queue did not start")
 	}
 	for index := 0; index < maxQueuedChatMessages; index++ {
-		if _, _, err := queue.enqueue("session-test", fmt.Sprintf("message %d", index), nil); err != nil {
+		if _, _, err := queue.enqueue("session-test", fmt.Sprintf("message %d", index), chatQueueModeFollowup, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, _, err := queue.enqueue("session-test", "overflow", nil); !errors.Is(err, errChatQueueFull) {
+	if _, _, err := queue.enqueue("session-test", "overflow", chatQueueModeFollowup, nil); !errors.Is(err, errChatQueueFull) {
 		t.Fatalf("full queue error = %v", err)
 	}
 	if cleared, active := queue.clear("session-test"); cleared != maxQueuedChatMessages || !active {

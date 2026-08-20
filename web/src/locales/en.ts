@@ -148,7 +148,7 @@ const en = {
     stopping: 'Stopping Agent', cooking: 'Cooking… ( •̀ᴗ•́ )و', pondering: 'Pondering… (｡•̀ᴗ-)✧', brewing: 'Brewing… (っ˘ڡ˘ς)', weaving: 'Weaving… (づ｡◕‿‿◕｡)づ', polishing: 'Polishing… ᕙ(⇀‸↼‶)ᕗ', crunching: 'Crunching… (ง •̀_•́)ง', stopTitle: 'Stop Agent run',
     hostsCount: '{{count}} hosts: {{names}}', noHosts: 'No hosts available to Agent', switchHosts: 'Switch Agent hosts', switchModel: 'Switch model', workspaceSelected: 'Workspace: {{id}}', noWorkspace: 'No Workspace', noModel: 'No active model',
     configureModel: 'Configure and activate a model provider', loadingConversation: 'Loading conversation...',
-    queuePlaceholder: 'Add to queue...', queueMessage: 'Queue message', queueCount: '{{count}} queued', queuedImages: '{{count}} images', imageCount: '{{count}} images', prompt: 'Message...',
+    steerPlaceholder: 'Steer the current task...', queueMessage: 'Queue follow-up', steerMessage: 'Steer now', followup: 'Follow-up', steering: 'Steer', steeringShort: 'STEER', queueCount: '{{count}} queued', queuedImages: '{{count}} images', imageCount: '{{count}} images', prompt: 'Message...',
     approvalCount: '{{count}} approval', runningBadge: 'running', messageCount: '{{count}} messages', renameConversation: 'Rename conversation', sessionTitle: 'Conversation title', deleteConversation: 'Delete conversation',
     deleteTitle: 'Delete conversation “{{title}}”?', cannotDelete: 'Agent is still running', stopFailed: 'Unable to stop Agent: {{message}}',
     stopped: 'Agent run stopped by the operator before completion.', agentError: 'Agent error',

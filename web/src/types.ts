@@ -292,6 +292,7 @@ export interface AgentEvent {
 	total_tokens?: number
 	queue_position?: number
 	queue_count?: number
+	queue_mode?: ChatQueueMode
 	attachment_count?: number
 }
 
@@ -418,6 +419,7 @@ export interface RunDetail {
 export interface QueuedChatMessage {
 	id: string
 	message: string
+	mode: ChatQueueMode
 	attachments?: ChatAttachment[]
 	attachment_count?: number
 	created_at: string
@@ -723,6 +725,8 @@ export interface WorkspaceFilePreview {
   binary?: boolean
 	truncated?: boolean
 }
+
+export type ChatQueueMode = 'followup' | 'steering'
 
 export interface WorkspaceDeleteResult {
   workspace_id: string

@@ -586,6 +586,59 @@ func TestRuntimeTracksOneActiveRunPerSession(t *testing.T) {
 	}
 }
 
+func TestSteerSessionWaitsForCancelRegistrationWithoutCancellingRunContext(t *testing.T) {
+	runtime := &Runtime{}
+	runCtx, started := runtime.beginSession(context.Background(), "session_steer")
+	if !started {
+		t.Fatal("run was not registered")
+	}
+	defer runtime.endSession("session_steer")
+	if !runtime.SteerSession("session_steer") {
+		t.Fatal("active run rejected steering")
+	}
+	called := make(chan struct{}, 1)
+	runtime.registerSteerCancel("session_steer", func(_ ...adk.AgentCancelOption) (*adk.CancelHandle, bool) {
+		called <- struct{}{}
+		return nil, true
+	})
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		t.Fatal("pending steering was not delivered after cancellation registration")
+	}
+	select {
+	case <-runCtx.Done():
+		t.Fatal("steering cancelled the run context immediately")
+	default:
+	}
+	if runtime.SteerSession("missing") {
+		t.Fatal("inactive session accepted steering")
+	}
+}
+
+func TestSafePointCancellationCompletesCurrentUserTurnForSteeringContext(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{{{
+		Err: &adk.CancelError{Info: &adk.AgentCancelInfo{Mode: adk.CancelAfterChatModel}},
+	}}}}
+	runtime := &Runtime{runner: runner, store: st}
+	if _, err := runtime.Query(ctx, "session_steered", "inspect the service", nil); !errors.Is(err, ErrSteered) {
+		t.Fatalf("query error = %v", err)
+	}
+	messages, err := st.ListChatContextMessages(ctx, "session_steered")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].Role != "user" || messages[0].Status != "completed" || messages[0].Content != "inspect the service" {
+		t.Fatalf("steered turn context = %#v", messages)
+	}
+}
+
 func TestCancelSessionStopsQueryAndPersistsInterruption(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")

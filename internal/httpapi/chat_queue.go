@@ -13,6 +13,11 @@ import (
 
 const maxQueuedChatMessages = 20
 
+const (
+	chatQueueModeFollowup = "followup"
+	chatQueueModeSteering = "steering"
+)
+
 var (
 	errChatQueueInactive = errors.New("the Agent is not running for this conversation")
 	errChatQueueFull     = errors.New("the conversation message queue is full")
@@ -21,6 +26,7 @@ var (
 type queuedChatMessage struct {
 	ID          string                  `json:"id"`
 	Message     string                  `json:"message"`
+	Mode        string                  `json:"mode"`
 	Attachments []domain.ChatAttachment `json:"attachments,omitempty"`
 	CreatedAt   time.Time               `json:"created_at"`
 }
@@ -56,7 +62,7 @@ func (q *chatMessageQueue) begin(sessionID string) (context.Context, bool) {
 	return ctx, true
 }
 
-func (q *chatMessageQueue) enqueue(sessionID, message string, attachments []domain.ChatAttachment) (queuedChatMessage, int, error) {
+func (q *chatMessageQueue) enqueue(sessionID, message, mode string, attachments []domain.ChatAttachment) (queuedChatMessage, int, error) {
 	if q == nil {
 		return queuedChatMessage{}, 0, errChatQueueInactive
 	}
@@ -70,16 +76,33 @@ func (q *chatMessageQueue) enqueue(sessionID, message string, attachments []doma
 	if len(state.items) >= maxQueuedChatMessages {
 		return queuedChatMessage{}, 0, errChatQueueFull
 	}
+	mode = strings.TrimSpace(mode)
+	if mode == "" {
+		mode = chatQueueModeFollowup
+	}
 	item := queuedChatMessage{
-		ID: ids.New("queue"), Message: strings.TrimSpace(message),
+		ID: ids.New("queue"), Message: strings.TrimSpace(message), Mode: mode,
 		Attachments: append([]domain.ChatAttachment(nil), attachments...), CreatedAt: time.Now().UTC(),
 	}
-	state.items = append(state.items, item)
-	return publicQueuedChatMessage(item), len(state.items), nil
+	position := len(state.items) + 1
+	if mode == chatQueueModeSteering {
+		// Steering messages retain their own order but run before followups that
+		// have not started yet.
+		position = 1
+		for position <= len(state.items) && state.items[position-1].Mode == chatQueueModeSteering {
+			position++
+		}
+		state.items = append(state.items, queuedChatMessage{})
+		copy(state.items[position:], state.items[position-1:])
+		state.items[position-1] = item
+	} else {
+		state.items = append(state.items, item)
+	}
+	return publicQueuedChatMessage(item), position, nil
 }
 
 // nextAfterTurn advances the queue only after the current Agent turn has
-// returned. Enqueueing never mutates or preempts the in-flight ReAct loop.
+// returned, either normally or through a steering safe-point.
 func (q *chatMessageQueue) nextAfterTurn(sessionID string) (queuedChatMessage, bool) {
 	if q == nil {
 		return queuedChatMessage{}, false

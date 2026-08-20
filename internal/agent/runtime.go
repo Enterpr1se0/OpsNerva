@@ -27,6 +27,7 @@ import (
 var (
 	ErrUnavailable     = errors.New("agent is unavailable: configure and activate a model provider in the Web UI or set OPENAI_API_KEY")
 	ErrSessionBusy     = errors.New("an agent run is already active for this session")
+	ErrSteered         = errors.New("agent turn steered at a safe point")
 	ErrEmptyResponse   = errors.New("model returned an empty response")
 	ErrRequestTooLarge = errors.New("model request was too large; oversized context was reduced for later turns, so continue with a smaller request")
 )
@@ -205,6 +206,7 @@ type Event struct {
 	TotalTokens      int    `json:"total_tokens,omitempty"`
 	QueuePosition    int    `json:"queue_position,omitempty"`
 	QueueCount       int    `json:"queue_count,omitempty"`
+	QueueMode        string `json:"queue_mode,omitempty"`
 	AttachmentCount  int    `json:"attachment_count,omitempty"`
 	TransferredBytes int64  `json:"transferred_bytes,omitempty"`
 	TotalBytes       int64  `json:"total_bytes,omitempty"`
@@ -236,8 +238,10 @@ type Runtime struct {
 }
 
 type activeAgentSession struct {
-	modelCancel context.CancelFunc
-	tools       *toolExecutionScope
+	modelCancel  context.CancelFunc
+	tools        *toolExecutionScope
+	steerCancel  adk.AgentCancelFunc
+	steerPending bool
 }
 
 type Status struct {
@@ -783,6 +787,49 @@ func (r *Runtime) CancelSession(sessionID string) bool {
 	return active != nil || len(scopes) > 0
 }
 
+// SteerSession asks Eino to end the active turn at the next model or tool
+// boundary. Unlike CancelSession, it does not cancel detached tool execution.
+func (r *Runtime) SteerSession(sessionID string) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	if r == nil || sessionID == "" {
+		return false
+	}
+	r.activeMu.Lock()
+	active := r.active[sessionID]
+	if active == nil {
+		r.activeMu.Unlock()
+		return false
+	}
+	active.steerPending = true
+	cancel := active.steerCancel
+	r.activeMu.Unlock()
+	requestAgentSteer(cancel)
+	return true
+}
+
+func (r *Runtime) registerSteerCancel(sessionID string, cancel adk.AgentCancelFunc) {
+	r.activeMu.Lock()
+	active := r.active[sessionID]
+	pending := active != nil && active.steerPending
+	if active != nil {
+		active.steerCancel = cancel
+	}
+	r.activeMu.Unlock()
+	if pending {
+		requestAgentSteer(cancel)
+	}
+}
+
+func requestAgentSteer(cancel adk.AgentCancelFunc) {
+	if cancel == nil {
+		return
+	}
+	_, _ = cancel(
+		adk.WithAgentCancelMode(adk.CancelAfterChatModel|adk.CancelAfterToolCalls),
+		adk.WithRecursive(),
+	)
+}
+
 func (r *Runtime) TestProvider(ctx context.Context, cfg config.Model) (TestResult, error) {
 	started := time.Now()
 	logger := observability.FromContext(ctx).With("component", "agent", "model", cfg.Name)
@@ -934,6 +981,10 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 		attrs := []any{
 			"duration_ms", time.Since(started).Milliseconds(), "answer_bytes", len(answer),
 			"reasoning_segments", reasoningSegments, "tool_results", toolResults, "model_retries", modelRetries.Load(),
+		}
+		if errors.Is(queryErr, ErrSteered) {
+			logger.InfoContext(ctx, "agent query steered", attrs...)
+			return
 		}
 		if queryErr != nil {
 			logger.ErrorContext(ctx, "agent query failed", append(attrs, "error", queryErr)...)
@@ -1129,7 +1180,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 	finalAnswerContext := finalAnswerInput{Request: query, ToolResults: make([]finalAnswerToolResult, 0)}
 	defer func() {
 		status := "failed"
-		if queryErr == nil && turnCompleted {
+		if (queryErr == nil && turnCompleted) || errors.Is(queryErr, ErrSteered) {
 			status = "completed"
 		}
 		statusCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -1271,7 +1322,9 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 		emitModelRetry(err, attempt)
 	})
 
-	iter := runner.Run(runCtx, messages, adk.WithCheckPointID(sessionID))
+	cancelOption, steerCancel := adk.WithCancel()
+	r.registerSteerCancel(sessionID, steerCancel)
+	iter := runner.Run(runCtx, messages, adk.WithCheckPointID(sessionID), cancelOption)
 	answerCandidate := ""
 	answerMessageID = ""
 	interrupted := false
@@ -1292,6 +1345,10 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 			var retryErr *adk.WillRetryError
 			if errors.As(event.Err, &retryErr) {
 				continue
+			}
+			var cancelErr *adk.CancelError
+			if errors.As(event.Err, &cancelErr) {
+				return "", ErrSteered
 			}
 			return "", normalizeModelRequestError(event.Err)
 		}
