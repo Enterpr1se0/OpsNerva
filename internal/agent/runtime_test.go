@@ -358,7 +358,7 @@ func TestAnthropicRequestsDoNotFollowRedirects(t *testing.T) {
 	if _, err := (&Runtime{}).TestProvider(context.Background(), cfg); err == nil {
 		t.Fatal("Anthropic connection test accepted a redirect response")
 	}
-	client, err := modelHTTPClient(cfg, time.Second)
+	client, err := modelHTTPClient(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

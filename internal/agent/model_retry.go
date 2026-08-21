@@ -49,7 +49,12 @@ func modelRequestRetryConfig() *adk.ModelRetryConfig {
 			if retryCtx == nil || ctx.Err() != nil {
 				return &adk.RetryDecision{}
 			}
-			if retryCtx.Err == nil && modelResponseHasContent(retryCtx.OutputMessage) {
+			// A mid-stream failure can carry the chunks already received in
+			// OutputMessage. Reissuing after any visible content, reasoning, or
+			// tool call would discard useful output and can repeat an expensive
+			// model request. Only failures with no effective output are safe to
+			// retry automatically.
+			if modelResponseHasContent(retryCtx.OutputMessage) {
 				return &adk.RetryDecision{}
 			}
 			decision := &adk.RetryDecision{Retry: retryCtx.Err == nil || isRetryableModelRequestError(retryCtx.Err)}

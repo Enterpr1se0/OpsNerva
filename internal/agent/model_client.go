@@ -28,11 +28,11 @@ import (
 const fallbackAnthropicMaxTokens = 32000
 
 // anthropicMaxTokensCeiling bounds catalog-reported limits so a single
-// response cannot run unbounded against request timeouts.
+// response cannot request an excessive output budget.
 const anthropicMaxTokensCeiling = 64000
 
-func newChatModel(ctx context.Context, cfg config.Model, timeout time.Duration, maxTokens int) (model.ToolCallingChatModel, error) {
-	httpClient, err := modelHTTPClient(cfg, timeout)
+func newChatModel(ctx context.Context, cfg config.Model, maxTokens int) (model.ToolCallingChatModel, error) {
+	httpClient, err := modelHTTPClient(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -45,7 +45,7 @@ func newChatModel(ctx context.Context, cfg config.Model, timeout time.Duration, 
 		}
 		claudeCfg := &claude.Config{
 			APIKey: cfg.APIKey, Model: cfg.Name, MaxTokens: maxTokens,
-			HTTPClient: httpClient, RequestTimeout: timeout,
+			HTTPClient: httpClient,
 		}
 		if cfg.ReasoningEffort != "" {
 			claudeCfg.ThinkingConfig = &anthropic.ThinkingConfigParamUnion{
@@ -61,7 +61,7 @@ func newChatModel(ctx context.Context, cfg config.Model, timeout time.Duration, 
 		return claude.NewChatModel(ctx, claudeCfg)
 	}
 	openaiCfg := &modelopenai.ChatModelConfig{
-		APIKey: cfg.APIKey, BaseURL: cfg.BaseURL, Model: cfg.Name, ReasoningEffort: modelopenai.ReasoningEffortLevel(cfg.ReasoningEffort), Timeout: timeout, HTTPClient: httpClient,
+		APIKey: cfg.APIKey, BaseURL: cfg.BaseURL, Model: cfg.Name, ReasoningEffort: modelopenai.ReasoningEffortLevel(cfg.ReasoningEffort), HTTPClient: httpClient,
 	}
 	if maxTokens > 0 {
 		name := strings.ToLower(strings.TrimSpace(cfg.Name))
@@ -249,13 +249,16 @@ func lookupAnthropicOutputLimit(ctx context.Context, cfg config.Model, httpClien
 	return payload.MaxTokens, nil
 }
 
-func modelHTTPClient(cfg config.Model, timeout time.Duration) (*http.Client, error) {
+func modelHTTPClient(cfg config.Model) (*http.Client, error) {
 	if cfg.Kind != "anthropic" && cfg.ProxyURL == "" && cfg.UserAgent == "" {
 		return nil, nil
 	}
-	client := &http.Client{Timeout: timeout}
+	// Model requests are bounded by their caller's context. Do not add a client
+	// or response-header timeout: providers may legitimately spend a long time
+	// reasoning before the first stream chunk.
+	client := &http.Client{}
 	if cfg.ProxyURL != "" {
-		proxyClient, err := proxyx.NewHTTPClient(cfg.ProxyURL, cfg.ProxyUsername, cfg.ProxyPassword, timeout)
+		proxyClient, err := proxyx.NewHTTPClient(cfg.ProxyURL, cfg.ProxyUsername, cfg.ProxyPassword, 0)
 		if err != nil {
 			return nil, err
 		}

@@ -283,7 +283,7 @@ func New(ctx context.Context, cfg config.Model, svc *service.Service, st *store.
 }
 
 func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st *store.Store, settings domain.SystemSettings) (*adk.Runner, []ToolDescriptor, *contextSummarizationMiddleware, error) {
-	chatModel, err := newChatModel(ctx, cfg, 90*time.Second, 0)
+	chatModel, err := newChatModel(ctx, cfg, 0)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("create chat model: %w", err)
 	}
@@ -463,7 +463,7 @@ func (r *Runtime) Reload(ctx context.Context) error {
 		return err
 	}
 	finalizer, err := buildReadOnlySubagent(
-		r.baseCtx, cfg, 90*time.Second, "final_answer",
+		r.baseCtx, cfg, "final_answer",
 		"Summarizes completed Agent activity without tools or operational side effects.",
 		finalAnswerInstruction,
 	)
@@ -489,7 +489,7 @@ func (r *Runtime) Reload(ctx context.Context) error {
 		return fmt.Errorf("build final answer Agent: %w", err)
 	}
 	titleGenerator, err := buildReadOnlySubagent(
-		r.baseCtx, cfg, sessionTitleTimeout, "conversation_title",
+		r.baseCtx, cfg, "conversation_title",
 		"Names a conversation without tools or operational side effects.",
 		sessionTitleInstruction,
 	)
@@ -557,14 +557,14 @@ func (r *Runtime) Reload(ctx context.Context) error {
 		explanationErr = fmt.Errorf("load configured subagent model provider: %w", explanationConfigErr)
 	} else {
 		approvalCoordinator, explanationErr = buildApprovalCoordinator(
-			r.baseCtx, explanationCfg, time.Duration(settings.SubagentTimeoutSeconds)*time.Second,
+			r.baseCtx, explanationCfg,
 		)
 	}
 	if automaticApprovalConfigErr != nil {
 		automaticApprovalErr = fmt.Errorf("load configured Auto approval model provider: %w", automaticApprovalConfigErr)
 	} else {
 		automaticApprovalCoordinator, automaticApprovalErr = buildAutomaticApprovalCoordinator(
-			r.baseCtx, automaticApprovalCfg, time.Duration(settings.SubagentTimeoutSeconds)*time.Second,
+			r.baseCtx, automaticApprovalCfg,
 		)
 	}
 	if explanationErr != nil {
@@ -836,7 +836,7 @@ func (r *Runtime) TestProvider(ctx context.Context, cfg config.Model) (TestResul
 	logger.InfoContext(ctx, "model connection test started")
 	testCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	chatModel, err := newChatModel(testCtx, cfg, 30*time.Second, modelConnectionTestMaxTokens)
+	chatModel, err := newChatModel(testCtx, cfg, modelConnectionTestMaxTokens)
 	if err != nil {
 		err = redactModelError(cfg, err)
 		logger.ErrorContext(ctx, "model connection test failed", "duration_ms", time.Since(started).Milliseconds(), "error", err)

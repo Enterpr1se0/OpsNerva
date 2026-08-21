@@ -7,12 +7,38 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"eino-ops-agent/internal/config"
 
 	"github.com/cloudwego/eino/schema"
 )
+
+func TestModelHTTPClientDoesNotAddRequestTimeout(t *testing.T) {
+	client, err := modelHTTPClient(config.Model{Kind: "openai_compatible"})
+	if err != nil || client != nil {
+		t.Fatalf("plain OpenAI-compatible client = %#v, %v; want SDK client with no configured timeout", client, err)
+	}
+
+	client, err = modelHTTPClient(config.Model{Kind: "openai_compatible", ProxyURL: "http://127.0.0.1:7890"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.Timeout != 0 {
+		t.Fatalf("proxy model client timeout = %v, want 0", client.Timeout)
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("proxy model transport = %T, want *http.Transport", client.Transport)
+	}
+	if transport.ResponseHeaderTimeout != 0 {
+		t.Fatalf("proxy model response-header timeout = %v, want 0", transport.ResponseHeaderTimeout)
+	}
+
+	client, err = modelHTTPClient(config.Model{Kind: "anthropic"})
+	if err != nil || client == nil || client.Timeout != 0 || client.CheckRedirect == nil {
+		t.Fatalf("Anthropic model client = %#v, %v", client, err)
+	}
+}
 
 func TestOpenAIThinkingToolHistoryPreservesEmptyReasoningContent(t *testing.T) {
 	requests := make(chan []map[string]json.RawMessage, 1)
@@ -35,7 +61,7 @@ func TestOpenAIThinkingToolHistoryPreservesEmptyReasoningContent(t *testing.T) {
 
 	chatModel, err := newChatModel(context.Background(), config.Model{
 		APIKey: "fixture-key", BaseURL: server.URL + "/v1", Name: "fixture-model", ReasoningEffort: "medium",
-	}, 5*time.Second, 0)
+	}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +176,7 @@ func TestAnthropicHistorySendsPersistedThinkingSignature(t *testing.T) {
 
 	chatModel, err := newChatModel(context.Background(), config.Model{
 		APIKey: "fixture-key", Kind: "anthropic", BaseURL: server.URL, Name: "claude-fixture",
-	}, 5*time.Second, 256)
+	}, 256)
 	if err != nil {
 		t.Fatal(err)
 	}
