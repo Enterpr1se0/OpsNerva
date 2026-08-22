@@ -10,6 +10,7 @@ workspace/
 .env
 *.log
 coverage.out
+.claude
 
 # IDE
 .idea/
