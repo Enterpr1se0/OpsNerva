@@ -561,6 +561,9 @@ func (s *Service) reconnectSSHTunnel(state *sshTunnelState) *sshTunnelRuntime {
 		if err == nil {
 			connection, _, err = s.resolveSSHConnection(attemptCtx, host)
 		}
+		if err == nil {
+			connection, err = s.hydrateSSHConnection(connection, false)
+		}
 		var runtime *sshTunnelRuntime
 		var localPort, remotePort int
 		if err == nil {

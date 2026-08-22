@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -27,6 +28,31 @@ type deadlineThenSuccessModel struct {
 
 type partialReasoningDeadlineModel struct {
 	calls atomic.Int32
+}
+
+type reasoningOnlyThenSuccessModel struct {
+	calls atomic.Int32
+}
+
+func (m *reasoningOnlyThenSuccessModel) Generate(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+	if m.calls.Add(1) == 1 {
+		message := schema.AssistantMessage("", nil)
+		message.ReasoningContent = "completed reasoning without a final answer"
+		return message, nil
+	}
+	return schema.AssistantMessage("recovered after reasoning-only response", nil), nil
+}
+
+func (m *reasoningOnlyThenSuccessModel) Stream(ctx context.Context, messages []*schema.Message, options ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	message, err := m.Generate(ctx, messages, options...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func (m *reasoningOnlyThenSuccessModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return m, nil
 }
 
 func (m *partialReasoningDeadlineModel) Generate(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
@@ -94,6 +120,49 @@ func (m *transientAfterToolModel) WithTools([]*schema.ToolInfo) (model.ToolCalli
 	return m, nil
 }
 
+func collectAgentAnswer(t *testing.T, iterator *adk.AsyncIterator[*adk.AgentEvent]) string {
+	t.Helper()
+	var answer strings.Builder
+	for {
+		event, ok := iterator.Next()
+		if !ok {
+			return answer.String()
+		}
+		if event.Err != nil {
+			var retryErr *adk.WillRetryError
+			if errors.As(event.Err, &retryErr) {
+				continue
+			}
+			t.Fatal(event.Err)
+		}
+		if event.Output == nil || event.Output.MessageOutput == nil {
+			continue
+		}
+		output := event.Output.MessageOutput
+		if output.Message != nil && output.Role == schema.Assistant {
+			answer.WriteString(output.Message.Content)
+		}
+		if output.MessageStream == nil || output.Role != schema.Assistant {
+			continue
+		}
+		for {
+			message, recvErr := output.MessageStream.Recv()
+			if errors.Is(recvErr, io.EOF) {
+				break
+			}
+			if recvErr != nil {
+				var retryErr *adk.WillRetryError
+				if errors.As(recvErr, &retryErr) {
+					break
+				}
+				t.Fatal(recvErr)
+			}
+			answer.WriteString(message.Content)
+		}
+		output.MessageStream.Close()
+	}
+}
+
 func TestModelRequestRetryPolicy(t *testing.T) {
 	shouldRetry := func(ctx context.Context, output *schema.Message, err error) bool {
 		decision := modelRequestRetryConfig().ShouldRetry(ctx, &adk.RetryContext{OutputMessage: output, Err: err})
@@ -135,6 +204,18 @@ func TestModelRequestRetryPolicy(t *testing.T) {
 	}
 	if !shouldRetry(ctx, nil, nil) {
 		t.Fatal("empty model output was not delegated to Eino retry")
+	}
+	if !shouldRetry(ctx, &schema.Message{Role: schema.Assistant, ReasoningContent: "completed reasoning"}, nil) {
+		t.Fatal("reasoning-only terminal output was not delegated to Eino retry")
+	}
+	if !shouldRetry(ctx, schema.AssistantMessage(" \n", nil), nil) {
+		t.Fatal("blank terminal output was not delegated to Eino retry")
+	}
+	if shouldRetry(ctx, schema.AssistantMessage("completed answer", nil), nil) {
+		t.Fatal("completed answer was marked retryable")
+	}
+	if shouldRetry(ctx, schema.AssistantMessage("", []schema.ToolCall{{ID: "call-1"}}), nil) {
+		t.Fatal("completed tool call was marked retryable")
 	}
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
@@ -184,45 +265,38 @@ func TestModelRequestTimeoutRetriesWhileRunContextIsActive(t *testing.T) {
 	}
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agentInstance, EnableStreaming: true})
 	iterator := runner.Run(ctx, []*schema.Message{schema.UserMessage("respond")})
-	answer := ""
-	for {
-		event, ok := iterator.Next()
-		if !ok {
-			break
-		}
-		if event.Err != nil {
-			var retryErr *adk.WillRetryError
-			if errors.As(event.Err, &retryErr) {
-				continue
-			}
-			t.Fatal(event.Err)
-		}
-		if event.Output == nil || event.Output.MessageOutput == nil {
-			continue
-		}
-		output := event.Output.MessageOutput
-		if output.Message != nil && output.Role == schema.Assistant {
-			answer += output.Message.Content
-		}
-		if output.MessageStream != nil && output.Role == schema.Assistant {
-			for {
-				message, recvErr := output.MessageStream.Recv()
-				if errors.Is(recvErr, io.EOF) {
-					break
-				}
-				if recvErr != nil {
-					var retryErr *adk.WillRetryError
-					if errors.As(recvErr, &retryErr) {
-						break
-					}
-					t.Fatal(recvErr)
-				}
-				answer += message.Content
-			}
-			output.MessageStream.Close()
-		}
-	}
+	answer := collectAgentAnswer(t, iterator)
 	if answer != "recovered after model timeout" {
+		t.Fatalf("answer = %q", answer)
+	}
+	if calls := chatModel.calls.Load(); calls != 2 {
+		t.Fatalf("model calls = %d, want 2", calls)
+	}
+	if retries := observedRetries.Load(); retries != 1 {
+		t.Fatalf("retry notifications = %d, want 1", retries)
+	}
+}
+
+func TestModelRequestRetriesReasoningOnlyTerminalOutput(t *testing.T) {
+	var observedRetries atomic.Int32
+	ctx := withModelRetryObserver(context.Background(), func(err error, attempt int) {
+		if !errors.Is(err, ErrEmptyResponse) || attempt != 1 {
+			t.Errorf("retry notification = (%v, %d)", err, attempt)
+		}
+		observedRetries.Add(1)
+	})
+	chatModel := &reasoningOnlyThenSuccessModel{}
+	agentInstance, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name: "reasoning-only-retry-test", Description: "reasoning-only terminal output retry regression", Model: chatModel, MaxIterations: 1,
+		ModelRetryConfig: modelRequestRetryConfig(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agentInstance, EnableStreaming: true})
+	iterator := runner.Run(ctx, []*schema.Message{schema.UserMessage("respond")})
+	answer := collectAgentAnswer(t, iterator)
+	if answer != "recovered after reasoning-only response" {
 		t.Fatalf("answer = %q", answer)
 	}
 	if calls := chatModel.calls.Load(); calls != 2 {

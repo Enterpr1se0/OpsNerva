@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"eino-ops-agent/internal/domain"
+	"eino-ops-agent/internal/sshx"
 )
 
 func TestSSHTunnelApprovalReusesResolvedProxyConnectionAndStops(t *testing.T) {
@@ -374,6 +375,68 @@ func TestOperatorTunnelReconnectsAutomatically(t *testing.T) {
 	}
 	assertNoPendingApprovals(t, svc)
 	if _, err := svc.StopSSHTunnel(context.Background(), started.ID, "admin-web"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOperatorTunnelReconnectReloadsStoredCredentials(t *testing.T) {
+	svc, transport, _ := newTestService(t)
+	ctx := context.Background()
+	jumpInput := hostInputForTunnelTest("password jump", "")
+	jumpInput.AuthType = "password"
+	jumpInput.Password = "jump-secret"
+	jump, err := svc.SaveHost(ctx, jumpInput, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy, err := svc.SaveProxy(ctx, domain.ProxyInput{
+		Name: "password proxy", URL: "socks5://127.0.0.1:1080", Username: "proxy-user", Password: "proxy-secret",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetInput := hostInputForTunnelTest("password target", "")
+	targetInput.AuthType = "password"
+	targetInput.Password = "target-secret"
+	targetInput.ProxyJumpHostID = jump.ID
+	targetInput.ProxyID = proxy.ID
+	target, err := svc.SaveHost(ctx, targetInput, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	started, err := svc.StartOperatorSSHTunnel(ctx, target.ID, domain.SSHTunnelConfig{RemotePort: 8080}, "admin-web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport.mu.Lock()
+	client := transport.tunnelClients[0]
+	transport.mu.Unlock()
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	var reconnected sshx.ConnectionSpec
+	for {
+		transport.mu.Lock()
+		if len(transport.tunnelSpecs) >= 2 {
+			reconnected = transport.tunnelSpecs[1]
+		}
+		transport.mu.Unlock()
+		if reconnected.Target.ID != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("tunnel did not reconnect: %#v", svc.ListSSHTunnels())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if reconnected.Target.Password != "target-secret" || reconnected.Target.ProxyPassword != "proxy-secret" ||
+		len(reconnected.Jumps) != 1 || reconnected.Jumps[0].Password != "jump-secret" {
+		t.Fatalf("automatic reconnect did not hydrate stored credentials: %#v", reconnected)
+	}
+	if _, err := svc.StopSSHTunnel(ctx, started.ID, "admin-web"); err != nil {
 		t.Fatal(err)
 	}
 }

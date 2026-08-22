@@ -37,7 +37,7 @@ func notifyModelRetry(ctx context.Context, retryCtx *adk.RetryContext) {
 	}
 	err := retryCtx.Err
 	if err == nil {
-		err = errors.New("model returned an empty response")
+		err = ErrEmptyResponse
 	}
 	observer(err, retryCtx.RetryAttempt)
 }
@@ -49,15 +49,18 @@ func modelRequestRetryConfig() *adk.ModelRetryConfig {
 			if retryCtx == nil || ctx.Err() != nil {
 				return &adk.RetryDecision{}
 			}
-			// A mid-stream failure can carry the chunks already received in
-			// OutputMessage. Reissuing after any visible content, reasoning, or
-			// tool call would discard useful output and can repeat an expensive
-			// model request. Only failures with no effective output are safe to
-			// retry automatically.
-			if modelResponseHasContent(retryCtx.OutputMessage) {
-				return &adk.RetryDecision{}
+			var retry bool
+			if retryCtx.Err == nil {
+				retry = !modelResponseCompletesTurn(retryCtx.OutputMessage)
+			} else {
+				// A mid-stream failure can carry the chunks already received in
+				// OutputMessage. Reissuing after any content, reasoning, or tool
+				// call would discard useful output and can repeat an expensive
+				// model request. Only failures with no effective output are safe to
+				// retry automatically.
+				retry = !modelResponseHasContent(retryCtx.OutputMessage) && isRetryableModelRequestError(retryCtx.Err)
 			}
-			decision := &adk.RetryDecision{Retry: retryCtx.Err == nil || isRetryableModelRequestError(retryCtx.Err)}
+			decision := &adk.RetryDecision{Retry: retry}
 			if decision.Retry {
 				notifyModelRetry(ctx, retryCtx)
 			}
@@ -68,6 +71,10 @@ func modelRequestRetryConfig() *adk.ModelRetryConfig {
 
 func modelResponseHasContent(message *schema.Message) bool {
 	return message != nil && (message.Content != "" || message.ReasoningContent != "" || len(message.ToolCalls) > 0)
+}
+
+func modelResponseCompletesTurn(message *schema.Message) bool {
+	return message != nil && (strings.TrimSpace(message.Content) != "" || len(message.ToolCalls) > 0)
 }
 
 func isRetryableModelRequestError(err error) bool {
