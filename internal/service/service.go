@@ -1894,6 +1894,7 @@ func autoApprovedRun(run domain.Run) bool {
 }
 
 func (s *Service) execute(ctx context.Context, host domain.Host, req domain.ExecRequest, run domain.Run, actor string, stream func(string, []byte)) (domain.ExecResult, error) {
+	ctx = s.withExecutionOwnerForRun(ctx, run.ID)
 	defer s.clearExecutionOwner(run.ID)
 	autoApproved := autoApprovedRun(run)
 	logger := observability.FromContext(ctx).With(

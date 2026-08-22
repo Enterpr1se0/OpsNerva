@@ -186,6 +186,18 @@ func (s *Service) bindExecutionOwner(ctx context.Context, runID, sessionID strin
 	s.executionEventMu.Unlock()
 }
 
+// withExecutionOwnerForRun restores submit-time ownership after an approval
+// request crosses into the operator or background execution context.
+func (s *Service) withExecutionOwnerForRun(ctx context.Context, runID string) context.Context {
+	s.executionEventMu.RLock()
+	owner, ok := s.executionOwners[runID]
+	s.executionEventMu.RUnlock()
+	if !ok {
+		return ctx
+	}
+	return context.WithValue(ctx, executionOwnerContextKey{}, owner)
+}
+
 func persistedToolExecutionStatus(status string) string {
 	switch status {
 	case "completed":
