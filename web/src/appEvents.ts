@@ -1,8 +1,8 @@
 import type { ServerLogResponse } from './types'
 
-export type ApplicationEventTopic='connections'|'approvals'|'sessions'|'chat_state'|'audit'|'health'|'logs'
+export type ApplicationEventTopic='connections'|'approvals'|'sessions'|'chat_state'|'audit'|'mcp_activity'|'health'|'logs'
 export type ApplicationLogSubscription={level?:string;component?:string;q?:string;limit?:number}
-export type ApplicationEventSubscription={logs?:ApplicationLogSubscription;sessionId?:string}
+export type ApplicationEventSubscription={logs?:ApplicationLogSubscription;sessionId?:string;mcpSessionId?:string}
 export type ApplicationEvent<T=unknown>={type:'event'|'error'|'heartbeat';topic?:ApplicationEventTopic;mode?:'snapshot'|'delta';sequence?:number;data?:T;error?:string}
 
 type ApplicationEventListener=(event:ApplicationEvent)=>void
@@ -68,7 +68,8 @@ class ApplicationEventClient{
 		const topics=Array.from(this.listeners.keys()).sort()
 		const logs=Array.from(this.listeners.get('logs')?.values()||[]).at(-1)?.options?.logs
 		const sessionId=Array.from(this.listeners.get('chat_state')?.values()||[]).at(-1)?.options?.sessionId
-		this.socket.send(JSON.stringify({type:'subscribe',topics,logs,session_id:sessionId}))
+		const mcpSessionId=Array.from(this.listeners.get('mcp_activity')?.values()||[]).at(-1)?.options?.mcpSessionId
+		this.socket.send(JSON.stringify({type:'subscribe',topics,logs,session_id:sessionId,mcp_session_id:mcpSessionId}))
 	}
 
 	private disconnect(){

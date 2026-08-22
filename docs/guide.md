@@ -302,7 +302,7 @@ CLI 审批示例：
 }
 ```
 
-MCP 与 Eino 复用同一个 Service、审批模式和 Audit Store；不存在权限更宽的旁路。
+MCP 与 Eino 复用同一个 Service、审批模式和 Audit Store；不存在权限更宽的旁路。每个 stdio 进程或 HTTP initialize 都会获得独立会话，`ssh_history` 只能读取该会话创建的运行。
 
 也可以在 **配置 / 系统设置 / MCP Server Mode** 启动 Streamable HTTP 服务。启动后复制界面显示的 Endpoint 和访问令牌；令牌只在启动或重新生成时显示，服务端仅保存 SHA-256 摘要。其他 Agent 的 MCP 配置示例：
 
@@ -319,7 +319,7 @@ MCP 与 Eino 复用同一个 Service、审批模式和 Audit Store；不存在�
 }
 ```
 
-停止 MCP Server Mode 后 `/mcp` 立即不可用；重新启动或重新生成令牌会使旧令牌失效。远程使用时应通过 HTTPS 反向代理暴露该 Endpoint。
+停止 MCP Server Mode 后 `/mcp` 立即不可用；重新启动或重新生成令牌会使旧令牌失效。远程使用时应通过 HTTPS 反向代理暴露该 Endpoint。其他 Agent 的工具调用可在 **审计 / MCP 活动** 实时查看；页面按客户端会话分组，并可展开关联的运行审计。
 
 Web 的 **Extensions / MCP Servers** 还支持反向角色：让 OpsNerva 作为 MCP Client 连接外部工具服务。支持两种标准传输：
 
@@ -342,7 +342,7 @@ Web 的 **Extensions / MCP Servers** 还支持反向角色：让 OpsNerva 作为
 - `ssh_file_read`（可选 `metadata_only=true` 或 `pattern` 搜索模式）/ `ssh_file_list`
 - `ssh_file_edit` / `ssh_file_transfer`
 - `workspace_file_list` / `workspace_file_read`（可选 `tail_lines` 或 `pattern` 搜索模式）/ `workspace_file_edit` / `workspace_file_delete` / `workspace_file_upload` / `workspace_file_download` / `workspace_shell`。这些工具只在 Eino Agent 中提供，Workspace 由 Web 会话绑定，模型不能列出或自行选择其他 Workspace；无会话语义的 MCP Server 不暴露这组工具。
-- `ssh_history` 可按请求/输出文本、主机、工具、状态和 RFC3339 时间范围组合检索，并支持 `literal` / POSIX `regex` 和游标分页。检索返回结构化摘要；指定 `run_id` 后返回有界的结构化请求和脱敏输出，也可同时传 `query` 获取匹配片段，此时 `limit` 限制每个输出流的匹配数。它和通用 `skill` 仅提供给 OpsNerva 主 Agent，不通过自身 MCP Server 暴露；Web 管理端仍可查看全局执行历史。
+- `ssh_history` 可按请求/输出文本、主机、工具、状态和 RFC3339 时间范围组合检索，并支持 `literal` / POSIX `regex` 和游标分页。检索返回结构化摘要；指定 `run_id` 后返回有界的结构化请求和脱敏输出，也可同时传 `query` 获取匹配片段，此时 `limit` 限制每个输出流的匹配数。主 Agent 与 MCP Client 都只能读取各自可信会话中的运行；通用 `skill` 不通过自身 MCP Server 暴露。
 
 ## 数据安全
 

@@ -544,6 +544,38 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_mcp_servers_enabled ON mcp_servers(enabled,name);
+CREATE TABLE IF NOT EXISTS mcp_client_sessions (
+  id TEXT PRIMARY KEY,
+  transport TEXT NOT NULL,
+  client_name TEXT NOT NULL DEFAULT '',
+  client_version TEXT NOT NULL DEFAULT '',
+  protocol_version TEXT NOT NULL DEFAULT '',
+  started_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mcp_client_sessions_seen ON mcp_client_sessions(last_seen_at DESC,id DESC);
+CREATE TABLE IF NOT EXISTS mcp_tool_calls (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  tool_name TEXT NOT NULL,
+  arguments_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL,
+  run_id TEXT NOT NULL DEFAULT '',
+  approval_id TEXT NOT NULL DEFAULT '',
+  task_id TEXT NOT NULL DEFAULT '',
+  shell_id TEXT NOT NULL DEFAULT '',
+  tunnel_id TEXT NOT NULL DEFAULT '',
+  operation_status TEXT NOT NULL DEFAULT '',
+  error TEXT NOT NULL DEFAULT '',
+  started_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT,
+  FOREIGN KEY(session_id) REFERENCES mcp_client_sessions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_session_started ON mcp_tool_calls(session_id,started_at DESC,id DESC);
+CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_session_status ON mcp_tool_calls(session_id,status);
+CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_status_updated ON mcp_tool_calls(status,updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_run ON mcp_tool_calls(run_id) WHERE run_id<>'';
 CREATE TABLE IF NOT EXISTS agent_tool_settings (
   name TEXT PRIMARY KEY,
   enabled INTEGER NOT NULL DEFAULT 1,

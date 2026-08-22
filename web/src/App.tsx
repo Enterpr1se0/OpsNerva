@@ -16,7 +16,7 @@ import { CopyButton, CopyablePre, writeClipboard } from './CopyButton'
 import { AppSelect, ModelCombobox } from './Controls'
 import i18n, { localeFor, type SupportedLanguage } from './i18n'
 import { TextFileEditor } from './TextFileEditor'
-import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, AuthStatus, ChatMessage, ChatQueueMode, ChatSession, ChatState, ChatTokenUsage, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, QueuedChatMessage, Run, ServerLogEntry, ServerLogResponse, SFTPFileEntry, SSHHostStatus, SSHShell, SSHShellEvent, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
+import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, AuthStatus, ChatMessage, ChatQueueMode, ChatSession, ChatState, ChatTokenUsage, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPActivityEvent, MCPActivitySnapshot, MCPClientSession, MCPServer, MCPServerInput, MCPToolCall, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, QueuedChatMessage, Run, ServerLogEntry, ServerLogResponse, SFTPFileEntry, SSHHostStatus, SSHShell, SSHShellEvent, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
 
 type Page = 'chat' | 'ssh' | 'config' | 'extensions' | 'audit' | 'logs'
 const pageVisualOrder:Page[]=['chat','ssh','extensions','audit','logs','config']
@@ -346,6 +346,7 @@ function keepEquivalentHealth(current:Health|null,next:Health){
 }
 
 type AuditPageCursor={hasMore:boolean;timestamp:string;id:string}
+type AuditView='runs'|'mcp'
 function mergeLatestPage<T extends{id:string}>(latest:T[],current:T[],hasMore:boolean,timestamp:(item:T)=>string){
 	if(!hasMore)return latest
 	const tail=latest.at(-1)
@@ -479,6 +480,8 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 	const [loadingMoreAudit,setLoadingMoreAudit]=useState(false)
 	const [auditSessions,setAuditSessions]=useState<ChatSession[]>([])
 	const [auditReady,setAuditReady]=useState(false)
+	const [auditView,setAuditView]=useState<AuditView>('runs')
+	const [mcpActivityRefresh,setMCPActivityRefresh]=useState(0)
   const [sshTunnels,setSSHTunnels]=useState<SSHTunnel[]>([])
   const [sshShells,setSSHShells]=useState<SSHShell[]>([])
   const [selectedShell,setSelectedShell]=useState<SSHShell|null>(null)
@@ -657,19 +660,19 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 		if(event.type==='event'&&event.data)setHealth(current=>keepEquivalentHealth(current,event.data!))
 	}),[])
 	useEffect(()=>{
-		if(page!=='audit')return
+		if(page!=='audit'||auditView!=='runs')return
 		return subscribeApplicationEvents<{id?:string;type?:string}>('audit',event=>{
 			if(event.type!=='event')return
 			if(event.data?.type==='audit_records_deleted')void refreshRuns(true)
 			else void refreshAudit()
 		})
-	},[page,refreshAudit,refreshRuns])
+	},[auditView,page,refreshAudit,refreshRuns])
 	useEffect(()=>{
 		if(page==='extensions')void refreshExtensions()
-		else if(page==='audit')void refreshAudit()
+		else if(page==='audit'&&auditView==='runs')void refreshAudit()
 		else if(page==='ssh')void Promise.all([refreshHosts(),refreshConnections()])
 		else if(page==='config')void refreshConfiguration()
-	},[page,refreshAudit,refreshConfiguration,refreshConnections,refreshExtensions,refreshHosts])
+	},[auditView,page,refreshAudit,refreshConfiguration,refreshConnections,refreshExtensions,refreshHosts])
 	useLayoutEffect(()=>{
 		const previous=previousPageRef.current
 		previousPageRef.current=page
@@ -721,7 +724,8 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 		setRefreshing(true)
 		try{
 			if(page==='extensions')await refreshExtensions()
-			else if(page==='audit')await refreshAudit()
+			else if(page==='audit'&&auditView==='runs')await refreshAudit()
+			else if(page==='audit')setMCPActivityRefresh(value=>value+1)
 			else if(page==='ssh')await Promise.all([refreshHosts(),refreshConnections()])
 			else if(page==='config')await refreshConfiguration()
 			else if(page==='chat')await refreshChat()
@@ -821,9 +825,9 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 				hosts={hosts} shells={sshShells.filter(shell=>shell.kind!=='workspace'&&shell.surface==='workspace')}
 				onCreated={rememberSSHShell} refresh={refreshConnections} onError={reportError}
 			/>}
-		{page === 'config' && <ConfigurationPage hosts={hosts} providers={providers} proxies={proxies} settings={settings} capabilities={capabilities} health={health} refreshModels={refreshModels} refreshHosts={refreshHosts} refreshProxies={refreshProxies} refreshCapabilities={refreshCapabilities} refreshHealth={refreshHealth} onSettingsChanged={setSettings}/>}
+		{page === 'config' && <ConfigurationPage hosts={hosts} providers={providers} proxies={proxies} settings={settings} capabilities={capabilities} health={health} refreshModels={refreshModels} refreshHosts={refreshHosts} refreshProxies={refreshProxies} refreshCapabilities={refreshCapabilities} refreshHealth={refreshHealth} onSettingsChanged={setSettings} onOpenMCPActivity={()=>{setAuditView('mcp');navigate('audit')}}/>}
 		{page === 'extensions' && <ExtensionsPage skills={skills} mcpServers={mcpServers} toolCatalog={toolCatalog} refreshSkills={refreshSkills} refreshMCPServers={refreshMCPServers} refreshToolCatalog={refreshToolCatalog} onToolCatalogChanged={setToolCatalog}/>}
-		{page === 'audit' && <AuditPage runs={runs} hosts={hosts} sessions={auditSessions} ready={auditReady} runsHasMore={auditRunCursor.hasMore} loadingMore={loadingMoreAudit} onLoadMoreRuns={loadMoreAuditRuns} onDeleteRuns={deleteAuditRuns}/>}
+		{page === 'audit' && <AuditPage view={auditView} onViewChange={setAuditView} mcpRefreshKey={mcpActivityRefresh} runs={runs} hosts={hosts} sessions={auditSessions} ready={auditReady} runsHasMore={auditRunCursor.hasMore} loadingMore={loadingMoreAudit} onLoadMoreRuns={loadMoreAuditRuns} onDeleteRuns={deleteAuditRuns}/>}
         {page === 'logs' && <LogsPage/>}
       </section>
 	      {selectedShell&&<SSHShellTerminal
@@ -1732,7 +1736,7 @@ function ConfigurationEditorPage({icon,title,busy,onBack,children}:{icon:React.R
 	</div>
 }
 
-function ConfigurationPage({hosts,providers,proxies,settings,capabilities,health,refreshModels,refreshHosts,refreshProxies,refreshCapabilities,refreshHealth,onSettingsChanged}:{hosts:Host[];providers:ModelProvider[];proxies:Proxy[];settings:SystemSettings|null;capabilities:ToolCapabilities;health:Health|null;refreshModels:()=>Promise<void>;refreshHosts:()=>Promise<void>;refreshProxies:()=>Promise<void>;refreshCapabilities:()=>Promise<void>;refreshHealth:()=>Promise<void>;onSettingsChanged:(settings:SystemSettings)=>void}) {
+function ConfigurationPage({hosts,providers,proxies,settings,capabilities,health,refreshModels,refreshHosts,refreshProxies,refreshCapabilities,refreshHealth,onSettingsChanged,onOpenMCPActivity}:{hosts:Host[];providers:ModelProvider[];proxies:Proxy[];settings:SystemSettings|null;capabilities:ToolCapabilities;health:Health|null;refreshModels:()=>Promise<void>;refreshHosts:()=>Promise<void>;refreshProxies:()=>Promise<void>;refreshCapabilities:()=>Promise<void>;refreshHealth:()=>Promise<void>;onSettingsChanged:(settings:SystemSettings)=>void;onOpenMCPActivity:()=>void}) {
   const {t}=useTranslation()
   const [section,setSection]=useState<ConfigurationSection>('models')
   const [showAddresses,setShowAddresses]=useState(false)
@@ -1754,7 +1758,7 @@ function ConfigurationPage({hosts,providers,proxies,settings,capabilities,health
 	  {section==='proxies'&&(
 		<ProxiesPage proxies={proxies} showAddresses={showAddresses} onToggleAddresses={()=>setShowAddresses(value=>!value)} refresh={refreshProxies}/>
 	  )}
-	  {section==='system'&&<SystemSettingsPage settings={settings} providers={providers} proxies={proxies} capabilities={capabilities} modelStatus={health?.model} refreshModels={refreshModels} refreshHosts={refreshHosts} refreshProxies={refreshProxies} refreshCapabilities={refreshCapabilities} refreshHealth={refreshHealth} onSettingsChanged={onSettingsChanged}/>}
+	  {section==='system'&&<SystemSettingsPage settings={settings} providers={providers} proxies={proxies} capabilities={capabilities} modelStatus={health?.model} refreshModels={refreshModels} refreshHosts={refreshHosts} refreshProxies={refreshProxies} refreshCapabilities={refreshCapabilities} refreshHealth={refreshHealth} onSettingsChanged={onSettingsChanged} onOpenMCPActivity={onOpenMCPActivity}/>}
     </div>
   </div>
 }
@@ -2028,7 +2032,7 @@ function ConfigurationTransferSettings({refreshModels,refreshHosts,refreshProxie
 	</>
 }
 
-function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus,refreshModels,refreshHosts,refreshProxies,refreshCapabilities,refreshHealth,onSettingsChanged}:{settings:SystemSettings|null;providers:ModelProvider[];proxies:Proxy[];capabilities:ToolCapabilities;modelStatus?:Health['model'];refreshModels:()=>Promise<void>;refreshHosts:()=>Promise<void>;refreshProxies:()=>Promise<void>;refreshCapabilities:()=>Promise<void>;refreshHealth:()=>Promise<void>;onSettingsChanged:(settings:SystemSettings)=>void}) {
+function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus,refreshModels,refreshHosts,refreshProxies,refreshCapabilities,refreshHealth,onSettingsChanged,onOpenMCPActivity}:{settings:SystemSettings|null;providers:ModelProvider[];proxies:Proxy[];capabilities:ToolCapabilities;modelStatus?:Health['model'];refreshModels:()=>Promise<void>;refreshHosts:()=>Promise<void>;refreshProxies:()=>Promise<void>;refreshCapabilities:()=>Promise<void>;refreshHealth:()=>Promise<void>;onSettingsChanged:(settings:SystemSettings)=>void;onOpenMCPActivity:()=>void}) {
   const {t}=useTranslation()
 	const notify=useNotifier()
   const savedValue=settings?.agent_max_iterations??50
@@ -2137,7 +2141,7 @@ function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus
 				<form onSubmit={submit('shell')}><div className="workspace-shell-modes" role="group" aria-label={t('settings.shellBackend')}><button type="button" className={shellMode==='sandbox'?'active':''} disabled={!settings?.workspace_sandbox_available} onClick={()=>selectShellMode('sandbox')}><ShieldCheck size={16}/><span><b>{t('settings.sandbox')}</b><small>{settings?.workspace_sandbox_available?t('settings.sandboxAvailable'):t('settings.unavailableHost')}</small></span></button><button type="button" className={`${shellMode==='host'?'active ':''}host`} disabled={!settings?.workspace_host_shell_available} onClick={()=>selectShellMode('host')}><TerminalSquare size={16}/><span><b>{t('settings.hostShell')}</b><small>{settings?.workspace_host_shell_available?`${settings.workspace_shell_name||t('settings.systemShell')} · ${t('settings.fullAuthority')}`:t('settings.noShell')}</small></span></button><button type="button" className={shellMode==='disabled'?'active':''} onClick={()=>selectShellMode('disabled')}><Power size={16}/><span><b>{t('settings.shellDisabled')}</b></span></button></div>{shellMode==='host'&&<div className="workspace-shell-warning"><ShieldAlert size={15}/><b>{t('settings.hostWarning')}</b></div>}{shellMode==='sandbox'&&!settings?.workspace_sandbox_available&&<div className="workspace-shell-warning"><ShieldAlert size={15}/><b>{t('settings.sandboxWarning')}</b></div>}<SettingsSectionFooter dirty={shellDirty} busy={busy} saving={savingSection==='shell'} onDiscard={()=>discard('shell')}/></form>
 			</SettingsDisclosure>
 			<WorkspaceSettingsPanel workspaces={capabilities.workspaces} refresh={refreshCapabilities} onNotify={notify}/>
-			<MCPServerModePanel settings={settings} onChanged={onSettingsChanged}/>
+			<MCPServerModePanel settings={settings} onChanged={onSettingsChanged} onOpenActivity={onOpenMCPActivity}/>
 			<WebSearchSettingsPanel proxies={proxies}/>
 		</div>
   </div>
@@ -2157,7 +2161,7 @@ function WorkspaceSettingsPanel({workspaces,refresh,onNotify}:{workspaces:Worksp
 
 const defaultWebSearchInput:WebSearchSettingsInput={enabled:false,base_url:'https://api.tavily.com',api_key:'',proxy_id:'',timeout_seconds:20,max_results:10}
 
-function MCPServerModePanel({settings,onChanged}:{settings:SystemSettings|null;onChanged:(settings:SystemSettings)=>void}){
+function MCPServerModePanel({settings,onChanged,onOpenActivity}:{settings:SystemSettings|null;onChanged:(settings:SystemSettings)=>void;onOpenActivity:()=>void}){
 	const {t}=useTranslation()
 	const notify=useNotifier()
 	const [busy,setBusy]=useState<'start'|'stop'|'rotate'|''>(''),[token,setToken]=useState('')
@@ -2193,6 +2197,7 @@ function MCPServerModePanel({settings,onChanged}:{settings:SystemSettings|null;o
 			{enabled&&<label><span>{t('mcpServerMode.token')}</span><div><input readOnly type={token?'text':'password'} value={token||'••••••••••••••••'} /><button type="button" disabled={!token} title={t('common.copy')} onClick={()=>void copy(token,t('mcpServerMode.tokenCopied'))}><Copy size={13}/></button></div>{!token&&settings?.mcp_http_token_configured&&<small>{t('mcpServerMode.tokenStored')}</small>}</label>}
 		</div>
 		<footer>
+			<button type="button" onClick={onOpenActivity}><Activity size={13}/>{t('mcpServerMode.activity')}</button>
 			{enabled&&desktopRuntime&&<button type="button" disabled={!!busy} onClick={()=>void enterLightweightMode()}><Minimize2 size={13}/>{t('mcpServerMode.lightweightMode')}</button>}
 			{enabled&&<button type="button" disabled={!!busy} onClick={()=>void update(true,true)}>{busy==='rotate'?<LoaderCircle className="spin" size={13}/>:<RefreshCw size={13}/>} {t('mcpServerMode.rotate')}</button>}
 			<button type="button" className={enabled?'danger':'primary'} disabled={!!busy||!settings} onClick={()=>void update(!enabled)}>{busy?<LoaderCircle className="spin" size={13}/>:<Power size={13}/>} {t(enabled?'mcpServerMode.stop':'mcpServerMode.start')}</button>
@@ -4310,7 +4315,20 @@ function AuditRunRow({run,hosts}:{run:Run;hosts:Host[]}){
 
 type AuditDeleteTarget={kind:'session';id:string;title:string}|{kind:'all'}
 
-function AuditPage({runs,hosts,sessions,ready,runsHasMore,loadingMore,onLoadMoreRuns,onDeleteRuns}:{runs:Run[];hosts:Host[];sessions:ChatSession[];ready:boolean;runsHasMore:boolean;loadingMore:boolean;onLoadMoreRuns:()=>Promise<void>;onDeleteRuns:(sessionID?:string|null)=>Promise<void>}) {
+type AuditPageProps={view:AuditView;onViewChange:(view:AuditView)=>void;mcpRefreshKey:number;runs:Run[];hosts:Host[];sessions:ChatSession[];ready:boolean;runsHasMore:boolean;loadingMore:boolean;onLoadMoreRuns:()=>Promise<void>;onDeleteRuns:(sessionID?:string|null)=>Promise<void>}
+
+function AuditPage({view,onViewChange,mcpRefreshKey,...props}:AuditPageProps){
+	const {t}=useTranslation()
+	return <div className="audit-page page-stack">
+		<div className="audit-view-tabs" role="tablist" aria-label={t('audit.views')}>
+			<button type="button" role="tab" aria-selected={view==='runs'} className={view==='runs'?'active':''} onClick={()=>onViewChange('runs')}><History size={15}/>{t('audit.runHistory')}</button>
+			<button type="button" role="tab" aria-selected={view==='mcp'} className={view==='mcp'?'active':''} onClick={()=>onViewChange('mcp')}><Activity size={15}/>{t('audit.mcpActivity')}</button>
+		</div>
+		{view==='runs'?<AuditRunsView {...props}/>:<MCPActivityView hosts={props.hosts} refreshKey={mcpRefreshKey}/>}
+	</div>
+}
+
+function AuditRunsView({runs,hosts,sessions,ready,runsHasMore,loadingMore,onLoadMoreRuns,onDeleteRuns}:{runs:Run[];hosts:Host[];sessions:ChatSession[];ready:boolean;runsHasMore:boolean;loadingMore:boolean;onLoadMoreRuns:()=>Promise<void>;onDeleteRuns:(sessionID?:string|null)=>Promise<void>}) {
 	const {t,i18n:instance}=useTranslation()
 	const [query,setQuery]=useState('')
 	const [deleteTarget,setDeleteTarget]=useState<AuditDeleteTarget|null>(null)
@@ -4329,7 +4347,7 @@ function AuditPage({runs,hosts,sessions,ready,runsHasMore,loadingMore,onLoadMore
 		for(const run of filtered){const key=run.session_id||'__direct__';grouped.set(key,[...(grouped.get(key)||[]),run])}
 		return [...grouped.entries()].map(([id,items])=>{
 			items.sort((a,b)=>Date.parse(b.started_at)-Date.parse(a.started_at))
-			return{id,title:id==='__direct__'?t('audit.direct'):titles.get(id)||t('audit.missingConversation'),runs:items,latest:items[0]?.started_at,pending:items.filter(run=>run.status==='approval_required').length}
+			return{id,title:id==='__direct__'?t('audit.direct'):id.startsWith('mcp_sess_')?t('audit.mcpRunGroup'):titles.get(id)||t('audit.missingConversation'),runs:items,latest:items[0]?.started_at,pending:items.filter(run=>run.status==='approval_required').length}
 		}).sort((a,b)=>Date.parse(b.latest||'')-Date.parse(a.latest||''))
 	},[filtered,sessions,t,instance.language])
 	const confirmDelete=async()=>{
@@ -4344,7 +4362,7 @@ function AuditPage({runs,hosts,sessions,ready,runsHasMore,loadingMore,onLoadMore
 	}
 	const deleteTitle=deleteTarget?.kind==='session'?t('audit.deleteSessionTitle',{title:deleteTarget.title}):t('audit.deleteAllTitle')
 	if(!ready)return <div className="audit-loading panel" role="status"><LoaderCircle className="spin" size={16}/><span>{t('common.loading')}</span></div>
-	return <div className="page-stack">
+	return <div className="audit-runs-view page-stack">
 		<div className="audit-toolbar"><div className="search-box"><Search size={16}/><input aria-label={t('common.search')} value={query} onChange={event=>setQuery(event.target.value)}/></div><span>{t('audit.counts',{sessions:groups.length,runs:filtered.length})}</span>{runs.length>0&&<button type="button" className="audit-clear-button" onClick={()=>setDeleteTarget({kind:'all'})}><Trash2 size={13}/>{t('audit.clear')}</button>}</div>
 		<div className="audit-groups">{groups.map(group=><details className="audit-session panel" key={group.id}>
 			<summary className="audit-session-summary"><div className="audit-session-glyph"><History size={17}/></div><div className="audit-session-name"><b>{group.title}</b><span>{group.id==='__direct__'?t('audit.noSession'):group.id} · {t('audit.lastRun',{date:new Date(group.latest).toLocaleString(localeFor(instance.language))})}</span></div><div className="audit-session-stats"><span><b>{group.runs.length}</b> {t('audit.runs')}</span>{group.pending>0&&<span className="pending-count"><b>{group.pending}</b> {t('audit.pending')}</span>}</div><ChevronRight className="audit-session-chevron" size={17}/></summary>
@@ -4356,6 +4374,138 @@ function AuditPage({runs,hosts,sessions,ready,runsHasMore,loadingMore,onLoadMore
 		{runs.length>0&&!groups.length&&<Empty icon={<Search/>} title={t('audit.noMatch')}/>}
 		{deleteTarget&&<DestructiveConfirmDialog title={deleteTitle} busy={deleting} onCancel={()=>setDeleteTarget(null)} onConfirm={()=>void confirmDelete()}/>}
 	</div>
+}
+
+type MCPCallOutput={stdout:string;stderr:string;transferredBytes:number;totalBytes:number}
+const mcpLiveOutputChars=64<<10
+
+function appendMCPOutput(current:string,content:string){
+	const next=current+content
+	return next.length<=mcpLiveOutputChars?next:next.slice(-mcpLiveOutputChars)
+}
+
+function MCPActivityView({hosts,refreshKey}:{hosts:Host[];refreshKey:number}){
+	const {t,i18n:instance}=useTranslation()
+	const [sessions,setSessions]=useState<MCPClientSession[]>([])
+	const [selectedID,setSelectedID]=useState('')
+	const [calls,setCalls]=useState<MCPToolCall[]>([])
+	const [outputs,setOutputs]=useState<Record<string,MCPCallOutput>>({})
+	const [query,setQuery]=useState('')
+	const [loading,setLoading]=useState(true)
+	const [error,setError]=useState('')
+	const selectedIDRef=useRef('')
+	const pendingEventsRef=useRef<MCPActivityEvent[]>([])
+	const eventFrameRef=useRef(0)
+	useEffect(()=>{selectedIDRef.current=selectedID},[selectedID])
+	useEffect(()=>{
+		let active=true
+		api.mcpActivity().then(snapshot=>{if(!active)return;setSessions(snapshot.sessions||[]);setSelectedID(current=>current&&snapshot.sessions.some(session=>session.id===current)?current:snapshot.sessions[0]?.id||'');setError('')}).catch(err=>{if(active)setError(errorText(err))}).finally(()=>{if(active)setLoading(false)})
+		return()=>{active=false}
+	},[refreshKey])
+	useEffect(()=>{
+		if(!selectedID){setCalls([]);return}
+		let active=true
+		api.mcpActivity(selectedID).then(snapshot=>{if(active)setCalls(snapshot.calls||[])}).catch(err=>{if(active)setError(errorText(err))})
+		return()=>{active=false}
+	},[selectedID])
+	const flushEvents=useCallback(()=>{
+		eventFrameRef.current=0
+		const events=pendingEventsRef.current.splice(0)
+		if(!events.length)return
+		setSessions(current=>{
+			let next=[...current]
+			for(const event of events){
+				const index=next.findIndex(session=>session.id===event.session_id)
+				if(event.type==='call_started'){
+					const existing=index>=0?next[index]:undefined
+					const session={...(event.session||existing||{id:event.session_id,transport:'',started_at:new Date().toISOString(),last_seen_at:new Date().toISOString(),call_count:0,running_calls:0}),call_count:(existing?.call_count||0)+1,running_calls:(existing?.running_calls||0)+1,last_seen_at:event.call?.started_at||new Date().toISOString()}
+					if(index>=0)next[index]=session;else next.push(session)
+				}else if(event.type==='call_finished'&&index>=0){
+					next[index]={...next[index],running_calls:Math.max(0,next[index].running_calls-1),last_seen_at:event.call?.updated_at||next[index].last_seen_at}
+				}
+			}
+			next.sort((a,b)=>Date.parse(b.last_seen_at)-Date.parse(a.last_seen_at))
+			return next
+		})
+		setCalls(current=>{
+			let next=[...current]
+			for(const event of events){
+				if(event.session_id!==selectedIDRef.current)continue
+				const index=next.findIndex(call=>call.id===event.call_id)
+				if(event.call){if(index>=0)next[index]=event.call;else next.unshift(event.call)}
+				else if(index>=0&&(event.status||event.run_id))next[index]={...next[index],operation_status:event.status||next[index].operation_status,run_id:event.run_id||next[index].run_id,updated_at:new Date().toISOString()}
+			}
+			return next.sort((a,b)=>Date.parse(b.started_at)-Date.parse(a.started_at))
+		})
+		setOutputs(current=>{
+			let next=current
+			for(const event of events){
+				if(event.session_id!==selectedIDRef.current||(!event.content&&event.type!=='call_progress'))continue
+				if(next===current)next={...current}
+				const output=next[event.call_id]||{stdout:'',stderr:'',transferredBytes:0,totalBytes:0}
+				next[event.call_id]={...output,
+					stdout:event.stream!=='stderr'&&event.content?appendMCPOutput(output.stdout,event.content):output.stdout,
+					stderr:event.stream==='stderr'&&event.content?appendMCPOutput(output.stderr,event.content):output.stderr,
+					transferredBytes:event.transferred_bytes??output.transferredBytes,totalBytes:event.total_bytes??output.totalBytes}
+			}
+			return next
+		})
+	},[])
+	useEffect(()=>{
+		const unsubscribe=subscribeApplicationEvents<MCPActivitySnapshot|MCPActivityEvent>('mcp_activity',event=>{
+			if(event.type==='error'){setError(event.error||t('audit.mcpStreamFailed'));return}
+			if(event.type!=='event'||!event.data)return
+			if(event.mode==='snapshot'){const snapshot=event.data as MCPActivitySnapshot;setSessions(snapshot.sessions||[]);setSelectedID(current=>current&&snapshot.sessions.some(session=>session.id===current)?current:snapshot.sessions[0]?.id||'');return}
+			const activity=event.data as MCPActivityEvent
+			pendingEventsRef.current.push(activity);if(!eventFrameRef.current)eventFrameRef.current=window.requestAnimationFrame(flushEvents)
+		})
+		return()=>{unsubscribe();if(eventFrameRef.current)window.cancelAnimationFrame(eventFrameRef.current);eventFrameRef.current=0;pendingEventsRef.current=[]}
+	},[flushEvents,t])
+	const selected=sessions.find(session=>session.id===selectedID)
+	const visibleCalls=useMemo(()=>{const needle=query.trim().toLowerCase();return needle?calls.filter(call=>`${call.tool_name}\n${call.arguments_json}\n${call.status}\n${call.error||''}`.toLowerCase().includes(needle)):calls},[calls,query])
+	if(loading)return <div className="audit-loading panel" role="status"><LoaderCircle className="spin" size={16}/><span>{t('common.loading')}</span></div>
+	return <div className="mcp-activity-layout">
+		<aside className="mcp-session-list panel">
+			<header><span>{t('audit.mcpSessions')}</span><em>{sessions.length}</em></header>
+			<div>{sessions.map(session=><button type="button" className={session.id===selectedID?'active':''} onClick={()=>setSelectedID(session.id)} key={session.id}><span><b>{session.client_name||t('audit.mcpClient')}</b>{session.running_calls>0&&<em>{session.running_calls}</em>}</span><code title={session.id}>{session.id}</code><small>{session.transport||'—'} · {t('audit.mcpCalls',{count:session.call_count})} · {new Date(session.last_seen_at).toLocaleString(localeFor(instance.language))}</small></button>)}</div>
+			{!sessions.length&&<Empty icon={<Activity/>} title={t('audit.noMCPActivity')}/>}
+		</aside>
+		<section className="mcp-call-panel">
+			<div className="audit-toolbar"><div className="search-box"><Search size={16}/><input aria-label={t('common.search')} value={query} onChange={event=>setQuery(event.target.value)}/></div>{selected&&<span><code>{selected.client_name||t('audit.mcpClient')}</code> · {visibleCalls.length}</span>}</div>
+			{error&&<div className="inline-error">{error}</div>}
+			<div className="mcp-call-list">{visibleCalls.map(call=><MCPActivityCallCard key={call.id} call={call} output={outputs[call.id]} hosts={hosts}/>)}</div>
+			{selected&&!calls.length&&<Empty icon={<Activity/>} title={t('audit.noMCPCalls')}/>}
+			{selected&&calls.length>0&&!visibleCalls.length&&<Empty icon={<Search/>} title={t('audit.noMatch')}/>}
+			{!selected&&sessions.length>0&&<Empty icon={<Activity/>} title={t('audit.selectMCPSession')}/>}
+		</section>
+	</div>
+}
+
+const MCPActivityCallCard=memo(function MCPActivityCallCard({call,output,hosts}:{call:MCPToolCall;output?:MCPCallOutput;hosts:Host[]}){
+	const {t,i18n:instance}=useTranslation()
+	const args=parseRecord(call.arguments_json)
+	const summary=toolArgumentSummary(call.tool_name,args)
+	const progress=output&&output.totalBytes>0?Math.min(100,Math.round(output.transferredBytes/output.totalBytes*100)):0
+	return <details className={`mcp-call-card panel ${call.status}`}>
+		<summary><span className="mcp-call-icon">{toolSummaryIcon(call.tool_name)}</span><span className="mcp-call-heading"><code>{call.tool_name}</code>{summary&&<small>{summary}</small>}</span><time>{new Date(call.started_at).toLocaleString(localeFor(instance.language))}</time><span className={`run-status ${call.status}`}>{t(`statusLabels.${call.status}`,{defaultValue:call.status})}</span><ChevronRight size={15}/></summary>
+		<div className="mcp-call-body">
+			<dl className="mcp-call-meta"><div><dt>{t('audit.callId')}</dt><dd><code>{call.id}</code></dd></div>{call.operation_status&&<div><dt>{t('common.status')}</dt><dd>{t(`statusLabels.${call.operation_status}`,{defaultValue:call.operation_status})}</dd></div>}{call.approval_id&&<div><dt>{t('audit.approvalId')}</dt><dd><code>{call.approval_id}</code></dd></div>}{call.task_id&&<div><dt>{t('audit.taskId')}</dt><dd><code>{call.task_id}</code></dd></div>}{call.shell_id&&<div><dt>Shell</dt><dd><code>{call.shell_id}</code></dd></div>}{call.tunnel_id&&<div><dt>Tunnel</dt><dd><code>{call.tunnel_id}</code></dd></div>}</dl>
+			{call.error&&<div className="inline-error">{call.error}</div>}
+			{progress>0&&<div className="file-transfer-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><div><span>{t('tool.transferProgress')}</span><b>{formatFileSize(output!.transferredBytes)} / {formatFileSize(output!.totalBytes)}</b></div><i><em style={{width:`${progress}%`}}/></i></div>}
+			{output&&(output.stdout||output.stderr)&&<div className="tool-output-grid">{output.stdout&&<ToolOutputPanel kind="stdout" label="STDOUT" content={output.stdout} live={call.status==='running'}/>} {output.stderr&&<ToolOutputPanel kind="stderr" label="STDERR" content={output.stderr} live={call.status==='running'}/>}</div>}
+			<LazyJSONDetails value={args}/>
+			{call.run_id&&<MCPRunEvidence runID={call.run_id} hosts={hosts}/>}
+		</div>
+	</details>
+})
+
+function MCPRunEvidence({runID,hosts}:{runID:string;hosts:Host[]}){
+	const {t}=useTranslation()
+	const [detail,setDetail]=useState<Run|null>(null)
+	const [loading,setLoading]=useState(false)
+	const [error,setError]=useState('')
+	const load=async()=>{if(detail||loading)return;setLoading(true);try{setDetail((await api.runDetail(runID)).run)}catch(err){setError(errorText(err))}finally{setLoading(false)}}
+	return <details className="mcp-run-evidence" onToggle={event=>{if(event.currentTarget.open)void load()}}><summary><History size={14}/><span>{t('audit.runEvidence')}</span><code>{runID}</code><ChevronRight size={14}/></summary><div>{loading?<div className="audit-loading" role="status"><LoaderCircle className="spin" size={14}/><span>{t('common.loading')}</span></div>:error?<div className="inline-error">{error}</div>:detail&&<AuditRunDetail run={detail} req={requestFromRun(detail)||{request:detail.request_json}} hosts={hosts}/>}</div></details>
 }
 
 function logFieldValue(value:unknown){

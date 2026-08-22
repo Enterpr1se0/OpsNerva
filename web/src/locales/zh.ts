@@ -137,7 +137,7 @@ const zh = {
   },
   mcpServerMode: {
     title: 'MCP Server Mode', endpoint: 'Endpoint', token: '访问令牌', tokenStored: '已保存，重新生成后显示',
-    start: '启动', stop: '停止', rotate: '重新生成令牌', lightweightMode: '轻量模式',
+    start: '启动', stop: '停止', rotate: '重新生成令牌', lightweightMode: '轻量模式', activity: '调用记录',
     started: 'MCP Server 已启动。', stopped: 'MCP Server 已停止。', endpointCopied: 'Endpoint 已复制。', tokenCopied: '令牌已复制。',
   },
   chat: {
@@ -234,6 +234,9 @@ const zh = {
     encryptedKey: '已保存', noApiKey: '无 API Key', switching: '切换中...', useModel: '使用此模型', emptyTitle: '没有模型提供商',
   },
   audit: {
+    views: '审计视图', runHistory: '运行记录', mcpActivity: 'MCP 活动', mcpSessions: '客户端会话', mcpClient: 'MCP 客户端', mcpCalls: '{{count}} 次调用',
+    noMCPActivity: '没有 MCP 活动', noMCPCalls: '没有工具调用', selectMCPSession: '选择客户端会话', mcpStreamFailed: 'MCP 活动连接失败',
+    callId: '调用 ID', approvalId: '审批 ID', taskId: '任务 ID', runEvidence: '运行审计', mcpRunGroup: 'MCP Server 调用',
     direct: '直接操作 / 旧操作', missingConversation: '会话已删除或不可用',
     counts: '{{sessions}} 个会话 · {{runs}} 次运行', noSession: '没有 Agent 会话上下文', lastRun: '最近运行 {{date}}', runs: '次运行', pending: '待审批',
     columns: { time: '时间', operation: '操作', status: '状态', host: '主机', exit: '退出码' }, unknownOperation: '未知操作',

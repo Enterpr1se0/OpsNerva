@@ -435,6 +435,63 @@ type MCPTestResult struct {
 	Tools     []MCPTool `json:"tools"`
 }
 
+const (
+	MCPCallRunning     = "running"
+	MCPCallCompleted   = "completed"
+	MCPCallFailed      = "failed"
+	MCPCallInterrupted = "interrupted"
+)
+
+type MCPClientSession struct {
+	ID              string    `json:"id"`
+	Transport       string    `json:"transport"`
+	ClientName      string    `json:"client_name,omitempty"`
+	ClientVersion   string    `json:"client_version,omitempty"`
+	ProtocolVersion string    `json:"protocol_version,omitempty"`
+	CallCount       int       `json:"call_count"`
+	RunningCalls    int       `json:"running_calls"`
+	StartedAt       time.Time `json:"started_at"`
+	LastSeenAt      time.Time `json:"last_seen_at"`
+}
+
+type MCPToolCall struct {
+	ID              string    `json:"id"`
+	SessionID       string    `json:"session_id"`
+	ToolName        string    `json:"tool_name"`
+	ArgumentsJSON   string    `json:"arguments_json"`
+	Status          string    `json:"status"`
+	RunID           string    `json:"run_id,omitempty"`
+	ApprovalID      string    `json:"approval_id,omitempty"`
+	TaskID          string    `json:"task_id,omitempty"`
+	ShellID         string    `json:"shell_id,omitempty"`
+	TunnelID        string    `json:"tunnel_id,omitempty"`
+	OperationStatus string    `json:"operation_status,omitempty"`
+	Error           string    `json:"error,omitempty"`
+	StartedAt       time.Time `json:"started_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+	CompletedAt     time.Time `json:"completed_at,omitempty,omitzero"`
+}
+
+type MCPActivitySnapshot struct {
+	Sessions []MCPClientSession `json:"sessions"`
+	Calls    []MCPToolCall      `json:"calls"`
+}
+
+type MCPActivityEvent struct {
+	Sequence         uint64            `json:"sequence"`
+	Type             string            `json:"type"`
+	SessionID        string            `json:"session_id"`
+	CallID           string            `json:"call_id"`
+	Session          *MCPClientSession `json:"session,omitempty"`
+	Call             *MCPToolCall      `json:"call,omitempty"`
+	RunID            string            `json:"run_id,omitempty"`
+	Stream           string            `json:"stream,omitempty"`
+	Content          string            `json:"content,omitempty"`
+	Status           string            `json:"status,omitempty"`
+	TransferredBytes int64             `json:"transferred_bytes,omitempty"`
+	TotalBytes       int64             `json:"total_bytes,omitempty"`
+}
+
 type ChatSession struct {
 	ID            string    `json:"id"`
 	Title         string    `json:"title"`

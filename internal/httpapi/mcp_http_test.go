@@ -72,4 +72,38 @@ func TestMCPHTTPServerRequiresEnabledModeAndBearerToken(t *testing.T) {
 	if response.Code != http.StatusOK || !strings.Contains(string(result), `"serverInfo":{"name":"opsnerva","version":"test"}`) {
 		t.Fatalf("authorized MCP initialize returned %d: %s", response.Code, result)
 	}
+	sessionID := response.Header().Get("Mcp-Session-Id")
+	if !strings.HasPrefix(sessionID, "mcp_sess_") {
+		t.Fatalf("authorized MCP initialize did not allocate a server session: %q", sessionID)
+	}
+	secondSessionID := request(settings.MCPHTTPToken).Header().Get("Mcp-Session-Id")
+	if secondSessionID == "" || secondSessionID == sessionID {
+		t.Fatalf("independent MCP clients shared a session: %q", secondSessionID)
+	}
+
+	callBody := bytes.NewBufferString(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ssh_history","arguments":{}}}`)
+	callRequest := httptest.NewRequest(http.MethodPost, "/mcp", callBody)
+	callRequest.Header.Set("Content-Type", "application/json")
+	callRequest.Header.Set("Accept", "application/json, text/event-stream")
+	callRequest.Header.Set("Authorization", "Bearer "+settings.MCPHTTPToken)
+	callRequest.Header.Set("Mcp-Session-Id", sessionID)
+	callRequest.Header.Set("Mcp-Protocol-Version", "2025-11-25")
+	callResponse := httptest.NewRecorder()
+	handler.ServeHTTP(callResponse, callRequest)
+	if callResponse.Code != http.StatusOK || !strings.Contains(callResponse.Body.String(), `"result"`) || strings.Contains(callResponse.Body.String(), `"error":{"code"`) {
+		t.Fatalf("stateful MCP tool call returned %d: %s", callResponse.Code, callResponse.Body.String())
+	}
+	activity, err := svc.ListMCPActivity(ctx, sessionID, 10, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(activity.Sessions) != 1 || len(activity.Calls) != 1 || activity.Calls[0].ToolName != "ssh_history" || activity.Calls[0].Status != domain.MCPCallCompleted {
+		t.Fatalf("unexpected MCP activity: %#v", activity)
+	}
+	activityRequest := httptest.NewRequest(http.MethodGet, "/api/v1/mcp/activity?session_id="+sessionID, nil)
+	activityResponse := httptest.NewRecorder()
+	handler.ServeHTTP(activityResponse, activityRequest)
+	if activityResponse.Code != http.StatusOK || !strings.Contains(activityResponse.Body.String(), activity.Calls[0].ID) {
+		t.Fatalf("MCP activity endpoint returned %d: %s", activityResponse.Code, activityResponse.Body.String())
+	}
 }

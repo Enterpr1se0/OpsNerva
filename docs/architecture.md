@@ -12,7 +12,7 @@ LLM、Prompt、Skill、远程输出和 MCP Client 都不属于可信计算基。
 
 Eino Tool、MCP Tool、HTTP 和 CLI 都是这个 Service 的适配器。模型侧执行结果只保留状态、有效输出和必要标识；预期失败额外返回 `code/message/retryable` 与可用的结构化校验信息。只有上下文取消或内部持久化损坏会成为 ToolNode fatal error。
 
-这里的 MCP Tool 分为两个方向。`ops-agent mcp` 通过 stdio、设置中的 MCP Server Mode 通过同一 HTTP 服务上的 `/mcp`，把受控 SSH Service 暴露给 MCP Client，因此完整复用输入校验、审批模式和审计，但不暴露 `ssh_history`；全局执行历史只允许 Web 管理端查看。只读工具通过 MCP annotations 明确标记；`ssh_shell` 使用独立 MCP surface，`ssh_tunnel` 复用已有转发状态。HTTP 传输采用无状态 Streamable HTTP；设置开关按请求即时生效，独立高熵 Bearer Token 仅在生成时返回，SQLite 只保存 SHA-256 摘要。管理员配置的外部 MCP Server 则属于独立信任域：它的工具在远端/子进程自身权限下执行，不自动继承 OpsNerva 的审批控制。Web 会明确提示该边界，只有启用状态为 ready 且未被 func 管理单独关闭的外部工具才进入主 Agent，审批 Agent 仍保持无 Tool。
+这里的 MCP Tool 分为两个方向。`ops-agent mcp` 通过 stdio、设置中的 MCP Server Mode 通过同一 HTTP 服务上的 `/mcp`，把受控 SSH Service 暴露给 MCP Client，因此完整复用输入校验、审批模式和审计。只读工具通过 MCP annotations 明确标记；`ssh_shell` 使用独立 MCP surface，`ssh_tunnel` 复用已有转发状态，`ssh_history` 只能读取当前 MCP 会话创建的运行。HTTP 使用有状态 Streamable HTTP，由服务端为每次 initialize 分配高熵 `mcp_sess_*`；stdio 进程拥有一个独立会话。客户端上报的 name/version 仅作展示，不作为身份认证，共享 Bearer Token 仍是 HTTP 访问边界。设置开关按请求即时生效，Token 仅在生成时返回，SQLite 只保存 SHA-256 摘要。管理员配置的外部 MCP Server 则属于独立信任域：它的工具在远端/子进程自身权限下执行，不自动继承 OpsNerva 的审批控制。Web 会明确提示该边界，只有启用状态为 ready 且未被 func 管理单独关闭的外部工具才进入主 Agent，审批 Agent 仍保持无 Tool。
 
 App 控制面通过 loopback HTTP API 连接本地 Sidecar。`auth.password` 非空时，除登录状态、登录和退出接口外，普通 `/api/v1` 端点都要求进程内随机会话 Cookie；Cookie 为 `HttpOnly`、`SameSite=Lax`，TLS 下同时设置 `Secure`，会话只保存令牌 SHA-256 与过期时间，重启后失效。配置密码使用常量时间比较，登录失败按来源地址限速。未配置密码时保持本机无登录模式。MCP HTTP 使用独立 Bearer Token，不接受控制面 Cookie；MCP stdio 与 CLI 仍属于本机进程边界。
 
@@ -114,13 +114,15 @@ HTTP Chat Handler 使用保留 request logger/value、但移除浏览器取消�
 
 `ssh_history` 始终限制在当前会话，可按主机、Tool、状态和 RFC3339 开始时间过滤，并通过稳定游标分页。文本检索默认使用字面量，也支持经过 POSIX 编译校验的 `regex`，并可通过 `query_scope=all|request|output` 限定匹配范围。搜索只返回运行摘要；指定 `run_id` 返回有界的 Tool 参数、规范化请求和脱敏输出，`run_id + query` 返回有界匹配片段，`limit` 在该模式下限制每个输出流的匹配数。
 
+每个 MCP `tools/call` 在执行前写入 `mcp_client_sessions` 与 `mcp_tool_calls`，参数经过统一脱敏并限制大小；完成时记录状态及关联的 Run、Approval、Task、Shell 或 Tunnel ID，同时写入 `mcp_tool_call_started/completed/failed/interrupted` 审计事件。高频 stdout、stderr 和传输进度只作为实时事件发送，不逐块写入 MCP 活动表。服务重启时仍处于 running 的调用明确转为 interrupted。
+
 `runs.request_json`、stdout 和 stderr 的可检索字段均为脱敏视图；对应原文采用 AES-256-GCM 写入 cipher 字段。MCP/Eino 历史工具永远不会返回 cipher 或解密内容。只有本地审批和显式 `audit show --raw` 会解密。
 
 每次运行还会产生独立事件：`command_started`、`approval_requested`、`approval_granted/rejected`、`command_completed/denied`、`task_cancelled` 等。
 
 ## Server observability
 
-服务端日志与执行审计是两条独立链路：Audit 是 SQLite 中不可替代的安全证据，Server Logs 用于排查控制面运行状态。应用统一调用标准库 `log/slog`，初始化时通过 MultiHandler 分发到终端、JSONL 轮转文件和进程内环形缓冲区。成功的普通 GET、HEAD 和 OPTIONS 不写访问日志；超过 2 秒的只读请求记录为 Warn，写请求记录为 Info，4xx/5xx 分别记录为 Warn/Error。Web 通过单一应用 WebSocket 订阅连接、审批、会话、活动 Tool 状态、健康和日志主题；普通主题仅在快照变化时发送，活动 Tool 状态按当前 session ID 按需订阅，日志首次发送筛选后的快照，随后只发送新增条目，重连或游标丢失时回退快照。终端仍使用独立 WebSocket，避免 PTY 流量阻塞控制面状态。
+服务端日志与执行审计是两条独立链路：Audit 是 SQLite 中不可替代的安全证据，Server Logs 用于排查控制面运行状态。应用统一调用标准库 `log/slog`，初始化时通过 MultiHandler 分发到终端、JSONL 轮转文件和进程内环形缓冲区。成功的普通 GET、HEAD 和 OPTIONS 不写访问日志；超过 2 秒的只读请求记录为 Warn，写请求记录为 Info，4xx/5xx 分别记录为 Warn/Error。Web 通过单一应用 WebSocket 订阅连接、审批、会话、活动 Tool 状态、MCP 活动、健康和日志主题；普通主题仅在快照变化时发送，Agent 活动按当前 session ID 按需订阅，MCP 活动使用 REST 快照恢复并直接推送增量事件，日志首次发送筛选后的快照，随后只发送新增条目，重连或游标丢失时回退快照。终端仍使用独立 WebSocket，避免 PTY 流量阻塞控制面状态。
 
 HTTP Middleware 始终为请求生成 `request_id` 并通过 context 传递给 Agent、Approval 与 SSH 层；需要记录访问事件时附带 method、path、status、耗时、响应字节和来源 IP，因此一次请求的跨层事件可以关联检索。模型输入、reasoning token、HTTP body、命令参数、脚本和远端输出均不进入服务日志，只记录长度、计数、ID 与最终状态。统一脱敏 Handler 会处理结构化敏感字段，并清理消息、错误文本和嵌套对象中的 Authorization、Bearer/Basic、密码、Token、API Key、私钥与常见云凭据格式。Debug 日志默认启用，可通过配置或 `OPS_AGENT_LOG_LEVEL=info` 降低详细程度。
 
@@ -130,7 +132,7 @@ Web 导出接口返回诊断 ZIP：`diagnostics.json` 仅包含版本、Go/OS/�
 
 每个新对话由后端生成 session ID，用户消息、最终 Assistant 文本和带 `tool_name` 的脱敏工具结果写入 `chat_messages`，Eino checkpoint 使用同一 session ID。运行中的会话接受最多 20 条内存消息，并区分 `followup` 与 `steering`：followup 保持 FIFO，在当前 Runner 轮次完整结束后消费；steering 保持自身顺序并排在未开始的 followup 前，通过 Eino `WithCancel` 在 ChatModel 或当前一组 Tool Calls 完成后的首个安全点收束当前轮次，再立即开始新输入。steering 不复用停止接口，不直接取消正在执行的 Tool、清空队列或拒绝审批；被引导的用户轮次以完成态保留为下一轮上下文。连续轮次通过 `turn_done` 或 `turn_steered` 保持 SSE，仅在队列耗尽时发送最终 `done`。停止、失败或进程退出会丢弃未消费队列。用户图片保存到 `chat_attachments`，普通历史 API 只返回元数据，鉴权附件接口返回原始内容，删除消息时通过外键级联删除。聊天上传使用 multipart，允许格式取自 `system_settings.chat_image_allowed_types_json`；不设置图片张数、大小或图片上下文预算。选入模型上下文的 turn 会把全部图片编码为 Eino `UserInputMultiContent`，再由 OpenAI-compatible adapter 生成 `image_url` data URL。Web 恢复历史时重建工具结果卡片和图片缩略图。下一轮模型输入按用户消息划分完整 turn；历史工具结果不会伪造成缺少 ToolCall ID 的协议级 Tool Message，而是作为明确标记、仍按不可信数据处理的 Assistant 历史证据。失败或中断 turn 只要已经执行过工具也会恢复，没有任何活动的失败 turn 则排除。查询最多读取最近 500 条模型相关记录，再按最近完整 turn、单条工具结果、单个 turn 和 256 KiB 文本总字节预算逐层裁剪；reasoning 不回放。每轮只记录消息数、图片数、图片字节数、工具证据数、文本字节数和截断状态，不记录上下文正文。会话索引按最后事件时间排序，标题取第一条用户消息，纯图片会话使用 `Image`；删除会话会在同一 SQLite 事务中删除消息、附件和对应 checkpoint，执行证据仍保留在独立的 runs 与 audit_events 中。
 
-Runner 在调用工具前通过 Go context 绑定当前 session ID，Service 创建 Run 时只从可信 context 读取该值，模型工具参数不能伪造会话归属。异步 Task 会把该值复制到脱离 HTTP 请求生命周期的后台 context。Audit 页面按 `runs.session_id` 分组；CLI、MCP、HTTP 直调和升级前的历史记录显示在 Direct / Legacy 分组。
+Runner 在调用工具前通过 Go context 绑定当前 session ID，Service 创建 Run 时只从可信 context 读取该值，模型工具参数不能伪造会话归属。异步 Task 会把该值复制到脱离 HTTP 请求生命周期的后台 context。Audit 的运行记录按 `runs.session_id` 分组，MCP Run 标记为 MCP Server 调用；MCP 活动视图按独立客户端会话展示调用过程。CLI、HTTP 直调和升级前的历史记录显示在 Direct / Legacy 分组。
 
 ## Model provider routing
 

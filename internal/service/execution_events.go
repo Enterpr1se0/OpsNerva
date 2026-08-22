@@ -16,6 +16,7 @@ type ExecutionEvent struct {
 	RunID            string `json:"run_id"`
 	ToolCallID       string `json:"tool_call_id,omitempty"`
 	ToolName         string `json:"tool_name,omitempty"`
+	Source           string `json:"source,omitempty"`
 	Stream           string `json:"stream,omitempty"`
 	Content          string `json:"content,omitempty"`
 	Status           string `json:"status,omitempty"`
@@ -101,12 +102,18 @@ func (s *Service) publishExecutionEvent(event ExecutionEvent) {
 		if event.ToolName == "" {
 			event.ToolName = owner.ToolName
 		}
+		if event.Source == "" {
+			event.Source = owner.Source
+		}
 	}
 	subscribers := make([]*executionSubscriber, 0, len(s.executionSubscribers[event.SessionID]))
 	for _, subscriber := range s.executionSubscribers[event.SessionID] {
 		subscribers = append(subscribers, subscriber)
 	}
 	s.executionEventMu.RUnlock()
+	if event.Source == "mcp" {
+		s.publishMCPExecutionEvent(event)
+	}
 	persistedStatus := persistedToolExecutionStatus(event.Status)
 	var call domain.ChatToolCall
 	callErr := store.ErrNotFound

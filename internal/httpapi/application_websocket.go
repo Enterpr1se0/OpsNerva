@@ -22,13 +22,14 @@ const applicationSnapshotCacheTTL = 200 * time.Millisecond
 const applicationSnapshotCacheLimit = 256
 
 var applicationEventIntervals = map[string]time.Duration{
-	"connections": time.Second,
-	"approvals":   time.Second,
-	"sessions":    2 * time.Second,
-	"chat_state":  2 * time.Second,
-	"audit":       time.Second,
-	"health":      30 * time.Second,
-	"logs":        time.Second,
+	"connections":  time.Second,
+	"approvals":    time.Second,
+	"sessions":     2 * time.Second,
+	"chat_state":   2 * time.Second,
+	"audit":        time.Second,
+	"mcp_activity": 0,
+	"health":       30 * time.Second,
+	"logs":         time.Second,
 }
 
 type applicationWebSocketLogFilter struct {
@@ -39,10 +40,11 @@ type applicationWebSocketLogFilter struct {
 }
 
 type applicationWebSocketCommand struct {
-	Type      string                        `json:"type"`
-	Topics    []string                      `json:"topics,omitempty"`
-	Logs      applicationWebSocketLogFilter `json:"logs,omitempty"`
-	SessionID string                        `json:"session_id,omitempty"`
+	Type         string                        `json:"type"`
+	Topics       []string                      `json:"topics,omitempty"`
+	Logs         applicationWebSocketLogFilter `json:"logs,omitempty"`
+	SessionID    string                        `json:"session_id,omitempty"`
+	MCPSessionID string                        `json:"mcp_session_id,omitempty"`
 }
 
 type applicationWebSocketEvent struct {
@@ -55,9 +57,10 @@ type applicationWebSocketEvent struct {
 }
 
 type applicationWebSocketSubscription struct {
-	topics    map[string]struct{}
-	logs      applicationWebSocketLogFilter
-	sessionID string
+	topics       map[string]struct{}
+	logs         applicationWebSocketLogFilter
+	sessionID    string
+	mcpSessionID string
 }
 
 type applicationTopicState struct {
@@ -107,6 +110,13 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 	subscription := applicationWebSocketSubscription{topics: map[string]struct{}{}}
 	states := make(map[string]applicationTopicState)
 	var previousLogs []observability.LogEntry
+	var mcpEvents <-chan domain.MCPActivityEvent
+	var unsubscribeMCP func()
+	defer func() {
+		if unsubscribeMCP != nil {
+			unsubscribeMCP()
+		}
+	}()
 	var sequence uint64
 	tick := time.NewTicker(250 * time.Millisecond)
 	heartbeat := time.NewTicker(15 * time.Second)
@@ -124,9 +134,34 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 		case <-readDone:
 			return
 		case next := <-updates:
+			if unsubscribeMCP != nil {
+				unsubscribeMCP()
+				unsubscribeMCP = nil
+				mcpEvents = nil
+			}
 			subscription = next
 			states = make(map[string]applicationTopicState)
 			previousLogs = nil
+			if _, subscribed := subscription.topics["mcp_activity"]; subscribed {
+				mcpEvents, unsubscribeMCP = s.service.SubscribeMCPActivity(subscription.mcpSessionID)
+				payload, err := s.applicationTopicSnapshot(ctx, "mcp_activity", subscription)
+				if err != nil {
+					_ = websocket.JSON.Send(connection, applicationWebSocketEvent{Type: "error", Topic: "mcp_activity", Error: err.Error()})
+				} else if send("mcp_activity", "snapshot", payload) != nil {
+					return
+				}
+			}
+		case event, ok := <-mcpEvents:
+			if !ok {
+				return
+			}
+			payload, err := json.Marshal(event)
+			if err != nil {
+				continue
+			}
+			if send("mcp_activity", "delta", payload) != nil {
+				return
+			}
 		case now := <-tick.C:
 			topics := make([]string, 0, len(subscription.topics))
 			for topic := range subscription.topics {
@@ -134,6 +169,9 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 			}
 			sort.Strings(topics)
 			for _, topic := range topics {
+				if topic == "mcp_activity" {
+					continue
+				}
 				state := states[topic]
 				if !state.next.IsZero() && now.Before(state.next) {
 					continue
@@ -252,13 +290,17 @@ func readApplicationWebSocket(ctx context.Context, connection *websocket.Conn, u
 			command.Logs.Limit = 1000
 		}
 		command.SessionID = strings.TrimSpace(command.SessionID)
+		command.MCPSessionID = strings.TrimSpace(command.MCPSessionID)
 		if _, subscribed := topics["chat_state"]; subscribed && command.SessionID == "" {
 			return fmt.Errorf("session_id is required for application event topic chat_state")
 		}
 		if len(command.SessionID) > 256 {
 			return fmt.Errorf("session_id must not exceed 256 bytes")
 		}
-		next := applicationWebSocketSubscription{topics: topics, logs: command.Logs, sessionID: command.SessionID}
+		if len(command.MCPSessionID) > 256 {
+			return fmt.Errorf("mcp_session_id must not exceed 256 bytes")
+		}
+		next := applicationWebSocketSubscription{topics: topics, logs: command.Logs, sessionID: command.SessionID, mcpSessionID: command.MCPSessionID}
 		select {
 		case updates <- next:
 		default:
@@ -317,6 +359,12 @@ func (s *Server) applicationTopicSnapshot(ctx context.Context, topic string, sub
 			latest := page.Events[0]
 			value = map[string]any{"id": latest.ID, "type": latest.Type, "created_at": latest.CreatedAt}
 		}
+	case "mcp_activity":
+		snapshot, err := s.service.ListMCPActivity(ctx, subscription.mcpSessionID, 100, 200)
+		if err != nil {
+			return nil, err
+		}
+		value = snapshot
 	default:
 		return nil, fmt.Errorf("unsupported application event topic %q", topic)
 	}

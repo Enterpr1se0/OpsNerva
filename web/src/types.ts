@@ -823,6 +823,58 @@ export interface MCPServerInput {
   enabled: boolean
 }
 
+export type MCPToolCallStatus='running'|'completed'|'failed'|'interrupted'
+
+export interface MCPClientSession {
+	id:string
+	transport:string
+	client_name?:string
+	client_version?:string
+	protocol_version?:string
+	call_count:number
+	running_calls:number
+	started_at:string
+	last_seen_at:string
+}
+
+export interface MCPToolCall {
+	id:string
+	session_id:string
+	tool_name:string
+	arguments_json:string
+	status:MCPToolCallStatus
+	run_id?:string
+	approval_id?:string
+	task_id?:string
+	shell_id?:string
+	tunnel_id?:string
+	operation_status?:string
+	error?:string
+	started_at:string
+	updated_at:string
+	completed_at?:string
+}
+
+export interface MCPActivitySnapshot {
+	sessions:MCPClientSession[]
+	calls:MCPToolCall[]
+}
+
+export interface MCPActivityEvent {
+	sequence:number
+	type:'call_started'|'call_finished'|'call_output'|'call_progress'|'operation_status'
+	session_id:string
+	call_id:string
+	session?:MCPClientSession
+	call?:MCPToolCall
+	run_id?:string
+	stream?:string
+	content?:string
+	status?:string
+	transferred_bytes?:number
+	total_bytes?:number
+}
+
 export interface MCPTestResult {
   ok: boolean
   latency_ms: number

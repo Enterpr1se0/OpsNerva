@@ -183,6 +183,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/run-summaries", s.searchRunSummaries)
 	s.mux.HandleFunc("GET /api/v1/runs/{id}", s.getRun)
 	s.mux.HandleFunc("DELETE /api/v1/audit/runs", s.deleteAuditRuns)
+	s.mux.HandleFunc("GET /api/v1/mcp/activity", s.listMCPActivity)
 	s.mux.HandleFunc("GET /api/v1/audit", s.listAudit)
 	s.mux.HandleFunc("GET /api/v1/audit-events", s.listAuditEvents)
 	s.mux.HandleFunc("GET /api/v1/logs", s.logs)
@@ -1622,6 +1623,13 @@ func (s *Server) searchRunSummaries(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 	includeRaw := r.URL.Query().Get("raw") == "1"
 	result, err := s.service.GetRun(r.Context(), r.PathValue("id"), includeRaw)
+	respond(w, result, err)
+}
+
+func (s *Server) listMCPActivity(w http.ResponseWriter, r *http.Request) {
+	sessionLimit, _ := strconv.Atoi(r.URL.Query().Get("session_limit"))
+	callLimit, _ := strconv.Atoi(r.URL.Query().Get("call_limit"))
+	result, err := s.service.ListMCPActivity(r.Context(), r.URL.Query().Get("session_id"), sessionLimit, callLimit)
 	respond(w, result, err)
 }
 

@@ -46,45 +46,49 @@ type Service struct {
 	validators           map[string]config.Validator
 	skills               *skills.Registry
 
-	globalSem              chan struct{}
-	semMu                  sync.Mutex
-	hostSems               map[string]chan struct{}
-	taskMu                 sync.RWMutex
-	tasks                  map[string]*taskState
-	reviewerMu             sync.RWMutex
-	reviewer               ApprovalReviewer
-	automaticReviewer      AutomaticApprovalReviewer
-	explainWG              sync.WaitGroup
-	explanationMu          sync.Mutex
-	explanationActive      map[string]*approvalExplanationTask
-	explanationSem         chan struct{}
-	explanationSlots       chan struct{}
-	automaticApprovalSem   chan struct{}
-	mcpMu                  sync.RWMutex
-	mcpRuntime             map[string]*mcpRuntimeState
-	mcpSecretsMu           sync.Mutex
-	mcpOAuthMu             sync.Mutex
-	mcpOAuthFlows          map[string]*mcpOAuthFlow
-	mcpOAuthByServer       map[string]*mcpOAuthFlow
-	modelMetadata          *modelMetadataCache
-	executionCtx           context.Context
-	executionCancel        context.CancelFunc
-	executionMu            sync.Mutex
-	executionClosed        bool
-	executionCancels       map[string]context.CancelFunc
-	cancelledExecutions    map[string]struct{}
-	executionWG            sync.WaitGroup
-	executionEventMu       sync.RWMutex
-	executionSubscribers   map[string]map[uint64]*executionSubscriber
-	executionOwners        map[string]executionOwner
-	executionSubscriberID  uint64
-	executionEventSequence atomic.Uint64
-	tunnelMu               sync.RWMutex
-	tunnels                map[string]*sshTunnelState
-	shellMu                sync.RWMutex
-	shells                 map[string]*sshShellState
-	webSem                 chan struct{}
-	webRequests            singleflight.Group
+	globalSem               chan struct{}
+	semMu                   sync.Mutex
+	hostSems                map[string]chan struct{}
+	taskMu                  sync.RWMutex
+	tasks                   map[string]*taskState
+	reviewerMu              sync.RWMutex
+	reviewer                ApprovalReviewer
+	automaticReviewer       AutomaticApprovalReviewer
+	explainWG               sync.WaitGroup
+	explanationMu           sync.Mutex
+	explanationActive       map[string]*approvalExplanationTask
+	explanationSem          chan struct{}
+	explanationSlots        chan struct{}
+	automaticApprovalSem    chan struct{}
+	mcpMu                   sync.RWMutex
+	mcpRuntime              map[string]*mcpRuntimeState
+	mcpSecretsMu            sync.Mutex
+	mcpOAuthMu              sync.Mutex
+	mcpOAuthFlows           map[string]*mcpOAuthFlow
+	mcpOAuthByServer        map[string]*mcpOAuthFlow
+	mcpActivityMu           sync.Mutex
+	mcpActivitySubscribers  map[uint64]*mcpActivitySubscriber
+	mcpActivitySubscriberID uint64
+	mcpActivitySequence     atomic.Uint64
+	modelMetadata           *modelMetadataCache
+	executionCtx            context.Context
+	executionCancel         context.CancelFunc
+	executionMu             sync.Mutex
+	executionClosed         bool
+	executionCancels        map[string]context.CancelFunc
+	cancelledExecutions     map[string]struct{}
+	executionWG             sync.WaitGroup
+	executionEventMu        sync.RWMutex
+	executionSubscribers    map[string]map[uint64]*executionSubscriber
+	executionOwners         map[string]executionOwner
+	executionSubscriberID   uint64
+	executionEventSequence  atomic.Uint64
+	tunnelMu                sync.RWMutex
+	tunnels                 map[string]*sshTunnelState
+	shellMu                 sync.RWMutex
+	shells                  map[string]*sshShellState
+	webSem                  chan struct{}
+	webRequests             singleflight.Group
 }
 
 const (
@@ -134,8 +138,9 @@ func New(st *store.Store, transport sshx.Transport, encryptor *security.Encrypto
 		workspaceSandboxPath: config.Default().WorkspaceSandboxPath,
 		globalSem:            make(chan struct{}, global), hostSems: make(map[string]chan struct{}), tasks: make(map[string]*taskState), workspaces: make(map[string]config.Workspace), validators: make(map[string]config.Validator), mcpRuntime: make(map[string]*mcpRuntimeState),
 		mcpOAuthFlows: make(map[string]*mcpOAuthFlow), mcpOAuthByServer: make(map[string]*mcpOAuthFlow),
-		modelMetadata:     newModelMetadataCache(modelsDevMetadataURL),
-		explanationActive: make(map[string]*approvalExplanationTask), explanationSem: make(chan struct{}, maxConcurrentApprovalExplanations), explanationSlots: make(chan struct{}, maxQueuedApprovalExplanations),
+		mcpActivitySubscribers: make(map[uint64]*mcpActivitySubscriber),
+		modelMetadata:          newModelMetadataCache(modelsDevMetadataURL),
+		explanationActive:      make(map[string]*approvalExplanationTask), explanationSem: make(chan struct{}, maxConcurrentApprovalExplanations), explanationSlots: make(chan struct{}, maxQueuedApprovalExplanations),
 		automaticApprovalSem: make(chan struct{}, maxConcurrentApprovalExplanations),
 		executionCtx:         executionCtx, executionCancel: executionCancel,
 		executionCancels: make(map[string]context.CancelFunc), cancelledExecutions: make(map[string]struct{}),
@@ -165,6 +170,9 @@ func (s *Service) RecoverInterruptedTasks(ctx context.Context) error {
 		return err
 	}
 	if err := s.recoverChatToolCalls(ctx); err != nil {
+		return err
+	}
+	if err := s.store.InterruptRunningMCPToolCalls(ctx); err != nil {
 		return err
 	}
 	_, err := s.store.PruneChatTurnsExcludedFromContext(ctx, "")
@@ -2388,7 +2396,7 @@ func (s *Service) StartTask(ctx context.Context, req domain.ExecRequest, actor s
 		background = WithSessionID(background, sessionID)
 	}
 	if owner, ok := executionOwnerFromContext(ctx); ok {
-		background = WithExecutionOwner(background, owner.ToolCallID, owner.ToolName, owner.Arguments)
+		background = context.WithValue(background, executionOwnerContextKey{}, owner)
 	}
 	taskCtx, cancel := context.WithCancel(background)
 	// GetHost accepts either an ID or a display name, while tasks.host_id is a

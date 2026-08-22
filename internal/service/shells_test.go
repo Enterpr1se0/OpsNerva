@@ -735,7 +735,8 @@ func TestInteractiveSSHShellApprovalIsolationCompleteOutputAndSensitiveRedaction
 
 func TestMCPInteractiveSSHShellUsesIsolatedSurface(t *testing.T) {
 	svc, _, host := newTestService(t)
-	ctx := WithMCPClientSession(context.Background())
+	const mcpSessionID = "mcp_sess_test"
+	ctx := WithMCPToolCall(context.Background(), mcpSessionID, "mcp_call_shell_start", "ssh_shell", `{"action":"start"}`)
 	pending, err := svc.StartSSHShell(ctx, host.ID, "", false, 120, 32, "open an MCP test shell", "mcp-client")
 	if err != nil {
 		t.Fatal(err)
@@ -744,11 +745,11 @@ func TestMCPInteractiveSSHShellUsesIsolatedSurface(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if approved.Shell == nil || approved.Shell.Surface != domain.SSHShellSurfaceMCP || approved.Shell.SessionID != mcpClientSessionID {
+	if approved.Shell == nil || approved.Shell.Surface != domain.SSHShellSurfaceMCP || approved.Shell.SessionID != mcpSessionID {
 		t.Fatalf("MCP shell was not isolated: %#v", approved.Shell)
 	}
 	shellID := approved.Shell.ID
-	page, err := svc.WriteSSHShellPage(ctx, shellID, mcpClientSessionID, "whoami\r", 0, 0, "", "mcp-client")
+	page, err := svc.WriteSSHShellPage(ctx, shellID, mcpSessionID, "whoami\r", 0, 0, "", "mcp-client")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -756,11 +757,11 @@ func TestMCPInteractiveSSHShellUsesIsolatedSurface(t *testing.T) {
 	if len(snapshot.Events) == 0 || snapshot.Events[0].Stream != "input" || snapshot.Events[0].Source != "agent" {
 		t.Fatalf("MCP shell input source is incorrect: %#v", snapshot.Events)
 	}
-	listed, err := svc.ListSSHShells(ctx, mcpClientSessionID, true, "", "mcp-client")
+	listed, err := svc.ListSSHShells(ctx, mcpSessionID, true, "", "mcp-client")
 	if err != nil || listed.Count != 1 || listed.Shells[0].ID != shellID {
 		t.Fatalf("MCP shell list is not isolated: list=%#v err=%v", listed, err)
 	}
-	if _, err := svc.CloseSSHShell(ctx, shellID, mcpClientSessionID, "", "mcp-client"); err != nil {
+	if _, err := svc.CloseSSHShell(ctx, shellID, mcpSessionID, "", "mcp-client"); err != nil {
 		t.Fatal(err)
 	}
 }

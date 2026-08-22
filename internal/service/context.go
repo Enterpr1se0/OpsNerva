@@ -17,9 +17,8 @@ type executionOwner struct {
 	ToolCallID string
 	ToolName   string
 	Arguments  string
+	Source     string
 }
-
-const mcpClientSessionID = "mcp-server"
 
 // WithSessionID binds an Agent conversation to all audited runs created by
 // tools below this context. Session IDs never come from model tool arguments.
@@ -57,12 +56,6 @@ func approvalUserRequestFromContext(ctx context.Context) string {
 	return strings.TrimSpace(value)
 }
 
-// WithMCPClientSession isolates MCP-owned interactive shells from Agent
-// conversations and operator terminals without trusting a model-supplied ID.
-func WithMCPClientSession(ctx context.Context) context.Context {
-	return WithSessionID(ctx, mcpClientSessionID)
-}
-
 // WithExecutionOwner binds a service run to the Agent tool card that started
 // it. The binding is copied into approved and background execution events.
 func WithExecutionOwner(ctx context.Context, toolCallID, toolName, arguments string) context.Context {
@@ -73,6 +66,18 @@ func WithExecutionOwner(ctx context.Context, toolCallID, toolName, arguments str
 		ToolCallID: strings.TrimSpace(toolCallID),
 		ToolName:   strings.TrimSpace(toolName),
 		Arguments:  strings.TrimSpace(arguments),
+	})
+}
+
+// WithMCPToolCall binds one server-assigned MCP session and call to every
+// service operation below it. Neither identifier is accepted from tool input.
+func WithMCPToolCall(ctx context.Context, sessionID, callID, toolName, arguments string) context.Context {
+	ctx = WithSessionID(ctx, sessionID)
+	return context.WithValue(ctx, executionOwnerContextKey{}, executionOwner{
+		ToolCallID: strings.TrimSpace(callID),
+		ToolName:   strings.TrimSpace(toolName),
+		Arguments:  strings.TrimSpace(arguments),
+		Source:     "mcp",
 	})
 }
 

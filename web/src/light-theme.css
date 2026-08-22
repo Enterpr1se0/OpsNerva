@@ -1462,3 +1462,23 @@
 :root[data-theme='light'] .file-transfer-progress > i {
   background: var(--light-border);
 }
+
+:root[data-theme='light'] :where(.audit-view-tabs, .mcp-call-body) {
+  background: var(--light-surface-soft);
+}
+
+:root[data-theme='light'] :where(.audit-view-tabs button:hover, .mcp-session-list button:hover, .mcp-call-card > summary:hover) {
+  background: var(--light-muted-surface);
+}
+
+:root[data-theme='light'] :where(.audit-view-tabs button.active, .mcp-session-list button.active, .mcp-call-card[open] > summary) {
+  background: var(--light-accent-soft);
+}
+
+:root[data-theme='light'] :where(.mcp-session-list button b, .mcp-call-heading code) {
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] :where(.mcp-session-list button code, .mcp-session-list button small, .mcp-call-heading small, .mcp-call-card > summary time, .mcp-call-meta dt, .mcp-run-evidence > summary code) {
+  color: var(--light-text-muted);
+}

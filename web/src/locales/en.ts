@@ -137,7 +137,7 @@ const en = {
   },
   mcpServerMode: {
     title: 'MCP Server Mode', endpoint: 'Endpoint', token: 'Access token', tokenStored: 'Saved; regenerate to display',
-    start: 'Start', stop: 'Stop', rotate: 'Regenerate token', lightweightMode: 'Lightweight mode',
+    start: 'Start', stop: 'Stop', rotate: 'Regenerate token', lightweightMode: 'Lightweight mode', activity: 'Activity',
     started: 'MCP Server started.', stopped: 'MCP Server stopped.', endpointCopied: 'Endpoint copied.', tokenCopied: 'Token copied.',
   },
   chat: {
@@ -234,6 +234,9 @@ const en = {
     encryptedKey: 'Saved', noApiKey: 'No API key', switching: 'Switching...', useModel: 'Use model', emptyTitle: 'No model providers',
   },
   audit: {
+    views: 'Audit views', runHistory: 'Run history', mcpActivity: 'MCP activity', mcpSessions: 'Client sessions', mcpClient: 'MCP client', mcpCalls: '{{count}} calls',
+    noMCPActivity: 'No MCP activity', noMCPCalls: 'No tool calls', selectMCPSession: 'Select a client session', mcpStreamFailed: 'MCP activity stream failed',
+    callId: 'Call ID', approvalId: 'Approval ID', taskId: 'Task ID', runEvidence: 'Run audit', mcpRunGroup: 'MCP Server calls',
     direct: 'Direct / legacy operations', missingConversation: 'Deleted or unavailable conversation',
     counts: '{{sessions}} SESSIONS · {{runs}} RUNS', noSession: 'No Agent session context', lastRun: 'Last run {{date}}', runs: 'runs', pending: 'pending',
     columns: { time: 'Time', operation: 'Operation', status: 'Status', host: 'Host', exit: 'Exit' }, unknownOperation: 'Unknown operation',

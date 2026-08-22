@@ -1,14 +1,21 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"eino-ops-agent/internal/config"
+	"eino-ops-agent/internal/domain"
 	"eino-ops-agent/internal/observability"
+	"eino-ops-agent/internal/security"
+	"eino-ops-agent/internal/service"
+	"eino-ops-agent/internal/store"
 
 	"golang.org/x/net/websocket"
 )
@@ -38,6 +45,63 @@ func TestApplicationWebSocketSubscribesThroughRequestLogger(t *testing.T) {
 	}
 	if event.Type != "event" || event.Topic != "logs" || event.Mode != "snapshot" || event.Sequence != 1 {
 		t.Fatalf("unexpected subscription event: %#v", event)
+	}
+}
+
+func TestApplicationWebSocketStreamsMCPActivityAfterSnapshot(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dataDir, "mcp-events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	encryptor, err := security.NewEncryptor("", dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	svc := service.New(st, nil, encryptor, security.NewRedactor(), cfg.Limits, cfg)
+	t.Cleanup(func() { _ = svc.Shutdown(context.Background()) })
+	server := &Server{service: svc}
+	httpServer := httptest.NewServer(requestLogMiddleware(http.HandlerFunc(server.applicationWebSocket), nil))
+	defer httpServer.Close()
+	webSocketConfig, err := websocket.NewConfig("ws"+strings.TrimPrefix(httpServer.URL, "http"), httpServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := websocket.DialConfig(webSocketConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if err := connection.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := websocket.JSON.Send(connection, applicationWebSocketCommand{Type: "subscribe", Topics: []string{"mcp_activity"}}); err != nil {
+		t.Fatal(err)
+	}
+	var snapshot applicationWebSocketEvent
+	if err := websocket.JSON.Receive(connection, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Topic != "mcp_activity" || snapshot.Mode != "snapshot" {
+		t.Fatalf("unexpected MCP activity snapshot: %#v", snapshot)
+	}
+	_, call, err := svc.BeginMCPToolCall(ctx, domain.MCPClientSession{ID: "mcp_sess_ws", Transport: "streamable_http"}, "ssh_history", `{}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var delta applicationWebSocketEvent
+	if err := websocket.JSON.Receive(connection, &delta); err != nil {
+		t.Fatal(err)
+	}
+	var activity domain.MCPActivityEvent
+	if err := json.Unmarshal(delta.Data, &activity); err != nil {
+		t.Fatal(err)
+	}
+	if delta.Topic != "mcp_activity" || delta.Mode != "delta" || activity.Type != "call_started" || activity.CallID != call.ID {
+		t.Fatalf("unexpected MCP activity delta: %#v, payload %#v", delta, activity)
 	}
 }
 

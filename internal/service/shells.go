@@ -764,7 +764,7 @@ func (s *Service) openInteractiveShell(
 			surface = domain.WorkspaceShellSurfaceOperator
 		} else if options.kind == domain.SSHShellKindWorkspace {
 			surface = domain.WorkspaceShellSurfaceAgent
-		} else if run.SessionID == mcpClientSessionID {
+		} else if owner, ok := executionOwnerFromContext(ctx); ok && owner.Source == "mcp" {
 			surface = domain.SSHShellSurfaceMCP
 		} else if run.SessionID == "" {
 			surface = domain.SSHShellSurfaceQuick
