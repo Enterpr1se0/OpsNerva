@@ -137,7 +137,7 @@ export const api = {
 		const match=/filename=(?:"([^"]+)"|([^;]+))/i.exec(disposition)
 		return{blob:await response.blob(),filename:(match?.[1]||match?.[2]||'opsnerva-configuration.json').trim()}
 	},
-	importConfiguration: (file:File,password='') => {const body=new FormData();body.set('file',file,file.name);if(password)body.set('password',password);return request<ConfigurationImportResult>('/api/v1/configuration/import',{method:'POST',body})},
+	importConfiguration: (file:File) => {const body=new FormData();body.set('file',file,file.name);return request<ConfigurationImportResult>('/api/v1/configuration/import',{method:'POST',body})},
   health: () => request<Health>('/api/v1/health'),
 	systemSettings: () => request<SystemSettings>('/api/v1/settings'),
 	capabilities: () => request<ToolCapabilities>('/api/v1/capabilities'),
@@ -187,7 +187,6 @@ export const api = {
   sshTunnels: () => request<SSHTunnelList>('/api/v1/ssh-tunnels'),
   startSSHTunnel: (input:SSHTunnelStartInput) => request<SSHTunnel>('/api/v1/ssh-tunnels', { method:'POST', body:JSON.stringify(input) }),
   updateSSHTunnel: (id:string,input:SSHTunnelUpdateInput) => request<SSHTunnel>(`/api/v1/ssh-tunnels/${encodeURIComponent(id)}`, { method:'PUT', body:JSON.stringify(input) }),
-  retrySSHTunnel: (id:string) => request<SSHTunnel>(`/api/v1/ssh-tunnels/${encodeURIComponent(id)}/retry`, { method:'POST', body:'{}' }),
   stopSSHTunnel: (id:string) => request<SSHTunnel>(`/api/v1/ssh-tunnels/${encodeURIComponent(id)}`, { method:'DELETE' }),
   sshShells: (sessionId='') => request<SSHShellList>(`/api/v1/ssh-shells?session_id=${encodeURIComponent(sessionId)}`),
   startSSHShell: (input:SSHShellStartInput) => request<SSHShell>('/api/v1/ssh-shells', { method:'POST', body:JSON.stringify(input) }),

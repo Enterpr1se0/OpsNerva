@@ -28,19 +28,20 @@ import (
 )
 
 type fakeTransport struct {
-	mu            sync.Mutex
-	calls         []domain.ExecRequest
-	hosts         []domain.Host
-	stdout        []byte
-	stderr        []byte
-	exitCode      int
-	execErr       error
-	execStarted   chan struct{}
-	execRelease   <-chan struct{}
-	execStartOnce sync.Once
-	tunnelClients []*fakeTunnelClient
-	tunnelSpecs   []sshx.ConnectionSpec
-	storedKeys    map[string]sshx.HostKey
+	mu             sync.Mutex
+	calls          []domain.ExecRequest
+	hosts          []domain.Host
+	stdout         []byte
+	stderr         []byte
+	exitCode       int
+	execErr        error
+	execStarted    chan struct{}
+	execRelease    <-chan struct{}
+	execStartOnce  sync.Once
+	tunnelOpenErrs []error
+	tunnelClients  []*fakeTunnelClient
+	tunnelSpecs    []sshx.ConnectionSpec
+	storedKeys     map[string]sshx.HostKey
 }
 
 type fakeTunnelClient struct {
@@ -71,8 +72,14 @@ func (client *fakeTunnelClient) Close() error {
 }
 
 func (f *fakeTransport) OpenTunnel(_ context.Context, connection sshx.ConnectionSpec) (sshx.TunnelClient, error) {
-	client := newFakeTunnelClient()
 	f.mu.Lock()
+	if len(f.tunnelOpenErrs) > 0 {
+		err := f.tunnelOpenErrs[0]
+		f.tunnelOpenErrs = f.tunnelOpenErrs[1:]
+		f.mu.Unlock()
+		return nil, err
+	}
+	client := newFakeTunnelClient()
 	f.tunnelClients = append(f.tunnelClients, client)
 	f.tunnelSpecs = append(f.tunnelSpecs, connection)
 	f.mu.Unlock()

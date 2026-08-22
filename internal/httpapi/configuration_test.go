@@ -21,7 +21,7 @@ import (
 	"eino-ops-agent/internal/store"
 )
 
-func TestAuthenticatedConfigurationExportIsEncryptedAndImportable(t *testing.T) {
+func TestAuthenticatedConfigurationExportIsJSONAndImportableWithoutPackagePassword(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
 	st, err := store.Open(ctx, filepath.Join(dataDir, "configuration.db"))
@@ -78,24 +78,22 @@ func TestAuthenticatedConfigurationExportIsEncryptedAndImportable(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.StatusCode != http.StatusOK || bytes.Contains(payload, []byte("http-export-secret")) {
-		t.Fatalf("encrypted export = status %d, body %s", response.StatusCode, payload)
+	if response.StatusCode != http.StatusOK || !bytes.Contains(payload, []byte("http-export-secret")) {
+		t.Fatalf("configuration export = status %d, body %s", response.StatusCode, payload)
 	}
 	disposition, parameters, err := mime.ParseMediaType(response.Header.Get("Content-Disposition"))
-	if err != nil || disposition != "attachment" || !strings.HasSuffix(parameters["filename"], ".opsnerva") {
+	if err != nil || disposition != "attachment" || !strings.HasSuffix(parameters["filename"], ".json") {
 		t.Fatalf("export disposition = %q %#v, %v", disposition, parameters, err)
 	}
-	plain, encrypted, err := security.OpenPortable("migration-password", payload)
-	if err != nil || !encrypted || !bytes.Contains(plain, []byte("http-export-secret")) {
-		t.Fatalf("decrypt export = encrypted %v, error %v, body %s", encrypted, err, plain)
+	if contentType := response.Header.Get("Content-Type"); contentType != "application/json" {
+		t.Fatalf("export content type = %q", contentType)
+	}
+	var exported domain.ConfigurationPackage
+	if err := json.Unmarshal(payload, &exported); err != nil || !exported.SecretsIncluded {
+		t.Fatalf("decode export = %#v, %v", exported, err)
 	}
 
-	wrongPasswordResponse := postConfigurationPackage(t, client, server.URL, payload, "wrong-password")
-	defer wrongPasswordResponse.Body.Close()
-	if wrongPasswordResponse.StatusCode != http.StatusUnauthorized || wrongPasswordResponse.Header.Get("X-OpsNerva-Auth") != "" {
-		t.Fatalf("wrong package password = %d, %#v", wrongPasswordResponse.StatusCode, wrongPasswordResponse.Header)
-	}
-	importResponse := postConfigurationPackage(t, client, server.URL, payload, "migration-password")
+	importResponse := postConfigurationPackage(t, client, server.URL, payload)
 	defer importResponse.Body.Close()
 	if importResponse.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(importResponse.Body)
@@ -107,18 +105,63 @@ func TestAuthenticatedConfigurationExportIsEncryptedAndImportable(t *testing.T) 
 	}
 }
 
-func postConfigurationPackage(t *testing.T, client *http.Client, baseURL string, payload []byte, password string) *http.Response {
+func TestConfigurationCredentialsExportAndImportWithoutAuthentication(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dataDir, "configuration.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	encryptor, err := security.NewEncryptor("", dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := service.New(st, nil, encryptor, security.NewRedactor(), config.Default().Limits)
+	server := httptest.NewServer(New(svc, nil, Options{Version: "test"}).Handler())
+	defer server.Close()
+	payload, err := json.Marshal(domain.ConfigurationPackage{
+		Schema: domain.ConfigurationSchema, SchemaVersion: domain.ConfigurationSchemaVersion, SecretsIncluded: true,
+		Proxies: []domain.ConfigurationProxy{}, Hosts: []domain.ConfigurationHost{},
+		ModelProviders: []domain.ConfigurationModelProvider{{
+			ID: "model-import", Name: "Imported model", Kind: "openai", Model: "gpt-import",
+			APIKeyConfigured: true, APIKey: "import-secret", Active: true,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := postConfigurationPackage(t, server.Client(), server.URL, payload)
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("credential import without authentication = %d, %s", response.StatusCode, body)
+	}
+
+	response, err = server.Client().Get(server.URL + "/api/v1/configuration/export")
+	if err != nil {
+		t.Fatal(err)
+	}
+	exported, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || !bytes.Contains(exported, []byte("import-secret")) {
+		t.Fatalf("credential export without authentication = %d, %s", response.StatusCode, exported)
+	}
+	var configuration domain.ConfigurationPackage
+	if err := json.Unmarshal(exported, &configuration); err != nil || !configuration.SecretsIncluded {
+		t.Fatalf("decode credential export = %#v, %v", configuration, err)
+	}
+}
+
+func postConfigurationPackage(t *testing.T, client *http.Client, baseURL string, payload []byte) *http.Response {
 	t.Helper()
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
-	file, err := writer.CreateFormFile("file", "configuration.opsnerva")
+	file, err := writer.CreateFormFile("file", "configuration.json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := file.Write(payload); err != nil {
-		t.Fatal(err)
-	}
-	if err := writer.WriteField("password", password); err != nil {
 		t.Fatal(err)
 	}
 	if err := writer.Close(); err != nil {

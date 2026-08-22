@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"strconv"
@@ -310,19 +311,17 @@ func TestOperatorCanStartTunnelWithoutAgentApproval(t *testing.T) {
 	}
 }
 
-func TestOperatorCanRetryFailedTunnel(t *testing.T) {
+func TestOperatorTunnelReconnectsAutomatically(t *testing.T) {
 	svc, transport, host := newTestService(t)
 
-	failed, err := svc.StartOperatorSSHTunnel(context.Background(), host.ID, domain.SSHTunnelConfig{RemotePort: 8080}, "admin-web")
+	started, err := svc.StartOperatorSSHTunnel(context.Background(), host.ID, domain.SSHTunnelConfig{RemotePort: 8080}, "admin-web")
 	if err != nil {
 		t.Fatal(err)
-	}
-	if _, err := svc.RetryOperatorSSHTunnel(context.Background(), failed.ID, "admin-web"); err == nil {
-		t.Fatal("running tunnel was retried")
 	}
 
 	transport.mu.Lock()
 	client := transport.tunnelClients[0]
+	transport.tunnelOpenErrs = []error{errors.New("temporary network failure")}
 	transport.mu.Unlock()
 	if err := client.Close(); err != nil {
 		t.Fatal(err)
@@ -330,30 +329,101 @@ func TestOperatorCanRetryFailedTunnel(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for {
 		list := svc.ListSSHTunnels()
-		if len(list.Tunnels) == 1 && list.Tunnels[0].Status == "failed" {
+		if len(list.Tunnels) == 1 && list.Tunnels[0].Status == "retrying" && list.Tunnels[0].ReconnectAttempt == 1 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("tunnel did not enter failed state: %#v", list)
+			t.Fatalf("tunnel did not enter reconnect wait: %#v", list)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	renamedInput := hostInputForTunnelTest("renamed tunnel host", host.ID)
+	if _, err := svc.SaveHost(context.Background(), renamedInput, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		list := svc.ListSSHTunnels()
+		if len(list.Tunnels) == 1 && list.Tunnels[0].Status == "retrying" && list.Tunnels[0].ReconnectAttempt == 2 && strings.Contains(list.Tunnels[0].Error, "temporary network failure") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("tunnel did not continue after a failed reconnect: %#v", list)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	retried, err := svc.RetryOperatorSSHTunnel(context.Background(), failed.ID, "admin-web")
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		list := svc.ListSSHTunnels()
+		transport.mu.Lock()
+		connectAttempts := len(transport.tunnelClients)
+		transport.mu.Unlock()
+		if len(list.Tunnels) == 1 && list.Tunnels[0].Status == "running" && connectAttempts >= 2 {
+			current := list.Tunnels[0]
+			if current.ID != started.ID || current.HostName != renamedInput.Name || current.LocalPort != started.LocalPort || current.RemotePort != started.RemotePort {
+				t.Fatalf("automatic reconnect did not preserve the tunnel or reload its host: started=%#v current=%#v", started, current)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("tunnel did not reconnect automatically: tunnels=%#v attempts=%d", list, connectAttempts)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	assertNoPendingApprovals(t, svc)
+	if _, err := svc.StopSSHTunnel(context.Background(), started.ID, "admin-web"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStoppingTunnelCancelsAutomaticReconnect(t *testing.T) {
+	svc, transport, host := newTestService(t)
+	started, err := svc.StartOperatorSSHTunnel(context.Background(), host.ID, domain.SSHTunnelConfig{RemotePort: 8080}, "admin-web")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if retried.ID == failed.ID || retried.Status != "running" || retried.HostID != failed.HostID || retried.Direction != failed.Direction ||
-		retried.LocalHost != failed.LocalHost ||
-		retried.RemoteHost != failed.RemoteHost || retried.RemotePort != failed.RemotePort || retried.LocalPort != failed.LocalPort {
-		t.Fatalf("unexpected retried tunnel: failed=%#v retried=%#v", failed, retried)
-	}
-	list := svc.ListSSHTunnels()
-	if list.Count != 1 || len(list.Tunnels) != 1 || list.Tunnels[0].ID != retried.ID {
-		t.Fatalf("failed tunnel was not replaced: %#v", list)
-	}
-	if _, err := svc.StopSSHTunnel(context.Background(), retried.ID, "admin-web"); err != nil {
+	transport.mu.Lock()
+	client := transport.tunnelClients[0]
+	transport.mu.Unlock()
+	if err := client.Close(); err != nil {
 		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		list := svc.ListSSHTunnels()
+		if len(list.Tunnels) == 1 && list.Tunnels[0].Status == "retrying" && list.Tunnels[0].ReconnectAttempt == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("tunnel did not enter reconnect wait: %#v", list)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := svc.DeleteHost(context.Background(), host.ID, "test"); err == nil || !strings.Contains(err.Error(), "active SSH tunnel") {
+		t.Fatalf("reconnecting tunnel did not protect its host: %v", err)
+	}
+	if _, err := svc.StopSSHTunnel(context.Background(), started.ID, "admin-web"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(sshTunnelReconnectInitialDelay + 100*time.Millisecond)
+	transport.mu.Lock()
+	connectAttempts := len(transport.tunnelClients)
+	transport.mu.Unlock()
+	if connectAttempts != 1 || svc.ListSSHTunnels().Count != 0 {
+		t.Fatalf("stopped tunnel reconnected: attempts=%d tunnels=%#v", connectAttempts, svc.ListSSHTunnels())
+	}
+}
+
+func TestSSHTunnelReconnectDelayIsBounded(t *testing.T) {
+	for attempt, expected := range map[int]time.Duration{
+		0: time.Second, 1: time.Second, 2: 2 * time.Second, 5: 16 * time.Second, 6: 30 * time.Second, 100: 30 * time.Second,
+	} {
+		if actual := sshTunnelReconnectDelay(attempt); actual != expected {
+			t.Fatalf("attempt %d delay = %s, want %s", attempt, actual, expected)
+		}
 	}
 }
 

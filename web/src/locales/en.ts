@@ -25,7 +25,7 @@ const en = {
   tunnels: {
     short: 'Tunnels', title: 'SSH port forwarding', empty: 'No SSH forwarding is active.',
     connections: 'Connections', traffic: 'Traffic', started: 'Started', viaProxy: 'Using proxy / jump chain', direct: 'Direct SSH',
-    retry: 'Retry', stop: 'Stop', automaticPort: 'auto', forwarding: 'SSH port forwarding', remoteEndpoint: 'Remote endpoint',
+    stop: 'Stop', reconnecting: 'Reconnecting · attempt {{attempt}}', automaticPort: 'auto', forwarding: 'SSH port forwarding', remoteEndpoint: 'Remote endpoint',
     create: 'New forward', edit: 'Edit forward', start: 'Start forwarding', starting: 'Connecting...', direction: 'Direction', localForward: 'Local (-L)', reverseForward: 'Reverse (-R)',
     localListenHost: 'Local listen IP', localListenPort: 'Local listen port', remoteTargetHost: 'Host-side target', remoteTargetPort: 'Host-side target port',
     remoteListenHost: 'Remote listen IP', remoteListenPort: 'Remote listen port', localTargetHost: 'Local target', localTargetPort: 'Local target port', portRange: 'Ports must be between 1–65535.',
@@ -51,8 +51,8 @@ const en = {
     tabs: { models: 'Model providers', hosts: 'SSH hosts', proxies: 'Proxies', system: 'System settings' },
     configured: '{{count}} configured', registered: '{{count}} registered', maxIterations: '{{count}} max iterations',
 		sections: 'Configuration sections', editor: 'Configuration editor', backToList: 'Back to list', showAddresses: 'Show addresses', hideAddresses: 'Hide addresses',
-		transfer: 'Configuration transfer', export: 'Export', exporting: 'Exporting...', import: 'Import', importing: 'Importing...', importTitle: 'Import configuration', package: 'Package', choosePackage: 'Choose package', backupPassword: 'Package password',
-		exported: 'Configuration exported.', exportedEncrypted: 'Encrypted configuration exported.', imported: 'Imported {{models}} providers · {{hosts}} hosts · {{proxies}} proxies',
+		transfer: 'Configuration transfer', export: 'Export', exporting: 'Exporting...', import: 'Import', importing: 'Importing...', importTitle: 'Import configuration', package: 'Package', choosePackage: 'Choose package',
+		exported: 'Configuration exported.', imported: 'Imported {{models}} providers · {{hosts}} hosts · {{proxies}} proxies',
   },
   proxies: {
     add: 'Add proxy',

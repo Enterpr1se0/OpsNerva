@@ -160,7 +160,6 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/ssh-tunnels", s.listSSHTunnels)
 	s.mux.HandleFunc("POST /api/v1/ssh-tunnels", s.startSSHTunnel)
 	s.mux.HandleFunc("PUT /api/v1/ssh-tunnels/{id}", s.updateSSHTunnel)
-	s.mux.HandleFunc("POST /api/v1/ssh-tunnels/{id}/retry", s.retrySSHTunnel)
 	s.mux.HandleFunc("DELETE /api/v1/ssh-tunnels/{id}", s.stopSSHTunnel)
 	s.mux.HandleFunc("GET /api/v1/ssh-shells", s.listSSHShells)
 	s.mux.HandleFunc("POST /api/v1/ssh-shells", s.startSSHShell)
@@ -1358,15 +1357,6 @@ func (s *Server) stopSSHTunnel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
-}
-
-func (s *Server) retrySSHTunnel(w http.ResponseWriter, r *http.Request) {
-	result, err := s.service.RetryOperatorSSHTunnel(r.Context(), r.PathValue("id"), actor(r))
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, result)
 }
 
 func (s *Server) saveHost(w http.ResponseWriter, r *http.Request) {

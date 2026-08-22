@@ -171,9 +171,9 @@ export OPS_AGENT_AUTH_SESSION_TTL_HOURS=24
 
 配置中心可以一次导入或导出模型提供商、SSH 主机和代理，并保留代理及 ProxyJump 引用。导入采用原子合并：相同 ID 或名称更新，未出现在配置包中的现有条目保留；名称冲突、无效引用或无效凭据会让整包回滚。
 
-- 未配置控制面登录时导出可读 JSON，不包含 API Key、私钥或任何密码；新机器导入后需要重新填写缺失凭据。
-- 配置控制面登录后导出 `.opsnerva` 加密包，包含 API Key、SSH 私钥、SSH/sudo 密码和代理密码。服务端使用 Argon2id 从登录密码派生迁移密钥，再以 AES-256-GCM 加密，因此不依赖源机器的 `master.key`。
-- 导入另一台机器生成的加密包时填写源机器的登录密码；目标机器必须先启用控制面登录。Host Key 信任状态和 Known Hosts 文件内容不会迁移，导入后仍需重新核对指纹。
+- 导出的 JSON 始终包含 API Key、SSH 私钥、SSH/root 密码和代理密码，不依赖控制面登录配置，也不需要单独的迁移密码。
+- 目标服务直接导入配置，并使用自己的主密钥重新加密凭据后落库。迁移文件包含明文凭据，应通过可信通道传输并在导入后妥善处理。
+- Host Key 信任状态和 Known Hosts 文件内容不会迁移，导入后仍需重新核对指纹。
 
 ### 使用环境变量配置模型
 
@@ -260,7 +260,7 @@ OpsNerva 默认不接受未知 host key。先注册、扫描并人工核对指�
 
 主机可选择当前 `ssh-agent`、上传未加密 OpenSSH 格式私钥或账号密码；Windows Agent 使用系统 OpenSSH Agent named pipe。上传私钥限制为 1 MiB，与 SSH、sudo 和代理密码一样使用 AES-256-GCM 加密保存，API 只返回是否已配置，不返回内容或宿主机路径。执行时只在内存中解密和解析，密钥和密码都不会发送给模型。SSH 主机可选择共享代理中的 SOCKS5、SOCKS5H 或 HTTP CONNECT 代理；HTTPS 代理不会出现在 SSH 选择器中，也会被服务端拒绝。ProxyJump 必须引用另一个已注册且已信任 host key 的主机，每一级都会独立认证并校验 host key，最多四级且拒绝环路。两者同时配置时，代理用于连接第一台跳板机。
 
-Eino Agent 的 `ssh_tunnel` 支持 `start`、`list` 和 `stop`。`direction=local`（默认）对应 `-L`：OpsNerva 监听 `local_host:local_port`，经 SSH 转发到主机侧可访问的 `remote_host:remote_port`；`direction=reverse` 对应 `-R`：SSH 服务端监听 `remote_host:remote_port`，经 SSH 回连 OpsNerva 可访问的 `local_host:local_port`。两个地址默认都是 `127.0.0.1`，监听端口可设为 `0` 自动分配。建立链路遵循当前审批模式，并复用主机已有的网络代理、ProxyJump、认证和 Host Key 校验。反向转发及非回环远端监听还受 SSH 服务端的 TCP 转发与 GatewayPorts 策略约束。Web 顶栏显示当前链路、方向、连接数、流量和故障，可直接编辑或停止。隧道只存在于当前服务进程中，停止服务或关闭桌面 App 会立即关闭监听和活动连接。
+Eino Agent 的 `ssh_tunnel` 支持 `start`、`list` 和 `stop`。`direction=local`（默认）对应 `-L`：OpsNerva 监听 `local_host:local_port`，经 SSH 转发到主机侧可访问的 `remote_host:remote_port`；`direction=reverse` 对应 `-R`：SSH 服务端监听 `remote_host:remote_port`，经 SSH 回连 OpsNerva 可访问的 `local_host:local_port`。两个地址默认都是 `127.0.0.1`，监听端口可设为 `0` 自动分配。建立链路遵循当前审批模式，并复用主机已有的网络代理、ProxyJump、认证和 Host Key 校验。连接异常中断后，Service 保留同一隧道 ID 和端口，按 1–30 秒指数退避自动重连，并在每次尝试时重新读取当前主机连接配置；手动停止会立即取消等待或正在进行的重连。反向转发及非回环远端监听还受 SSH 服务端的 TCP 转发与 GatewayPorts 策略约束。Web 顶栏显示当前链路、方向、重连次数、连接数、流量和故障，可直接编辑或停止。隧道只存在于当前服务进程中，停止服务或关闭桌面 App 会立即关闭监听和活动连接。
 
 从双后端版本升级时会执行一次破坏性 SSH schema 迁移：旧主机及其关联的运行、审批、任务和文件操作记录会被删除，同时移除 System OpenSSH、`ssh_config` 别名和自由格式 ProxyJump 字段。聊天记录、模型设置和 Workspace 文件不受影响。
 

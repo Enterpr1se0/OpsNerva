@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next'
 
 type CopyValue = string | (() => string)
 
-async function writeClipboard(value:string){
+export async function writeClipboard(value:string){
 	try{
 		if(navigator.clipboard?.writeText){await navigator.clipboard.writeText(value);return}
 	}catch{/* use the document fallback below */}

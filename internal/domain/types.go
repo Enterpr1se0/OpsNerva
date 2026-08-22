@@ -742,6 +742,7 @@ type SSHTunnel struct {
 	TotalConnections  int64              `json:"total_connections"`
 	BytesSent         int64              `json:"bytes_sent"`
 	BytesReceived     int64              `json:"bytes_received"`
+	ReconnectAttempt  int                `json:"reconnect_attempt,omitempty"`
 	Error             string             `json:"error,omitempty"`
 	StartedAt         time.Time          `json:"started_at"`
 }

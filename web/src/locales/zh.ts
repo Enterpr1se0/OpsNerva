@@ -25,7 +25,7 @@ const zh = {
   tunnels: {
     short: '隧道', title: 'SSH 端口转发', empty: '当前没有 SSH 转发。',
     connections: '连接', traffic: '流量', started: '启动时间', viaProxy: '使用代理 / 跳板链路', direct: 'SSH 直连',
-    retry: '重试', stop: '停止', automaticPort: '自动端口', forwarding: 'SSH 端口转发', remoteEndpoint: '远程端点',
+    stop: '停止', reconnecting: '重连中 · 第 {{attempt}} 次', automaticPort: '自动端口', forwarding: 'SSH 端口转发', remoteEndpoint: '远程端点',
     create: '新建转发', edit: '编辑转发', start: '开始转发', starting: '正在连接...', direction: '方向', localForward: '本地 (-L)', reverseForward: '反向 (-R)',
     localListenHost: '本地监听 IP', localListenPort: '本地监听端口', remoteTargetHost: '主机侧目标', remoteTargetPort: '主机侧目标端口',
     remoteListenHost: '远端监听 IP', remoteListenPort: '远端监听端口', localTargetHost: '本地目标', localTargetPort: '本地目标端口', portRange: '端口必须在 1–65535 之间。',
@@ -51,8 +51,8 @@ const zh = {
     tabs: { models: '模型提供商', hosts: 'SSH 主机', proxies: '代理', system: '系统设置' },
     configured: '已配置 {{count}} 个', registered: '已注册 {{count}} 台', maxIterations: '最多 {{count}} 轮',
 		sections: '配置栏目', editor: '配置编辑', backToList: '返回列表', showAddresses: '显示地址', hideAddresses: '隐藏地址',
-		transfer: '配置迁移', export: '导出', exporting: '导出中...', import: '导入', importing: '导入中...', importTitle: '导入配置', package: '配置包', choosePackage: '选择配置包', backupPassword: '配置包密码',
-		exported: '配置已导出。', exportedEncrypted: '加密配置已导出。', imported: '已导入 {{models}} 个模型 · {{hosts}} 台主机 · {{proxies}} 个代理',
+		transfer: '配置迁移', export: '导出', exporting: '导出中...', import: '导入', importing: '导入中...', importTitle: '导入配置', package: '配置包', choosePackage: '选择配置包',
+		exported: '配置已导出。', imported: '已导入 {{models}} 个模型 · {{hosts}} 台主机 · {{proxies}} 个代理',
   },
   proxies: {
     add: '添加代理',

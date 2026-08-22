@@ -12,7 +12,7 @@ import {
 } from 'lucide-react'
 import { api, chatAttachmentURL, downloadFile, reconnectChatStream, sftpDownloadURL, sshShellWebSocketURL, streamChat, workspaceDownloadURL, workspaceFileEventsURL } from './api'
 import { subscribeApplicationEvents } from './appEvents'
-import { CopyButton, CopyablePre } from './CopyButton'
+import { CopyButton, CopyablePre, writeClipboard } from './CopyButton'
 import { AppSelect, ModelCombobox } from './Controls'
 import i18n, { localeFor, type SupportedLanguage } from './i18n'
 import { TextFileEditor } from './TextFileEditor'
@@ -615,7 +615,7 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 		if(!desktopRuntime)return
 		const handleContextMenu=(event:MouseEvent)=>{
 			const target=event.target instanceof Element?event.target:null
-			if(target?.closest('input, textarea, [contenteditable="true"]'))return
+			if(target?.closest('input, textarea, [contenteditable="true"], .xterm'))return
 			event.preventDefault()
 		}
 		document.addEventListener('contextmenu',handleContextMenu)
@@ -736,15 +736,6 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 			notify(errorText(err),'error')
 		}
 	}
-	const retrySSHTunnel=async(id:string)=>{
-		try{
-			const tunnel=await api.retrySSHTunnel(id)
-			setSSHTunnels(current=>[...current.filter(item=>item.id!==id&&item.id!==tunnel.id),tunnel])
-		}catch(err){
-			notify(errorText(err),'error')
-			void refreshConnections()
-		}
-	}
 	const registerSSHTunnel=(tunnel:SSHTunnel)=>{
 		setSSHTunnels(current=>[...current.filter(item=>item.id!==tunnel.id),tunnel])
 	}
@@ -809,7 +800,7 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
     </aside>
     <main>
 	      <header className="topbar"><div><h1 ref={pageTitleRef}>{title}</h1></div><div className="top-actions">
-        <SSHTunnelStatus tunnels={sshTunnels} hosts={hosts} open={openConnectionPanel==='tunnel'} onOpenChange={open=>setOpenConnectionPanel(current=>open?'tunnel':current==='tunnel'?null:current)} onRetry={retrySSHTunnel} onStop={stopSSHTunnel} onCreated={registerSSHTunnel} onUpdated={replaceSSHTunnel} onRefresh={()=>void refreshConnections()}/>
+		<SSHTunnelStatus tunnels={sshTunnels} hosts={hosts} open={openConnectionPanel==='tunnel'} onOpenChange={open=>setOpenConnectionPanel(current=>open?'tunnel':current==='tunnel'?null:current)} onStop={stopSSHTunnel} onCreated={registerSSHTunnel} onUpdated={replaceSSHTunnel} onRefresh={()=>void refreshConnections()}/>
 		<SSHShellStatus shells={topbarShells} hosts={hosts} open={openConnectionPanel==='shell'} onOpenChange={open=>setOpenConnectionPanel(current=>open?'shell':current==='shell'?null:current)} onOpen={shell=>{setOpenConnectionPanel(null);setSelectedShell(shell)}} onClose={closeSSHShell} onCreated={registerSSHShell}/>
         <LanguageSwitch/>
 		<ThemeSwitch preference={themePreference} onChange={setThemePreference}/>
@@ -830,7 +821,7 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 				hosts={hosts} shells={sshShells.filter(shell=>shell.kind!=='workspace'&&shell.surface==='workspace')}
 				onCreated={rememberSSHShell} refresh={refreshConnections} onError={reportError}
 			/>}
-		{page === 'config' && <ConfigurationPage authEnabled={auth.enabled} hosts={hosts} providers={providers} proxies={proxies} settings={settings} capabilities={capabilities} health={health} refreshModels={refreshModels} refreshHosts={refreshHosts} refreshProxies={refreshProxies} refreshCapabilities={refreshCapabilities} refreshHealth={refreshHealth} onSettingsChanged={setSettings}/>}
+		{page === 'config' && <ConfigurationPage hosts={hosts} providers={providers} proxies={proxies} settings={settings} capabilities={capabilities} health={health} refreshModels={refreshModels} refreshHosts={refreshHosts} refreshProxies={refreshProxies} refreshCapabilities={refreshCapabilities} refreshHealth={refreshHealth} onSettingsChanged={setSettings}/>}
 		{page === 'extensions' && <ExtensionsPage skills={skills} mcpServers={mcpServers} toolCatalog={toolCatalog} refreshSkills={refreshSkills} refreshMCPServers={refreshMCPServers} refreshToolCatalog={refreshToolCatalog} onToolCatalogChanged={setToolCatalog}/>}
 		{page === 'audit' && <AuditPage runs={runs} hosts={hosts} sessions={auditSessions} ready={auditReady} runsHasMore={auditRunCursor.hasMore} loadingMore={loadingMoreAudit} onLoadMoreRuns={loadMoreAuditRuns} onDeleteRuns={deleteAuditRuns}/>}
         {page === 'logs' && <LogsPage/>}
@@ -1015,9 +1006,8 @@ function ComposerReasoningSelector({providers,disabled,onChanged,onError}:{provi
 	</details>
 }
 
-function SSHTunnelStatus({tunnels,hosts,open,onOpenChange,onRetry,onStop,onCreated,onUpdated,onRefresh}:{tunnels:SSHTunnel[];hosts:Host[];open:boolean;onOpenChange:(open:boolean)=>void;onRetry:(id:string)=>Promise<void>;onStop:(id:string)=>Promise<void>;onCreated:(tunnel:SSHTunnel)=>void;onUpdated:(previousID:string,tunnel:SSHTunnel)=>void;onRefresh:()=>void}){
+function SSHTunnelStatus({tunnels,hosts,open,onOpenChange,onStop,onCreated,onUpdated,onRefresh}:{tunnels:SSHTunnel[];hosts:Host[];open:boolean;onOpenChange:(open:boolean)=>void;onStop:(id:string)=>Promise<void>;onCreated:(tunnel:SSHTunnel)=>void;onUpdated:(previousID:string,tunnel:SSHTunnel)=>void;onRefresh:()=>void}){
 	const {t,i18n:instance}=useTranslation()
-	const [retrying,setRetrying]=useState('')
 	const [stopping,setStopping]=useState('')
 	const [creating,setCreating]=useState(false)
 	const [editing,setEditing]=useState<SSHTunnel|null>(null)
@@ -1030,8 +1020,8 @@ function SSHTunnelStatus({tunnels,hosts,open,onOpenChange,onRetry,onStop,onCreat
 				<div>
 					{tunnels.map(tunnel=><section className={`${tunnel.status} ${stopping===tunnel.id?'closing':''}`} key={tunnel.id}>
 						<div className="ssh-tunnel-route"><i/><code>{sshTunnelRoute(tunnel.host_name||tunnel.host_id,tunnel.direction,tunnel.local_host,tunnel.local_port,tunnel.remote_host,tunnel.remote_port)}</code></div>
-						<dl><div><dt>{t('common.status')}</dt><dd>{t(`statusLabels.${tunnel.status}`,{defaultValue:tunnel.status})}</dd></div><div><dt>{t('tunnels.connections')}</dt><dd>{tunnel.active_connections} / {tunnel.total_connections}</dd></div><div><dt>{t('tunnels.traffic')}</dt><dd>↑ {formatFileSize(tunnel.bytes_sent)} · ↓ {formatFileSize(tunnel.bytes_received)}</dd></div><div><dt>{t('tunnels.started')}</dt><dd>{new Date(tunnel.started_at).toLocaleTimeString(localeFor(instance.language))}</dd></div></dl>
-						<div className="ssh-tunnel-meta"><span>{tunnel.direction==='reverse'?'-R':'-L'} · {tunnel.proxy_used?t('tunnels.viaProxy'):t('tunnels.direct')}</span><code>{tunnel.id}</code><button className="edit" type="button" disabled={stopping===tunnel.id||retrying===tunnel.id} onClick={()=>{onOpenChange(false);setEditing(tunnel)}}><Edit3 size={12}/>{t('common.edit')}</button>{tunnel.status==='failed'&&<button className="retry" type="button" disabled={retrying===tunnel.id||stopping===tunnel.id} onClick={async()=>{setRetrying(tunnel.id);try{await onRetry(tunnel.id)}finally{setRetrying('')}}}>{retrying===tunnel.id?<LoaderCircle className="spin" size={12}/>:<RefreshCw size={12}/>} {t('tunnels.retry')}</button>}<button type="button" disabled={stopping===tunnel.id||retrying===tunnel.id} onClick={async()=>{setStopping(tunnel.id);try{await onStop(tunnel.id)}finally{setStopping('')}}}>{stopping===tunnel.id?<LoaderCircle className="spin" size={12}/>:<Square size={10} fill="currentColor"/>}{t('tunnels.stop')}</button></div>
+						<dl><div><dt>{t('common.status')}</dt><dd>{tunnel.status==='retrying'&&tunnel.reconnect_attempt?t('tunnels.reconnecting',{attempt:tunnel.reconnect_attempt}):t(`statusLabels.${tunnel.status}`,{defaultValue:tunnel.status})}</dd></div><div><dt>{t('tunnels.connections')}</dt><dd>{tunnel.active_connections} / {tunnel.total_connections}</dd></div><div><dt>{t('tunnels.traffic')}</dt><dd>↑ {formatFileSize(tunnel.bytes_sent)} · ↓ {formatFileSize(tunnel.bytes_received)}</dd></div><div><dt>{t('tunnels.started')}</dt><dd>{new Date(tunnel.started_at).toLocaleTimeString(localeFor(instance.language))}</dd></div></dl>
+						<div className="ssh-tunnel-meta"><span>{tunnel.direction==='reverse'?'-R':'-L'} · {tunnel.proxy_used?t('tunnels.viaProxy'):t('tunnels.direct')}</span><code>{tunnel.id}</code><button className="edit" type="button" disabled={stopping===tunnel.id||tunnel.status==='retrying'} onClick={()=>{onOpenChange(false);setEditing(tunnel)}}><Edit3 size={12}/>{t('common.edit')}</button><button type="button" disabled={stopping===tunnel.id} onClick={async()=>{setStopping(tunnel.id);try{await onStop(tunnel.id)}finally{setStopping('')}}}>{stopping===tunnel.id?<LoaderCircle className="spin" size={12}/>:<Square size={10} fill="currentColor"/>}{t('tunnels.stop')}</button></div>
 						{tunnel.error&&<p><ShieldAlert size={12}/>{tunnel.error}</p>}
 					</section>)}
 					{!tunnels.length&&<div className="ssh-tunnel-empty">{hosts.length?t('tunnels.empty'):t('connections.noHosts')}</div>}
@@ -1272,6 +1262,14 @@ function SSHShellTerminal({initialShell,relatedShells=[],onSelect,onClose,onChan
 			terminal.loadAddon(fit)
 			terminal.open(container)
 			terminalRef.current=terminal
+			terminal.attachCustomKeyEventHandler(event=>{
+				if(event.type!=='keydown'||event.key.toLowerCase()!=='c'||!terminal.hasSelection())return true
+				const copyShortcut=(event.metaKey||event.ctrlKey)&&!event.altKey
+				if(!copyShortcut)return true
+				event.preventDefault()
+				void writeClipboard(terminal.getSelection()).catch(err=>onErrorRef.current(errorText(err))).finally(()=>terminal.focus())
+				return false
+			})
 			let inputBuffer=''
 			let inputTimer:number|undefined
 			let reconnectTimer:number|undefined
@@ -1734,7 +1732,7 @@ function ConfigurationEditorPage({icon,title,busy,onBack,children}:{icon:React.R
 	</div>
 }
 
-function ConfigurationPage({authEnabled,hosts,providers,proxies,settings,capabilities,health,refreshModels,refreshHosts,refreshProxies,refreshCapabilities,refreshHealth,onSettingsChanged}:{authEnabled:boolean;hosts:Host[];providers:ModelProvider[];proxies:Proxy[];settings:SystemSettings|null;capabilities:ToolCapabilities;health:Health|null;refreshModels:()=>Promise<void>;refreshHosts:()=>Promise<void>;refreshProxies:()=>Promise<void>;refreshCapabilities:()=>Promise<void>;refreshHealth:()=>Promise<void>;onSettingsChanged:(settings:SystemSettings)=>void}) {
+function ConfigurationPage({hosts,providers,proxies,settings,capabilities,health,refreshModels,refreshHosts,refreshProxies,refreshCapabilities,refreshHealth,onSettingsChanged}:{hosts:Host[];providers:ModelProvider[];proxies:Proxy[];settings:SystemSettings|null;capabilities:ToolCapabilities;health:Health|null;refreshModels:()=>Promise<void>;refreshHosts:()=>Promise<void>;refreshProxies:()=>Promise<void>;refreshCapabilities:()=>Promise<void>;refreshHealth:()=>Promise<void>;onSettingsChanged:(settings:SystemSettings)=>void}) {
   const {t}=useTranslation()
   const [section,setSection]=useState<ConfigurationSection>('models')
   const [showAddresses,setShowAddresses]=useState(false)
@@ -1756,7 +1754,7 @@ function ConfigurationPage({authEnabled,hosts,providers,proxies,settings,capabil
 	  {section==='proxies'&&(
 		<ProxiesPage proxies={proxies} showAddresses={showAddresses} onToggleAddresses={()=>setShowAddresses(value=>!value)} refresh={refreshProxies}/>
 	  )}
-	  {section==='system'&&<SystemSettingsPage authEnabled={authEnabled} settings={settings} providers={providers} proxies={proxies} capabilities={capabilities} modelStatus={health?.model} refreshModels={refreshModels} refreshHosts={refreshHosts} refreshProxies={refreshProxies} refreshCapabilities={refreshCapabilities} refreshHealth={refreshHealth} onSettingsChanged={onSettingsChanged}/>}
+	  {section==='system'&&<SystemSettingsPage settings={settings} providers={providers} proxies={proxies} capabilities={capabilities} modelStatus={health?.model} refreshModels={refreshModels} refreshHosts={refreshHosts} refreshProxies={refreshProxies} refreshCapabilities={refreshCapabilities} refreshHealth={refreshHealth} onSettingsChanged={onSettingsChanged}/>}
     </div>
   </div>
 }
@@ -2012,26 +2010,25 @@ function SettingsSectionFooter({dirty,busy,saving,onDiscard}:{dirty:boolean;busy
 
 type SystemSettingsSection='iterations'|'prompt'|'explanation'|'compression'|'images'|'shell'
 
-function ConfigurationTransferSettings({authEnabled,refreshModels,refreshHosts,refreshProxies,refreshCapabilities,refreshHealth}:{authEnabled:boolean;refreshModels:()=>Promise<void>;refreshHosts:()=>Promise<void>;refreshProxies:()=>Promise<void>;refreshCapabilities:()=>Promise<void>;refreshHealth:()=>Promise<void>}){
+function ConfigurationTransferSettings({refreshModels,refreshHosts,refreshProxies,refreshCapabilities,refreshHealth}:{refreshModels:()=>Promise<void>;refreshHosts:()=>Promise<void>;refreshProxies:()=>Promise<void>;refreshCapabilities:()=>Promise<void>;refreshHealth:()=>Promise<void>}){
 	const {t}=useTranslation()
 	const notify=useNotifier()
 	const [busy,setBusy]=useState<'export'|'import'|''>('')
 	const [importOpen,setImportOpen]=useState(false)
 	const [importFile,setImportFile]=useState<File|null>(null)
-	const [importPassword,setImportPassword]=useState('')
 	const [importError,setImportError]=useState('')
-	const exportConfiguration=async()=>{if(busy)return;setBusy('export');try{const result=await api.exportConfiguration();const url=URL.createObjectURL(result.blob);const anchor=document.createElement('a');anchor.href=url;anchor.download=result.filename;document.body.appendChild(anchor);anchor.click();anchor.remove();window.setTimeout(()=>URL.revokeObjectURL(url),1000);notify(t(authEnabled?'config.exportedEncrypted':'config.exported'))}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
-	const importConfiguration=async(event:FormEvent)=>{event.preventDefault();if(!importFile||busy)return;setBusy('import');setImportError('');try{const result=await api.importConfiguration(importFile,importPassword);await Promise.all([refreshModels(),refreshHosts(),refreshProxies(),refreshCapabilities(),refreshHealth()]);notify(t('config.imported',{models:result.model_providers,hosts:result.hosts,proxies:result.proxies}));setImportOpen(false);setImportFile(null);setImportPassword('')}catch(err){setImportError(errorText(err))}finally{setBusy('')}}
-	const closeImport=()=>{if(busy)return;setImportOpen(false);setImportFile(null);setImportPassword('');setImportError('')}
+	const exportConfiguration=async()=>{if(busy)return;setBusy('export');try{const result=await api.exportConfiguration();const url=URL.createObjectURL(result.blob);const anchor=document.createElement('a');anchor.href=url;anchor.download=result.filename;document.body.appendChild(anchor);anchor.click();anchor.remove();window.setTimeout(()=>URL.revokeObjectURL(url),1000);notify(t('config.exported'))}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
+	const importConfiguration=async(event:FormEvent)=>{event.preventDefault();if(!importFile||busy)return;setBusy('import');setImportError('');try{const result=await api.importConfiguration(importFile);await Promise.all([refreshModels(),refreshHosts(),refreshProxies(),refreshCapabilities(),refreshHealth()]);notify(t('config.imported',{models:result.model_providers,hosts:result.hosts,proxies:result.proxies}));setImportOpen(false);setImportFile(null)}catch(err){setImportError(errorText(err))}finally{setBusy('')}}
+	const closeImport=()=>{if(busy)return;setImportOpen(false);setImportFile(null);setImportError('')}
 	return <>
 		<SettingsDisclosure className="configuration-transfer-settings" icon={<FolderOutput size={18}/>} title={t('config.transfer')}>
-			<div className="configuration-transfer-actions"><button type="button" onClick={()=>{setImportOpen(true);setImportError('')}}><UploadCloud size={15}/>{t('config.import')}</button><button type="button" className="primary" disabled={busy==='export'} onClick={()=>void exportConfiguration()}>{busy==='export'?<LoaderCircle className="spin" size={15}/>:authEnabled?<ShieldCheck size={15}/>:<Download size={15}/>} {busy==='export'?t('config.exporting'):t('config.export')}</button></div>
+			<div className="configuration-transfer-actions"><button type="button" onClick={()=>{setImportOpen(true);setImportError('')}}><UploadCloud size={15}/>{t('config.import')}</button><button type="button" className="primary" disabled={busy==='export'} onClick={()=>void exportConfiguration()}>{busy==='export'?<LoaderCircle className="spin" size={15}/>:<Download size={15}/>} {busy==='export'?t('config.exporting'):t('config.export')}</button></div>
 		</SettingsDisclosure>
-		{importOpen&&createPortal(<div className="configuration-import-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget)closeImport()}}><form className="configuration-import-dialog panel" role="dialog" aria-modal="true" aria-labelledby="configuration-import-title" onSubmit={importConfiguration}><header><UploadCloud size={20}/><h2 id="configuration-import-title">{t('config.importTitle')}</h2></header><label className="configuration-import-file"><span>{t('config.package')}</span><input type="file" accept=".json,.opsnerva,application/json,application/vnd.opsnerva.configuration+json" onChange={event=>{setImportFile(event.target.files?.[0]||null);setImportError('')}}/><b>{importFile?.name||t('config.choosePackage')}</b></label><label><span>{t('config.backupPassword')}</span><PasswordInput autoComplete="off" value={importPassword} onChange={event=>setImportPassword(event.target.value)}/></label>{importError&&<div className="configuration-import-error" role="alert"><ShieldAlert size={14}/>{importError}</div>}<footer><button type="button" disabled={busy==='import'} onClick={closeImport}>{t('common.cancel')}</button><button className="primary" disabled={!importFile||busy==='import'}>{busy==='import'?<LoaderCircle className="spin" size={14}/>:<UploadCloud size={14}/>} {busy==='import'?t('config.importing'):t('config.import')}</button></footer></form></div>,document.body)}
+		{importOpen&&createPortal(<div className="configuration-import-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget)closeImport()}}><form className="configuration-import-dialog panel" role="dialog" aria-modal="true" aria-labelledby="configuration-import-title" onSubmit={importConfiguration}><header><UploadCloud size={20}/><h2 id="configuration-import-title">{t('config.importTitle')}</h2></header><label className="configuration-import-file"><span>{t('config.package')}</span><input type="file" accept=".json,application/json" onChange={event=>{setImportFile(event.target.files?.[0]||null);setImportError('')}}/><b>{importFile?.name||t('config.choosePackage')}</b></label>{importError&&<div className="configuration-import-error" role="alert"><ShieldAlert size={14}/>{importError}</div>}<footer><button type="button" disabled={busy==='import'} onClick={closeImport}>{t('common.cancel')}</button><button className="primary" disabled={!importFile||busy==='import'}>{busy==='import'?<LoaderCircle className="spin" size={14}/>:<UploadCloud size={14}/>} {busy==='import'?t('config.importing'):t('config.import')}</button></footer></form></div>,document.body)}
 	</>
 }
 
-function SystemSettingsPage({authEnabled,settings,providers,proxies,capabilities,modelStatus,refreshModels,refreshHosts,refreshProxies,refreshCapabilities,refreshHealth,onSettingsChanged}:{authEnabled:boolean;settings:SystemSettings|null;providers:ModelProvider[];proxies:Proxy[];capabilities:ToolCapabilities;modelStatus?:Health['model'];refreshModels:()=>Promise<void>;refreshHosts:()=>Promise<void>;refreshProxies:()=>Promise<void>;refreshCapabilities:()=>Promise<void>;refreshHealth:()=>Promise<void>;onSettingsChanged:(settings:SystemSettings)=>void}) {
+function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus,refreshModels,refreshHosts,refreshProxies,refreshCapabilities,refreshHealth,onSettingsChanged}:{settings:SystemSettings|null;providers:ModelProvider[];proxies:Proxy[];capabilities:ToolCapabilities;modelStatus?:Health['model'];refreshModels:()=>Promise<void>;refreshHosts:()=>Promise<void>;refreshProxies:()=>Promise<void>;refreshCapabilities:()=>Promise<void>;refreshHealth:()=>Promise<void>;onSettingsChanged:(settings:SystemSettings)=>void}) {
   const {t}=useTranslation()
 	const notify=useNotifier()
   const savedValue=settings?.agent_max_iterations??50
@@ -2120,7 +2117,7 @@ function SystemSettingsPage({authEnabled,settings,providers,proxies,capabilities
   return <div className="system-settings page-stack">
 
 		<div className="settings-form">
-			<ConfigurationTransferSettings authEnabled={authEnabled} refreshModels={refreshModels} refreshHosts={refreshHosts} refreshProxies={refreshProxies} refreshCapabilities={refreshCapabilities} refreshHealth={refreshHealth}/>
+			<ConfigurationTransferSettings refreshModels={refreshModels} refreshHosts={refreshHosts} refreshProxies={refreshProxies} refreshCapabilities={refreshCapabilities} refreshHealth={refreshHealth}/>
 			<SettingsDisclosure icon={<SlidersHorizontal size={18}/>} title={t('settings.maxIterations')} meta={<strong>{maxIterations}</strong>}>
 				<form onSubmit={submit('iterations')}><div className="iteration-editor"><input aria-label={t('settings.maxIterations')} type="range" min="5" max="100" step="1" value={maxIterations} onChange={event=>update(Number(event.target.value))}/><label><span>{t('settings.rounds')}</span><input type="number" min="5" max="100" value={maxIterations} onChange={event=>update(Number(event.target.value))}/></label></div><div className="iteration-presets"><span>{t('settings.quickPresets')}</span>{[20,50,100].map(value=><button type="button" className={maxIterations===value?'active':''} onClick={()=>update(value)} key={value}><b>{value}</b></button>)}</div><SettingsSectionFooter dirty={iterationsDirty} busy={busy} saving={savingSection==='iterations'} onDiscard={()=>discard('iterations')}/></form>
 			</SettingsDisclosure>

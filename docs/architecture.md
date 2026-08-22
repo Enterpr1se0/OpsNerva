@@ -16,7 +16,7 @@ Eino Tool、MCP Tool、HTTP 和 CLI 都是这个 Service 的适配器。模型�
 
 App 控制面通过 loopback HTTP API 连接本地 Sidecar。`auth.password` 非空时，除登录状态、登录和退出接口外，普通 `/api/v1` 端点都要求进程内随机会话 Cookie；Cookie 为 `HttpOnly`、`SameSite=Lax`，TLS 下同时设置 `Secure`，会话只保存令牌 SHA-256 与过期时间，重启后失效。配置密码使用常量时间比较，登录失败按来源地址限速。未配置密码时保持本机无登录模式。MCP HTTP 使用独立 Bearer Token，不接受控制面 Cookie；MCP stdio 与 CLI 仍属于本机进程边界。
 
-模型提供商、SSH 主机和代理使用带版本号的统一迁移契约。Store 在只读事务中生成一致快照，Service 通过专用 DTO 明确允许导出的字段，不序列化运行时 Host Key、派生状态或数据库密文。无控制面鉴权时只生成无凭据 JSON；启用鉴权后，Service 先用本机 Master Key 解密凭据，再以登录密码经 Argon2id 派生的独立密钥和 AES-256-GCM 封装 `.opsnerva` 包。导入先完整解密、解析、校验 ID、名称、模式、凭据和跨资源引用，再在单个 SQLite 事务中合并；任何错误整体回滚，未包含的现有资源不会删除。目标库用自己的 Master Key 重新加密凭据，因此迁移包不携带、也不依赖源机器 `master.key`。导入和导出只属于 Web 控制面，不暴露给 LLM 或 MCP Tool。
+模型提供商、SSH 主机和代理使用带版本号的统一 JSON 迁移契约。Store 在只读事务中生成一致快照，Service 通过专用 DTO 明确允许导出的字段，不序列化运行时 Host Key、派生状态或数据库密文。Service 使用本机 Master Key 解密凭据并写入迁移 JSON，不依赖控制面登录，也不要求单独的迁移密码。导入先完整解析并校验 ID、名称、模式、凭据和跨资源引用，再在单个 SQLite 事务中合并；任何错误整体回滚，未包含的现有资源不会删除。目标库用自己的 Master Key 重新加密凭据，因此迁移包不携带、也不依赖源机器 `master.key`。导入和导出只属于 Web 控制面，不暴露给 LLM 或 MCP Tool。
 
 人工审批说明使用原有 `ApprovalAgent`；Auto 决策使用新增的 `AutoApprovalAgent`。两者都是 `MaxIterations=1`、无 Tool 的独立 Eino `ChatModelAgent`，各自拥有 Runner、Prompt、Service 接口、并发槽和可用状态，互不复用。`ApprovalAgent` 仅异步生成人工审批页的操作与风险说明，不参与自动决定。`AutoApprovalAgent` 接收由 Go context 绑定的当前用户请求、精确操作、目标能力、当前任务和请求摘要；Tool reason 与任务不能扩大用户授权。它结构化返回 `allow/reject/manual`。Auto 仅在完整 `allow` 时执行，明确 `reject` 时终止，`manual`、缺少当前用户请求、不可用、超时或格式无效时回退用户审批。
 
@@ -48,7 +48,7 @@ stdio 通过 `exec.Command(command,args...)` 启动，不解析 Shell；Streamab
 
 `ssh_exec` 只接受单个非交互可执行文件及分离的 argv；Shell 语法和多步骤操作使用 `ssh_run_script`，提示或终端 UI 使用 `ssh_shell`。`ssh_run_script` 将脚本通过 stdin 传给远端 `bash -se`。服务端使用 Bash AST 校验语法并拒绝脚本内直接调用 sudo；提权只能使用结构化的 `elevated` 参数。后台执行返回 task ID；未显式指定 `timeout_seconds` 时，后台命令使用 `max_timeout_seconds`，同步命令使用 `sync_timeout_seconds`。`ssh_task status` 可在 Service 内阻塞等待终态或指定字节偏移后的新输出，单次最长 60 秒，并可只返回 stdout/stderr 增量；等待截止只返回仍在运行的任务和 `wait_deadline_reached=true`，不会终止或改写任务。
 
-`ssh_tunnel` 的 `start` 进入同一套 Run、审批模式和加密审计状态机；`list` 与 `stop` 直接操作进程内 Tunnel Registry。本地转发由控制面在指定 IP 建立 TCP Listener，再以 `direct-tcpip` channel 连接主机侧目标；反向转发通过 `tcpip-forward` 请求 SSH 服务端监听指定 IP，并接收 `forwarded-tcpip` channel 后回拨控制面侧目标。两种方向都使用已解析的持久 `ConnectionSpec`，因此网络代理、ProxyJump 链、认证与严格 Host Key 校验和普通 SSH 操作完全共用一条连接实现。Registry 记录相对控制面的双向流量，Service Shutdown 会关闭 Listener、SSH Client 及全部已接受连接并等待 worker 退出；不把隧道恢复为跨重启持久状态。
+`ssh_tunnel` 的 `start` 进入同一套 Run、审批模式和加密审计状态机；`list` 与 `stop` 直接操作进程内 Tunnel Registry。本地转发由控制面在指定 IP 建立 TCP Listener，再以 `direct-tcpip` channel 连接主机侧目标；反向转发通过 `tcpip-forward` 请求 SSH 服务端监听指定 IP，并接收 `forwarded-tcpip` channel 后回拨控制面侧目标。Registry 将用户创建的长期隧道状态与一次 SSH 连接对应的 Listener、Client 和连接集合分离；连接异常结束时关闭该次运行时，保留隧道 ID、已分配端口和累计流量，以 1–30 秒指数退避重建运行时。每次重连重新从 Store 解析主机、代理、ProxyJump、认证和 Host Key 配置，不持有旧凭据，也不生成重复执行 Run。`stop` 与 Service Shutdown 共用生命周期取消，能够终止退避等待、连接建立、Listener、SSH Client 和全部活动连接并等待 worker 退出；不把隧道恢复为跨重启持久状态。
 
 无 PTY 的交互式 Shell、编辑器与 `systemctl edit` 会在 Service 层拒绝；apt/dnf/yum/pacman 的变更操作必须显式提供对应非交互参数。脚本、argv、环境和路径还有独立大小与格式上限，检测到秘密的环境变量不会进入执行请求。
 

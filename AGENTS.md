@@ -12,6 +12,12 @@
 - Before modifying code, collect enough information to identify the root cause, affected paths, existing behavior, and relevant constraints.
 - Inspect the surrounding implementation and current changes before editing; do not implement a fix from the visible symptom alone.
 
+## Implementation quality
+
+- Do not add defensive compatibility paths, fallback branches, adapters, or duplicate implementations without a demonstrated current requirement. Prefer removing obsolete behavior over preserving it speculatively.
+- Before accumulating localized patches, evaluate whether a focused simplification or refactor produces a smaller and clearer implementation. Update or remove superseded code, tests, documentation, locale keys, and styles as part of the same change.
+- Optimize selectively from collected evidence. Keep changes cohesive and maintainable instead of pursuing the requested outcome through layered special cases.
+
 ## Frontend copy
 
 - Keep frontend text concise and limited to labels, values, statuses, actionable errors, and instructions required to complete an operation.

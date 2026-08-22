@@ -3,7 +3,6 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,14 +12,12 @@ import (
 	"time"
 
 	"eino-ops-agent/internal/domain"
-	"eino-ops-agent/internal/security"
 )
 
 const maxConfigurationPackageBytes = 32 << 20
 
 func (s *Server) exportConfiguration(w http.ResponseWriter, r *http.Request) {
-	includeSecrets := s.auth.enabled()
-	result, err := s.service.ExportConfiguration(r.Context(), includeSecrets, s.options.Version, actor(r))
+	result, err := s.service.ExportConfiguration(r.Context(), s.options.Version, actor(r))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -30,18 +27,9 @@ func (s *Server) exportConfiguration(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	extension := ".json"
-	if includeSecrets {
-		payload, err = security.SealPortable(s.auth.config.Password, payload)
-		if err != nil {
-			writeError(w, err)
-			return
-		}
-		extension = ".opsnerva"
-	}
 	payload = append(payload, '\n')
-	filename := "opsnerva-configuration-" + time.Now().UTC().Format("20060102-150405") + extension
-	w.Header().Set("Content-Type", "application/vnd.opsnerva.configuration+json")
+	filename := "opsnerva-configuration-" + time.Now().UTC().Format("20060102-150405") + ".json"
+	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -71,32 +59,12 @@ func (s *Server) importConfiguration(w http.ResponseWriter, r *http.Request) {
 		writeErrorStatus(w, fmt.Errorf("configuration package must be between 1 byte and 32 MiB"), http.StatusBadRequest)
 		return
 	}
-	password := r.FormValue("password")
-	if password == "" && s.auth.enabled() {
-		password = s.auth.config.Password
-	}
-	if security.IsPortableEncrypted(payload) && !s.auth.enabled() {
-		writeErrorStatus(w, fmt.Errorf("authentication must be configured before importing encrypted credentials"), http.StatusBadRequest)
-		return
-	}
-	plaintext, encrypted, err := security.OpenPortable(password, payload)
-	if err != nil {
-		status := http.StatusBadRequest
-		if errors.Is(err, security.ErrPortablePassword) {
-			status = http.StatusUnauthorized
-		}
-		writeErrorStatus(w, err, status)
-		return
-	}
-	if !encrypted {
-		plaintext = payload
-	}
-	configuration, err := decodeConfigurationPackage(plaintext)
+	configuration, err := decodeConfigurationPackage(payload)
 	if err != nil {
 		writeErrorStatus(w, err, http.StatusBadRequest)
 		return
 	}
-	result, err := s.service.ImportConfiguration(r.Context(), configuration, encrypted, actor(r))
+	result, err := s.service.ImportConfiguration(r.Context(), configuration, actor(r))
 	if err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(strings.ToLower(err.Error()), "unique constraint") || strings.Contains(strings.ToLower(err.Error()), "conflict") {

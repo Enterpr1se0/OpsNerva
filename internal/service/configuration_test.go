@@ -38,19 +38,19 @@ func TestConfigurationPackageMovesCredentialsAcrossMasterKeys(t *testing.T) {
 	if _, err := source.ActivateModelProvider(ctx, provider.ID, "test"); err != nil {
 		t.Fatal(err)
 	}
-	pkg, err := source.ExportConfiguration(ctx, true, "test", "test")
+	pkg, err := source.ExportConfiguration(ctx, "test", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
 	encoded, _ := json.Marshal(pkg)
 	for _, secret := range []string{"proxy-secret", "ssh-secret", "sudo-secret", "model-secret", "PRIVATE KEY"} {
 		if !strings.Contains(string(encoded), secret) {
-			t.Fatalf("encrypted package plaintext fixture is missing %q before envelope encryption", secret)
+			t.Fatalf("configuration package is missing credential %q", secret)
 		}
 	}
 
 	target, _, _ := newTestService(t)
-	result, err := target.ImportConfiguration(ctx, pkg, true, "test")
+	result, err := target.ImportConfiguration(ctx, pkg, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestConfigurationPackageMovesCredentialsAcrossMasterKeys(t *testing.T) {
 	}
 }
 
-func TestPlainConfigurationNeverExportsCredentials(t *testing.T) {
+func TestConfigurationWithoutCredentialsRemainsImportable(t *testing.T) {
 	ctx := context.Background()
 	source, _, _ := newTestService(t)
 	provider, err := source.SaveModelProvider(ctx, domain.ModelProviderInput{Name: "plain model", Kind: "openai", Model: "gpt-plain", APIKey: "never-export-this"}, "test")
@@ -102,16 +102,20 @@ func TestPlainConfigurationNeverExportsCredentials(t *testing.T) {
 	if _, err := source.ActivateModelProvider(ctx, provider.ID, "test"); err != nil {
 		t.Fatal(err)
 	}
-	pkg, err := source.ExportConfiguration(ctx, false, "test", "test")
+	pkg, err := source.ExportConfiguration(ctx, "test", "test")
 	if err != nil {
 		t.Fatal(err)
+	}
+	pkg.SecretsIncluded = false
+	for index := range pkg.ModelProviders {
+		pkg.ModelProviders[index].APIKey = ""
 	}
 	encoded, _ := json.Marshal(pkg)
 	if strings.Contains(string(encoded), "never-export-this") || strings.Contains(string(encoded), "cipher") || pkg.SecretsIncluded {
 		t.Fatalf("plain package exposed credentials: %s", encoded)
 	}
 	target, _, _ := newTestService(t)
-	if _, err := target.ImportConfiguration(ctx, pkg, false, "test"); err != nil {
+	if _, err := target.ImportConfiguration(ctx, pkg, "test"); err != nil {
 		t.Fatal(err)
 	}
 	imported, err := target.store.GetModelProvider(ctx, provider.ID)
@@ -134,7 +138,7 @@ func TestConfigurationImportRejectsProxyJumpCycleBeforeWriting(t *testing.T) {
 			{ID: "host-cycle-b", Name: "cycle b", Address: "192.0.2.22", Port: 22, User: "ops", AgentEnabled: true, AuthType: "agent", ProxyJumpHostID: "host-cycle-a", SudoMode: "none"},
 		},
 	}
-	if _, err := svc.ImportConfiguration(ctx, pkg, false, "test"); err == nil || !strings.Contains(err.Error(), "cycle") {
+	if _, err := svc.ImportConfiguration(ctx, pkg, "test"); err == nil || !strings.Contains(err.Error(), "cycle") {
 		t.Fatalf("ProxyJump cycle was accepted: %v", err)
 	}
 	if _, err := svc.store.GetHost(ctx, "host-cycle-a"); err == nil {
