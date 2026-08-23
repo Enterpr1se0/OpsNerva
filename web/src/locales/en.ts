@@ -51,7 +51,8 @@ const en = {
     tabs: { models: 'Model providers', hosts: 'SSH hosts', proxies: 'Proxies', system: 'System settings' },
     configured: '{{count}} configured', registered: '{{count}} registered', maxIterations: '{{count}} max iterations',
 		sections: 'Configuration sections', editor: 'Configuration editor', backToList: 'Back to list', showAddresses: 'Show addresses', hideAddresses: 'Hide addresses',
-		transfer: 'Configuration transfer', export: 'Export', exporting: 'Exporting...', import: 'Import', importing: 'Importing...', importTitle: 'Import configuration', package: 'Package', choosePackage: 'Choose package',
+		transfer: 'Configuration transfer', export: 'Export', exporting: 'Exporting...', import: 'Import', importing: 'Importing...', exportTitle: 'Export configuration', importTitle: 'Import configuration', package: 'Encrypted package', choosePackage: 'Choose package',
+		encryptionPassword: 'Encryption password', confirmPassword: 'Confirm password', passwordMismatch: 'Passwords do not match.',
 		exported: 'Configuration exported.', imported: 'Imported {{models}} providers · {{hosts}} hosts · {{proxies}} proxies',
   },
   proxies: {

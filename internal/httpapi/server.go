@@ -90,7 +90,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/auth/status", s.authStatus)
 	s.mux.HandleFunc("POST /api/v1/auth/login", s.authLogin)
 	s.mux.HandleFunc("POST /api/v1/auth/logout", s.authLogout)
-	s.mux.HandleFunc("GET /api/v1/configuration/export", s.exportConfiguration)
+	s.mux.HandleFunc("POST /api/v1/configuration/export", s.exportConfiguration)
 	s.mux.HandleFunc("POST /api/v1/configuration/import", s.importConfiguration)
 	s.mux.HandleFunc("GET /api/v1/health", s.health)
 	s.mux.HandleFunc("GET /api/v1/proxies", s.listProxies)

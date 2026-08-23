@@ -11,7 +11,6 @@ export interface ConfigurationImportResult {
 	proxies: number
 	hosts: number
 	model_providers: number
-	secrets_imported: boolean
 	runtime_reloaded: boolean
 }
 

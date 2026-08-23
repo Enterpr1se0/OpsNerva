@@ -54,7 +54,7 @@ func TestConfigurationPackageMovesCredentialsAcrossMasterKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Proxies != len(pkg.Proxies) || result.Hosts != len(pkg.Hosts) || result.ModelProviders != len(pkg.ModelProviders) || !result.SecretsImported {
+	if result.Proxies != len(pkg.Proxies) || result.Hosts != len(pkg.Hosts) || result.ModelProviders != len(pkg.ModelProviders) {
 		t.Fatalf("unexpected import result: %#v", result)
 	}
 	targetProxy, err := target.store.GetProxy(ctx, proxy.ID)
@@ -89,41 +89,6 @@ func TestConfigurationPackageMovesCredentialsAcrossMasterKeys(t *testing.T) {
 	apiKey, _ := target.encryptor.Decrypt(targetProvider.APIKeyCipher)
 	if string(apiKey) != "model-secret" || !targetProvider.Active || targetProvider.ProxyID != proxy.ID {
 		t.Fatalf("model credential or state did not migrate: %#v", targetProvider)
-	}
-}
-
-func TestConfigurationWithoutCredentialsRemainsImportable(t *testing.T) {
-	ctx := context.Background()
-	source, _, _ := newTestService(t)
-	provider, err := source.SaveModelProvider(ctx, domain.ModelProviderInput{Name: "plain model", Kind: "openai", Model: "gpt-plain", APIKey: "never-export-this"}, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := source.ActivateModelProvider(ctx, provider.ID, "test"); err != nil {
-		t.Fatal(err)
-	}
-	pkg, err := source.ExportConfiguration(ctx, "test", "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	pkg.SecretsIncluded = false
-	for index := range pkg.ModelProviders {
-		pkg.ModelProviders[index].APIKey = ""
-	}
-	encoded, _ := json.Marshal(pkg)
-	if strings.Contains(string(encoded), "never-export-this") || strings.Contains(string(encoded), "cipher") || pkg.SecretsIncluded {
-		t.Fatalf("plain package exposed credentials: %s", encoded)
-	}
-	target, _, _ := newTestService(t)
-	if _, err := target.ImportConfiguration(ctx, pkg, "test"); err != nil {
-		t.Fatal(err)
-	}
-	imported, err := target.store.GetModelProvider(ctx, provider.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if imported.APIKeyCipher != "" || imported.Active {
-		t.Fatalf("plain import invented credentials or activated an unusable provider: %#v", imported)
 	}
 }
 

@@ -51,7 +51,8 @@ const zh = {
     tabs: { models: '模型提供商', hosts: 'SSH 主机', proxies: '代理', system: '系统设置' },
     configured: '已配置 {{count}} 个', registered: '已注册 {{count}} 台', maxIterations: '最多 {{count}} 轮',
 		sections: '配置栏目', editor: '配置编辑', backToList: '返回列表', showAddresses: '显示地址', hideAddresses: '隐藏地址',
-		transfer: '配置迁移', export: '导出', exporting: '导出中...', import: '导入', importing: '导入中...', importTitle: '导入配置', package: '配置包', choosePackage: '选择配置包',
+		transfer: '配置迁移', export: '导出', exporting: '导出中...', import: '导入', importing: '导入中...', exportTitle: '导出配置', importTitle: '导入配置', package: '加密配置包', choosePackage: '选择配置包',
+		encryptionPassword: '加密密码', confirmPassword: '确认密码', passwordMismatch: '两次输入的密码不一致。',
 		exported: '配置已导出。', imported: '已导入 {{models}} 个模型 · {{hosts}} 台主机 · {{proxies}} 个代理',
   },
   proxies: {

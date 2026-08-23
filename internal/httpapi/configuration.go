@@ -12,24 +12,43 @@ import (
 	"time"
 
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/security"
 )
 
-const maxConfigurationPackageBytes = 32 << 20
+const (
+	maxConfigurationPackageBytes  = 32 << 20
+	configurationPackageMediaType = "application/vnd.opsnerva.configuration"
+)
 
 func (s *Server) exportConfiguration(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Password string `json:"password"`
+	}
+	if !decodeLimit(w, r, &input, 8<<10) {
+		return
+	}
+	if err := security.ValidateConfigurationPackagePassword(input.Password); err != nil {
+		writeErrorStatus(w, err, http.StatusBadRequest)
+		return
+	}
 	result, err := s.service.ExportConfiguration(r.Context(), s.options.Version, actor(r))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	payload, err := json.MarshalIndent(result, "", "  ")
+	plain, err := json.Marshal(result)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	payload = append(payload, '\n')
-	filename := "opsnerva-configuration-" + time.Now().UTC().Format("20060102-150405") + ".json"
-	w.Header().Set("Content-Type", "application/json")
+	payload, err := security.EncryptConfigurationPackage(plain, input.Password)
+	clear(plain)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	filename := "opsnerva-configuration-" + time.Now().UTC().Format("20060102-150405") + ".opsnerva-config"
+	w.Header().Set("Content-Type", configurationPackageMediaType)
 	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -59,7 +78,13 @@ func (s *Server) importConfiguration(w http.ResponseWriter, r *http.Request) {
 		writeErrorStatus(w, fmt.Errorf("configuration package must be between 1 byte and 32 MiB"), http.StatusBadRequest)
 		return
 	}
-	configuration, err := decodeConfigurationPackage(payload)
+	plain, err := security.DecryptConfigurationPackage(payload, r.FormValue("password"))
+	if err != nil {
+		writeErrorStatus(w, err, http.StatusBadRequest)
+		return
+	}
+	configuration, err := decodeConfigurationPackage(plain)
+	clear(plain)
 	if err != nil {
 		writeErrorStatus(w, err, http.StatusBadRequest)
 		return

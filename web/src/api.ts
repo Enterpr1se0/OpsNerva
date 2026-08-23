@@ -130,14 +130,14 @@ export const api = {
 	authStatus: () => request<AuthStatus>('/api/v1/auth/status'),
 	login: (username:string,password:string) => request<AuthStatus>('/api/v1/auth/login',{method:'POST',body:JSON.stringify({username,password})}),
 	logout: () => request<void>('/api/v1/auth/logout',{method:'POST',body:'{}'}),
-	exportConfiguration: async() => {
-		const response=await fetch('/api/v1/configuration/export',{credentials:'same-origin'})
+	exportConfiguration: async(password:string) => {
+		const response=await fetch('/api/v1/configuration/export',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({password})})
 		if(!response.ok)throw await responseError(response)
 		const disposition=response.headers.get('Content-Disposition')||''
 		const match=/filename=(?:"([^"]+)"|([^;]+))/i.exec(disposition)
-		return{blob:await response.blob(),filename:(match?.[1]||match?.[2]||'opsnerva-configuration.json').trim()}
+		return{blob:await response.blob(),filename:(match?.[1]||match?.[2]||'opsnerva-configuration.opsnerva-config').trim()}
 	},
-	importConfiguration: (file:File) => {const body=new FormData();body.set('file',file,file.name);return request<ConfigurationImportResult>('/api/v1/configuration/import',{method:'POST',body})},
+	importConfiguration: (file:File,password:string) => {const body=new FormData();body.set('file',file,file.name);body.set('password',password);return request<ConfigurationImportResult>('/api/v1/configuration/import',{method:'POST',body})},
   health: () => request<Health>('/api/v1/health'),
 	systemSettings: () => request<SystemSettings>('/api/v1/settings'),
 	capabilities: () => request<ToolCapabilities>('/api/v1/capabilities'),

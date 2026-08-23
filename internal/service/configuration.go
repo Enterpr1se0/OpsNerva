@@ -29,11 +29,11 @@ func (s *Service) ExportConfiguration(ctx context.Context, applicationVersion, a
 	}
 	result := domain.ConfigurationPackage{
 		Schema: domain.ConfigurationSchema, SchemaVersion: domain.ConfigurationSchemaVersion,
-		ApplicationVersion: applicationVersion, ExportedAt: time.Now().UTC(), SecretsIncluded: true,
+		ApplicationVersion: applicationVersion, ExportedAt: time.Now().UTC(),
 		Proxies: []domain.ConfigurationProxy{}, Hosts: []domain.ConfigurationHost{}, ModelProviders: []domain.ConfigurationModelProvider{},
 	}
 	for _, proxy := range snapshot.Proxies {
-		item := domain.ConfigurationProxy{ID: proxy.ID, Name: proxy.Name, URL: proxy.URL, Username: proxy.Username, PasswordConfigured: proxy.PasswordCipher != ""}
+		item := domain.ConfigurationProxy{ID: proxy.ID, Name: proxy.Name, URL: proxy.URL, Username: proxy.Username}
 		if proxy.PasswordCipher != "" {
 			plain, decryptErr := s.encryptor.Decrypt(proxy.PasswordCipher)
 			if decryptErr != nil {
@@ -46,9 +46,8 @@ func (s *Service) ExportConfiguration(ctx context.Context, applicationVersion, a
 	for _, host := range snapshot.Hosts {
 		item := domain.ConfigurationHost{
 			ID: host.ID, Name: host.Name, Address: host.Address, Port: host.Port, User: host.User, AgentEnabled: host.AgentEnabled,
-			AuthType: host.AuthType, PrivateKeyConfigured: host.PrivateKeyCipher != "", KnownHostsFile: host.KnownHostsFile,
-			ProxyJumpHostID: host.ProxyJumpHostID, ProxyID: host.ProxyID, PasswordConfigured: host.PasswordCipher != "",
-			SudoMode: host.SudoMode, SudoPasswordConfigured: host.SudoCipher != "",
+			AuthType: host.AuthType, KnownHostsFile: host.KnownHostsFile, ProxyJumpHostID: host.ProxyJumpHostID,
+			ProxyID: host.ProxyID, SudoMode: host.SudoMode,
 		}
 		if host.PrivateKeyCipher != "" {
 			plain, decryptErr := s.encryptor.Decrypt(host.PrivateKeyCipher)
@@ -76,8 +75,8 @@ func (s *Service) ExportConfiguration(ctx context.Context, applicationVersion, a
 	for _, provider := range snapshot.ModelProviders {
 		item := domain.ConfigurationModelProvider{
 			ID: provider.ID, Name: provider.Name, Kind: provider.Kind, BaseURL: provider.BaseURL, Model: provider.Model,
-			ContextWindow: provider.ContextWindow, ReasoningEffort: provider.ReasoningEffort, APIKeyConfigured: provider.APIKeyCipher != "",
-			ProxyID: provider.ProxyID, UserAgent: provider.UserAgent, Active: provider.Active,
+			ContextWindow: provider.ContextWindow, ReasoningEffort: provider.ReasoningEffort, ProxyID: provider.ProxyID,
+			UserAgent: provider.UserAgent, Active: provider.Active,
 		}
 		if provider.APIKeyCipher != "" {
 			plain, decryptErr := s.encryptor.Decrypt(provider.APIKeyCipher)
@@ -89,7 +88,7 @@ func (s *Service) ExportConfiguration(ctx context.Context, applicationVersion, a
 		result.ModelProviders = append(result.ModelProviders, item)
 	}
 	s.audit(ctx, "", "configuration_exported", actor, map[string]any{
-		"proxies": len(result.Proxies), "hosts": len(result.Hosts), "model_providers": len(result.ModelProviders), "secrets_included": true,
+		"proxies": len(result.Proxies), "hosts": len(result.Hosts), "model_providers": len(result.ModelProviders),
 	})
 	return result, nil
 }
@@ -100,9 +99,6 @@ func (s *Service) ImportConfiguration(ctx context.Context, input domain.Configur
 	}
 	if len(input.Proxies) > maxConfigurationEntries || len(input.Hosts) > maxConfigurationEntries || len(input.ModelProviders) > maxConfigurationEntries {
 		return domain.ConfigurationImportResult{}, fmt.Errorf("configuration package contains too many entries")
-	}
-	if !input.SecretsIncluded && configurationContainsSecrets(input) {
-		return domain.ConfigurationImportResult{}, fmt.Errorf("configuration package credentials do not match its credential marker")
 	}
 	existing, err := s.store.ConfigurationSnapshot(ctx)
 	if err != nil {
@@ -126,7 +122,7 @@ func (s *Service) ImportConfiguration(ctx context.Context, input domain.Configur
 	}
 	for index, source := range input.Proxies {
 		identity := proxyIdentities[index]
-		proxy, prepareErr := s.prepareImportedProxy(source, proxyIDs[identity.ID], existingProxies[proxyIDs[identity.ID]], input.SecretsIncluded)
+		proxy, prepareErr := s.prepareImportedProxy(source, proxyIDs[identity.ID])
 		if prepareErr != nil {
 			return domain.ConfigurationImportResult{}, fmt.Errorf("proxy %q: %w", identity.Name, prepareErr)
 		}
@@ -158,7 +154,7 @@ func (s *Service) ImportConfiguration(ctx context.Context, input domain.Configur
 		if err != nil {
 			return domain.ConfigurationImportResult{}, fmt.Errorf("host %q: %w", identity.Name, err)
 		}
-		host, prepareErr := s.prepareImportedHost(source, targetID, existingHosts[targetID], input.SecretsIncluded)
+		host, prepareErr := s.prepareImportedHost(source, targetID)
 		if prepareErr != nil {
 			return domain.ConfigurationImportResult{}, fmt.Errorf("host %q: %w", identity.Name, prepareErr)
 		}
@@ -170,9 +166,7 @@ func (s *Service) ImportConfiguration(ctx context.Context, input domain.Configur
 
 	providerIdentities := make([]configurationIdentity, 0, len(input.ModelProviders))
 	existingProviderIdentities := make([]configurationIdentity, 0, len(existing.ModelProviders))
-	existingProviders := make(map[string]domain.ModelProvider, len(existing.ModelProviders))
 	for _, provider := range existing.ModelProviders {
-		existingProviders[provider.ID] = provider
 		existingProviderIdentities = append(existingProviderIdentities, configurationIdentity{ID: provider.ID, Name: provider.Name})
 	}
 	for _, provider := range input.ModelProviders {
@@ -190,7 +184,7 @@ func (s *Service) ImportConfiguration(ctx context.Context, input domain.Configur
 		if err != nil {
 			return domain.ConfigurationImportResult{}, fmt.Errorf("model provider %q: %w", identity.Name, err)
 		}
-		provider, prepareErr := s.prepareImportedModelProvider(source, targetID, existingProviders[targetID], input.SecretsIncluded)
+		provider, prepareErr := s.prepareImportedModelProvider(source, targetID)
 		if prepareErr != nil {
 			return domain.ConfigurationImportResult{}, fmt.Errorf("model provider %q: %w", identity.Name, prepareErr)
 		}
@@ -206,31 +200,12 @@ func (s *Service) ImportConfiguration(ctx context.Context, input domain.Configur
 		return domain.ConfigurationImportResult{}, err
 	}
 	result := domain.ConfigurationImportResult{
-		Proxies: len(prepared.Proxies), Hosts: len(prepared.Hosts), ModelProviders: len(prepared.ModelProviders), SecretsImported: input.SecretsIncluded,
+		Proxies: len(prepared.Proxies), Hosts: len(prepared.Hosts), ModelProviders: len(prepared.ModelProviders),
 	}
 	s.audit(ctx, "", "configuration_imported", actor, map[string]any{
-		"proxies": result.Proxies, "hosts": result.Hosts, "model_providers": result.ModelProviders, "secrets_imported": result.SecretsImported,
+		"proxies": result.Proxies, "hosts": result.Hosts, "model_providers": result.ModelProviders,
 	})
 	return result, nil
-}
-
-func configurationContainsSecrets(input domain.ConfigurationPackage) bool {
-	for _, proxy := range input.Proxies {
-		if proxy.Password != "" {
-			return true
-		}
-	}
-	for _, host := range input.Hosts {
-		if host.PrivateKey != "" || host.Password != "" || host.SudoPassword != "" {
-			return true
-		}
-	}
-	for _, provider := range input.ModelProviders {
-		if provider.APIKey != "" {
-			return true
-		}
-	}
-	return false
 }
 
 func resolveConfigurationIDs(kind string, source, existing []configurationIdentity) (map[string]string, error) {
@@ -356,7 +331,7 @@ func validateConfigurationHostGraph(existingHosts map[string]domain.Host, import
 	return nil
 }
 
-func (s *Service) prepareImportedProxy(input domain.ConfigurationProxy, id string, existing domain.Proxy, secrets bool) (domain.Proxy, error) {
+func (s *Service) prepareImportedProxy(input domain.ConfigurationProxy, id string) (domain.Proxy, error) {
 	name := strings.TrimSpace(input.Name)
 	username := strings.TrimSpace(input.Username)
 	proxyURL, err := proxyx.NormalizeURL(input.URL)
@@ -370,26 +345,19 @@ func (s *Service) prepareImportedProxy(input domain.ConfigurationProxy, id strin
 		return domain.Proxy{}, fmt.Errorf("proxy credentials are invalid")
 	}
 	result := domain.Proxy{ID: id, Name: name, URL: proxyURL, Username: username}
-	if secrets {
-		if input.PasswordConfigured != (input.Password != "") {
-			return domain.Proxy{}, fmt.Errorf("password marker does not match the encrypted credential")
-		}
-		if username == "" && input.PasswordConfigured {
+	if input.Password != "" {
+		if username == "" {
 			return domain.Proxy{}, fmt.Errorf("password requires a username")
 		}
-		if input.Password != "" {
-			result.PasswordCipher, err = s.encryptor.Encrypt([]byte(input.Password))
-			if err != nil {
-				return domain.Proxy{}, err
-			}
+		result.PasswordCipher, err = s.encryptor.Encrypt([]byte(input.Password))
+		if err != nil {
+			return domain.Proxy{}, err
 		}
-	} else if existing.ID != "" && existing.Username == username {
-		result.PasswordCipher = existing.PasswordCipher
 	}
 	return result, nil
 }
 
-func (s *Service) prepareImportedHost(input domain.ConfigurationHost, id string, existing domain.Host, secrets bool) (domain.Host, error) {
+func (s *Service) prepareImportedHost(input domain.ConfigurationHost, id string) (domain.Host, error) {
 	name := strings.TrimSpace(input.Name)
 	address := strings.TrimSpace(input.Address)
 	user := strings.TrimSpace(input.User)
@@ -425,52 +393,37 @@ func (s *Service) prepareImportedHost(input domain.ConfigurationHost, id string,
 		AuthType: authType, KnownHostsFile: strings.TrimSpace(input.KnownHostsFile), ProxyJumpHostID: input.ProxyJumpHostID,
 		ProxyID: input.ProxyID, SudoMode: sudoMode,
 	}
-	if secrets {
-		if input.PrivateKeyConfigured != (input.PrivateKey != "") || input.PasswordConfigured != (input.Password != "") || input.SudoPasswordConfigured != (input.SudoPassword != "") {
-			return domain.Host{}, fmt.Errorf("credential marker does not match the encrypted credentials")
+	if authType != "key" && input.PrivateKey != "" || authType != "password" && input.Password != "" || sudoMode != "password" && input.SudoPassword != "" {
+		return domain.Host{}, fmt.Errorf("credentials do not match the selected authentication modes")
+	}
+	if authType == "key" && input.PrivateKey == "" || authType == "password" && input.Password == "" || sudoMode == "password" && input.SudoPassword == "" {
+		return domain.Host{}, fmt.Errorf("credentials required by the selected authentication modes are missing")
+	}
+	if input.PrivateKey != "" {
+		if err := sshx.ValidatePrivateKey([]byte(input.PrivateKey)); err != nil {
+			return domain.Host{}, fmt.Errorf("invalid SSH private key: %w", err)
 		}
-		if authType != "key" && input.PrivateKey != "" || authType != "password" && input.Password != "" || sudoMode != "password" && input.SudoPassword != "" {
-			return domain.Host{}, fmt.Errorf("credentials do not match the selected authentication modes")
-		}
-		if input.PrivateKey != "" {
-			if err := sshx.ValidatePrivateKey([]byte(input.PrivateKey)); err != nil {
-				return domain.Host{}, fmt.Errorf("invalid SSH private key: %w", err)
-			}
-			result.PrivateKeyCipher, err = s.encryptor.Encrypt([]byte(input.PrivateKey))
-			if err != nil {
-				return domain.Host{}, err
-			}
-		}
-		if input.Password != "" {
-			result.PasswordCipher, err = s.encryptor.Encrypt([]byte(input.Password))
-			if err != nil {
-				return domain.Host{}, err
-			}
-		}
-		if input.SudoPassword != "" {
-			result.SudoCipher, err = s.encryptor.Encrypt([]byte(input.SudoPassword))
-			if err != nil {
-				return domain.Host{}, err
-			}
-		}
-	} else if existing.ID != "" {
-		if authType == "key" {
-			result.PrivateKeyCipher = existing.PrivateKeyCipher
-		}
-		if authType == "password" {
-			result.PasswordCipher = existing.PasswordCipher
-		}
-		if sudoMode == "password" {
-			result.SudoCipher = existing.SudoCipher
+		result.PrivateKeyCipher, err = s.encryptor.Encrypt([]byte(input.PrivateKey))
+		if err != nil {
+			return domain.Host{}, err
 		}
 	}
-	if authType == "key" && result.PrivateKeyCipher == "" || authType == "password" && result.PasswordCipher == "" {
-		result.AgentEnabled = false
+	if input.Password != "" {
+		result.PasswordCipher, err = s.encryptor.Encrypt([]byte(input.Password))
+		if err != nil {
+			return domain.Host{}, err
+		}
+	}
+	if input.SudoPassword != "" {
+		result.SudoCipher, err = s.encryptor.Encrypt([]byte(input.SudoPassword))
+		if err != nil {
+			return domain.Host{}, err
+		}
 	}
 	return result, nil
 }
 
-func (s *Service) prepareImportedModelProvider(input domain.ConfigurationModelProvider, id string, existing domain.ModelProvider, secrets bool) (domain.ModelProvider, error) {
+func (s *Service) prepareImportedModelProvider(input domain.ConfigurationModelProvider, id string) (domain.ModelProvider, error) {
 	name := strings.TrimSpace(input.Name)
 	kind := strings.TrimSpace(input.Kind)
 	model := strings.TrimSpace(input.Model)
@@ -504,18 +457,11 @@ func (s *Service) prepareImportedModelProvider(input domain.ConfigurationModelPr
 		ID: id, Name: name, Kind: kind, BaseURL: baseURL, Model: model, ContextWindow: input.ContextWindow,
 		ReasoningEffort: reasoningEffort, ProxyID: input.ProxyID, UserAgent: userAgent, Active: input.Active,
 	}
-	if secrets {
-		if input.APIKeyConfigured != (input.APIKey != "") {
-			return domain.ModelProvider{}, fmt.Errorf("API key marker does not match the encrypted credential")
+	if input.APIKey != "" {
+		result.APIKeyCipher, err = s.encryptor.Encrypt([]byte(strings.TrimSpace(input.APIKey)))
+		if err != nil {
+			return domain.ModelProvider{}, err
 		}
-		if input.APIKey != "" {
-			result.APIKeyCipher, err = s.encryptor.Encrypt([]byte(strings.TrimSpace(input.APIKey)))
-			if err != nil {
-				return domain.ModelProvider{}, err
-			}
-		}
-	} else if existing.ID != "" {
-		result.APIKeyCipher = existing.APIKeyCipher
 	}
 	if providerKindRequiresAPIKey(kind) && result.APIKeyCipher == "" {
 		result.Active = false
