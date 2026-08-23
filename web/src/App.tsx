@@ -785,7 +785,7 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 	const workspaceShells=useMemo(()=>sshShells.filter(shell=>shell.kind==='workspace'),[sshShells])
 	const topbarShells=useMemo(()=>sshShells.filter(topbarShell),[sshShells])
 	const logout=async()=>{try{await api.logout()}finally{onLogout()}}
-  return <NotificationContext.Provider value={notify}><AppFrame><div className="app-shell">
+  return <NotificationContext.Provider value={notify}><FileTransferProvider><AppFrame><div className="app-shell">
     <aside className="sidebar">
       <div className="brand"><div className="brand-mark"><TerminalSquare size={21}/></div><div className="brand-name"><strong>OpsNerva</strong></div></div>
       <nav className="sidebar-nav">
@@ -841,7 +841,7 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 		/>}
     </main>
 	<NotificationCenter notifications={notifications} onDismiss={dismissNotification}/>
-  </div></AppFrame></NotificationContext.Provider>
+  </div></AppFrame></FileTransferProvider></NotificationContext.Provider>
 }
 
 function LanguageSwitch(){
@@ -1505,9 +1505,156 @@ function SSHHostHome({hosts,connectingHostID,onConnect}:{hosts:Host[];connecting
 
 type SFTPNameEditor={mode:'create'}|{mode:'rename';entry:SFTPFileEntry}
 type SFTPDeleteCandidate={entry:SFTPFileEntry}
-type SFTPOverwriteCandidate={file:File;path:string}
+type SFTPOverwriteCandidate={file:File;path:string;directory:string}
 type SFTPTextEncoding='utf-8'|'utf-16le'|'utf-16be'|'gb18030'
 type SFTPTextFile={entry:SFTPFileEntry;content:string;binary:boolean;encoding:SFTPTextEncoding}
+type ActiveFileTransfer={operation:'upload'|'download';name:string;loaded:number;total:number;index?:number;count?:number}
+type FileTransferRecord={active:ActiveFileTransfer|null;conflict:SFTPOverwriteCandidate|null;uploadVersion:number}
+type WorkspaceTransferItem={file:File;path:string}
+type FileTransferManager={
+	records:ReadonlyMap<string,FileTransferRecord>
+	uploadSFTP:(hostID:string,directory:string,files:File[])=>void
+	downloadSFTP:(hostID:string,entry:SFTPFileEntry)=>void
+	uploadWorkspace:(workspaceID:string,items:WorkspaceTransferItem[])=>boolean
+	downloadWorkspace:(workspaceID:string,path:string,name:string,size:number)=>void
+	cancel:(key:string)=>void
+}
+
+const FileTransferContext=createContext<FileTransferManager|null>(null)
+const sftpTransferKey=(hostID:string)=>`sftp:${hostID}`
+const workspaceTransferKey=(workspaceID:string)=>`workspace:${workspaceID}`
+
+function FileTransferProvider({children}:{children:React.ReactNode}){
+	const {t}=useTranslation()
+	const notify=useNotifier()
+	const [records,setRecords]=useState<Map<string,FileTransferRecord>>(()=>new Map())
+	const controllers=useRef(new Map<string,AbortController>())
+	const updateRecord=useCallback((key:string,update:(current:FileTransferRecord)=>FileTransferRecord)=>{
+		setRecords(current=>{
+			const next=new Map(current)
+			next.set(key,update(current.get(key)||{active:null,conflict:null,uploadVersion:0}))
+			return next
+		})
+	},[])
+	const begin=useCallback((key:string,transfer:ActiveFileTransfer)=>{
+		if(controllers.current.has(key))return null
+		const controller=new AbortController()
+		controllers.current.set(key,controller)
+		updateRecord(key,current=>({...current,active:transfer,conflict:null}))
+		return controller
+	},[updateRecord])
+	const finish=useCallback((key:string,controller:AbortController,uploaded=false)=>{
+		if(controllers.current.get(key)!==controller)return
+		controllers.current.delete(key)
+		updateRecord(key,current=>({...current,active:null,uploadVersion:current.uploadVersion+(uploaded?1:0)}))
+	},[updateRecord])
+	const runSFTPUpload=useCallback(async(hostID:string,directory:string,items:Array<{file:File;path:string}>,overwrite:boolean)=>{
+		const key=sftpTransferKey(hostID)
+		const total=items.reduce((sum,item)=>sum+item.file.size,0)
+		const controller=begin(key,{operation:'upload',name:items[0]?.file.name||'',loaded:0,total,index:1,count:items.length})
+		if(!controller)return
+		let completedBytes=0
+		let uploaded=0
+		let failure=''
+		let conflict:SFTPOverwriteCandidate|null=null
+		for(let index=0;index<items.length;index++){
+			const {file,path}=items[index]
+			updateRecord(key,current=>({...current,active:{operation:'upload',name:file.name,loaded:completedBytes,total,index:index+1,count:items.length}}))
+			try{
+				await api.uploadSFTPFile(hostID,path,file,overwrite,{signal:controller.signal,onProgress:progress=>updateRecord(key,current=>({...current,active:current.active?{...current.active,loaded:completedBytes+progress.loaded,total}:null}))})
+				uploaded+=1;completedBytes+=file.size
+			}catch(err){
+				if(!isAbortError(err)){
+					const message=errorText(err)
+					if(items.length===1&&!overwrite&&message.includes('already exists'))conflict={file,path,directory}
+					else failure=message
+				}
+				break
+			}
+		}
+		if(controllers.current.get(key)===controller&&conflict)updateRecord(key,current=>({...current,conflict}))
+		finish(key,controller,uploaded>0)
+		if(failure)notify(failure,'error')
+		else if(!controller.signal.aborted&&!conflict&&uploaded===items.length)notify(t('sshWorkspace.uploaded',{count:uploaded}))
+	},[begin,finish,notify,t,updateRecord])
+	const uploadSFTP=useCallback((hostID:string,directory:string,files:File[])=>{
+		if(!files.length)return
+		void runSFTPUpload(hostID,directory,files.map(file=>({file,path:remoteChildPath(directory,file.name)})),false)
+	},[runSFTPUpload])
+	const downloadSFTP=useCallback(async(hostID:string,entry:SFTPFileEntry)=>{
+		const key=sftpTransferKey(hostID)
+		const controller=begin(key,{operation:'download',name:entry.name,loaded:0,total:entry.size||0})
+		if(!controller)return
+		try{
+			await downloadFile(sftpDownloadURL(hostID,entry.path),entry.name,{signal:controller.signal,totalBytes:entry.size||0,onProgress:progress=>updateRecord(key,current=>({...current,active:current.active?{...current.active,...progress}:null}))})
+		}catch(err){if(!isAbortError(err))notify(errorText(err),'error')}
+		finally{finish(key,controller)}
+	},[begin,finish,notify,updateRecord])
+	const overwrite=useCallback((hostID:string)=>{
+		const conflict=records.get(sftpTransferKey(hostID))?.conflict
+		if(conflict)void runSFTPUpload(hostID,conflict.directory,[{file:conflict.file,path:conflict.path}],true)
+	},[records,runSFTPUpload])
+	const dismissConflict=useCallback((hostID:string)=>updateRecord(sftpTransferKey(hostID),current=>({...current,conflict:null})),[updateRecord])
+	const uploadWorkspace=useCallback((workspaceID:string,items:WorkspaceTransferItem[])=>{
+		const key=workspaceTransferKey(workspaceID)
+		if(!workspaceID||!items.length||controllers.current.has(key))return false
+		void (async()=>{
+			const total=items.reduce((sum,item)=>sum+item.file.size,0)
+			const controller=begin(key,{operation:'upload',name:items[0].file.name,loaded:0,total,index:1,count:items.length})
+			if(!controller)return
+			let completedBytes=0
+			let uploaded=0
+			const failures:Array<{name:string;message:string}>=[]
+			for(let index=0;index<items.length;index++){
+				const item=items[index]
+				updateRecord(key,current=>({...current,active:{operation:'upload',name:item.file.name,loaded:completedBytes,total,index:index+1,count:items.length}}))
+				try{
+					await api.uploadWorkspaceFile(workspaceID,item.file,item.path,{signal:controller.signal,onProgress:progress=>updateRecord(key,current=>({...current,active:current.active?{...current.active,loaded:completedBytes+progress.loaded,total}:null}))})
+					uploaded+=1;completedBytes+=item.file.size
+				}catch(err){
+					if(isAbortError(err))break
+					failures.push({name:item.file.name,message:errorText(err)})
+				}
+			}
+			finish(key,controller,uploaded>0)
+			if(controller.signal.aborted)return
+			if(failures.length===1&&items.length===1)notify(failures[0].message,'error')
+			else if(failures.length)notify(t('workspace.uploadPartial',{uploaded,failed:failures.length,message:`${failures[0].name}: ${failures[0].message}`}),'error')
+			else if(items.length===1)notify(t('workspace.uploaded',{path:items[0].path}))
+			else notify(t('workspace.uploadedFiles',{count:uploaded}))
+		})()
+		return true
+	},[begin,finish,notify,t,updateRecord])
+	const downloadWorkspace=useCallback(async(workspaceID:string,path:string,name:string,size:number)=>{
+		const key=workspaceTransferKey(workspaceID)
+		const controller=begin(key,{operation:'download',name,loaded:0,total:size})
+		if(!controller)return
+		try{
+			await downloadFile(workspaceDownloadURL(workspaceID,path),name,{signal:controller.signal,totalBytes:size,onProgress:progress=>updateRecord(key,current=>({...current,active:current.active?{...current.active,...progress}:null}))})
+		}catch(err){if(!isAbortError(err))notify(errorText(err),'error')}
+		finally{finish(key,controller)}
+	},[begin,finish,notify,updateRecord])
+	const cancel=useCallback((key:string)=>controllers.current.get(key)?.abort(),[])
+	useEffect(()=>()=>{for(const controller of controllers.current.values())controller.abort();controllers.current.clear()},[])
+	const value=useMemo<FileTransferManager>(()=>({records,uploadSFTP,downloadSFTP,uploadWorkspace,downloadWorkspace,cancel}),[cancel,downloadSFTP,downloadWorkspace,records,uploadSFTP,uploadWorkspace])
+	return <FileTransferContext.Provider value={value}><>{children}{[...records].map(([key,record])=>record.conflict&&<SFTPOverwriteDialog key={key} path={record.conflict.path} busy={!!record.active} onCancel={()=>dismissConflict(key.slice(5))} onConfirm={()=>overwrite(key.slice(5))}/>)}</></FileTransferContext.Provider>
+}
+
+function useSFTPTransfer(hostID:string){
+	const manager=useContext(FileTransferContext)
+	if(!manager)throw new Error('FileTransferProvider is missing')
+	const key=sftpTransferKey(hostID)
+	const record=manager.records.get(key)||{active:null,conflict:null,uploadVersion:0}
+	return{...record,upload:(directory:string,files:File[])=>manager.uploadSFTP(hostID,directory,files),download:(entry:SFTPFileEntry)=>manager.downloadSFTP(hostID,entry),cancel:()=>manager.cancel(key)}
+}
+
+function useWorkspaceTransfer(workspaceID:string){
+	const manager=useContext(FileTransferContext)
+	if(!manager)throw new Error('FileTransferProvider is missing')
+	const key=workspaceTransferKey(workspaceID)
+	const record=manager.records.get(key)||{active:null,conflict:null,uploadVersion:0}
+	return{...record,upload:(items:WorkspaceTransferItem[])=>manager.uploadWorkspace(workspaceID,items),download:(path:string,name:string,size:number)=>manager.downloadWorkspace(workspaceID,path,name,size),cancel:()=>manager.cancel(key)}
+}
 
 function remoteChildPath(parent:string,name:string){return parent==='/'?`/${name}`:`${parent}/${name}`}
 function remoteParentPath(value:string){if(!value||value==='/')return '/';const parts=value.split('/').filter(Boolean);parts.pop();return `/${parts.join('/')}`||'/'}
@@ -1557,13 +1704,11 @@ function SFTPBrowser({host,embedded=false,hosts=[],onHostSelect,onWorkspaceMode,
 	const [inputKey,setInputKey]=useState(0)
 	const [nameEditor,setNameEditor]=useState<SFTPNameEditor|null>(null)
 	const [deleteCandidate,setDeleteCandidate]=useState<SFTPDeleteCandidate|null>(null)
-	const [overwriteCandidate,setOverwriteCandidate]=useState<SFTPOverwriteCandidate|null>(null)
 	const [textFile,setTextFile]=useState<SFTPTextFile|null>(null)
 	const [openingFile,setOpeningFile]=useState('')
-	const [transfer,setTransfer]=useState<ActiveFileTransfer|null>(null)
-	const transferAbort=useRef<AbortController|null>(null)
+	const {active:transfer,uploadVersion,upload:uploadTransfer,download,cancel}=useSFTPTransfer(hostID)
 	const loadRequest=useRef(0)
-	useEffect(()=>()=>transferAbort.current?.abort(),[])
+	const observedUploadVersion=useRef(uploadVersion)
 	const load=useCallback(async(target='')=>{
 		if(!hostID)return
 		const request=++loadRequest.current
@@ -1578,14 +1723,11 @@ function SFTPBrowser({host,embedded=false,hosts=[],onHostSelect,onWorkspaceMode,
 		}finally{if(request===loadRequest.current)setLoading(false)}
 	},[hostID])
 	useEffect(()=>{void load('')},[load])
-	const download=async(entry:SFTPFileEntry)=>{
-		if(transfer)return
-		const controller=new AbortController();transferAbort.current=controller
-		setTransfer({name:entry.name,loaded:0,total:entry.size||0})
-		try{await downloadFile(sftpDownloadURL(hostID,entry.path),entry.name,{signal:controller.signal,totalBytes:entry.size||0,onProgress:progress=>setTransfer(current=>current?{...current,...progress}:current)})}
-		catch(err){if(!isAbortError(err)){setNotice(errorText(err));setNoticeError(true)}}
-		finally{if(transferAbort.current===controller)transferAbort.current=null;setTransfer(null)}
-	}
+	useEffect(()=>{
+		if(observedUploadVersion.current===uploadVersion)return
+		observedUploadVersion.current=uploadVersion
+		void load(path)
+	},[load,path,uploadVersion])
 	const openTextFile=async(entry:SFTPFileEntry)=>{
 		if(openingFile)return
 		setOpeningFile(entry.path);setNotice('');setNoticeError(false)
@@ -1596,32 +1738,10 @@ function SFTPBrowser({host,embedded=false,hosts=[],onHostSelect,onWorkspaceMode,
 		}catch(err){setNotice(errorText(err));setNoticeError(true)}
 		finally{setOpeningFile('')}
 	}
-	const uploadFiles=async(files:File[],overwrite=false)=>{
+	const uploadFiles=(files:File[])=>{
 		if(!files.length||busy||transfer)return
-		setBusy(true);setNotice('');setNoticeError(false)
-		const controller=new AbortController();transferAbort.current=controller
-		const total=files.reduce((sum,file)=>sum+file.size,0)
-		let completedBytes=0
-		let uploaded=0
-		let aborted=false
-		for(let index=0;index<files.length;index++){
-			const file=files[index]
-			const target=remoteChildPath(path,file.name)
-			setTransfer({name:file.name,loaded:completedBytes,total,index:index+1,count:files.length})
-			try{await api.uploadSFTPFile(hostID,target,file,overwrite,{signal:controller.signal,onProgress:progress=>setTransfer(current=>current?{...current,loaded:completedBytes+progress.loaded,total}:current)});uploaded+=1;completedBytes+=file.size}
-			catch(err){
-				if(isAbortError(err)){aborted=true;break}
-				const message=errorText(err)
-				if(files.length===1&&!overwrite&&message.includes('already exists'))setOverwriteCandidate({file,path:target})
-				else{setNotice(message);setNoticeError(true)}
-				break
-			}
-		}
-		if(aborted){setNotice('');setNoticeError(false)}
-		else if(uploaded){setNotice(t('sshWorkspace.uploaded',{count:uploaded}));setNoticeError(false)}
-		if(transferAbort.current===controller)transferAbort.current=null
-		setTransfer(null);setInputKey(value=>value+1);setBusy(false)
-		if(uploaded)await load(path)
+		setNotice('');setNoticeError(false);setInputKey(value=>value+1)
+		uploadTransfer(path,files)
 	}
 	const saveName=async(name:string)=>{
 		if(!name.trim()||name==='.'||name==='..'||name.includes('/'))return
@@ -1647,18 +1767,6 @@ function SFTPBrowser({host,embedded=false,hosts=[],onHostSelect,onWorkspaceMode,
 		}catch(err){setNotice(errorText(err));setNoticeError(true)}
 		finally{setBusy(false)}
 	}
-	const overwrite=async()=>{
-		if(!overwriteCandidate)return
-		const candidate=overwriteCandidate
-		setBusy(true);setNotice('');setNoticeError(false)
-		const controller=new AbortController();transferAbort.current=controller
-		setTransfer({name:candidate.file.name,loaded:0,total:candidate.file.size})
-		try{
-			await api.uploadSFTPFile(hostID,candidate.path,candidate.file,true,{signal:controller.signal,onProgress:progress=>setTransfer(current=>current?{...current,...progress}:current)})
-			setNotice(t('sshWorkspace.uploaded',{count:1}));setOverwriteCandidate(null);await load(path)
-		}catch(err){if(!isAbortError(err)){setNotice(errorText(err));setNoticeError(true)}}
-		finally{if(transferAbort.current===controller)transferAbort.current=null;setTransfer(null);setBusy(false)}
-	}
 	const saveTextFile=async(content:string)=>{
 		if(!textFile)return
 		const result=await api.uploadSFTPTextFile(hostID,textFile.entry.path,content,textFile.encoding)
@@ -1673,13 +1781,12 @@ function SFTPBrowser({host,embedded=false,hosts=[],onHostSelect,onWorkspaceMode,
 			<form className="sftp-path" onSubmit={event=>{event.preventDefault();void load(pathInput)}}><button type="button" disabled={!path||path==='/'} onClick={()=>void load(remoteParentPath(path))} title={t('workspace.parent')}>‹</button><input value={pathInput} disabled={!hostID} onChange={event=>setPathInput(event.target.value)} aria-label={t('sshWorkspace.remotePath')}/><button type="submit" disabled={!hostID||loading}><ChevronRight size={13}/></button><button type="button" disabled={!hostID||loading} onClick={()=>void load(path)} title={t('common.refresh')}><RefreshCw className={loading?'spin':''} size={13}/></button></form>
 			<div className="sftp-actions"><button type="button" disabled={busy||!!transfer||!path} onClick={()=>setNameEditor({mode:'create'})}><Plus size={13}/>{t('sshWorkspace.newDirectory')}</button><label className={busy||transfer||!path?'disabled':''}><UploadCloud size={13}/>{t('common.upload')}<input key={inputKey} type="file" multiple disabled={busy||!!transfer||!path} onChange={event=>void uploadFiles(Array.from(event.target.files||[]))}/></label></div>
 			<div className="sftp-list">{!hostID?<span className="sftp-state">{t('connections.noHosts')}</span>:loading?<span className="sftp-state"><LoaderCircle className="spin" size={14}/>{t('common.loading')}</span>:listError?<span className="sftp-state error">{listError}</span>:entries.length?entries.map(entry=><div className="sftp-row" key={`${entry.type}:${entry.path}`}><button type="button" className="sftp-entry" onClick={()=>entry.type==='directory'?void load(entry.path):void openTextFile(entry)} title={entry.path}>{openingFile===entry.path?<LoaderCircle className="spin" size={14}/>:entry.type==='directory'?<FolderOpen size={14}/>:<FileText size={14}/>}<span><b>{entry.name}</b><small>{entry.mode} · {entry.type==='directory'?'—':formatFileSize(entry.size||0)} · {new Date(entry.modified_at).toLocaleString(localeFor(instance.language))}</small></span></button>{entry.type!=='directory'&&<button type="button" disabled={!!transfer} onClick={()=>void download(entry)} title={t('common.download')}><Download size={12}/></button>}<button type="button" disabled={!!transfer} onClick={()=>setNameEditor({mode:'rename',entry})} title={t('sshWorkspace.rename')}><Edit3 size={12}/></button><button type="button" className="danger" disabled={!!transfer} onClick={()=>setDeleteCandidate({entry})} title={t('common.delete')}><Trash2 size={12}/></button></div>):<span className="sftp-state">{t('workspace.emptyDirectory')}</span>}</div>
-			{transfer&&<FileTransferProgress transfer={transfer} onCancel={()=>transferAbort.current?.abort()}/>}
+			{transfer&&<FileTransferProgress transfer={transfer} onCancel={cancel}/>}
 			{notice&&<div className={`sftp-notice ${noticeError?'error':''}`}>{notice}<button onClick={()=>setNotice('')}><X size={11}/></button></div>}
 			{dragging&&<div className="sftp-drop"><UploadCloud size={28}/><b>{t('workspace.dropFilesHere')}</b></div>}
 		</aside>
 		{nameEditor&&<SFTPNameDialog mode={nameEditor.mode} initialName={nameEditor.mode==='rename'?nameEditor.entry.name:''} busy={busy} onCancel={()=>setNameEditor(null)} onConfirm={name=>void saveName(name)}/>}
 		{deleteCandidate&&<DestructiveConfirmDialog title={t('sshWorkspace.deleteTitle',{name:deleteCandidate.entry.name})} busy={busy} onCancel={()=>setDeleteCandidate(null)} onConfirm={()=>void remove()}/>}
-		{overwriteCandidate&&<SFTPOverwriteDialog path={overwriteCandidate.path} busy={busy} onCancel={()=>setOverwriteCandidate(null)} onConfirm={()=>void overwrite()}/>}
 		{textFile&&<TextFileEditor path={textFile.entry.path} meta={`${textFile.entry.mode} · ${formatFileSize(textFile.entry.size||0)} · ${textFile.encoding.toUpperCase()} · ${new Date(textFile.entry.modified_at).toLocaleString(localeFor(instance.language))}`} content={textFile.content} binary={textFile.binary} editable onClose={()=>setTextFile(null)} onSave={saveTextFile} onDownload={()=>download(textFile.entry)}/>}
 	</>
 }
@@ -2796,8 +2903,6 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 
 function formatFileSize(size:number){if(size<1024)return `${size} B`;if(size<1024**2)return `${(size/1024).toFixed(1)} KiB`;if(size<1024**3)return `${(size/1024**2).toFixed(1)} MiB`;return `${(size/1024**3).toFixed(1)} GiB`}
 
-type ActiveFileTransfer={name:string;loaded:number;total:number;index?:number;count?:number}
-
 function FileTransferProgress({transfer,onCancel}:{transfer:ActiveFileTransfer;onCancel:()=>void}){
 	const {t}=useTranslation()
 	const percent=transfer.total>0?Math.min(100,Math.round(transfer.loaded/transfer.total*100)):0
@@ -2828,15 +2933,15 @@ const ChatWorkspacePanel=memo(function ChatWorkspacePanel({active,mode,onModeCha
 	const [path,setPath]=useState('.')
 	const [entries,setEntries]=useState<{name:string;type:'file'|'directory';size?:number}[]>([])
 	const [loading,setLoading]=useState(false),[error,setError]=useState('')
-	const [file,setFile]=useState<File|null>(null),[target,setTarget]=useState(''),[uploading,setUploading]=useState(false),[inputKey,setInputKey]=useState(0)
+	const [file,setFile]=useState<File|null>(null),[target,setTarget]=useState(''),[inputKey,setInputKey]=useState(0)
 	const [notice,setNotice]=useState<WorkspaceNotice|null>(null),[dragging,setDragging]=useState(false)
 	const [preview,setPreview]=useState<WorkspaceFilePreview|null>(null),[previewLoading,setPreviewLoading]=useState(''),[deleting,setDeleting]=useState('')
 	const [deleteCandidate,setDeleteCandidate]=useState<WorkspaceDeleteCandidate|null>(null)
 	const [startingShell,setStartingShell]=useState(false)
-	const [transfer,setTransfer]=useState<ActiveFileTransfer|null>(null)
-	const transferAbort=useRef<AbortController|null>(null)
+	const {active:transfer,uploadVersion,upload:startUpload,download:startDownload,cancel}=useWorkspaceTransfer(activeWorkspaceID)
+	const uploading=transfer?.operation==='upload'
+	const observedUploadVersion=useRef(uploadVersion)
 	const loadRequestRef=useRef(0),previewPathRef=useRef('')
-	useEffect(()=>()=>transferAbort.current?.abort(),[])
 	const activeShells=shells.filter(shell=>shell.workspace_id===activeWorkspaceID&&sshShellActive(shell.status)).sort((left,right)=>left.started_at.localeCompare(right.started_at))
 
 	const load=useCallback(async(showLoading=true)=>{
@@ -2861,6 +2966,12 @@ const ChatWorkspacePanel=memo(function ChatWorkspacePanel({active,mode,onModeCha
 		try{const result=await api.previewWorkspaceFile(activeWorkspaceID,previewPath);if(previewPathRef.current===previewPath)setPreview(result)}catch{/* keep the last successful preview; the listing still reports the error */}
 	},[activeWorkspaceID,previewPath])
 	const synchronize=useCallback((showLoading=false)=>{void load(showLoading);void refreshPreview()},[load,refreshPreview])
+	useEffect(()=>{
+		if(observedUploadVersion.current===uploadVersion)return
+		observedUploadVersion.current=uploadVersion
+		setFile(null);setTarget('');setInputKey(value=>value+1)
+		if(active&&mode==='workspace')synchronize(false)
+	},[active,mode,synchronize,uploadVersion])
 
 	useEffect(()=>{if(active&&mode==='workspace')void load()},[active,load,mode])
 	useEffect(()=>{
@@ -2876,37 +2987,15 @@ const ChatWorkspacePanel=memo(function ChatWorkspacePanel({active,mode,onModeCha
 		const selected=event.target.files?.[0]||null
 		setFile(selected);setTarget(selected?workspaceChildPath(path,selected.name):'');setNotice(null)
 	}
-	const upload=async()=>{
+	const upload=()=>{
 		if(!workspace||!file||!target.trim()||transfer)return
-		setUploading(true);setNotice(null)
-		const controller=new AbortController();transferAbort.current=controller
-		setTransfer({name:file.name,loaded:0,total:file.size})
-		try{
-			const result=await api.uploadWorkspaceFile(workspace.id,file,target.trim(),{signal:controller.signal,onProgress:progress=>setTransfer(current=>current?{...current,...progress}:current)})
-			setNotice({kind:'success',text:t('workspace.uploaded',{path:result.path})});setFile(null);setTarget('');setInputKey(value=>value+1)
-		}catch(err){if(!isAbortError(err))setNotice({kind:'error',text:errorText(err)})}
-		finally{if(transferAbort.current===controller)transferAbort.current=null;setTransfer(null);setUploading(false)}
+		setNotice(null)
+		startUpload([{file,path:target.trim()}])
 	}
-	const uploadDropped=async(files:File[])=>{
+	const uploadDropped=(files:File[])=>{
 		if(!workspace||workspace.access!=='read_write'||uploading||transfer||!files.length)return
-		setUploading(true);setNotice({kind:'success',text:t('workspace.uploadingFiles',{count:files.length})})
-		const controller=new AbortController();transferAbort.current=controller
-		const total=files.reduce((sum,item)=>sum+item.size,0)
-		let completedBytes=0
-		let uploaded=0
-		let aborted=false
-		const failures:string[]=[]
-		for(let index=0;index<files.length;index++){
-			const dropped=files[index]
-			setTransfer({name:dropped.name,loaded:completedBytes,total,index:index+1,count:files.length})
-			try{await api.uploadWorkspaceFile(workspace.id,dropped,workspaceChildPath(path,dropped.name),{signal:controller.signal,onProgress:progress=>setTransfer(current=>current?{...current,loaded:completedBytes+progress.loaded,total}:current)});uploaded+=1;completedBytes+=dropped.size}
-			catch(err){if(isAbortError(err)){aborted=true;break}failures.push(`${dropped.name}: ${errorText(err)}`)}
-		}
-		if(aborted)setNotice(null)
-		else if(failures.length){setNotice({kind:'error',text:t('workspace.uploadPartial',{uploaded,failed:failures.length,message:failures[0]})})}
-		else{setNotice({kind:'success',text:t('workspace.uploadedFiles',{count:uploaded})})}
-		if(transferAbort.current===controller)transferAbort.current=null
-		setTransfer(null);setUploading(false)
+		setNotice(null)
+		startUpload(files.map(dropped=>({file:dropped,path:workspaceChildPath(path,dropped.name)})))
 	}
 	const acceptsFiles=(event:React.DragEvent<HTMLElement>)=>workspace?.access==='read_write'&&Array.from(event.dataTransfer.types).includes('Files')
 	const dragEnter=(event:React.DragEvent<HTMLElement>)=>{if(!acceptsFiles(event))return;event.preventDefault();event.stopPropagation();setDragging(true)}
@@ -2920,13 +3009,10 @@ const ChatWorkspacePanel=memo(function ChatWorkspacePanel({active,mode,onModeCha
 		setPreviewLoading(next);setNotice(null)
 		try{setPreview(await api.previewWorkspaceFile(workspace.id,next))}catch(err){setNotice({kind:'error',text:errorText(err)})}finally{setPreviewLoading('')}
 	}
-	const download=async(relativePath:string,name:string,size=0)=>{
+	const download=(relativePath:string,name:string,size=0)=>{
 		if(!workspace||transfer)return
-		const controller=new AbortController();transferAbort.current=controller
-		setTransfer({name,loaded:0,total:size})
-		try{await downloadFile(workspaceDownloadURL(workspace.id,relativePath),name,{signal:controller.signal,totalBytes:size,onProgress:progress=>setTransfer(current=>current?{...current,...progress}:current)})}
-		catch(err){if(!isAbortError(err))setNotice({kind:'error',text:errorText(err)})}
-		finally{if(transferAbort.current===controller)transferAbort.current=null;setTransfer(null)}
+		setNotice(null)
+		startDownload(relativePath,name,size)
 	}
 	const requestEntryRemoval=(name:string,type:'file'|'directory')=>{
 		if(workspace)setDeleteCandidate({workspaceID:workspace.id,path:workspaceChildPath(path,name),type})
@@ -2967,8 +3053,8 @@ const ChatWorkspacePanel=memo(function ChatWorkspacePanel({active,mode,onModeCha
 			<div className="panel-header"><FileBrowserTabs mode={mode} onChange={onModeChange}/><div className="workspace-panel-actions"><button type="button" onClick={onCollapse} title={t('workspace.collapsePanel')} aria-label={t('workspace.collapsePanel')}><PanelLeftClose size={14}/></button></div></div>
 			<div className="workspace-summary"><div className="chat-workspace-head"><div className="chat-workspace-selector"><AppSelect className="workspace-switch-select" value={workspace.id} disabled={workspaces.length<2||disabled||switching} ariaLabel={t('workspace.switchWorkspace')} onChange={onSelect} options={workspaces.map(item=>({value:item.id,label:item.id}))}/>{(switching||bound)&&<small>{switching?t('workspace.switching'):t('workspace.boundToConversation')}</small>}</div><div className="chat-workspace-head-actions"><em className={workspace.access}>{workspace.access==='read_write'?t('workspace.readWrite'):t('workspace.readOnly')}</em><button type="button" disabled={!workspace.shell||startingShell} onClick={()=>void createShell()} title={t('workspace.newTerminal')} aria-label={t('workspace.newTerminal')}>{startingShell?<LoaderCircle className="spin" size={14}/>:<TerminalSquare size={14}/>}</button></div></div>{activeShells.length>0&&<div className="workspace-shell-sessions">{activeShells.map(shell=><button type="button" onClick={()=>onOpenShell(shell)} title={shell.id} key={shell.id}><i className={shell.status}/><b>{t(shell.surface==='workspace_agent'?'workspace.agent':'workspace.operator')}</b><code>{shell.cwd||'.'}</code></button>)}</div>}</div>
 			<div className="workspace-path-row"><button onClick={up} disabled={path==='.'} title={t('workspace.parent')}>‹</button><code title={path}>{path}</code>{workspace.access==='read_write'&&<label className={transfer?'disabled':''} title={t('workspace.uploadFile')}><UploadCloud size={14}/><input key={inputKey} type="file" disabled={!!transfer} onChange={choose}/></label>}<button onClick={()=>synchronize(true)} title={t('workspace.refreshFiles')}><RefreshCw size={12}/></button></div>
-			{file&&<div className="chat-upload-row"><input value={target} disabled={uploading} onChange={event=>setTarget(event.target.value)} aria-label={t('workspace.relativePath')}/><button onClick={()=>void upload()} disabled={uploading||!target.trim()}>{uploading?'...':t('common.upload')}</button><button onClick={()=>{if(uploading){transferAbort.current?.abort();return}setFile(null);setTarget('');setInputKey(value=>value+1)}} title={t('workspace.cancelUpload')}><X size={11}/></button></div>}
-			{transfer&&<FileTransferProgress transfer={transfer} onCancel={()=>transferAbort.current?.abort()}/>}
+			{file&&<div className="chat-upload-row"><input value={target} disabled={uploading} onChange={event=>setTarget(event.target.value)} aria-label={t('workspace.relativePath')}/><button onClick={upload} disabled={uploading||!target.trim()}>{uploading?'...':t('common.upload')}</button><button onClick={()=>{if(uploading){cancel();return}setFile(null);setTarget('');setInputKey(value=>value+1)}} title={t('workspace.cancelUpload')}><X size={11}/></button></div>}
+			{transfer&&<FileTransferProgress transfer={transfer} onCancel={cancel}/>}
 			<div className="workspace-file-list">{loading?<span className="workspace-files-state"><LoaderCircle className="spin" size={13}/>{t('common.loading')}</span>:error?<span className="workspace-files-state error">{error}</span>:entries.length?entries.map(entry=>{const fullPath=workspaceChildPath(path,entry.name);return <div className="workspace-file-row" key={`${entry.type}:${entry.name}`}><button className="workspace-file-open" onClick={()=>void openEntry(entry.name,entry.type)} title={entry.type==='file'?t('workspace.previewFile'):t('workspace.openDirectory')}>{previewLoading===fullPath?<LoaderCircle className="spin" size={13}/>:entry.type==='directory'?<FolderOpen size={13}/>:<FileText size={13}/>}<span>{entry.name}</span>{entry.type==='file'&&<small>{formatFileSize(entry.size??0)}</small>}</button>{(entry.type==='file'||desktopRuntime&&entry.type==='directory'||workspace.access==='read_write')&&<div className="workspace-file-actions">{entry.type==='file'&&<button className="workspace-file-download" disabled={!!transfer} onClick={()=>void download(fullPath,entry.name,entry.size??0)} title={t('common.download')}><Download size={12}/></button>}{desktopRuntime&&entry.type==='directory'&&<button className="workspace-file-reveal" onClick={()=>void revealDirectory(fullPath)} title={t('workspace.revealDirectory')}><FolderOutput size={12}/></button>}{workspace.access==='read_write'&&<button className="workspace-file-delete" onClick={()=>requestEntryRemoval(entry.name,entry.type)} disabled={deleting===fullPath||!!transfer} title={t('workspace.deleteEntry',{type:t(`workspace.${entry.type}`)})}><Trash2 size={12}/></button>}</div>}</div>}):<span className="workspace-files-state">{t('workspace.emptyDirectory')}</span>}</div>
 			{notice&&<div className={`chat-workspace-notice ${notice.kind}`}>{notice.text}</div>}
 			{dragging&&<div className="workspace-drop-overlay"><UploadCloud size={27}/><b>{t('workspace.dropFilesHere')}</b><span>{path}</span></div>}

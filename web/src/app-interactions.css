@@ -196,6 +196,10 @@
   grid-template-rows: auto auto auto auto minmax(0, 1fr) auto auto;
 }
 
+.chat-sftp-browser > * {
+  min-width: 0;
+}
+
 .notification-center {
   position: fixed;
   z-index: 240;

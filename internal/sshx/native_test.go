@@ -42,6 +42,25 @@ type shellInputBuffer struct {
 
 func (*shellInputBuffer) Close() error { return nil }
 
+type pausedUploadReader struct {
+	reads   int
+	waiting chan struct{}
+	release chan struct{}
+}
+
+func (reader *pausedUploadReader) Read(data []byte) (int, error) {
+	if reader.reads == 0 {
+		reader.reads++
+		return copy(data, bytes.Repeat([]byte("x"), 32*1024)), nil
+	}
+	if reader.reads == 1 {
+		reader.reads++
+		close(reader.waiting)
+		<-reader.release
+	}
+	return 0, io.EOF
+}
+
 func TestNativeShellInterruptWritesPTYControlByte(t *testing.T) {
 	input := &shellInputBuffer{}
 	session := &nativeShellSession{stdin: input, done: make(chan struct{})}
@@ -468,6 +487,77 @@ func TestNativeSFTPFileManagerOperations(t *testing.T) {
 	}
 	if _, err := os.Stat(directoryLocal); !os.IsNotExist(err) {
 		t.Fatalf("managed directory still exists: %v", err)
+	}
+}
+
+func TestNativeSFTPCancelledUploadRemovesTemporaryFile(t *testing.T) {
+	server := startTestSSHServer(t, "sftp-cancel-password")
+	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
+	transport := NewNativeSSHTransport(config.SSH{DefaultKnownHosts: knownHosts}, config.Default().Limits)
+	t.Cleanup(func() { _ = transport.Close() })
+	connection := ConnectionSpec{Target: server.host()}
+	connection.Target.ID = "sftp_cancel_host"
+	key, err := transport.ScanHostKey(context.Background(), connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transport.TrustHostKey(context.Background(), connection, key.Fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	directoryLocal := filepath.Join(server.root, "cancelled-upload")
+	if err := os.Mkdir(directoryLocal, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	remotePath := testSFTPPath(filepath.Join(directoryLocal, "artifact.bin"))
+	reader := &pausedUploadReader{waiting: make(chan struct{}), release: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := transport.UploadSFTPFile(ctx, connection, remotePath, reader, false)
+		result <- err
+	}()
+	select {
+	case <-reader.waiting:
+	case <-time.After(2 * time.Second):
+		close(reader.release)
+		t.Fatal("upload did not reach the paused source read")
+	}
+	cancel()
+	poolKey := sftpConnectionKey(connection)
+	closed := false
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		transport.sftpPoolMu.Lock()
+		entry := transport.sftpPool[poolKey]
+		closed = entry != nil && entry.refs == 0
+		transport.sftpPoolMu.Unlock()
+		if closed {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(reader.release)
+	if !closed {
+		t.Fatal("cancellation did not close the active SFTP lease")
+	}
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("cancelled upload unexpectedly succeeded")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled upload did not return")
+	}
+	entries, err := os.ReadDir(directoryLocal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		t.Fatalf("cancelled upload left remote files: %v", names)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -1968,13 +1969,14 @@ func (s *Service) workspaceHost(ctx context.Context, workspaceID string) (domain
 
 func (s *Service) resolveWorkspacePath(workspace config.Workspace, relative string, allowMissing bool) (string, error) {
 	relative = normalizedWorkspaceRelativePath(relative)
-	if filepath.IsAbs(relative) {
+	localRelative := filepath.FromSlash(relative)
+	if path.IsAbs(relative) || filepath.IsAbs(localRelative) {
 		return "", fmt.Errorf(`workspace path must be relative; omit path or use "." for the Workspace root (examples: "src", "src/main.go"); absolute paths such as "/workspace" are invalid`)
 	}
-	if filepath.Clean(relative) != relative || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || strings.ContainsAny(relative, "\\\x00\r\n") {
+	if path.Clean(relative) != relative || relative == ".." || strings.HasPrefix(relative, "../") || strings.ContainsAny(relative, "\\\x00\r\n") {
 		return "", fmt.Errorf(`workspace path must be clean and relative (examples: ".", "src", "src/main.go")`)
 	}
-	for _, component := range strings.Split(filepath.ToSlash(relative), "/") {
+	for _, component := range strings.Split(relative, "/") {
 		if isSensitiveWorkspaceComponent(component) {
 			return "", fmt.Errorf("workspace path is sensitive and denied")
 		}
@@ -1983,7 +1985,7 @@ func (s *Service) resolveWorkspacePath(workspace config.Workspace, relative stri
 	if err != nil {
 		return "", fmt.Errorf("resolve workspace root: %w", err)
 	}
-	target := filepath.Join(root, relative)
+	target := filepath.Join(root, localRelative)
 	resolved, err := filepath.EvalSymlinks(target)
 	if err != nil {
 		if !allowMissing || !errors.Is(err, os.ErrNotExist) {

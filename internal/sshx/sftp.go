@@ -15,6 +15,8 @@ import (
 	"github.com/pkg/sftp"
 )
 
+const sftpUploadCleanupTimeout = 5 * time.Second
+
 type SFTPFileEntry struct {
 	Name       string    `json:"name"`
 	Path       string    `json:"path"`
@@ -116,7 +118,7 @@ func (t *NativeSSHTransport) OpenSFTPFile(ctx context.Context, connection Connec
 	return SFTPDownload{Entry: sftpFileEntry(remotePath, info), Reader: reader}, nil
 }
 
-func (t *NativeSSHTransport) UploadSFTPFile(ctx context.Context, connection ConnectionSpec, remotePath string, source io.Reader, overwrite bool) (SFTPFileEntry, error) {
+func (t *NativeSSHTransport) UploadSFTPFile(ctx context.Context, connection ConnectionSpec, remotePath string, source io.Reader, overwrite bool) (_ SFTPFileEntry, resultErr error) {
 	remotePath, err := cleanSFTPPath(remotePath)
 	if err != nil {
 		return SFTPFileEntry{}, err
@@ -147,8 +149,25 @@ func (t *NativeSSHTransport) UploadSFTPFile(ctx context.Context, connection Conn
 	}
 	tempExists := true
 	defer func() {
-		if tempExists {
-			_ = sftpClient.Remove(tempPath)
+		if !tempExists {
+			return
+		}
+		var cleanupErr error
+		if ctx.Err() == nil {
+			cleanupErr = sftpClient.Remove(tempPath)
+		} else {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), sftpUploadCleanupTimeout)
+			defer cancel()
+			cleanupLease, err := t.openSFTP(cleanupCtx, connection)
+			if err != nil {
+				cleanupErr = err
+			} else {
+				cleanupErr = cleanupLease.client.Remove(tempPath)
+				_ = cleanupLease.Close()
+			}
+		}
+		if cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+			resultErr = errors.Join(resultErr, fmt.Errorf("remove remote upload temporary file: %w", cleanupErr))
 		}
 	}()
 	if _, err := io.Copy(remote, source); err != nil {
