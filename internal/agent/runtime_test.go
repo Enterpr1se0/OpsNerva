@@ -46,6 +46,11 @@ type modelFailureWithRunningToolRunner struct {
 	finished chan error
 }
 
+type cancellableToolAgentRunner struct {
+	started  chan struct{}
+	finished chan error
+}
+
 type assistantLifecycleReplay struct {
 	content      map[string]string
 	committedIDs []string
@@ -125,6 +130,24 @@ func (r *modelFailureWithRunningToolRunner) Run(ctx context.Context, _ []*schema
 	go func() {
 		<-r.started
 		generator.Send(&adk.AgentEvent{Err: errors.New("model request failed")})
+		generator.Close()
+	}()
+	return iterator
+}
+
+func (r *cancellableToolAgentRunner) Run(ctx context.Context, _ []*schema.Message, _ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+	iterator, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	endpoint := normalizeToolCallErrors(func(toolCtx context.Context, _ *compose.ToolInput) (*compose.ToolOutput, error) {
+		close(r.started)
+		<-toolCtx.Done()
+		return nil, toolCtx.Err()
+	})
+	go func() {
+		_, err := endpoint(ctx, &compose.ToolInput{
+			CallID: "call-cancelled", Name: "ssh_exec",
+			Arguments: `{"host_id":"host-one","program":"sleep","args":["60"]}`,
+		})
+		r.finished <- err
 		generator.Close()
 	}()
 	return iterator
@@ -686,6 +709,76 @@ func TestCancelSessionStopsQueryAndPersistsInterruption(t *testing.T) {
 	}
 	if len(messages) != 0 {
 		t.Fatalf("interrupted prompt excluded from future context was retained: %#v", messages)
+	}
+}
+
+func TestCancelSessionEmitsInterruptedToolBeforeAgentInterruption(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	runner := &cancellableToolAgentRunner{started: make(chan struct{}), finished: make(chan error, 1)}
+	runtime := &Runtime{runner: runner, store: st}
+	var emitted []Event
+	queryDone := make(chan error, 1)
+	go func() {
+		_, queryErr := runtime.Query(ctx, "session_cancel_tool", "run it", func(event Event) {
+			emitted = append(emitted, event)
+		})
+		queryDone <- queryErr
+	}()
+	select {
+	case <-runner.started:
+	case <-time.After(time.Second):
+		t.Fatal("tool did not start")
+	}
+	if !runtime.CancelSession("session_cancel_tool") {
+		t.Fatal("active Agent query was not cancelled")
+	}
+	select {
+	case queryErr := <-queryDone:
+		if !errors.Is(queryErr, context.Canceled) {
+			t.Fatalf("query error = %v", queryErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled Agent query did not stop")
+	}
+	select {
+	case toolErr := <-runner.finished:
+		if !errors.Is(toolErr, context.Canceled) {
+			t.Fatalf("tool error = %v", toolErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled tool did not stop")
+	}
+
+	startedIndex, terminalIndex, interruptedIndex := -1, -1, -1
+	terminalEvents := 0
+	for index, event := range emitted {
+		switch {
+		case event.Type == "tool" && event.ToolCallID == "call-cancelled" && event.Status == "in_progress":
+			startedIndex = index
+		case event.Type == "tool" && event.ToolCallID == "call-cancelled" && event.Status == domain.ChatToolCallInterrupted:
+			terminalEvents++
+			terminalIndex = index
+			if !strings.Contains(event.Content, `"status":"interrupted"`) || !strings.Contains(event.Content, `"host_id":"host-one"`) {
+				t.Fatalf("interrupted tool payload = %s", event.Content)
+			}
+		case event.Type == "interrupted":
+			interruptedIndex = index
+		}
+	}
+	if startedIndex < 0 || terminalEvents != 1 || terminalIndex <= startedIndex || interruptedIndex <= terminalIndex {
+		t.Fatalf("cancelled tool lifecycle = %#v", emitted)
+	}
+	call, err := st.GetChatToolCall(ctx, "session_cancel_tool", "call-cancelled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if call.Status != domain.ChatToolCallInterrupted {
+		t.Fatalf("persisted tool call = %#v", call)
 	}
 }
 

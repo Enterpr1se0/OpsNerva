@@ -1178,6 +1178,29 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 	}
 	turnCompleted := false
 	finalAnswerContext := finalAnswerInput{Request: query, ToolResults: make([]finalAnswerToolResult, 0)}
+	var terminalToolEventMu sync.Mutex
+	terminalToolEvents := make(map[string]struct{})
+	markTerminalToolEvent := func(toolCallID string) bool {
+		if strings.TrimSpace(toolCallID) == "" {
+			return true
+		}
+		terminalToolEventMu.Lock()
+		defer terminalToolEventMu.Unlock()
+		if _, exists := terminalToolEvents[toolCallID]; exists {
+			return false
+		}
+		terminalToolEvents[toolCallID] = struct{}{}
+		return true
+	}
+	emitPersistedToolTerminal := func(call domain.ChatToolCall) {
+		if !markTerminalToolEvent(call.ToolCallID) {
+			return
+		}
+		emit(Event{
+			Type: "tool", ToolName: call.ToolName, ToolCallID: call.ToolCallID,
+			Content: call.ResultJSON, SessionID: sessionID, RunID: call.RunID, Status: call.Status,
+		})
+	}
 	defer func() {
 		status := "failed"
 		if (queryErr == nil && turnCompleted) || errors.Is(queryErr, ErrSteered) {
@@ -1207,23 +1230,35 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 			logger.ErrorContext(statusCtx, "load unfinished tool calls failed", "message_id", userMessageID, "error", err)
 			return
 		}
+		cancelled := errors.Is(queryErr, context.Canceled)
 		activeIDs := map[string]struct{}{}
 		if scope, _ := ctx.Value(toolExecutionScopeContextKey{}).(*toolExecutionScope); scope != nil {
 			activeIDs = scope.activeToolCallIDs()
 		}
 		for _, call := range calls {
-			if call.UserMessageID != userMessageID || call.Status != domain.ChatToolCallRunning {
+			if call.UserMessageID != userMessageID {
 				continue
 			}
-			if _, active := activeIDs[call.ToolCallID]; active {
+			if call.Status != domain.ChatToolCallRunning {
+				if cancelled {
+					emitPersistedToolTerminal(call)
+				}
+				continue
+			}
+			if _, active := activeIDs[call.ToolCallID]; active && !cancelled {
 				continue
 			}
 			terminalStatus := domain.ChatToolCallUnknown
-			if errors.Is(queryErr, context.Canceled) {
+			if cancelled {
 				terminalStatus = domain.ChatToolCallInterrupted
 			}
-			if _, err := r.store.FinishChatToolCall(statusCtx, sessionID, call.ToolCallID, call.RunID, terminalStatus, "", ""); err != nil {
+			settled, err := r.store.FinishChatToolCall(statusCtx, sessionID, call.ToolCallID, call.RunID, terminalStatus, "", "")
+			if err != nil {
 				logger.ErrorContext(statusCtx, "settle unconfirmed tool call failed", "tool_call_id", call.ToolCallID, "status", terminalStatus, "error", err)
+				continue
+			}
+			if cancelled {
+				emitPersistedToolTerminal(settled)
 			}
 		}
 	}()
@@ -1538,7 +1573,9 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 				if err := r.persistChatToolResult(ctx, sessionID, userMessageID, toolCallID, toolName, content, captured); err != nil {
 					return "", err
 				}
-				emit(Event{Type: "tool", ToolName: toolName, ToolCallID: toolCallID, Content: content, SessionID: sessionID})
+				if markTerminalToolEvent(toolCallID) {
+					emit(Event{Type: "tool", ToolName: toolName, ToolCallID: toolCallID, Content: content, SessionID: sessionID})
+				}
 			}
 			continue
 		}
@@ -1592,7 +1629,9 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 				if err := r.persistChatToolResult(ctx, sessionID, userMessageID, toolCallID, toolName, displayContent, captured); err != nil {
 					return "", err
 				}
-				emit(Event{Type: "tool", ToolName: toolName, ToolCallID: toolCallID, Content: displayContent, SessionID: sessionID})
+				if markTerminalToolEvent(toolCallID) {
+					emit(Event{Type: "tool", ToolName: toolName, ToolCallID: toolCallID, Content: displayContent, SessionID: sessionID})
+				}
 				continue
 			}
 			if variant.Role == schema.Assistant {
