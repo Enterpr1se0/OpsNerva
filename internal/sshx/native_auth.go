@@ -7,7 +7,7 @@ import (
 	"io"
 	"strings"
 
-	"eino-ops-agent/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/domain"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"

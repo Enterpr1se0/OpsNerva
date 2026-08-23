@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"eino-ops-agent/internal/config"
+	"github.com/Enterpr1se0/opsnerva/internal/config"
 )
 
 func TestOptionalAuthenticationSessionLifecycle(t *testing.T) {

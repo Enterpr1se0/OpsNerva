@@ -6,9 +6,9 @@ import (
 	"errors"
 	"sync"
 
-	"eino-ops-agent/internal/domain"
-	"eino-ops-agent/internal/observability"
-	"eino-ops-agent/internal/store"
+	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/observability"
+	"github.com/Enterpr1se0/opsnerva/internal/store"
 )
 
 type ExecutionEvent struct {

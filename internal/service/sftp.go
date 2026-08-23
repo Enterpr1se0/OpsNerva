@@ -6,7 +6,7 @@ import (
 	"io"
 	"strings"
 
-	"eino-ops-agent/internal/sshx"
+	"github.com/Enterpr1se0/opsnerva/internal/sshx"
 )
 
 func (s *Service) ListOperatorSFTPFiles(ctx context.Context, hostID, remotePath string) (sshx.SFTPFileList, error) {

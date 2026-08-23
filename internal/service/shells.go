@@ -11,12 +11,12 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"eino-ops-agent/internal/domain"
-	"eino-ops-agent/internal/ids"
-	"eino-ops-agent/internal/observability"
-	"eino-ops-agent/internal/sshx"
-	"eino-ops-agent/internal/store"
-	"eino-ops-agent/internal/terminaltext"
+	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/ids"
+	"github.com/Enterpr1se0/opsnerva/internal/observability"
+	"github.com/Enterpr1se0/opsnerva/internal/sshx"
+	"github.com/Enterpr1se0/opsnerva/internal/store"
+	"github.com/Enterpr1se0/opsnerva/internal/terminaltext"
 )
 
 const (

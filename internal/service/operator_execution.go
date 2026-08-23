@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"eino-ops-agent/internal/domain"
-	"eino-ops-agent/internal/ids"
+	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/ids"
 )
 
 const webOperatorReason = "started directly by the operator from the Web console"

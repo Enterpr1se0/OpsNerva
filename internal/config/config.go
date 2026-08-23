@@ -90,10 +90,10 @@ func Default() Config {
 	return Config{
 		ListenAddress: "127.0.0.1:8080",
 		DataDir:       "data",
-		DatabasePath:  "data/ops-agent.db",
+		DatabasePath:  "data/opsnerva.db",
 		Auth:          Auth{Username: "admin", SessionTTLHours: 24},
 		Logging: Logging{
-			Level: "debug", Format: "text", File: "data/ops-agent.log",
+			Level: "debug", Format: "text", File: "data/opsnerva.log",
 			MaxSizeMB: 20, MaxBackups: 3, RecentLimit: 2000,
 		},
 		SSH: SSH{
@@ -134,14 +134,14 @@ func Load(path string) (Config, error) {
 		}
 	}
 	applyEnv(&cfg)
-	if cfg.DatabasePath == "" || (cfg.DataDir != defaultDataDir && cfg.DatabasePath == defaultDatabasePath && os.Getenv("OPS_AGENT_DATABASE") == "") {
-		cfg.DatabasePath = filepath.Join(cfg.DataDir, "ops-agent.db")
+	if cfg.DatabasePath == "" || (cfg.DataDir != defaultDataDir && cfg.DatabasePath == defaultDatabasePath && os.Getenv("OPSNERVA_DATABASE") == "") {
+		cfg.DatabasePath = filepath.Join(cfg.DataDir, "opsnerva.db")
 	}
 	if cfg.SSH.DefaultKnownHosts == "" || (cfg.DataDir != defaultDataDir && cfg.SSH.DefaultKnownHosts == defaultKnownHosts) {
 		cfg.SSH.DefaultKnownHosts = filepath.Join(cfg.DataDir, "known_hosts")
 	}
-	if cfg.Logging.File == "" || (cfg.DataDir != defaultDataDir && cfg.Logging.File == defaultLogFile && os.Getenv("OPS_AGENT_LOG_FILE") == "") {
-		cfg.Logging.File = filepath.Join(cfg.DataDir, "ops-agent.log")
+	if cfg.Logging.File == "" || (cfg.DataDir != defaultDataDir && cfg.Logging.File == defaultLogFile && os.Getenv("OPSNERVA_LOG_FILE") == "") {
+		cfg.Logging.File = filepath.Join(cfg.DataDir, "opsnerva.log")
 	}
 	cfg.DataDir = resolvePath(baseDir, cfg.DataDir)
 	if cfg.DatabasePath != ":memory:" && !strings.HasPrefix(cfg.DatabasePath, "file:") {
@@ -258,29 +258,29 @@ func sameOrWithin(path, root string) bool {
 }
 
 func applyEnv(cfg *Config) {
-	setString(&cfg.ListenAddress, "OPS_AGENT_LISTEN")
-	setString(&cfg.DataDir, "OPS_AGENT_DATA_DIR")
-	setString(&cfg.DatabasePath, "OPS_AGENT_DATABASE")
-	setString(&cfg.Auth.Username, "OPS_AGENT_AUTH_USERNAME")
-	setString(&cfg.Auth.Password, "OPS_AGENT_AUTH_PASSWORD")
-	setInt(&cfg.Auth.SessionTTLHours, "OPS_AGENT_AUTH_SESSION_TTL_HOURS")
-	setString(&cfg.Logging.Level, "OPS_AGENT_LOG_LEVEL")
-	setString(&cfg.Logging.Format, "OPS_AGENT_LOG_FORMAT")
-	setString(&cfg.Logging.File, "OPS_AGENT_LOG_FILE")
-	setBool(&cfg.Logging.AddSource, "OPS_AGENT_LOG_SOURCE")
-	setInt(&cfg.Logging.MaxSizeMB, "OPS_AGENT_LOG_MAX_SIZE_MB")
-	setInt(&cfg.Logging.MaxBackups, "OPS_AGENT_LOG_MAX_BACKUPS")
-	setInt(&cfg.Logging.RecentLimit, "OPS_AGENT_LOG_RECENT_LIMIT")
-	setString(&cfg.MasterKey, "OPS_AGENT_MASTER_KEY")
-	setString(&cfg.WorkspaceDir, "OPS_AGENT_WORKSPACE_DIR")
-	setString(&cfg.WorkspaceSandboxPath, "OPS_AGENT_WORKSPACE_SANDBOX")
+	setString(&cfg.ListenAddress, "OPSNERVA_LISTEN")
+	setString(&cfg.DataDir, "OPSNERVA_DATA_DIR")
+	setString(&cfg.DatabasePath, "OPSNERVA_DATABASE")
+	setString(&cfg.Auth.Username, "OPSNERVA_AUTH_USERNAME")
+	setString(&cfg.Auth.Password, "OPSNERVA_AUTH_PASSWORD")
+	setInt(&cfg.Auth.SessionTTLHours, "OPSNERVA_AUTH_SESSION_TTL_HOURS")
+	setString(&cfg.Logging.Level, "OPSNERVA_LOG_LEVEL")
+	setString(&cfg.Logging.Format, "OPSNERVA_LOG_FORMAT")
+	setString(&cfg.Logging.File, "OPSNERVA_LOG_FILE")
+	setBool(&cfg.Logging.AddSource, "OPSNERVA_LOG_SOURCE")
+	setInt(&cfg.Logging.MaxSizeMB, "OPSNERVA_LOG_MAX_SIZE_MB")
+	setInt(&cfg.Logging.MaxBackups, "OPSNERVA_LOG_MAX_BACKUPS")
+	setInt(&cfg.Logging.RecentLimit, "OPSNERVA_LOG_RECENT_LIMIT")
+	setString(&cfg.MasterKey, "OPSNERVA_MASTER_KEY")
+	setString(&cfg.WorkspaceDir, "OPSNERVA_WORKSPACE_DIR")
+	setString(&cfg.WorkspaceSandboxPath, "OPSNERVA_WORKSPACE_SANDBOX")
 	setString(&cfg.Model.APIKey, "OPENAI_API_KEY")
 	setString(&cfg.Model.BaseURL, "OPENAI_BASE_URL")
 	setString(&cfg.Model.Name, "OPENAI_MODEL")
 	setInt(&cfg.Model.ContextWindow, "OPENAI_CONTEXT_WINDOW")
 	setString(&cfg.Model.ReasoningEffort, "OPENAI_REASONING_EFFORT")
-	setInt(&cfg.Limits.GlobalConcurrency, "OPS_AGENT_GLOBAL_CONCURRENCY")
-	setInt(&cfg.Limits.HostConcurrency, "OPS_AGENT_HOST_CONCURRENCY")
+	setInt(&cfg.Limits.GlobalConcurrency, "OPSNERVA_GLOBAL_CONCURRENCY")
+	setInt(&cfg.Limits.HostConcurrency, "OPSNERVA_HOST_CONCURRENCY")
 }
 
 func setBool(dst *bool, name string) {

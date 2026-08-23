@@ -20,8 +20,8 @@ import (
 	"testing"
 	"time"
 
-	"eino-ops-agent/internal/config"
-	"eino-ops-agent/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/config"
+	"github.com/Enterpr1se0/opsnerva/internal/domain"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"

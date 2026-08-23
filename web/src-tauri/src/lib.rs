@@ -357,10 +357,10 @@ fn start_sidecar(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
 
     let command = app
         .shell()
-        .sidecar("ops-agent")?
-        .env("OPS_AGENT_HOME", install_dir)
-        .env("OPS_AGENT_DESKTOP", "true")
-        .env("OPS_AGENT_LISTEN", "127.0.0.1:0")
+        .sidecar("opsnerva")?
+        .env("OPSNERVA_HOME", install_dir)
+        .env("OPSNERVA_DESKTOP", "true")
+        .env("OPSNERVA_LISTEN", "127.0.0.1:0")
         .current_dir(install_dir);
     let (mut events, child) = command.spawn()?;
     app.state::<SidecarState>().0.lock().unwrap().replace(child);

@@ -19,7 +19,7 @@ make dev-api   # Go backend only (listens :8080), after a `make build-web`
 make dev-web   # Vite dev server (:5173), proxies /api to :8080
 make test      # build-web + go test ./...
 make check     # full verification: build-web + go test ./... + build-go
-make build     # build web + produce bin/ops-agent
+make build     # build web + produce bin/opsnerva
 make test-web  # build-web only (type-check + vite build, the web "tests")
 make clean     # rm -rf bin
 ```
@@ -27,16 +27,16 @@ make clean     # rm -rf bin
 - Run a single Go package's tests: `go test ./internal/service/...` — or call `run` from an editor in Go.
 - Run one Go test by name: `go test ./internal/security/ -run TestRedact`.
 - Web type-check/build (no test framework exists; `npm run build` runs `tsc --noEmit` + `vite build`): `npm --prefix web run build`. During dev: `npm --prefix web run dev`.
-- Running the app: `./bin/ops-agent serve` (serves embedded frontend on `:8080`). Standalone commands: `host add|list|probe|scan-key|trust|delete`, `exec`, `approval`, `audit`, `chat`, `mcp`, `version`. No args = quick-start that creates `config.yaml`/`data/`/`workspace/` next to the binary.
+- Running the app: `./bin/opsnerva serve` (serves embedded frontend on `:8080`). Standalone commands: `host add|list|probe|scan-key|trust|delete`, `exec`, `approval`, `audit`, `chat`, `mcp`, `version`. No args = quick-start that creates `config.yaml`/`data/`/`workspace/` next to the binary.
 - Desktop builds: **never compile, test, or build Rust/Tauri locally** (see AGENTS.md). The Go backend and web build are validated locally; Tauri packaging is validated only via the `.github/workflows/desktop.yml` GitHub Actions run.
 
-Environment overrides used by config: `OPS_AGENT_CONFIG`, `OPS_AGENT_HOME`, `OPS_AGENT_WORKSPACE_DIR`, `OPS_AGENT_WORKSPACE_SANDBOX`, `OPS_AGENT_LOG_LEVEL`, `OPS_AGENT_DESKTOP`, plus `OPENAI_API_KEY/BASE_URL/MODEL` as a model fallback.
+Environment overrides used by config: `OPSNERVA_CONFIG`, `OPSNERVA_HOME`, `OPSNERVA_WORKSPACE_DIR`, `OPSNERVA_WORKSPACE_SANDBOX`, `OPSNERVA_LOG_LEVEL`, `OPSNERVA_DESKTOP`, plus `OPENAI_API_KEY/BASE_URL/MODEL` as a model fallback.
 
 ## Architecture
 
 ### Runtime bootstrap and command surface
 
-`cmd/ops-agent/main.go` is the entry point. `newApplication` wires the stack: `store.Open` (SQLite) → `security.NewEncryptor` → `sshx.NewNativeSSHTransport` → `service.New` → workspace/skill/MCP init → `agent.New` (Eino ChatModelAgent runtime). The `serve` subcommand constructs the `httpapi.Server`. `version` constant lives in main.go.
+`cmd/opsnerva/main.go` is the entry point. `newApplication` wires the stack: `store.Open` (SQLite) → `security.NewEncryptor` → `sshx.NewNativeSSHTransport` → `service.New` → workspace/skill/MCP init → `agent.New` (Eino ChatModelAgent runtime). The `serve` subcommand constructs the `httpapi.Server`. `version` constant lives in main.go.
 
 ### Packages (the request path)
 
@@ -49,7 +49,7 @@ The data flow is: Web/CLI/MCP → `internal/httpapi` / `internal/mcpserver` → 
 - `internal/security` — `crypto.go` (AES-256-GCM encryptor, master key), `redact.go` / `redact_stream.go` (uniform redaction of Authorization/Token/API key/private-key/cloud-credential patterns across requests, outputs, SSE, logs).
 - `internal/sshx` — in-process SSH: auth (`ssh-agent` via Unix socket or Windows named pipe, uploaded private key, password), strict host-key checking, SFTP, SOCKS5/HTTP proxy, ProxyJump chains (max 4), tunnels, `go-pty` shells.
 - `internal/httpapi` (`server.go`) — the loopback HTTP API + SSE + embedded React static assets. Routes are registered in `Server.routes()` using Go 1.22+ pattern routing (`GET /api/v1/...`). ServeMux middleware wrapper: `requestLogMiddleware` → `recoverMiddleware` → `corsMiddleware`.
-- `internal/mcpserver` — the official MCP Go SDK adapters for both the stdio CLI (`ops-agent mcp`) and the Streamable HTTP endpoint (`/mcp`) that exposes the controlled SSH Service to MCP clients.
+- `internal/mcpserver` — the official MCP Go SDK adapters for both the stdio CLI (`opsnerva mcp`) and the Streamable HTTP endpoint (`/mcp`) that exposes the controlled SSH Service to MCP clients.
 - `internal/config`, `internal/ids`, `internal/observability`, `internal/skills`, `internal/terminaltext`, `internal/proxyx` — config loading, ID generation, slog wiring, dynamic Skill registry, ANSI stripping, proxy HTTP.
 
 ### Frontend

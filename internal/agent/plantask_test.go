@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"eino-ops-agent/internal/service"
-	"eino-ops-agent/internal/store"
+	"github.com/Enterpr1se0/opsnerva/internal/service"
+	"github.com/Enterpr1se0/opsnerva/internal/store"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/tool"

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"eino-ops-agent/internal/service"
+	"github.com/Enterpr1se0/opsnerva/internal/service"
 
 	"github.com/cloudwego/eino/adk"
 	skillmw "github.com/cloudwego/eino/adk/middlewares/skill"

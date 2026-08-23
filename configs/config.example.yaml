@@ -1,11 +1,11 @@
 listen_address: 127.0.0.1:8080
 data_dir: data
-database_path: data/ops-agent.db
+database_path: data/opsnerva.db
 
 # Optional Web control-plane login. Authentication and encrypted credential
 # migration are enabled only when password is non-empty. Environment overrides:
-# OPS_AGENT_AUTH_USERNAME, OPS_AGENT_AUTH_PASSWORD,
-# OPS_AGENT_AUTH_SESSION_TTL_HOURS.
+# OPSNERVA_AUTH_USERNAME, OPSNERVA_AUTH_PASSWORD,
+# OPSNERVA_AUTH_SESSION_TTL_HOURS.
 auth:
   username: admin
   password: ""
@@ -13,12 +13,12 @@ auth:
 
 # OpsNerva creates one directory per Workspace below this managed root.
 # Relative paths use the configuration file directory. Override with
-# OPS_AGENT_WORKSPACE_DIR.
+# OPSNERVA_WORKSPACE_DIR.
 workspace_dir: workspace
 
 # System settings choose Sandbox, Host Shell, or Disabled. Sandbox is the
 # fail-safe default and requires this Bubblewrap binary on Linux; it never
-# falls back to Host Shell. Override with OPS_AGENT_WORKSPACE_SANDBOX.
+# falls back to Host Shell. Override with OPSNERVA_WORKSPACE_SANDBOX.
 workspace_sandbox_path: bwrap
 
 # Validators are argv templates, never shell snippets. {{path}} is substituted
@@ -34,7 +34,7 @@ validators:
 logging:
   level: debug # use info in production when detailed lifecycle logs are not needed
   format: text # terminal format: text or json; the rotating file is always JSONL
-  file: data/ops-agent.log # set to "-" to disable file output
+  file: data/opsnerva.log # set to "-" to disable file output
   add_source: false
   max_size_mb: 20
   max_backups: 3

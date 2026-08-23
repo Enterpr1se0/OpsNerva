@@ -7,8 +7,8 @@ import (
 	"regexp"
 	"strings"
 
-	"eino-ops-agent/internal/domain"
-	"eino-ops-agent/internal/sshx"
+	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/sshx"
 )
 
 var transferSHA256Pattern = regexp.MustCompile(`^[a-fA-F0-9]{64}$`)

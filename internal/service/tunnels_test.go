@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"eino-ops-agent/internal/domain"
-	"eino-ops-agent/internal/sshx"
+	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/sshx"
 )
 
 func TestSSHTunnelApprovalReusesResolvedProxyConnectionAndStops(t *testing.T) {

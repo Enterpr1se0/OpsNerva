@@ -1,4 +1,4 @@
-module eino-ops-agent
+module github.com/Enterpr1se0/opsnerva
 
 go 1.26
 

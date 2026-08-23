@@ -8,11 +8,11 @@ const repoDir = resolve(webDir, '..')
 const triple = process.env.TAURI_ENV_TARGET_TRIPLE || hostTriple()
 const target = goTarget(triple)
 const extension = target.goos === 'windows' ? '.exe' : ''
-const output = join(webDir, 'src-tauri', 'binaries', `ops-agent-${triple}${extension}`)
+const output = join(webDir, 'src-tauri', 'binaries', `opsnerva-${triple}${extension}`)
 
 mkdirSync(dirname(output), { recursive: true })
 execFileSync('go', [
-  'build', '-buildvcs=false', '-trimpath', '-ldflags=-s -w', '-o', output, './cmd/ops-agent',
+  'build', '-buildvcs=false', '-trimpath', '-ldflags=-s -w', '-o', output, './cmd/opsnerva',
 ], {
   cwd: repoDir,
   env: { ...process.env, CGO_ENABLED: '0', GOOS: target.goos, GOARCH: target.goarch },

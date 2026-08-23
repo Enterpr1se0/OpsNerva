@@ -8,9 +8,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"eino-ops-agent/internal/domain"
-	"eino-ops-agent/internal/observability"
-	"eino-ops-agent/internal/store"
+	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/observability"
+	"github.com/Enterpr1se0/opsnerva/internal/store"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/middlewares/summarization"

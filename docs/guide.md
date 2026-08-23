@@ -68,7 +68,7 @@ Docker 保持独立的 Web 服务部署方式，不包含 Tauri 或 Rust 运行�
 
 ```bash
 docker build -t opsnerva .
-docker run --rm -e OPS_AGENT_LISTEN=0.0.0.0 -p 127.0.0.1:8080:8080 \
+docker run --rm -e OPSNERVA_LISTEN=0.0.0.0 -p 127.0.0.1:8080:8080 \
   -v opsnerva-data:/app/data \
   -v opsnerva-workspace:/app/workspace \
   opsnerva
@@ -93,7 +93,7 @@ Linux / macOS 的快捷构建命令还需要 `make`。内置 SSH 不依赖系统
 git clone https://github.com/Enterpr1se0/opsnerva.git
 cd opsnerva
 make build
-./bin/ops-agent
+./bin/opsnerva
 ```
 
 无参数启动会在可执行文件同目录创建 `config.yaml` 并直接启动 Web 服务，已有配置不会被覆盖。
@@ -108,11 +108,11 @@ Set-Location opsnerva
 npm --prefix web install
 npm --prefix web run build
 New-Item -ItemType Directory -Force bin | Out-Null
-go build -buildvcs=false -trimpath -ldflags="-s -w" -o bin/ops-agent.exe ./cmd/ops-agent
-.\bin\ops-agent.exe
+go build -buildvcs=false -trimpath -ldflags="-s -w" -o bin/opsnerva.exe ./cmd/opsnerva
+.\bin\opsnerva.exe
 ```
 
-也可以直接双击 `ops-agent.exe`。首次运行会在 EXE 旁创建 `config.yaml`、启动服务并打开浏览器。构建会把 Web 前端嵌入可执行文件，运行时不需要单独复制 `web/dist`。
+也可以直接双击 `opsnerva.exe`。首次运行会在 EXE 旁创建 `config.yaml`、启动服务并打开浏览器。构建会把 Web 前端嵌入可执行文件，运行时不需要单独复制 `web/dist`。
 
 ### 首次启动
 
@@ -128,7 +128,7 @@ go build -buildvcs=false -trimpath -ldflags="-s -w" -o bin/ops-agent.exe ./cmd/o
 
 ```bash
 cp configs/config.example.yaml bin/config.local.yaml
-./bin/ops-agent --config bin/config.local.yaml serve
+./bin/opsnerva --config bin/config.local.yaml serve
 ```
 
 ### 修改监听地址
@@ -136,14 +136,14 @@ cp configs/config.example.yaml bin/config.local.yaml
 默认监听 `127.0.0.1:8080`。快捷启动可以修改 EXE 同目录的 `config.yaml`，也可以在启动时覆盖：
 
 ```bash
-OPS_AGENT_LISTEN='127.0.0.1:9090' ./bin/ops-agent --config bin/config.local.yaml serve
+OPSNERVA_LISTEN='127.0.0.1:9090' ./bin/opsnerva --config bin/config.local.yaml serve
 ```
 
 PowerShell 使用：
 
 ```powershell
-$env:OPS_AGENT_LISTEN = '127.0.0.1:9090'
-.\bin\ops-agent.exe --config bin/config.local.yaml serve
+$env:OPSNERVA_LISTEN = '127.0.0.1:9090'
+.\bin\opsnerva.exe --config bin/config.local.yaml serve
 ```
 
 ### 控制面登录
@@ -160,9 +160,9 @@ auth:
 也可以使用环境变量，环境变量优先于 YAML：
 
 ```bash
-export OPS_AGENT_AUTH_USERNAME=admin
-export OPS_AGENT_AUTH_PASSWORD='replace-with-a-long-password'
-export OPS_AGENT_AUTH_SESSION_TTL_HOURS=24
+export OPSNERVA_AUTH_USERNAME=admin
+export OPSNERVA_AUTH_PASSWORD='replace-with-a-long-password'
+export OPSNERVA_AUTH_SESSION_TTL_HOURS=24
 ```
 
 密码至少 8 个字符，会保留在启动配置或进程环境中，不写入数据库、日志或健康信息。登录成功后服务端签发进程内随机会话，浏览器仅保存 `HttpOnly`、`SameSite=Lax` Cookie；重启服务会使已有会话失效。登录不会替代 HTTPS：非本机部署仍应使用 HTTPS 反向代理，不要把 HTTP 控制面直接暴露到局域网或公网。`/mcp` 继续使用 MCP Server Mode 自己的 Bearer Token，不接受控制面 Cookie。
@@ -218,11 +218,11 @@ Agent 页面右侧的 Conversations 会列出最近会话，标题取首条用�
 
 服务在 `workspace_dir`（默认启动目录下的 `workspace/`）中托管全部 Workspace。首次初始化会创建 `default/read_write`，之后可在系统设置中按名称新增、修改权限或移除；每个 Workspace 固定使用 `<workspace_dir>/<名称>/`，无需填写或查看宿主机绝对路径。在系统设置中删除 Workspace 会先解除登记（Agent 立即失去访问权），再永久删除对应目录及其中全部文件，无法恢复；审计事件会记录目录路径与删除结果。每个 Agent 会话持久化绑定一个 Workspace；对话左侧的选择器负责首次绑定和后续切换，运行中的 Agent 禁止切换。模型没有 Workspace 列表工具，所有 `workspace_*` Tool 都由服务端读取当前会话绑定，Tool schema 不接受 `workspace_id`。文件面板可进入子目录、点击上传或拖入多个不超过 100 MiB 的文件、预览文本，并从文件列表或预览窗口把原文件下载到浏览器；上传和下载显示实时字节进度并可取消。服务端通过操作系统文件事件监听当前打开的目录，再以 SSE 通知 Web 静默刷新，因此 Web 上传、Agent Tool、Workspace Shell 和外部编辑器产生的变化使用同一条刷新链路；页面隐藏时暂停该监听，重新显示时自动同步。Web 删除会直接永久删除宿主机文件或目录，确认后无法恢复。这些操作不会自动改写提示词或触发 LLM。文本预览上限为 1 MiB，二进制文件只显示元数据和 SHA256，但仍可直接下载。Web 上传使用防路径穿越、敏感文件名拒绝、禁止覆盖、同目录临时文件、`fsync` 和原子落盘。
 
-`workspace_shell` 用于解压、构建、测试、打包和交互式调试。`action=run` 执行一次性脚本并一次返回完整输出；`start/input/output/list/interrupt/close` 管理持续 PTY。`input` 先发送输入，`input/output` 再按 `wait_seconds` 延迟 0–600 秒后读取一次输出，未填写时延迟 5 秒；期间产生的输出仍实时推送到 Web，不会提前结束工具等待。Agent 创建的 Workspace Shell 会进入右上角统一 Shell 列表并可直接打开观察；Workspace 文件栏中用户手动新建的终端只保留在当前 Workspace，不重复展示。Web 终端通过同一条 WebSocket 发送输入、尺寸和中断，并以带序列号的二进制帧接收原始 PTY 输出；断线按最后序列恢复。交互 Sandbox 保留专用 PTY 的控制终端，因此 Bash 作业控制及 `vim`、`top` 等全屏程序可用。初次渲染会立即同步实际终端尺寸，xterm 滚动缓冲限制为 10,000 行。Agent Tool 结果仍使用跨输出块清理后的可读文本。系统设置提供 `Sandbox`、`Host Shell`、`Disabled` 三种模式；Linux 默认 Sandbox，Windows 默认 Host Shell，设置变化不会让已审批请求切换执行边界。Sandbox 仅支持 Linux，通过 `workspace_sandbox_path`（默认 `bwrap`，也可用 `OPS_AGENT_WORKSPACE_SANDBOX`）启动隔离的 user/mount/PID/network namespace，只挂载只读系统运行目录、独立 `/tmp` 和目标 Workspace，并禁用网络与嵌套 user namespace；缺少 Bubblewrap 或 namespace 权限时直接失败，不会降级执行。Workspace 的 `read_only/read_write` 决定沙箱挂载权限，`.env*`、`.ssh` 和系统隐藏文件等敏感路径会被遮蔽。交互会话持续到主动关闭、进程退出或服务停止，不设置 TTL。
+`workspace_shell` 用于解压、构建、测试、打包和交互式调试。`action=run` 执行一次性脚本并一次返回完整输出；`start/input/output/list/interrupt/close` 管理持续 PTY。`input` 先发送输入，`input/output` 再按 `wait_seconds` 延迟 0–600 秒后读取一次输出，未填写时延迟 5 秒；期间产生的输出仍实时推送到 Web，不会提前结束工具等待。Agent 创建的 Workspace Shell 会进入右上角统一 Shell 列表并可直接打开观察；Workspace 文件栏中用户手动新建的终端只保留在当前 Workspace，不重复展示。Web 终端通过同一条 WebSocket 发送输入、尺寸和中断，并以带序列号的二进制帧接收原始 PTY 输出；断线按最后序列恢复。交互 Sandbox 保留专用 PTY 的控制终端，因此 Bash 作业控制及 `vim`、`top` 等全屏程序可用。初次渲染会立即同步实际终端尺寸，xterm 滚动缓冲限制为 10,000 行。Agent Tool 结果仍使用跨输出块清理后的可读文本。系统设置提供 `Sandbox`、`Host Shell`、`Disabled` 三种模式；Linux 默认 Sandbox，Windows 默认 Host Shell，设置变化不会让已审批请求切换执行边界。Sandbox 仅支持 Linux，通过 `workspace_sandbox_path`（默认 `bwrap`，也可用 `OPSNERVA_WORKSPACE_SANDBOX`）启动隔离的 user/mount/PID/network namespace，只挂载只读系统运行目录、独立 `/tmp` 和目标 Workspace，并禁用网络与嵌套 user namespace；缺少 Bubblewrap 或 namespace 权限时直接失败，不会降级执行。Workspace 的 `read_only/read_write` 决定沙箱挂载权限，`.env*`、`.ssh` 和系统隐藏文件等敏感路径会被遮蔽。交互会话持续到主动关闭、进程退出或服务停止，不设置 TTL。
 
 Host Shell 直接拥有当前服务账户可用的宿主机文件系统与网络权限：Unix 使用 Bash，Windows 优先使用 PowerShell 7 (`pwsh.exe`) 并回退 Windows PowerShell。它仅允许 `read_write` Workspace，并遵循当前审批模式。省略 `cwd` 时固定使用 Workspace 根目录；Bash、PowerShell、Python 等子进程统一声明 UTF-8 环境。实际后端、Workspace、脚本、相对工作目录、环境与超时全部进入加密请求摘要；模式或请求内容变化不会修改已经开始的执行。`Disabled` 会在审批前拒绝调用。
 
-Agent 向远端发送 Workspace 文件使用 `workspace_file_upload`；从远端取回 Workspace 使用 `workspace_file_download`。两个方向都绑定读取所得 SHA256、主机和两端路径，并在批准执行时再次校验版本；下载只创建新文件，不覆盖现有 Workspace 文件。`workspace_file_delete` 可删除文件或目录，非空目录必须显式设置 `recursive=true`，Workspace 根目录不可删除。托管根目录仅在服务内部使用，不写入数据库、API、审计或模型上下文。可通过 `workspace_dir` 或 `OPS_AGENT_WORKSPACE_DIR` 修改统一根目录。
+Agent 向远端发送 Workspace 文件使用 `workspace_file_upload`；从远端取回 Workspace 使用 `workspace_file_download`。两个方向都绑定读取所得 SHA256、主机和两端路径，并在批准执行时再次校验版本；下载只创建新文件，不覆盖现有 Workspace 文件。`workspace_file_delete` 可删除文件或目录，非空目录必须显式设置 `recursive=true`，Workspace 根目录不可删除。托管根目录仅在服务内部使用，不写入数据库、API、审计或模型上下文。可通过 `workspace_dir` 或 `OPSNERVA_WORKSPACE_DIR` 修改统一根目录。
 
 `workspace_file_read` 和 `ssh_file_read` 默认读取 128 KiB；内容未读完时返回 `file.has_more=true` 与下一页 `file.next_offset`。只有文件大小合理且确实需要完整内容时才设置 `full_content=true`。两者都支持 `tail_lines`。显式设置 `offset_bytes` 时，非负值表示从文件开头计算的零基偏移，负值表示读取末尾对应字节数，例如 `-12000` 读取最后 12,000 字节。设置 `pattern` 会切换为搜索模式，并且必须同时设置 `match_mode`：`literal` 匹配完整字面量，`regex` 使用 POSIX 正则表达式；可选的 `context_lines` 返回上下文，搜索结果不会截断。未找到匹配项是成功结果并返回 `search.found=false`；搜索参数与内容范围参数互斥，不再提供独立的 file search Tool。
 
@@ -235,27 +235,27 @@ SSH 主机间迁移单个普通文件使用 `ssh_file_transfer`。OpsNerva 分�
 服务端统一使用标准库 `log/slog`。终端按 `logging.format` 输出，轮转文件始终使用便于检索的 JSONL；Web 的 **Logs** 页面显示当前进程最近的结构化日志，支持级别、组件、关键字筛选、WebSocket 增量更新和诊断包导出。切换筛选条件或断线重连时先取得快照，之后只传输新增条目。默认采集 `debug` 及以上级别；生产环境不需要详细生命周期日志时可将级别调为 `info`：
 
 ```bash
-OPS_AGENT_LOG_LEVEL=info ./bin/ops-agent serve
-tail -f data/ops-agent.log | jq
+OPSNERVA_LOG_LEVEL=info ./bin/opsnerva serve
+tail -f data/opsnerva.log | jq
 ```
 
-日志默认保存在 `data/ops-agent.log`，单文件 20 MiB、保留 3 个备份，可通过配置文件的 `logging` 段或 `OPS_AGENT_LOG_*` 环境变量调整。Web 诊断包包含 `diagnostics.json`、当前日志和现存轮转备份；未启用文件日志时则包含当前进程的内存日志 JSONL。诊断清单只提供版本、平台、日志配置、Agent 状态以及主机/模型/MCP/Workspace/Skill 数量，不包含系统 Prompt、主机地址、目录路径或凭据。Web 缓冲区不跨重启，轮转文件会保留。成功的普通 GET/HEAD/OPTIONS 不写访问日志，超过 2 秒的只读请求记录为 Warn；写请求记录为 Info，4xx/5xx 分别记录为 Warn/Error。内置日志不记录 HTTP 正文、API Key、SSH/sudo 密码、模型 reasoning 正文、完整参数或 stdout/stderr；结构化敏感字段、消息和错误文本中的常见凭据格式会统一替换为 `[REDACTED]`，导出时还会重新清理已有日志。
+日志默认保存在 `data/opsnerva.log`，单文件 20 MiB、保留 3 个备份，可通过配置文件的 `logging` 段或 `OPSNERVA_LOG_*` 环境变量调整。Web 诊断包包含 `diagnostics.json`、当前日志和现存轮转备份；未启用文件日志时则包含当前进程的内存日志 JSONL。诊断清单只提供版本、平台、日志配置、Agent 状态以及主机/模型/MCP/Workspace/Skill 数量，不包含系统 Prompt、主机地址、目录路径或凭据。Web 缓冲区不跨重启，轮转文件会保留。成功的普通 GET/HEAD/OPTIONS 不写访问日志，超过 2 秒的只读请求记录为 Warn；写请求记录为 Info，4xx/5xx 分别记录为 Warn/Error。内置日志不记录 HTTP 正文、API Key、SSH/sudo 密码、模型 reasoning 正文、完整参数或 stdout/stderr；结构化敏感字段、消息和错误文本中的常见凭据格式会统一替换为 `[REDACTED]`，导出时还会重新清理已有日志。
 
 ## 注册第一个主机
 
 OpsNerva 默认不接受未知 host key。先注册、扫描并人工核对指纹：
 
 ```bash
-./bin/ops-agent host add \
+./bin/opsnerva host add \
   --name demo \
   --address 192.0.2.10 \
   --port 22 \
   --user ops
 
-./bin/ops-agent host list
-./bin/ops-agent host scan-key HOST_ID
-./bin/ops-agent host trust HOST_ID SHA256:THE_VERIFIED_FINGERPRINT
-./bin/ops-agent host probe HOST_ID
+./bin/opsnerva host list
+./bin/opsnerva host scan-key HOST_ID
+./bin/opsnerva host trust HOST_ID SHA256:THE_VERIFIED_FINGERPRINT
+./bin/opsnerva host probe HOST_ID
 ```
 
 主机可选择当前 `ssh-agent`、上传未加密 OpenSSH 格式私钥或账号密码；Windows Agent 使用系统 OpenSSH Agent named pipe。上传私钥限制为 1 MiB，与 SSH、sudo 和代理密码一样使用 AES-256-GCM 加密保存，API 只返回是否已配置，不返回内容或宿主机路径。执行时只在内存中解密和解析，密钥和密码都不会发送给模型。SSH 主机可选择共享代理中的 SOCKS5、SOCKS5H 或 HTTP CONNECT 代理；HTTPS 代理不会出现在 SSH 选择器中，也会被服务端拒绝。ProxyJump 必须引用另一个已注册且已信任 host key 的主机，每一级都会独立认证并校验 host key，最多四级且拒绝环路。两者同时配置时，代理用于连接第一台跳板机。
@@ -283,19 +283,19 @@ Eino Agent 的 `ssh_tunnel` 支持 `start`、`list` 和 `stop`。`direction=loca
 CLI 审批示例：
 
 ```bash
-./bin/ops-agent approval list
-./bin/ops-agent approval approve APPROVAL_ID --reason "reviewed command"
+./bin/opsnerva approval list
+./bin/opsnerva approval approve APPROVAL_ID --reason "reviewed command"
 ```
 
 ## MCP 使用
 
-`ops-agent mcp` 使用官方 MCP Go SDK 启动 stdio Server。以支持 MCP 的客户端为例：
+`opsnerva mcp` 使用官方 MCP Go SDK 启动 stdio Server。以支持 MCP 的客户端为例：
 
 ```json
 {
   "mcpServers": {
     "opsnerva": {
-      "command": "/absolute/path/to/bin/ops-agent",
+      "command": "/absolute/path/to/bin/opsnerva",
       "args": ["--config", "/absolute/path/to/bin/config.yaml", "mcp"]
     }
   }
@@ -346,7 +346,7 @@ Web 的 **Extensions / MCP Servers** 还支持反向角色：让 OpsNerva 作为
 
 ## 数据安全
 
-- `data/master.key` 首次运行生成，权限为 `0600`；生产演示可通过 `OPS_AGENT_MASTER_KEY` 注入 Base64 编码的 32 字节密钥。
+- `data/master.key` 首次运行生成，权限为 `0600`；生产演示可通过 `OPSNERVA_MASTER_KEY` 注入 Base64 编码的 32 字节密钥。
 - Web 模型提供商的 API Key 同样采用 AES-256-GCM 加密保存，HTTP API 只暴露是否已配置密钥。
 - 主机 SSH/sudo 密码采用 AES-256-GCM 加密保存；HTTP 和 LLM 工具只暴露 `has_password`、`has_sudo_password` 能力标记。
 - 原始请求和 stdout/stderr 加密保存；数据库只额外保存脱敏视图用于检索和模型上下文。
@@ -364,11 +364,11 @@ make test-web   # TypeScript + Vite 构建
 make build      # 构建 Web 与单二进制后端
 make check      # 测试并构建全部组件
 
-./bin/ops-agent chat
-./bin/ops-agent exec --host HOST_ID --program uname --arg -a --reason diagnosis
-./bin/ops-agent audit search "systemctl"
-./bin/ops-agent audit show RUN_ID
-./bin/ops-agent audit show RUN_ID --raw
+./bin/opsnerva chat
+./bin/opsnerva exec --host HOST_ID --program uname --arg -a --reason diagnosis
+./bin/opsnerva audit search "systemctl"
+./bin/opsnerva audit show RUN_ID
+./bin/opsnerva audit show RUN_ID --raw
 
 ```
 

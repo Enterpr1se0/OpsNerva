@@ -64,7 +64,7 @@ func loadOrCreateKey(encodedKey, dataDir string) ([]byte, error) {
 	if encodedKey != "" {
 		key, err := decodeKey(encodedKey)
 		if err != nil {
-			return nil, fmt.Errorf("decode OPS_AGENT_MASTER_KEY: %w", err)
+			return nil, fmt.Errorf("decode OPSNERVA_MASTER_KEY: %w", err)
 		}
 		return key, nil
 	}

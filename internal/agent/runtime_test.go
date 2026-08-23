@@ -15,11 +15,11 @@ import (
 	"testing"
 	"time"
 
-	"eino-ops-agent/internal/config"
-	"eino-ops-agent/internal/domain"
-	"eino-ops-agent/internal/security"
-	"eino-ops-agent/internal/service"
-	"eino-ops-agent/internal/store"
+	"github.com/Enterpr1se0/opsnerva/internal/config"
+	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/security"
+	"github.com/Enterpr1se0/opsnerva/internal/service"
+	"github.com/Enterpr1se0/opsnerva/internal/store"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/compose"

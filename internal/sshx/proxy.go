@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"strings"
 
-	"eino-ops-agent/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/domain"
 
 	netproxy "golang.org/x/net/proxy"
 )

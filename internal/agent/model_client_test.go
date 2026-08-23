@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"eino-ops-agent/internal/config"
+	"github.com/Enterpr1se0/opsnerva/internal/config"
 
 	"github.com/cloudwego/eino/schema"
 )

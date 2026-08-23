@@ -1,7 +1,7 @@
 .PHONY: dev-api dev-web build build-go build-web test test-web check clean
 
 dev-api: build-web
-	go run ./cmd/ops-agent serve
+	go run ./cmd/opsnerva serve
 
 dev-web:
 	npm --prefix web run dev
@@ -14,7 +14,7 @@ build-web:
 
 build-go: build-web
 	mkdir -p bin
-	go build -buildvcs=false -trimpath -ldflags="-s -w" -o bin/ops-agent ./cmd/ops-agent
+	go build -buildvcs=false -trimpath -ldflags="-s -w" -o bin/opsnerva ./cmd/opsnerva
 
 test: build-web
 	go test ./...

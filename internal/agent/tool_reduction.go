@@ -6,7 +6,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"eino-ops-agent/internal/observability"
+	"github.com/Enterpr1se0/opsnerva/internal/observability"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/middlewares/reduction"

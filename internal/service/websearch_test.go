@@ -15,7 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"eino-ops-agent/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/domain"
 )
 
 func TestTavilyWebSearchUsesConfiguredProxyAndKeepsCredentialsEncrypted(t *testing.T) {

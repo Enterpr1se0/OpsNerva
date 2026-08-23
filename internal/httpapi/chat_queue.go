@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"eino-ops-agent/internal/domain"
-	"eino-ops-agent/internal/ids"
+	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/ids"
 )
 
 const maxQueuedChatMessages = 20

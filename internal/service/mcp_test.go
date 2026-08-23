@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"eino-ops-agent/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/domain"
 
 	officialmcp "github.com/cloudwego/eino-ext/components/tool/mcp/officialmcp"
 	"github.com/cloudwego/eino/components/tool"

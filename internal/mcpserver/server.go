@@ -7,11 +7,11 @@ import (
 	"net/http"
 	"strings"
 
-	"eino-ops-agent/internal/agent"
-	"eino-ops-agent/internal/domain"
-	"eino-ops-agent/internal/ids"
-	"eino-ops-agent/internal/service"
-	"eino-ops-agent/internal/sshx"
+	"github.com/Enterpr1se0/opsnerva/internal/agent"
+	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/ids"
+	"github.com/Enterpr1se0/opsnerva/internal/service"
+	"github.com/Enterpr1se0/opsnerva/internal/sshx"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"

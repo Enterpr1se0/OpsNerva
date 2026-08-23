@@ -5,9 +5,9 @@ import (
 	"sync"
 	"time"
 
-	"eino-ops-agent/internal/agent"
-	"eino-ops-agent/internal/config"
-	"eino-ops-agent/internal/ids"
+	"github.com/Enterpr1se0/opsnerva/internal/agent"
+	"github.com/Enterpr1se0/opsnerva/internal/config"
+	"github.com/Enterpr1se0/opsnerva/internal/ids"
 )
 
 const modelTestRetention = 10 * time.Minute

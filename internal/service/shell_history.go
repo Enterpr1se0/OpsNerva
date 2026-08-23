@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"sync"
 
-	"eino-ops-agent/internal/domain"
-	"eino-ops-agent/internal/store"
+	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/store"
 )
 
 const (

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"eino-ops-agent/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/domain"
 )
 
 func (s *Store) StartMCPToolCall(ctx context.Context, session domain.MCPClientSession, call domain.MCPToolCall) error {

@@ -16,8 +16,8 @@ import (
 	"strings"
 	"time"
 
-	"eino-ops-agent/internal/domain"
-	"eino-ops-agent/internal/ids"
+	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/ids"
 
 	"github.com/klauspost/compress/zstd"
 	_ "modernc.org/sqlite"

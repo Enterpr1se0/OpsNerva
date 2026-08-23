@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"eino-ops-agent/internal/config"
-	"eino-ops-agent/internal/security"
-	"eino-ops-agent/internal/service"
-	"eino-ops-agent/internal/store"
+	"github.com/Enterpr1se0/opsnerva/internal/config"
+	"github.com/Enterpr1se0/opsnerva/internal/security"
+	"github.com/Enterpr1se0/opsnerva/internal/service"
+	"github.com/Enterpr1se0/opsnerva/internal/store"
 )
 
 func TestWorkspaceFileEventsStreamsExternalChanges(t *testing.T) {

@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"eino-ops-agent/internal/agent"
-	"eino-ops-agent/internal/observability"
+	"github.com/Enterpr1se0/opsnerva/internal/agent"
+	"github.com/Enterpr1se0/opsnerva/internal/observability"
 )
 
 const chatEventSubscriberBuffer = 128

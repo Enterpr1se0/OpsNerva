@@ -18,8 +18,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"eino-ops-agent/internal/config"
-	"eino-ops-agent/internal/security"
+	"github.com/Enterpr1se0/opsnerva/internal/config"
+	"github.com/Enterpr1se0/opsnerva/internal/security"
 )
 
 type LogEntry struct {
@@ -159,7 +159,7 @@ func Configure(cfg config.Logging) error {
 	buffer := &Buffer{limit: cfg.RecentLimit}
 	activeBuffer.Store(buffer)
 	handlers = append(handlers, &bufferHandler{buffer: buffer, level: levelVar})
-	logger := slog.New(&redactingHandler{next: slog.NewMultiHandler(handlers...)}).With("service", "ops-agent")
+	logger := slog.New(&redactingHandler{next: slog.NewMultiHandler(handlers...)}).With("service", "opsnerva")
 	slog.SetDefault(logger)
 	slog.SetLogLoggerLevel(level)
 	return nil
@@ -248,7 +248,7 @@ func WriteArchive(writer io.Writer, diagnostics Diagnostics) error {
 		}
 	}
 	if written == 0 {
-		entry, err := archive.Create("ops-agent-memory.jsonl")
+		entry, err := archive.Create("opsnerva-memory.jsonl")
 		if err != nil {
 			_ = archive.Close()
 			return fmt.Errorf("create in-memory log archive entry: %w", err)

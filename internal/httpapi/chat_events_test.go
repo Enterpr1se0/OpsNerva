@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"eino-ops-agent/internal/agent"
+	"github.com/Enterpr1se0/opsnerva/internal/agent"
 )
 
 func TestChatEventHubReplaysMissedEventsAndContinuesLive(t *testing.T) {

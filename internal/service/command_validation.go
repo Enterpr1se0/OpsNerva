@@ -6,7 +6,7 @@ import (
 	"path"
 	"strings"
 
-	"eino-ops-agent/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/domain"
 
 	"mvdan.cc/sh/v3/syntax"
 )

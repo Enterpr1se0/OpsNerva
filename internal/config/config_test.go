@@ -73,10 +73,10 @@ func TestLoadResolvesRuntimePathsRelativeToConfigurationDirectory(t *testing.T) 
 	if cfg.DataDir != filepath.Join(configRoot, "data") {
 		t.Fatalf("data directory = %q", cfg.DataDir)
 	}
-	if cfg.DatabasePath != filepath.Join(configRoot, "data", "ops-agent.db") {
+	if cfg.DatabasePath != filepath.Join(configRoot, "data", "opsnerva.db") {
 		t.Fatalf("database path = %q", cfg.DatabasePath)
 	}
-	if cfg.Logging.File != filepath.Join(configRoot, "data", "ops-agent.log") {
+	if cfg.Logging.File != filepath.Join(configRoot, "data", "opsnerva.log") {
 		t.Fatalf("log path = %q", cfg.Logging.File)
 	}
 	if cfg.SSH.DefaultKnownHosts != filepath.Join(configRoot, "data", "known_hosts") {
@@ -188,9 +188,9 @@ func TestOptionalAuthenticationLoadsFromYAMLAndEnvironment(t *testing.T) {
 	if !cfg.Auth.Enabled() || cfg.Auth.Username != "operator" || cfg.Auth.Password != "yaml-password" || cfg.Auth.SessionTTLHours != 12 {
 		t.Fatalf("YAML authentication = %#v", cfg.Auth)
 	}
-	t.Setenv("OPS_AGENT_AUTH_USERNAME", "environment-operator")
-	t.Setenv("OPS_AGENT_AUTH_PASSWORD", "environment-password")
-	t.Setenv("OPS_AGENT_AUTH_SESSION_TTL_HOURS", "36")
+	t.Setenv("OPSNERVA_AUTH_USERNAME", "environment-operator")
+	t.Setenv("OPSNERVA_AUTH_PASSWORD", "environment-password")
+	t.Setenv("OPSNERVA_AUTH_SESSION_TTL_HOURS", "36")
 	cfg, err = Load(path)
 	if err != nil {
 		t.Fatal(err)
@@ -198,7 +198,7 @@ func TestOptionalAuthenticationLoadsFromYAMLAndEnvironment(t *testing.T) {
 	if cfg.Auth.Username != "environment-operator" || cfg.Auth.Password != "environment-password" || cfg.Auth.SessionTTLHours != 36 {
 		t.Fatalf("environment authentication = %#v", cfg.Auth)
 	}
-	t.Setenv("OPS_AGENT_AUTH_PASSWORD", "short")
+	t.Setenv("OPSNERVA_AUTH_PASSWORD", "short")
 	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "at least 8") {
 		t.Fatalf("short authentication password was accepted: %v", err)
 	}

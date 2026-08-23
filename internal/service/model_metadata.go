@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"eino-ops-agent/internal/domain"
-	"eino-ops-agent/internal/proxyx"
+	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/proxyx"
 )
 
 const (

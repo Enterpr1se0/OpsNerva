@@ -249,7 +249,7 @@ const en = {
     search: 'Search messages, IDs, hosts, status...', minimumLevel: 'Level', component: 'Component', allComponents: 'All components', live: 'Live · 3s', paused: 'Paused',
 		export: 'Export diagnostics',
     entries: '{{count}} recent entries', file: 'Log path: {{file}}', fileDisabled: 'File logging disabled',
-    debugHint: 'Debug logs are off. Set OPS_AGENT_LOG_LEVEL=debug and restart the service.',
+    debugHint: 'Debug logs are off. Set OPSNERVA_LOG_LEVEL=debug and restart the service.',
     columns: { time: 'Time', level: 'Level', component: 'Component', event: 'Event / fields' }, general: 'general', emptyTitle: 'No matching server logs',
   },
   statusLabels: { pending: 'pending', completed: 'completed', skipped: 'skipped', partial: 'partial', closed: 'closed', expired: 'expired', failed: 'failed', unknown: 'result unknown', active: 'active', running: 'running', retrying: 'retrying', stopping: 'stopping', stopped: 'stopped', blocked: 'blocked', in_progress: 'in progress', ready: 'ready', error: 'error', connecting: 'connecting', interrupted: 'interrupted', rejected: 'rejected', approval_required: 'approval required' },

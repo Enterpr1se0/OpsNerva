@@ -37,7 +37,7 @@
 通过 CLI 请求一个仅作用于测试目录的删除：
 
 ```bash
-./bin/ops-agent exec --host demo --program rm --arg -rf --arg /tmp/opsnerva-demo \
+./bin/opsnerva exec --host demo --program rm --arg -rf --arg /tmp/opsnerva-demo \
   --reason "remove disposable demo directory"
 ```
 

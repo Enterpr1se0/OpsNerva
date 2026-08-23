@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"eino-ops-agent/internal/skills"
+	"github.com/Enterpr1se0/opsnerva/internal/skills"
 )
 
 type SkillContentInput struct {

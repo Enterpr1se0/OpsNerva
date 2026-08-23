@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"eino-ops-agent/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/domain"
 )
 
 const (

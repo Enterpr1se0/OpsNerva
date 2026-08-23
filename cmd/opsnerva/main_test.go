@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"eino-ops-agent/internal/config"
+	"github.com/Enterpr1se0/opsnerva/internal/config"
 )
 
 func TestPrepareQuickStartUsesApplicationDirectoryAndKeepsConfig(t *testing.T) {
@@ -50,7 +50,7 @@ func TestPrepareQuickStartUsesConfiguredHome(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chdir(previous) })
 	appDir := t.TempDir()
-	t.Setenv("OPS_AGENT_HOME", appDir)
+	t.Setenv("OPSNERVA_HOME", appDir)
 
 	path, created, err := prepareQuickStart()
 	if err != nil {
@@ -93,12 +93,12 @@ func TestDesktopReadyLineIsMachineReadable(t *testing.T) {
 }
 
 func TestEnvBool(t *testing.T) {
-	t.Setenv("OPS_AGENT_DESKTOP", "true")
-	if !envBool("OPS_AGENT_DESKTOP") {
+	t.Setenv("OPSNERVA_DESKTOP", "true")
+	if !envBool("OPSNERVA_DESKTOP") {
 		t.Fatal("expected true")
 	}
-	t.Setenv("OPS_AGENT_DESKTOP", "invalid")
-	if envBool("OPS_AGENT_DESKTOP") {
+	t.Setenv("OPSNERVA_DESKTOP", "invalid")
+	if envBool("OPSNERVA_DESKTOP") {
 		t.Fatal("invalid boolean must be false")
 	}
 }

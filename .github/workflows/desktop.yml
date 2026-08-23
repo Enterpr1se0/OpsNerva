@@ -61,7 +61,7 @@ jobs:
             artifact: opsnerva-macos-arm64
             # Upload only the dmg. A .app bundle is a directory; recursive
             # artifact upload flattens Contents/* into release assets
-            # (icon.icns, Info.plist, ops-agent, opsnerva-desktop).
+            # (icon.icns, Info.plist, opsnerva, opsnerva-desktop).
             paths: web/src-tauri/target/release/bundle/dmg/*.dmg
     runs-on: ${{ matrix.os }}
     steps:
@@ -120,7 +120,7 @@ jobs:
           CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
             go build -buildvcs=false -trimpath -ldflags="-s -w" \
             -o dist/opsnerva-server-${{ matrix.goos }}-${{ matrix.goarch }} \
-            ./cmd/ops-agent
+            ./cmd/opsnerva
 
       - uses: actions/upload-artifact@v7
         with:

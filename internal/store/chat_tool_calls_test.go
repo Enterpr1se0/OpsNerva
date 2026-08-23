@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"eino-ops-agent/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/domain"
 )
 
 func TestChatToolCallPersistsStableLifecycleAndContextResult(t *testing.T) {

@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"eino-ops-agent/internal/config"
-	"eino-ops-agent/internal/observability"
-	"eino-ops-agent/internal/proxyx"
+	"github.com/Enterpr1se0/opsnerva/internal/config"
+	"github.com/Enterpr1se0/opsnerva/internal/observability"
+	"github.com/Enterpr1se0/opsnerva/internal/proxyx"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/cloudwego/eino-ext/components/model/claude"

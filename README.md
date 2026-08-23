@@ -156,7 +156,7 @@ docker run --rm -p 8080:8080 \
 git clone https://github.com/Enterpr1se0/opsnerva.git
 cd opsnerva
 make build
-./bin/ops-agent
+./bin/opsnerva
 ```
 
 无参数启动会在可执行文件同目录生成 `config.yaml`、`data/` 和 `workspace/`，已有配置不会被覆盖。Windows 的构建命令见[使用手册](docs/guide.md#windows-powershell)。
@@ -168,7 +168,7 @@ make build
 3. 在 **配置 → SSH 主机** 添加主机，扫描并人工核对 Host Key 指纹后信任。
 4. 回到 **Agent** 新建会话，开始对话。
 
-> App API 默认只监听本机。可通过 `config.yaml` 的 `auth` 或 `OPS_AGENT_AUTH_*` 环境变量启用登录和加密配置迁移。
+> App API 默认只监听本机。可通过 `config.yaml` 的 `auth` 或 `OPSNERVA_AUTH_*` 环境变量启用登录和加密配置迁移。
 
 ---
 

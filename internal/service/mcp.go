@@ -17,9 +17,9 @@ import (
 	"strings"
 	"time"
 
-	"eino-ops-agent/internal/domain"
-	"eino-ops-agent/internal/observability"
-	"eino-ops-agent/internal/proxyx"
+	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/observability"
+	"github.com/Enterpr1se0/opsnerva/internal/proxyx"
 
 	officialmcp "github.com/cloudwego/eino-ext/components/tool/mcp/officialmcp"
 	"github.com/cloudwego/eino/components/tool"

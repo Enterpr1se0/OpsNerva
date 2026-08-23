@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"eino-ops-agent/internal/config"
+	"github.com/Enterpr1se0/opsnerva/internal/config"
 )
 
 const authSessionCookie = "opsnerva_session"

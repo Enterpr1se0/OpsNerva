@@ -21,16 +21,16 @@ import (
 	"syscall"
 	"time"
 
-	"eino-ops-agent/internal/agent"
-	"eino-ops-agent/internal/config"
-	"eino-ops-agent/internal/domain"
-	"eino-ops-agent/internal/httpapi"
-	"eino-ops-agent/internal/mcpserver"
-	"eino-ops-agent/internal/observability"
-	"eino-ops-agent/internal/security"
-	"eino-ops-agent/internal/service"
-	"eino-ops-agent/internal/sshx"
-	"eino-ops-agent/internal/store"
+	"github.com/Enterpr1se0/opsnerva/internal/agent"
+	"github.com/Enterpr1se0/opsnerva/internal/config"
+	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/httpapi"
+	"github.com/Enterpr1se0/opsnerva/internal/mcpserver"
+	"github.com/Enterpr1se0/opsnerva/internal/observability"
+	"github.com/Enterpr1se0/opsnerva/internal/security"
+	"github.com/Enterpr1se0/opsnerva/internal/service"
+	"github.com/Enterpr1se0/opsnerva/internal/sshx"
+	"github.com/Enterpr1se0/opsnerva/internal/store"
 )
 
 const version = "0.3.1"
@@ -62,7 +62,7 @@ func main() {
 
 func run(ctx context.Context, args []string) error {
 	quickStart := len(args) == 0
-	configPath := os.Getenv("OPS_AGENT_CONFIG")
+	configPath := os.Getenv("OPSNERVA_CONFIG")
 	if len(args) >= 2 && args[0] == "--config" {
 		configPath = args[1]
 		args = args[2:]
@@ -111,7 +111,7 @@ func run(ctx context.Context, args []string) error {
 	switch args[0] {
 	case "serve":
 		return serve(ctx, app, serveOptions{
-			QuickStart: quickStart, Desktop: quickStart && envBool("OPS_AGENT_DESKTOP"), ConfigPath: configPath,
+			QuickStart: quickStart, Desktop: quickStart && envBool("OPSNERVA_DESKTOP"), ConfigPath: configPath,
 			ConfigCreated: configCreated, WorkspaceRoot: cfg.WorkspaceDir,
 		})
 	case "mcp":
@@ -167,7 +167,7 @@ func newApplication(ctx context.Context, cfg config.Config) (*application, error
 }
 
 func prepareQuickStart() (string, bool, error) {
-	if appDir := strings.TrimSpace(os.Getenv("OPS_AGENT_HOME")); appDir != "" {
+	if appDir := strings.TrimSpace(os.Getenv("OPSNERVA_HOME")); appDir != "" {
 		return prepareQuickStartIn(appDir)
 	}
 	executable, err := os.Executable()
@@ -528,15 +528,15 @@ func usage() {
 	fmt.Println(`OpsNerva ` + version + `
 
 Usage:
-  ops-agent                         Create/load config.yaml and start the Web UI
-  ops-agent [--config FILE] serve
-  ops-agent [--config FILE] chat
-  ops-agent [--config FILE] mcp
-  ops-agent [--config FILE] host add|list|probe|scan-key|trust|delete
-  ops-agent [--config FILE] exec --host ID --program PROGRAM --arg ARG
-  ops-agent [--config FILE] approval list|approve|reject
-  ops-agent [--config FILE] audit search|show
-  ops-agent version`)
+  opsnerva                         Create/load config.yaml and start the Web UI
+  opsnerva [--config FILE] serve
+  opsnerva [--config FILE] chat
+  opsnerva [--config FILE] mcp
+  opsnerva [--config FILE] host add|list|probe|scan-key|trust|delete
+  opsnerva [--config FILE] exec --host ID --program PROGRAM --arg ARG
+  opsnerva [--config FILE] approval list|approve|reject
+  opsnerva [--config FILE] audit search|show
+  opsnerva version`)
 }
 
 var _ = strconv.Itoa

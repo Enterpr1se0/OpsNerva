@@ -10,7 +10,7 @@ import (
 
 	ptylib "github.com/aymanbagabas/go-pty"
 
-	"eino-ops-agent/internal/sshx"
+	"github.com/Enterpr1se0/opsnerva/internal/sshx"
 )
 
 type workspacePTYSession struct {

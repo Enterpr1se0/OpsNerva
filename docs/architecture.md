@@ -12,7 +12,7 @@ LLM、Prompt、Skill、远程输出和 MCP Client 都不属于可信计算基。
 
 Eino Tool、MCP Tool、HTTP 和 CLI 都是这个 Service 的适配器。模型侧执行结果只保留状态、有效输出和必要标识；预期失败额外返回 `code/message/retryable` 与可用的结构化校验信息。只有上下文取消或内部持久化损坏会成为 ToolNode fatal error。
 
-这里的 MCP Tool 分为两个方向。`ops-agent mcp` 通过 stdio、设置中的 MCP Server Mode 通过同一 HTTP 服务上的 `/mcp`，把受控 SSH Service 暴露给 MCP Client，因此完整复用输入校验、审批模式和审计。只读工具通过 MCP annotations 明确标记；`ssh_shell` 使用独立 MCP surface，`ssh_tunnel` 复用已有转发状态，`ssh_history` 只能读取当前 MCP 会话创建的运行。HTTP 使用有状态 Streamable HTTP，由服务端为每次 initialize 分配高熵 `mcp_sess_*`；stdio 进程拥有一个独立会话。客户端上报的 name/version 仅作展示，不作为身份认证，共享 Bearer Token 仍是 HTTP 访问边界。设置开关按请求即时生效，Token 仅在生成时返回，SQLite 只保存 SHA-256 摘要。管理员配置的外部 MCP Server 则属于独立信任域：它的工具在远端/子进程自身权限下执行，不自动继承 OpsNerva 的审批控制。Web 会明确提示该边界，只有启用状态为 ready 且未被 func 管理单独关闭的外部工具才进入主 Agent，审批 Agent 仍保持无 Tool。
+这里的 MCP Tool 分为两个方向。`opsnerva mcp` 通过 stdio、设置中的 MCP Server Mode 通过同一 HTTP 服务上的 `/mcp`，把受控 SSH Service 暴露给 MCP Client，因此完整复用输入校验、审批模式和审计。只读工具通过 MCP annotations 明确标记；`ssh_shell` 使用独立 MCP surface，`ssh_tunnel` 复用已有转发状态，`ssh_history` 只能读取当前 MCP 会话创建的运行。HTTP 使用有状态 Streamable HTTP，由服务端为每次 initialize 分配高熵 `mcp_sess_*`；stdio 进程拥有一个独立会话。客户端上报的 name/version 仅作展示，不作为身份认证，共享 Bearer Token 仍是 HTTP 访问边界。设置开关按请求即时生效，Token 仅在生成时返回，SQLite 只保存 SHA-256 摘要。管理员配置的外部 MCP Server 则属于独立信任域：它的工具在远端/子进程自身权限下执行，不自动继承 OpsNerva 的审批控制。Web 会明确提示该边界，只有启用状态为 ready 且未被 func 管理单独关闭的外部工具才进入主 Agent，审批 Agent 仍保持无 Tool。
 
 App 控制面通过 loopback HTTP API 连接本地 Sidecar。`auth.password` 非空时，除登录状态、登录和退出接口外，普通 `/api/v1` 端点都要求进程内随机会话 Cookie；Cookie 为 `HttpOnly`、`SameSite=Lax`，TLS 下同时设置 `Secure`，会话只保存令牌 SHA-256 与过期时间，重启后失效。配置密码使用常量时间比较，登录失败按来源地址限速。未配置密码时保持本机无登录模式。MCP HTTP 使用独立 Bearer Token，不接受控制面 Cookie；MCP stdio 与 CLI 仍属于本机进程边界。
 
@@ -124,7 +124,7 @@ HTTP Chat Handler 使用保留 request logger/value、但移除浏览器取消�
 
 服务端日志与执行审计是两条独立链路：Audit 是 SQLite 中不可替代的安全证据，Server Logs 用于排查控制面运行状态。应用统一调用标准库 `log/slog`，初始化时通过 MultiHandler 分发到终端、JSONL 轮转文件和进程内环形缓冲区。成功的普通 GET、HEAD 和 OPTIONS 不写访问日志；超过 2 秒的只读请求记录为 Warn，写请求记录为 Info，4xx/5xx 分别记录为 Warn/Error。Web 通过单一应用 WebSocket 订阅连接、审批、会话、活动 Tool 状态、MCP 活动、健康和日志主题；普通主题仅在快照变化时发送，Agent 活动按当前 session ID 按需订阅，MCP 活动使用 REST 快照恢复并直接推送增量事件，日志首次发送筛选后的快照，随后只发送新增条目，重连或游标丢失时回退快照。终端仍使用独立 WebSocket，避免 PTY 流量阻塞控制面状态。
 
-HTTP Middleware 始终为请求生成 `request_id` 并通过 context 传递给 Agent、Approval 与 SSH 层；需要记录访问事件时附带 method、path、status、耗时、响应字节和来源 IP，因此一次请求的跨层事件可以关联检索。模型输入、reasoning token、HTTP body、命令参数、脚本和远端输出均不进入服务日志，只记录长度、计数、ID 与最终状态。统一脱敏 Handler 会处理结构化敏感字段，并清理消息、错误文本和嵌套对象中的 Authorization、Bearer/Basic、密码、Token、API Key、私钥与常见云凭据格式。Debug 日志默认启用，可通过配置或 `OPS_AGENT_LOG_LEVEL=info` 降低详细程度。
+HTTP Middleware 始终为请求生成 `request_id` 并通过 context 传递给 Agent、Approval 与 SSH 层；需要记录访问事件时附带 method、path、status、耗时、响应字节和来源 IP，因此一次请求的跨层事件可以关联检索。模型输入、reasoning token、HTTP body、命令参数、脚本和远端输出均不进入服务日志，只记录长度、计数、ID 与最终状态。统一脱敏 Handler 会处理结构化敏感字段，并清理消息、错误文本和嵌套对象中的 Authorization、Bearer/Basic、密码、Token、API Key、私钥与常见云凭据格式。Debug 日志默认启用，可通过配置或 `OPSNERVA_LOG_LEVEL=info` 降低详细程度。
 
 Web 导出接口返回诊断 ZIP：`diagnostics.json` 仅包含版本、Go/OS/架构、启动时间、非敏感日志配置、Agent/模型状态及资源数量；其余条目为当前 JSONL 文件和轮转备份，文件日志关闭时回退为内存日志 JSONL。归档阶段会再次解析并脱敏已有结构化日志，避免旧文件中的常见凭据格式直接进入诊断包。诊断包不包含系统 Prompt、主机地址、Workspace 路径、数据库、审计原文或浏览器控制台日志。
 

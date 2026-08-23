@@ -249,7 +249,7 @@ const zh = {
     search: '搜索消息、ID、主机和状态...', minimumLevel: '级别', component: '组件', allComponents: '全部组件', live: '实时 · 3 秒', paused: '已暂停',
 		export: '导出诊断包',
     entries: '最近 {{count}} 条', file: '日志路径：{{file}}', fileDisabled: '文件日志未启用',
-    debugHint: 'Debug 日志未启用。设置 OPS_AGENT_LOG_LEVEL=debug 后重启服务。',
+    debugHint: 'Debug 日志未启用。设置 OPSNERVA_LOG_LEVEL=debug 后重启服务。',
     columns: { time: '时间', level: '级别', component: '组件', event: '事件 / 字段' }, general: '通用', emptyTitle: '没有匹配的服务日志',
   },
   statusLabels: { pending: '待处理', completed: '已完成', skipped: '已跳过', partial: '部分成功', closed: '已关闭', expired: '已到期', failed: '失败', unknown: '结果未知', active: '进行中', running: '运行中', retrying: '重试中', stopping: '停止中', stopped: '已停止', blocked: '已阻塞', in_progress: '执行中', ready: '就绪', error: '错误', connecting: '连接中', interrupted: '已中断', rejected: '已拒绝', approval_required: '待审批' },

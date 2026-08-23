@@ -94,7 +94,7 @@ func mustJSON(value any) []byte {
 }
 
 func TestRotatingWriterKeepsBoundedBackups(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "ops-agent.log")
+	path := filepath.Join(t.TempDir(), "opsnerva.log")
 	writer, err := newRotatingWriter(path, 10, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -121,11 +121,11 @@ func TestRotatingWriterKeepsBoundedBackups(t *testing.T) {
 
 func TestWriteArchiveIncludesCurrentLogAndRotatedBackups(t *testing.T) {
 	root := t.TempDir()
-	path := filepath.Join(root, "ops-agent.log")
+	path := filepath.Join(root, "opsnerva.log")
 	files := map[string]string{
-		"ops-agent.log":   "current\n",
-		"ops-agent.log.1": "backup-one\n",
-		"ops-agent.log.2": "backup-two\n",
+		"opsnerva.log":   "current\n",
+		"opsnerva.log.1": "backup-one\n",
+		"opsnerva.log.2": "backup-two\n",
 	}
 	for name, content := range files {
 		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o600); err != nil {
@@ -198,7 +198,7 @@ func TestWriteArchiveFallsBackToInMemoryJSONL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(reader.File) != 2 || reader.File[0].Name != "diagnostics.json" || reader.File[1].Name != "ops-agent-memory.jsonl" {
+	if len(reader.File) != 2 || reader.File[0].Name != "diagnostics.json" || reader.File[1].Name != "opsnerva-memory.jsonl" {
 		t.Fatalf("unexpected archive entries: %#v", reader.File)
 	}
 	entry, err := reader.File[1].Open()
@@ -216,7 +216,7 @@ func TestWriteArchiveFallsBackToInMemoryJSONL(t *testing.T) {
 }
 
 func TestWriteArchiveRedactsExistingLogFiles(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "ops-agent.log")
+	path := filepath.Join(t.TempDir(), "opsnerva.log")
 	content := `{"level":"ERROR","msg":"password=legacy-secret","password":"field-secret","details":{"api_key":"nested-secret"}}` + "\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"eino-ops-agent/internal/agent"
+	"github.com/Enterpr1se0/opsnerva/internal/agent"
 )
 
 type flushRecorder struct {

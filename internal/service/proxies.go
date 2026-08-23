@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"eino-ops-agent/internal/domain"
-	"eino-ops-agent/internal/proxyx"
-	"eino-ops-agent/internal/sshx"
-	"eino-ops-agent/internal/store"
+	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/proxyx"
+	"github.com/Enterpr1se0/opsnerva/internal/sshx"
+	"github.com/Enterpr1se0/opsnerva/internal/store"
 )
 
 var ErrProxyInUse = errors.New("proxy is in use")
