@@ -147,7 +147,7 @@ const en = {
     emptyTitle: 'What should we investigate?',
     retryingModel: 'Retrying model · attempt {{attempt}}/{{max}}', reconnecting: 'Reconnecting · attempt {{attempt}} · {{delay}}s',
     stopping: 'Stopping Agent', cooking: 'Cooking… ( •̀ᴗ•́ )و', pondering: 'Pondering… (｡•̀ᴗ-)✧', brewing: 'Brewing… (っ˘ڡ˘ς)', weaving: 'Weaving… (づ｡◕‿‿◕｡)づ', polishing: 'Polishing… ᕙ(⇀‸↼‶)ᕗ', crunching: 'Crunching… (ง •̀_•́)ง', stopTitle: 'Stop Agent run',
-    hostsCount: '{{count}} hosts: {{names}}', noHosts: 'No hosts available to Agent', switchHosts: 'Switch Agent hosts', switchModel: 'Switch model', workspaceSelected: 'Workspace: {{id}}', noWorkspace: 'No Workspace', noModel: 'No active model',
+    hostsCount: '{{count}} hosts: {{names}}', noHosts: 'No hosts available to Agent', switchHosts: 'Switch Agent hosts', rootAccess: 'Allow root access', switchModel: 'Switch model', workspaceSelected: 'Workspace: {{id}}', noWorkspace: 'No Workspace', noModel: 'No active model',
     configureModel: 'Configure and activate a model provider', loadingConversation: 'Loading conversation...',
     steerPlaceholder: 'Steer the current task...', queueMessage: 'Queue follow-up', steerMessage: 'Steer now', followup: 'Follow-up', steering: 'Steer', queuedImages: '{{count}} images', prompt: 'Message...',
     approvalCount: '{{count}} approval', runningBadge: 'running', messageCount: '{{count}} messages', renameConversation: 'Rename conversation', sessionTitle: 'Conversation title', deleteConversation: 'Delete conversation',

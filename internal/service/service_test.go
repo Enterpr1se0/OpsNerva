@@ -433,6 +433,7 @@ func testSSHPrivateKey(t *testing.T) []byte {
 
 func TestElevatedExecutionUsesManagedSecretAfterApproval(t *testing.T) {
 	svc, transport, _ := newTestService(t)
+	agentRootEnabled := true
 	host, err := svc.SaveHost(context.Background(), domain.HostInput{
 		Name: "sudo-host", Address: "192.0.2.11", Port: 22, User: "ops", AuthType: "password",
 		Password: "ssh-secret", SudoMode: "password", SudoPassword: "sudo-secret",
@@ -440,8 +441,13 @@ func TestElevatedExecutionUsesManagedSecretAfterApproval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	host, err = svc.SetHostAgentRootEnabled(context.Background(), host.ID, agentRootEnabled, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
 	callArguments := `{"host_id":"sudo-host","program":"id","elevated":true,"reason":"verify managed root access"}`
-	result, err := svc.Submit(WithExecutionOwner(context.Background(), "call-elevated", "ssh_exec", callArguments), domain.ExecRequest{
+	ctx := WithExecutionOwner(context.Background(), "call-elevated", "ssh_exec", callArguments)
+	result, err := svc.Submit(ctx, domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "id", Elevated: true, Reason: "verify managed root access",
 	}, "eino-agent")
 	if err != nil {

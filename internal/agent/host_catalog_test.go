@@ -33,12 +33,12 @@ func TestHostCatalogMiddlewareInjectsFreshCatalogEachRun(t *testing.T) {
 		t.Fatalf("empty host catalog prompt = %q", first.Instruction)
 	}
 
-	fixture.hosts = []domain.HostCapability{{ID: "host_dynamic", Name: "production", AuthType: "key", SudoMode: "passwordless"}}
+	fixture.hosts = []domain.HostCapability{{ID: "host_dynamic", Name: "production", User: "ops", AgentRootEnabled: true, AuthType: "key", SudoMode: "nopasswd"}}
 	_, second, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext{Instruction: "base"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`"id":"host_dynamic"`, `"name":"production"`, `"auth_type":"key"`, `"sudo_mode":"passwordless"`} {
+	for _, want := range []string{`"id":"host_dynamic"`, `"name":"production"`, `"user":"ops"`, `"agent_root_enabled":true`, `"auth_type":"key"`, `"sudo_mode":"nopasswd"`} {
 		if !strings.Contains(second.Instruction, want) {
 			t.Fatalf("updated host catalog prompt is missing %q: %s", want, second.Instruction)
 		}

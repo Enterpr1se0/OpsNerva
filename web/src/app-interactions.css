@@ -392,6 +392,27 @@ body {
   animation-name: app-composer-host-popover-in;
 }
 
+.composer-host-option {
+  display: flex;
+  gap: 3px;
+}
+
+.composer-host-option > button:first-child {
+  flex: 1 1 auto;
+}
+
+.composer-host-root {
+  width: 34px !important;
+  flex: 0 0 34px;
+  justify-content: center !important;
+  padding: 6px !important;
+}
+
+.composer-host-root.active {
+  color: #ffbd66 !important;
+  background: #201a10 !important;
+}
+
 /* Disclosure surfaces keep their native keyboard semantics while animating
    the browser-managed content box in engines that support it. */
 @supports (interpolate-size: allow-keywords) and selector(details::details-content) {

@@ -209,6 +209,7 @@ export const api = {
   renameSFTPEntry: (hostId:string,sourcePath:string,destinationPath:string) => request<SFTPMutationResult>(`/api/v1/hosts/${encodeURIComponent(hostId)}/sftp/entries`, { method:'PATCH', body:JSON.stringify({source_path:sourcePath,destination_path:destinationPath}) }),
   deleteSFTPEntry: (hostId:string,path:string,recursive=false) => request<SFTPMutationResult>(`/api/v1/hosts/${encodeURIComponent(hostId)}/sftp/entries?path=${encodeURIComponent(path)}&recursive=${recursive}`, { method:'DELETE' }),
   saveHost: (host: HostInput) => request<Host>('/api/v1/hosts', { method: 'POST', body: JSON.stringify(host) }),
+  setHostAgentRootAccess: (id:string,enabled:boolean) => request<Host>(`/api/v1/hosts/${encodeURIComponent(id)}/agent-root`, { method:'PUT', body:JSON.stringify({enabled}) }),
   deleteHost: (id: string) => request<void>(`/api/v1/hosts/${id}`, { method: 'DELETE' }),
 	  scanKey: (id: string) => request<{ fingerprint: string; algorithm?: string; trusted: boolean }>(`/api/v1/hosts/${id}/scan-key`, { method: 'POST', body: '{}' }),
 	  trustKey: (id: string, fingerprint: string) => request<{ fingerprint: string; algorithm?: string; trusted: boolean }>(`/api/v1/hosts/${id}/trust-key`, { method: 'POST', body: JSON.stringify({ fingerprint }) }),

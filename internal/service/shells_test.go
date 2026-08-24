@@ -199,6 +199,52 @@ func TestOperatorCanStartShellWithoutAgentConversation(t *testing.T) {
 	}
 }
 
+func TestAgentRootShellInputStopsAfterAccessIsRevoked(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	host, err := svc.AddHost(context.Background(), domain.Host{
+		Name: "root shell fixture", Address: "127.0.0.2", Port: 22, User: "root", AgentEnabled: true,
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err = svc.SetHostAgentRootEnabled(context.Background(), host.ID, true, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sessionID = "session-root-shell"
+	ctx := WithSessionID(context.Background(), sessionID)
+	if _, err := svc.PrepareChatSession(ctx, sessionID, "", "test"); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := svc.StartSSHShell(ctx, host.ID, "", false, 80, 24, "test root shell revocation", "eino-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed", "operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shellID := approved.Shell.ID
+	svc.shellMu.RLock()
+	session := svc.shells[shellID].session.(*fakeShellSession)
+	svc.shellMu.RUnlock()
+	if _, err := svc.SetHostAgentRootEnabled(ctx, host.ID, false, "operator"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.SendSSHShellInput(ctx, shellID, sessionID, "id\r", "test revoked input", "eino-agent"); !errors.Is(err, ErrAgentRootAccessDenied) {
+		t.Fatalf("revoked root shell input error = %v", err)
+	}
+	session.mu.Lock()
+	inputs := len(session.inputs)
+	session.mu.Unlock()
+	if inputs != 0 {
+		t.Fatalf("revoked root shell received %d input writes", inputs)
+	}
+	if _, err := svc.CloseSSHShell(context.Background(), shellID, sessionID, "test cleanup", "operator"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGetSSHShellHostStatusUsesActiveConnection(t *testing.T) {
 	svc, _, host := newTestService(t)
 	shell, err := svc.StartOperatorSSHShell(context.Background(), host.ID, domain.SSHShellSurfaceWorkspace, "admin-web")

@@ -147,7 +147,7 @@ const zh = {
     emptyTitle: '需要排查什么？',
     retryingModel: '模型重试中 · 第 {{attempt}}/{{max}} 次', reconnecting: '正在重连 · 第 {{attempt}} 次 · {{delay}} 秒',
     stopping: '正在停止 Agent', cooking: 'Cooking… ( •̀ᴗ•́ )و', pondering: 'Pondering… (｡•̀ᴗ-)✧', brewing: 'Brewing… (っ˘ڡ˘ς)', weaving: 'Weaving… (づ｡◕‿‿◕｡)づ', polishing: 'Polishing… ᕙ(⇀‸↼‶)ᕗ', crunching: 'Crunching… (ง •̀_•́)ง', stopTitle: '停止 Agent 运行',
-    hostsCount: '{{count}} 台主机：{{names}}', noHosts: 'Agent 无可用主机', switchHosts: '切换 Agent 主机', switchModel: '切换模型', workspaceSelected: 'Workspace：{{id}}', noWorkspace: '未选择 Workspace', noModel: '没有活动模型',
+    hostsCount: '{{count}} 台主机：{{names}}', noHosts: 'Agent 无可用主机', switchHosts: '切换 Agent 主机', rootAccess: '允许 root 权限', switchModel: '切换模型', workspaceSelected: 'Workspace：{{id}}', noWorkspace: '未选择 Workspace', noModel: '没有活动模型',
     configureModel: '请配置并启用模型提供商', loadingConversation: '正在加载会话...',
     steerPlaceholder: '调整当前任务...', queueMessage: '后续处理', steerMessage: '立即引导', followup: '跟进', steering: '引导', queuedImages: '{{count}} 张图片', prompt: '输入消息...',
     approvalCount: '{{count}} 个审批', runningBadge: '运行中', messageCount: '{{count}} 条消息', renameConversation: '重命名会话', sessionTitle: '会话标题', deleteConversation: '删除会话',

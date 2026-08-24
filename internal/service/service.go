@@ -932,11 +932,15 @@ func (s *Service) SaveHost(ctx context.Context, input domain.HostInput, actor st
 	if input.AgentEnabled != nil {
 		agentEnabled = *input.AgentEnabled
 	}
+	agentRootEnabled := false
+	if hasExisting {
+		agentRootEnabled = existing.AgentRootEnabled
+	}
 
 	host := domain.Host{
 		ID: input.ID, Name: input.Name, Address: input.Address, Port: input.Port, User: input.User,
-		AgentEnabled: agentEnabled,
-		AuthType:     input.AuthType, KnownHostsFile: input.KnownHostsFile, ProxyJumpHostID: input.ProxyJumpHostID,
+		AgentEnabled: agentEnabled, AgentRootEnabled: agentRootEnabled,
+		AuthType: input.AuthType, KnownHostsFile: input.KnownHostsFile, ProxyJumpHostID: input.ProxyJumpHostID,
 		ProxyID: input.ProxyID, SudoMode: input.SudoMode,
 	}
 	if hasExisting {
@@ -991,13 +995,16 @@ func (s *Service) SaveHost(ctx context.Context, input domain.HostInput, actor st
 			return domain.Host{}, fmt.Errorf("load ProxyJump host %q: %w", input.ProxyJumpHostID, err)
 		}
 	}
+	if !hostSupportsRoot(host) {
+		host.AgentRootEnabled = false
+	}
 
 	created, err := s.store.UpsertHost(ctx, host)
 	if err != nil {
 		return domain.Host{}, err
 	}
 	s.audit(ctx, "", "host_saved", actor, map[string]any{
-		"host_id": created.ID, "name": created.Name, "agent_enabled": created.AgentEnabled, "auth_type": created.AuthType, "has_private_key": created.HasPrivateKey, "sudo_mode": created.SudoMode,
+		"host_id": created.ID, "name": created.Name, "agent_enabled": created.AgentEnabled, "agent_root_enabled": created.AgentRootEnabled, "auth_type": created.AuthType, "has_private_key": created.HasPrivateKey, "sudo_mode": created.SudoMode,
 	})
 	return created, nil
 }
@@ -1007,6 +1014,22 @@ func (s *Service) GetHost(ctx context.Context, id string) (domain.Host, error) {
 	if err != nil {
 		return domain.Host{}, err
 	}
+	return s.withStoredHostKey(host), nil
+}
+
+func (s *Service) SetHostAgentRootEnabled(ctx context.Context, id string, enabled bool, actor string) (domain.Host, error) {
+	host, err := s.store.GetHost(ctx, strings.TrimSpace(id))
+	if err != nil {
+		return domain.Host{}, err
+	}
+	if enabled && !hostSupportsRoot(host) {
+		return domain.Host{}, fmt.Errorf("%w: %q", ErrHostAgentRootUnavailable, host.Name)
+	}
+	host, err = s.store.SetHostAgentRootEnabled(ctx, host.ID, enabled)
+	if err != nil {
+		return domain.Host{}, err
+	}
+	s.audit(ctx, "", "host_agent_root_changed", actor, map[string]any{"host_id": host.ID, "enabled": enabled})
 	return s.withStoredHostKey(host), nil
 }
 
@@ -1047,7 +1070,7 @@ func (s *Service) ListHostCapabilities(ctx context.Context) ([]domain.HostCapabi
 		if resolveErr == nil && requireAgentSSHAccess("eino-agent", connection) != nil {
 			continue
 		}
-		result = append(result, domain.HostCapability{ID: host.ID, Name: host.Name, AuthType: host.AuthType, SudoMode: host.SudoMode})
+		result = append(result, domain.HostCapability{ID: host.ID, Name: host.Name, User: host.User, AgentRootEnabled: host.AgentRootEnabled, AuthType: host.AuthType, SudoMode: host.SudoMode})
 	}
 	return result, nil
 }
@@ -1151,15 +1174,18 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 	if err != nil {
 		return domain.ExecResult{}, err
 	}
+	var rootConnections []sshx.ConnectionSpec
 	if isWorkspaceMode(req.Mode) {
 		if req.SSHConnectionDigest != "" || req.SourceConnectionDigest != "" {
 			return domain.ExecResult{}, fmt.Errorf("SSH connection binding is invalid for local Workspace operations")
 		}
 	} else if req.Mode == domain.ExecSSHFileTransfer {
-		_, err = s.bindSSHFileTransfer(ctx, host, &req, actor)
+		connections, bindErr := s.bindSSHFileTransfer(ctx, host, &req, actor)
+		err = bindErr
 		if err != nil {
 			return domain.ExecResult{}, err
 		}
+		rootConnections = append(rootConnections, connections.Destination, connections.Source)
 	} else {
 		if req.SourceConnectionDigest != "" {
 			return domain.ExecResult{}, fmt.Errorf("source SSH connection binding is only valid for host-to-host transfers")
@@ -1172,6 +1198,10 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 			return domain.ExecResult{}, err
 		}
 		bindSSHRequest(&req, digest)
+		rootConnections = append(rootConnections, connection)
+	}
+	if err := authorizeAgentRootConnections(actor, req.Elevated, rootConnections...); err != nil {
+		return domain.ExecResult{}, err
 	}
 	if err := validateExecutionRequest(host, req); err != nil {
 		return domain.ExecResult{}, err

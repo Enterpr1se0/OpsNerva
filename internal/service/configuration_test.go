@@ -24,6 +24,10 @@ func TestConfigurationPackageMovesCredentialsAcrossMasterKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	passwordHost, err = source.SetHostAgentRootEnabled(ctx, passwordHost.ID, true, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
 	keyHost, err := source.SaveHost(ctx, domain.HostInput{
 		Name: "key migration", Address: "192.0.2.11", Port: 22, User: "ops", AgentEnabled: &agentEnabled,
 		AuthType: "key", PrivateKey: string(testSSHPrivateKey(t)), ProxyJumpHostID: passwordHost.ID, SudoMode: "none",
@@ -71,7 +75,7 @@ func TestConfigurationPackageMovesCredentialsAcrossMasterKeys(t *testing.T) {
 	}
 	password, _ := target.encryptor.Decrypt(targetPasswordHost.PasswordCipher)
 	sudoPassword, _ := target.encryptor.Decrypt(targetPasswordHost.SudoCipher)
-	if string(password) != "ssh-secret" || string(sudoPassword) != "sudo-secret" || targetPasswordHost.ProxyID != proxy.ID {
+	if string(password) != "ssh-secret" || string(sudoPassword) != "sudo-secret" || targetPasswordHost.ProxyID != proxy.ID || !targetPasswordHost.AgentRootEnabled {
 		t.Fatalf("host credentials or proxy reference did not migrate: %#v", targetPasswordHost)
 	}
 	targetKeyHost, err := target.store.GetHost(ctx, keyHost.ID)

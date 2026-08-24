@@ -45,7 +45,7 @@ func (s *Service) ExportConfiguration(ctx context.Context, applicationVersion, a
 	}
 	for _, host := range snapshot.Hosts {
 		item := domain.ConfigurationHost{
-			ID: host.ID, Name: host.Name, Address: host.Address, Port: host.Port, User: host.User, AgentEnabled: host.AgentEnabled,
+			ID: host.ID, Name: host.Name, Address: host.Address, Port: host.Port, User: host.User, AgentEnabled: host.AgentEnabled, AgentRootEnabled: host.AgentRootEnabled,
 			AuthType: host.AuthType, KnownHostsFile: host.KnownHostsFile, ProxyJumpHostID: host.ProxyJumpHostID,
 			ProxyID: host.ProxyID, SudoMode: host.SudoMode,
 		}
@@ -389,7 +389,7 @@ func (s *Service) prepareImportedHost(input domain.ConfigurationHost, id string)
 	}
 	var err error
 	result := domain.Host{
-		ID: id, Name: name, Address: address, Port: input.Port, User: user, AgentEnabled: input.AgentEnabled,
+		ID: id, Name: name, Address: address, Port: input.Port, User: user, AgentEnabled: input.AgentEnabled, AgentRootEnabled: input.AgentRootEnabled,
 		AuthType: authType, KnownHostsFile: strings.TrimSpace(input.KnownHostsFile), ProxyJumpHostID: input.ProxyJumpHostID,
 		ProxyID: input.ProxyID, SudoMode: sudoMode,
 	}
@@ -419,6 +419,9 @@ func (s *Service) prepareImportedHost(input domain.ConfigurationHost, id string)
 		if err != nil {
 			return domain.Host{}, err
 		}
+	}
+	if !hostSupportsRoot(result) {
+		result.AgentRootEnabled = false
 	}
 	return result, nil
 }

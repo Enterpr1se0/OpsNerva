@@ -647,13 +647,13 @@
   color: var(--light-accent);
 }
 
-:root[data-theme='light'] .tool-event summary .tool-transfer-endpoint > b {
+:root[data-theme='light'] .tool-event summary .tool-transfer-route > span > b {
   border-color: var(--light-accent-border);
   background: var(--light-accent-soft);
   color: var(--light-accent);
 }
 
-:root[data-theme='light'] .tool-event summary .tool-transfer-endpoint.workspace > b {
+:root[data-theme='light'] .tool-event summary .tool-workspace-transfer-route > span[data-endpoint-kind='workspace'] > b {
   border-color: #a9c5dc;
   background: #edf5fb;
   color: #39739d;
@@ -970,6 +970,18 @@
   border-color: var(--light-accent-border);
   background: var(--light-accent-soft);
   color: var(--light-accent);
+}
+
+:root[data-theme='light'] :where(.host-agent-state:not(.active), .host-root-state:not(.active)) {
+  border-color: var(--light-border);
+  background: var(--light-surface);
+  color: var(--light-text-muted);
+}
+
+:root[data-theme='light'] .host-root-state.active {
+  border-color: var(--light-warning-border);
+  background: var(--light-warning-soft);
+  color: var(--light-warning);
 }
 
 :root[data-theme='light'] .host-key-state.untrusted,

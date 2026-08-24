@@ -206,11 +206,18 @@ func (s *Service) ResumeAgentApproval(ctx context.Context, approvalID string) (d
 	if terminalExecutionStatus(approved.run.Status) {
 		return execResultFromRun(approved.run, approval.ID, ""), nil
 	}
+	approved.actor = "eino-agent"
+	if err := s.authorizeApprovedAgentSSHExecution(ctx, approved.actor, approved.host, approved.request); err != nil {
+		s.finishApprovedExecutionError(approved, err)
+		if run, loadErr := s.store.GetRun(context.WithoutCancel(ctx), approved.run.ID); loadErr == nil {
+			return execResultFromRun(run, approval.ID, ""), err
+		}
+		return domain.ExecResult{}, err
+	}
 	if err := s.store.ClaimAgentApprovalRun(ctx, approval.ID, approved.run.ID); err != nil {
 		return domain.ExecResult{}, err
 	}
 	approved.run.Status = "running"
-	approved.actor = "eino-agent"
 	return s.executeApproved(ctx, approved)
 }
 
@@ -457,7 +464,7 @@ func (s *Service) commandReviewInput(ctx context.Context, req domain.ExecRequest
 	}
 	return domain.CommandReviewInput{
 		Request:       req,
-		Host:          domain.HostCapability{ID: host.ID, Name: host.Name, AuthType: host.AuthType, SudoMode: host.SudoMode},
+		Host:          domain.HostCapability{ID: host.ID, Name: host.Name, User: host.User, AgentRootEnabled: host.AgentRootEnabled, AuthType: host.AuthType, SudoMode: host.SudoMode},
 		CurrentTask:   currentTask,
 		RequestDigest: digest,
 	}
@@ -465,7 +472,7 @@ func (s *Service) commandReviewInput(ctx context.Context, req domain.ExecRequest
 
 func (s *Service) automaticApprovalInput(ctx context.Context, req domain.ExecRequest, host domain.Host, digest, sessionID string) domain.AutomaticApprovalInput {
 	input := domain.AutomaticApprovalInput{
-		Request: req, Host: domain.HostCapability{ID: host.ID, Name: host.Name, AuthType: host.AuthType, SudoMode: host.SudoMode},
+		Request: req, Host: domain.HostCapability{ID: host.ID, Name: host.Name, User: host.User, AgentRootEnabled: host.AgentRootEnabled, AuthType: host.AuthType, SudoMode: host.SudoMode},
 		UserRequest: s.redactor.Redact(approvalUserRequestFromContext(ctx)), RequestDigest: digest,
 	}
 	if sessionID == "" {
@@ -719,7 +726,7 @@ func (s *Service) RetryApprovalExplanation(ctx context.Context, approvalID, acto
 		}
 	}
 	input := domain.CommandReviewInput{
-		Request: req, Host: domain.HostCapability{ID: host.ID, Name: host.Name, AuthType: host.AuthType, SudoMode: host.SudoMode},
+		Request: req, Host: domain.HostCapability{ID: host.ID, Name: host.Name, User: host.User, AgentRootEnabled: host.AgentRootEnabled, AuthType: host.AuthType, SudoMode: host.SudoMode},
 		CurrentTask: currentTask, RequestDigest: digest,
 	}
 

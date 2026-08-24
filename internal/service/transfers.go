@@ -22,31 +22,49 @@ func (s *Service) TransferFileBetweenHosts(ctx context.Context, sourceHostID, so
 	}, actor)
 }
 
-func (s *Service) bindSSHFileTransfer(ctx context.Context, destination domain.Host, req *domain.ExecRequest, actor string) (domain.Host, error) {
-	if err := validateSSHFileTransferRequest(*req); err != nil {
-		return domain.Host{}, err
-	}
-	source, err := s.store.GetHost(ctx, req.SourceHostID)
+type sshFileTransferConnections struct {
+	Destination       sshx.ConnectionSpec
+	DestinationDigest string
+	Source            sshx.ConnectionSpec
+	SourceDigest      string
+}
+
+func (s *Service) resolveSSHFileTransferConnections(ctx context.Context, destination domain.Host, sourceHostID string) (sshFileTransferConnections, error) {
+	source, err := s.store.GetHost(ctx, sourceHostID)
 	if err != nil {
-		return domain.Host{}, fmt.Errorf("load source SSH host: %w", err)
+		return sshFileTransferConnections{}, fmt.Errorf("load source SSH host: %w", err)
 	}
 	destinationConnection, destinationDigest, err := s.resolveSSHConnection(ctx, destination)
 	if err != nil {
-		return domain.Host{}, fmt.Errorf("resolve destination SSH connection: %w", err)
-	}
-	if err := requireAgentSSHAccess(actor, destinationConnection); err != nil {
-		return domain.Host{}, err
+		return sshFileTransferConnections{}, fmt.Errorf("resolve destination SSH connection: %w", err)
 	}
 	sourceConnection, sourceDigest, err := s.resolveSSHConnection(ctx, source)
 	if err != nil {
-		return domain.Host{}, fmt.Errorf("resolve source SSH connection: %w", err)
+		return sshFileTransferConnections{}, fmt.Errorf("resolve source SSH connection: %w", err)
 	}
-	if err := requireAgentSSHAccess(actor, sourceConnection); err != nil {
-		return domain.Host{}, err
+	return sshFileTransferConnections{
+		Destination: destinationConnection, DestinationDigest: destinationDigest,
+		Source: sourceConnection, SourceDigest: sourceDigest,
+	}, nil
+}
+
+func (s *Service) bindSSHFileTransfer(ctx context.Context, destination domain.Host, req *domain.ExecRequest, actor string) (sshFileTransferConnections, error) {
+	if err := validateSSHFileTransferRequest(*req); err != nil {
+		return sshFileTransferConnections{}, err
 	}
-	bindSSHRequest(req, destinationDigest)
-	bindSSHTransferSource(req, sourceDigest)
-	return source, nil
+	connections, err := s.resolveSSHFileTransferConnections(ctx, destination, req.SourceHostID)
+	if err != nil {
+		return sshFileTransferConnections{}, err
+	}
+	if err := requireAgentSSHAccess(actor, connections.Destination); err != nil {
+		return sshFileTransferConnections{}, err
+	}
+	if err := requireAgentSSHAccess(actor, connections.Source); err != nil {
+		return sshFileTransferConnections{}, err
+	}
+	bindSSHRequest(req, connections.DestinationDigest)
+	bindSSHTransferSource(req, connections.SourceDigest)
+	return connections, nil
 }
 
 func validateSSHFileTransferRequest(req domain.ExecRequest) error {

@@ -27,6 +27,7 @@ export interface Host {
   port: number
   user: string
   agent_enabled: boolean
+  agent_root_enabled: boolean
   auth_type: HostAuthType
   has_private_key: boolean
   known_hosts_file?: string

@@ -26,20 +26,21 @@ type ConfigurationProxy struct {
 }
 
 type ConfigurationHost struct {
-	ID              string `json:"id"`
-	Name            string `json:"name"`
-	Address         string `json:"address"`
-	Port            int    `json:"port"`
-	User            string `json:"user"`
-	AgentEnabled    bool   `json:"agent_enabled"`
-	AuthType        string `json:"auth_type"`
-	PrivateKey      string `json:"private_key,omitempty"`
-	KnownHostsFile  string `json:"known_hosts_file,omitempty"`
-	ProxyJumpHostID string `json:"proxy_jump_host_id,omitempty"`
-	ProxyID         string `json:"proxy_id,omitempty"`
-	Password        string `json:"password,omitempty"`
-	SudoMode        string `json:"sudo_mode"`
-	SudoPassword    string `json:"sudo_password,omitempty"`
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	Address          string `json:"address"`
+	Port             int    `json:"port"`
+	User             string `json:"user"`
+	AgentEnabled     bool   `json:"agent_enabled"`
+	AgentRootEnabled bool   `json:"agent_root_enabled"`
+	AuthType         string `json:"auth_type"`
+	PrivateKey       string `json:"private_key,omitempty"`
+	KnownHostsFile   string `json:"known_hosts_file,omitempty"`
+	ProxyJumpHostID  string `json:"proxy_jump_host_id,omitempty"`
+	ProxyID          string `json:"proxy_id,omitempty"`
+	Password         string `json:"password,omitempty"`
+	SudoMode         string `json:"sudo_mode"`
+	SudoPassword     string `json:"sudo_password,omitempty"`
 }
 
 type ConfigurationModelProvider struct {

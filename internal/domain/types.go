@@ -25,6 +25,7 @@ type Host struct {
 	Port                int       `json:"port"`
 	User                string    `json:"user"`
 	AgentEnabled        bool      `json:"agent_enabled"`
+	AgentRootEnabled    bool      `json:"agent_root_enabled"`
 	AuthType            string    `json:"auth_type"`
 	PrivateKeyCipher    string    `json:"-"`
 	HasPrivateKey       bool      `json:"has_private_key"`
@@ -73,10 +74,12 @@ type HostInput struct {
 }
 
 type HostCapability struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	AuthType string `json:"auth_type"`
-	SudoMode string `json:"sudo_mode"`
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	User             string `json:"user"`
+	AgentRootEnabled bool   `json:"agent_root_enabled"`
+	AuthType         string `json:"auth_type"`
+	SudoMode         string `json:"sudo_mode"`
 }
 
 const (

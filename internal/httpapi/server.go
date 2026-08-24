@@ -147,6 +147,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/hosts", s.listHosts)
 	s.mux.HandleFunc("POST /api/v1/hosts", s.saveHost)
 	s.mux.HandleFunc("GET /api/v1/hosts/{id}", s.getHost)
+	s.mux.HandleFunc("PUT /api/v1/hosts/{id}/agent-root", s.setHostAgentRootAccess)
 	s.mux.HandleFunc("DELETE /api/v1/hosts/{id}", s.deleteHost)
 	s.mux.HandleFunc("POST /api/v1/hosts/{id}/scan-key", s.scanHostKey)
 	s.mux.HandleFunc("POST /api/v1/hosts/{id}/trust-key", s.trustHostKey)
@@ -1375,6 +1376,21 @@ func (s *Server) saveHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, result)
+}
+
+func (s *Server) setHostAgentRootAccess(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Enabled bool `json:"enabled"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	result, err := s.service.SetHostAgentRootEnabled(r.Context(), r.PathValue("id"), input.Enabled, actor(r))
+	if errors.Is(err, service.ErrHostAgentRootUnavailable) {
+		writeErrorStatus(w, err, http.StatusBadRequest)
+		return
+	}
+	respond(w, result, err)
 }
 
 func (s *Server) getHost(w http.ResponseWriter, r *http.Request) {
