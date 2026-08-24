@@ -326,7 +326,7 @@ export interface ChatMessage {
 	run_id?: string
 	tool_status?: ChatToolCallStatus
 	token_usage?: ChatTokenUsage
-  status: 'pending' | 'completed' | 'failed'
+  status: 'pending' | 'waiting_for_approval' | 'completed' | 'failed'
 	attachments?: ChatAttachment[]
   created_at: string
 }
@@ -338,7 +338,7 @@ export interface ChatMessagePage {
 	next_id?: string
 }
 
-export type ChatToolCallStatus = 'running' | 'completed' | 'partial' | 'failed' | 'interrupted' | 'rejected' | 'expired' | 'unknown'
+export type ChatToolCallStatus = 'running' | 'approval_required' | 'completed' | 'partial' | 'failed' | 'interrupted' | 'rejected' | 'expired' | 'unknown'
 
 export interface ChatToolCall {
 	session_id: string

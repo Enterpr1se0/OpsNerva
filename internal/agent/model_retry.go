@@ -43,6 +43,14 @@ func notifyModelRetry(ctx context.Context, retryCtx *adk.RetryContext) {
 }
 
 func modelRequestRetryConfig() *adk.ModelRetryConfig {
+	return newModelRetryConfig(true)
+}
+
+func modelConnectionTestRetryConfig() *adk.ModelRetryConfig {
+	return newModelRetryConfig(false)
+}
+
+func newModelRetryConfig(retryIncompleteOutput bool) *adk.ModelRetryConfig {
 	return &adk.ModelRetryConfig{
 		MaxRetries: modelRequestMaxRetries,
 		ShouldRetry: func(ctx context.Context, retryCtx *adk.RetryContext) *adk.RetryDecision {
@@ -51,7 +59,7 @@ func modelRequestRetryConfig() *adk.ModelRetryConfig {
 			}
 			var retry bool
 			if retryCtx.Err == nil {
-				retry = !modelResponseCompletesTurn(retryCtx.OutputMessage)
+				retry = retryIncompleteOutput && !modelResponseCompletesTurn(retryCtx.OutputMessage)
 			} else {
 				// A mid-stream failure can carry the chunks already received in
 				// OutputMessage. Reissuing after any content, reasoning, or tool
@@ -133,13 +141,13 @@ func normalizeModelRequestError(err error) error {
 	return err
 }
 
-func generateModelWithRetry(ctx context.Context, chatModel model.ToolCallingChatModel, messages []*schema.Message) (*schema.Message, error) {
+func generateConnectionTestResponse(ctx context.Context, chatModel model.ToolCallingChatModel, messages []*schema.Message) (*schema.Message, error) {
 	agentInstance, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name:             "model-connection-test",
 		Description:      "Tests a model connection",
 		Model:            chatModel,
 		MaxIterations:    1,
-		ModelRetryConfig: modelRequestRetryConfig(),
+		ModelRetryConfig: modelConnectionTestRetryConfig(),
 	})
 	if err != nil {
 		return nil, err

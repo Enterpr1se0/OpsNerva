@@ -15,6 +15,7 @@ import (
 	"github.com/Enterpr1se0/opsnerva/internal/skills"
 	"github.com/Enterpr1se0/opsnerva/internal/store"
 
+	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 )
 
@@ -27,6 +28,15 @@ type toolCallActivity struct {
 	Status    string
 	Result    string
 	Error     string
+}
+
+type approvalInterrupt struct {
+	ApprovalID string
+	RunID      string
+}
+
+type approvalResumeDecision struct {
+	ApprovalID string
 }
 
 type toolInputValidationError struct {
@@ -195,15 +205,27 @@ func normalizeEmptyToolArguments(next compose.InvokableToolEndpoint) compose.Inv
 	}
 }
 
-func normalizeToolCallErrors(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
+func normalizeToolCallErrors(svc *service.Service, next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
 	return func(ctx context.Context, input *compose.ToolInput) (output *compose.ToolOutput, err error) {
 		started := time.Now()
+		var paused *approvalInterrupt
 		logger := observability.FromContext(ctx).With("component", "agent", "tool_name", input.Name, "tool_call_id", input.CallID)
 		ctx, release := scopedToolContext(ctx, input.CallID)
 		defer release()
 		notifyToolStarted(ctx, input)
 		ctx = service.WithExecutionOwner(ctx, input.CallID, input.Name, input.Arguments)
 		defer func() {
+			if paused != nil {
+				result := ""
+				if output != nil {
+					result = output.Result
+				}
+				notifyToolActivity(ctx, toolCallActivity{
+					CallID: input.CallID, Name: input.Name, Arguments: input.Arguments,
+					Status: domain.ChatToolCallApprovalRequired, Result: result,
+				})
+				return
+			}
 			activityErr := err
 			if errors.Is(activityErr, context.Canceled) && errors.Is(context.Cause(ctx), context.DeadlineExceeded) {
 				activityErr = context.DeadlineExceeded
@@ -231,6 +253,35 @@ func normalizeToolCallErrors(next compose.InvokableToolEndpoint) compose.Invokab
 			}
 		}()
 
+		wasInterrupted, hasState, interrupt := einotool.GetInterruptState[approvalInterrupt](ctx)
+		if wasInterrupted {
+			if !hasState || interrupt.ApprovalID == "" || interrupt.RunID == "" {
+				return nil, fmt.Errorf("Agent approval checkpoint is missing its tool state")
+			}
+			isTarget, hasDecision, decision := einotool.GetResumeContext[approvalResumeDecision](ctx)
+			if !isTarget {
+				paused = &interrupt
+				return nil, einotool.StatefulInterrupt(ctx, interrupt, interrupt)
+			}
+			if !hasDecision || decision.ApprovalID != interrupt.ApprovalID {
+				return nil, fmt.Errorf("Agent approval resume target does not match its checkpoint")
+			}
+			if svc == nil {
+				return nil, fmt.Errorf("Agent approval service is unavailable")
+			}
+			result, resumeErr := svc.ResumeAgentApproval(ctx, interrupt.ApprovalID)
+			compact, normalizedErr := CompactExecToolResult(result, resumeErr)
+			if normalizedErr != nil {
+				return nil, normalizedErr
+			}
+			encoded, marshalErr := json.Marshal(compact)
+			if marshalErr != nil {
+				return nil, fmt.Errorf("encode resumed Agent approval result: %w", marshalErr)
+			}
+			output = &compose.ToolOutput{Result: string(encoded)}
+			logStructuredToolFailure(ctx, logger, output, time.Since(started))
+			return output, nil
+		}
 		output, err = next(ctx, input)
 		if err != nil {
 			failure, fatalErr := normalizeToolFailure(ctx, input.Name, err)
@@ -241,8 +292,27 @@ func normalizeToolCallErrors(next compose.InvokableToolEndpoint) compose.Invokab
 			return &compose.ToolOutput{Result: marshalToolFailure(failure)}, nil
 		}
 		logStructuredToolFailure(ctx, logger, output, time.Since(started))
+		if interrupt, ok := approvalInterruptFromOutput(output); ok {
+			paused = &interrupt
+			return output, einotool.StatefulInterrupt(ctx, interrupt, interrupt)
+		}
 		return output, nil
 	}
+}
+
+func approvalInterruptFromOutput(output *compose.ToolOutput) (approvalInterrupt, bool) {
+	if output == nil || strings.TrimSpace(output.Result) == "" {
+		return approvalInterrupt{}, false
+	}
+	var result struct {
+		Status     string `json:"status"`
+		ApprovalID string `json:"approval_id"`
+		RunID      string `json:"run_id"`
+	}
+	if json.Unmarshal([]byte(output.Result), &result) != nil || result.Status != "approval_required" || result.ApprovalID == "" || result.RunID == "" {
+		return approvalInterrupt{}, false
+	}
+	return approvalInterrupt{ApprovalID: result.ApprovalID, RunID: result.RunID}, true
 }
 
 // Execution ownership is bound when the service creates a run. Result payloads

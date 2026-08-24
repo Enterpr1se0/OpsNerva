@@ -136,8 +136,23 @@ func (s *Store) InterruptActiveTasks(ctx context.Context) error {
 	return err
 }
 
+func (s *Store) InterruptActiveRuns(ctx context.Context, reason string) error {
+	now := formatTime(time.Now().UTC())
+	_, err := s.db.ExecContext(ctx, `UPDATE runs SET status='interrupted',
+error=CASE WHEN error='' THEN ? ELSE error END,completed_at=COALESCE(completed_at,?)
+WHERE status IN ('created','running')`, reason, now)
+	return err
+}
+
 func (s *Store) FailPendingChatMessages(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE chat_messages SET status='failed' WHERE role='user' AND status='pending'`)
+	_, err := s.db.ExecContext(ctx, `UPDATE chat_messages SET status='failed'
+WHERE role='user' AND status='pending' AND NOT EXISTS (
+  SELECT 1 FROM chat_tool_calls
+  JOIN approvals ON approvals.run_id=chat_tool_calls.run_id
+  JOIN checkpoints ON checkpoints.id=approvals.checkpoint_id
+  WHERE chat_tool_calls.user_message_id=chat_messages.id
+    AND approvals.continuation_kind=? AND approvals.interrupt_id<>''
+)`, domain.ApprovalContinuationAgent)
 	return err
 }
 
@@ -316,6 +331,9 @@ CREATE TABLE IF NOT EXISTS approvals (
   request_digest TEXT NOT NULL,
   status TEXT NOT NULL,
   reason TEXT NOT NULL DEFAULT '',
+  continuation_kind TEXT NOT NULL DEFAULT '',
+  checkpoint_id TEXT NOT NULL DEFAULT '',
+  interrupt_id TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   decided_at TEXT,
   FOREIGN KEY(run_id) REFERENCES runs(id),
@@ -631,6 +649,19 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
 		return err
 	}
 	if err := s.ensureColumn(ctx, "chat_messages", "model_extra_json", "TEXT NOT NULL DEFAULT '{}'"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "approvals", "continuation_kind", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "approvals", "checkpoint_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "approvals", "interrupt_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_approvals_continuation_checkpoint
+ON approvals(continuation_kind, checkpoint_id, created_at)`); err != nil {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "system_settings", "context_compression_enabled", "INTEGER NOT NULL DEFAULT 1"); err != nil {
@@ -1591,183 +1622,6 @@ func scanRun(row scanner) (domain.Run, error) {
 	return run, nil
 }
 
-func (s *Store) CreateApproval(ctx context.Context, approval domain.Approval) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO approvals(id,run_id,host_id,request_json,request_cipher,request_digest,
-status,reason,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, approval.ID, approval.RunID,
-		approval.HostID, approval.RequestJSON, approval.RequestCipher, approval.RequestDigest, approval.Status,
-		approval.Reason, formatTime(approval.CreatedAt))
-	return err
-}
-
-func (s *Store) GetApproval(ctx context.Context, id string) (domain.Approval, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT approvals.id,approvals.run_id,runs.session_id,approvals.host_id,approvals.request_json,
-approvals.request_cipher,approvals.request_digest,approvals.status,approvals.reason,
-approvals.created_at,approvals.decided_at FROM approvals
-JOIN runs ON runs.id=approvals.run_id WHERE approvals.id=?`, id)
-	return scanApproval(row)
-}
-
-func (s *Store) ListApprovals(ctx context.Context, status string, limit int) ([]domain.Approval, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 50
-	}
-	statement := `SELECT approvals.id,approvals.run_id,runs.session_id,approvals.host_id,
-approvals.request_json,approvals.request_cipher,approvals.request_digest,approvals.status,
-approvals.reason,approvals.created_at,approvals.decided_at,runs.ai_review_json FROM approvals
-JOIN runs ON runs.id=approvals.run_id`
-	arguments := make([]any, 0, 2)
-	if status != "" {
-		statement += " WHERE approvals.status=?"
-		arguments = append(arguments, status)
-	}
-	statement += " ORDER BY approvals.created_at DESC LIMIT ?"
-	arguments = append(arguments, limit)
-	rows, err := s.db.QueryContext(ctx, statement, arguments...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	result := make([]domain.Approval, 0)
-	for rows.Next() {
-		approval, err := scanApprovalWithReview(rows)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, approval)
-	}
-	return result, rows.Err()
-}
-
-func scanApprovalWithReview(row scanner) (domain.Approval, error) {
-	var approval domain.Approval
-	var created string
-	var decided sql.NullString
-	var reviewJSON string
-	err := row.Scan(&approval.ID, &approval.RunID, &approval.SessionID, &approval.HostID, &approval.RequestJSON,
-		&approval.RequestCipher, &approval.RequestDigest, &approval.Status, &approval.Reason, &created, &decided, &reviewJSON)
-	if err != nil {
-		return domain.Approval{}, err
-	}
-	approval.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-	if decided.Valid {
-		approval.DecidedAt, _ = time.Parse(time.RFC3339Nano, decided.String)
-	}
-	if reviewJSON != "" {
-		var review domain.CommandReview
-		if json.Unmarshal([]byte(reviewJSON), &review) == nil {
-			approval.AIReview = &review
-		}
-	}
-	return approval, nil
-}
-
-func (s *Store) ListPendingApprovalsForSession(ctx context.Context, sessionID string) ([]domain.Approval, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT approvals.id,approvals.run_id,runs.session_id,approvals.host_id,
-approvals.request_json,approvals.request_cipher,approvals.request_digest,approvals.status,
-approvals.reason,approvals.created_at,approvals.decided_at FROM approvals
-JOIN runs ON runs.id=approvals.run_id WHERE runs.session_id=? AND approvals.status='pending'
-ORDER BY approvals.created_at`, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	result := make([]domain.Approval, 0)
-	for rows.Next() {
-		approval, err := scanApproval(rows)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, approval)
-	}
-	return result, rows.Err()
-}
-
-func (s *Store) DecideApproval(ctx context.Context, id, status, reason string) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE approvals SET status=?,reason=?,decided_at=? WHERE id=? AND status='pending'`,
-		status, reason, formatTime(time.Now().UTC()), id)
-	if err != nil {
-		return err
-	}
-	count, _ := result.RowsAffected()
-	if count == 0 {
-		return fmt.Errorf("approval is missing or no longer pending")
-	}
-	return nil
-}
-
-func (s *Store) ApprovePendingAndStartRun(ctx context.Context, id, runID, reason string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, `UPDATE approvals SET status='approved',reason=?,decided_at=?
-WHERE id=? AND run_id=? AND status='pending'`, reason, formatTime(time.Now().UTC()), id, runID)
-	if err != nil {
-		return err
-	}
-	count, _ := result.RowsAffected()
-	if count == 0 {
-		return fmt.Errorf("approval changed or is no longer pending; refresh and review it again")
-	}
-	result, err = tx.ExecContext(ctx, `UPDATE runs SET status='running' WHERE id=? AND status='approval_required'`, runID)
-	if err != nil {
-		return err
-	}
-	count, _ = result.RowsAffected()
-	if count == 0 {
-		return fmt.Errorf("approval run changed or is no longer awaiting approval")
-	}
-	return tx.Commit()
-}
-
-func (s *Store) UpdatePendingApprovalExplanation(ctx context.Context, approvalID, runID, reviewJSON string) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE runs SET ai_review_json=?
-WHERE id=? AND status='approval_required' AND EXISTS (
-  SELECT 1 FROM approvals WHERE approvals.id=? AND approvals.run_id=runs.id AND approvals.status='pending'
-)`, reviewJSON, runID, approvalID)
-	if err != nil {
-		return err
-	}
-	count, _ := result.RowsAffected()
-	if count == 0 {
-		return fmt.Errorf("approval is no longer pending")
-	}
-	return nil
-}
-
-func (s *Store) UpdateRunAIReview(ctx context.Context, runID, reviewJSON string) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE runs SET ai_review_json=? WHERE id=?`, reviewJSON, runID)
-	if err != nil {
-		return err
-	}
-	count, _ := result.RowsAffected()
-	if count == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-func scanApproval(row scanner) (domain.Approval, error) {
-	var approval domain.Approval
-	var created string
-	var decided sql.NullString
-	err := row.Scan(&approval.ID, &approval.RunID, &approval.SessionID, &approval.HostID, &approval.RequestJSON, &approval.RequestCipher,
-		&approval.RequestDigest, &approval.Status, &approval.Reason,
-		&created, &decided)
-	if errors.Is(err, sql.ErrNoRows) {
-		return domain.Approval{}, ErrNotFound
-	}
-	if err != nil {
-		return domain.Approval{}, err
-	}
-	approval.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-	if decided.Valid {
-		approval.DecidedAt, _ = time.Parse(time.RFC3339Nano, decided.String)
-	}
-	return approval, nil
-}
-
 func (s *Store) AppendAudit(ctx context.Context, event domain.AuditEvent) error {
 	data, err := json.Marshal(event.Data)
 	if err != nil {
@@ -2021,7 +1875,7 @@ VALUES(?,?,?,?,?,?,?)`, attachmentID, id, attachment.Name, attachment.MIMEType, 
 }
 
 func (s *Store) SetChatMessageStatus(ctx context.Context, id, status string) error {
-	if status != "pending" && status != "completed" && status != "failed" {
+	if status != "pending" && status != "waiting_for_approval" && status != "completed" && status != "failed" {
 		return fmt.Errorf("invalid chat message status %q", status)
 	}
 	result, err := s.db.ExecContext(ctx, `UPDATE chat_messages SET status=? WHERE id=?`, status, id)
@@ -2705,6 +2559,12 @@ func (s *Store) DeleteChatSession(ctx context.Context, sessionID string) error {
 	if count == 0 {
 		return ErrNotFound
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM checkpoints WHERE id IN (
+SELECT approvals.checkpoint_id FROM approvals JOIN runs ON runs.id=approvals.run_id
+WHERE runs.session_id=? AND approvals.continuation_kind=? AND approvals.checkpoint_id<>''
+)`, sessionID, domain.ApprovalContinuationAgent); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM approvals WHERE run_id IN (SELECT id FROM runs WHERE session_id=?)`, sessionID); err != nil {
 		return err
 	}
@@ -2718,9 +2578,6 @@ func (s *Store) DeleteChatSession(ctx context.Context, sessionID string) error {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM chat_tool_calls WHERE session_id=?`, sessionID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM checkpoints WHERE id=?`, sessionID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM ssh_shell_sessions

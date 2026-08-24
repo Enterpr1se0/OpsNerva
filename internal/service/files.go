@@ -51,18 +51,6 @@ func (s *Service) ReadFileAdvanced(ctx context.Context, hostID, path string, met
 		MaxBytes: maxBytes, OffsetBytes: offsetBytes, TailLines: tailLines, Elevated: elevated,
 		Reason: "read a bounded remote file with version metadata",
 	}, actor)
-	if result.Stdout != "" {
-		metadata, content := parseFileReadOutput(path, result.Stdout)
-		metadata.OffsetBytes = resolvedFileOffset(metadata.Size, offsetBytes)
-		metadata.ReturnedBytes = len(content)
-		decorateFileReadPage(&metadata, maxBytes, tailLines)
-		metadata.Sensitive = strings.Contains(content, "[REDACTED]")
-		result.File = &metadata
-		result.Stdout = content
-	}
-	if metadataOnly {
-		result.Stdout = ""
-	}
 	return result, err
 }
 

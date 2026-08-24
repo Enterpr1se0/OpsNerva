@@ -1611,112 +1611,90 @@ func TestChangeRequiresApprovalThenExecutes(t *testing.T) {
 	}
 }
 
-func TestBlockingApprovalSuspendsToolAndResumesWithExecutionResult(t *testing.T) {
+func TestAgentApprovalDecisionDoesNotExecuteBeforeCheckpointResume(t *testing.T) {
 	svc, transport, host := newTestService(t)
-	base, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	notifications := make(chan domain.ExecResult, 2)
-	ctx := WithSessionID(base, "session_blocking_approval")
-	ctx = WithBlockingApprovals(ctx)
-	ctx = WithApprovalNotifier(ctx, func(result domain.ExecResult) { notifications <- result })
-
-	type outcome struct {
-		result domain.ExecResult
-		err    error
-	}
-	done := make(chan outcome, 1)
-	go func() {
-		result, err := svc.Submit(ctx, domain.ExecRequest{
-			HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
-			Reason: "recover demo service",
-		}, "eino-agent")
-		done <- outcome{result: result, err: err}
-	}()
-
-	var pending domain.ExecResult
-	select {
-	case pending = <-notifications:
-	case <-base.Done():
-		t.Fatal("timed out waiting for approval notification")
-	}
-	if pending.Status != "approval_required" || pending.ApprovalID == "" {
-		t.Fatalf("missing pending notification: %#v", pending)
-	}
-	select {
-	case result := <-done:
-		t.Fatalf("Tool returned before the human decision: %#v", result)
-	case <-time.After(75 * time.Millisecond):
-	}
-
-	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed", "operator")
+	ctx := WithAgentApprovalContinuation(WithSessionID(context.Background(), "session_agent_resume"), "checkpoint_agent_resume")
+	pending, err := svc.Submit(ctx, domain.ExecRequest{
+		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
+		Reason: "restart demo after review",
+	}, "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var result outcome
-	select {
-	case result = <-done:
-	case <-base.Done():
-		t.Fatal("timed out waiting for approved Tool to resume")
+	if pending.Status != "approval_required" || pending.ApprovalID == "" || len(transport.calls) != 0 {
+		t.Fatalf("unexpected pending result %#v calls=%d", pending, len(transport.calls))
 	}
-	if result.err != nil || result.result.Status != "completed" || result.result.RunID != approved.RunID {
-		t.Fatalf("Tool did not resume with execution result: %#v err=%v", result.result, result.err)
+	preparing, err := svc.GetApproval(context.Background(), pending.ApprovalID)
+	if err != nil || preparing.Status != domain.ApprovalStatusPreparing || preparing.CheckpointID != "checkpoint_agent_resume" {
+		t.Fatalf("Agent continuation was not prepared: approval=%#v err=%v", preparing, err)
 	}
-	if len(transport.calls) != 1 {
-		t.Fatalf("approved operation executed %d times", len(transport.calls))
+	if listed, err := svc.ListApprovals(context.Background(), domain.ApprovalStatusPending, 10); err != nil || len(listed) != 0 {
+		t.Fatalf("approval was visible before its checkpoint: approvals=%#v err=%v", listed, err)
+	}
+	if err := svc.store.Set(context.Background(), preparing.CheckpointID, []byte("checkpoint")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ActivateAgentApprovals(context.Background(), preparing.CheckpointID, map[string]string{preparing.ID: "interrupt_agent_resume"}); err != nil {
+		t.Fatal(err)
+	}
+	decision, err := svc.DecideAgentApproval(context.Background(), preparing.ID, domain.ApprovalStatusApproved, "reviewed", "operator")
+	if err != nil || decision.Status != domain.ApprovalStatusApproved || len(transport.calls) != 0 {
+		t.Fatalf("approval decision executed the operation: result=%#v calls=%d err=%v", decision, len(transport.calls), err)
+	}
+	run, err := svc.store.GetRun(context.Background(), pending.RunID)
+	if err != nil || run.Status != "approval_required" {
+		t.Fatalf("approved run was claimed before resume: run=%#v err=%v", run, err)
+	}
+	completed, err := svc.ResumeAgentApproval(context.Background(), preparing.ID)
+	if err != nil || completed.Status != "completed" || len(transport.calls) != 1 {
+		t.Fatalf("resumed operation = %#v calls=%d err=%v", completed, len(transport.calls), err)
+	}
+	if replayed, err := svc.ResumeAgentApproval(context.Background(), preparing.ID); err != nil || replayed.Status != "completed" || len(transport.calls) != 1 {
+		t.Fatalf("completed approval was not replay-safe: result=%#v calls=%d err=%v", replayed, len(transport.calls), err)
 	}
 }
 
-func TestBlockingApprovalReturnsRejectedOperatorInstructionToTool(t *testing.T) {
+func TestRejectedAgentApprovalResumesAsToolRejectionWithoutExecution(t *testing.T) {
 	svc, transport, host := newTestService(t)
-	base, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	notifications := make(chan domain.ExecResult, 1)
-	ctx := WithApprovalNotifier(WithBlockingApprovals(WithSessionID(base, "session_rejected_approval")), func(result domain.ExecResult) {
-		notifications <- result
-	})
-
-	type outcome struct {
-		result domain.ExecResult
-		err    error
-	}
-	done := make(chan outcome, 1)
-	go func() {
-		result, err := svc.Submit(ctx, domain.ExecRequest{
-			HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
-			Reason: "recover demo service",
-		}, "eino-agent")
-		done <- outcome{result: result, err: err}
-	}()
-
-	var pending domain.ExecResult
-	select {
-	case pending = <-notifications:
-	case <-base.Done():
-		t.Fatal("timed out waiting for approval notification")
-	}
-	instruction := "不要重启服务，先读取最近 100 行日志并分析。"
-	if err := svc.Reject(context.Background(), pending.ApprovalID, instruction, "operator"); err != nil {
+	ctx := WithAgentApprovalContinuation(WithSessionID(context.Background(), "session_agent_reject"), "checkpoint_agent_reject")
+	pending, err := svc.Submit(ctx, domain.ExecRequest{
+		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
+		Reason: "restart demo after review",
+	}, "eino-agent")
+	if err != nil {
 		t.Fatal(err)
 	}
-	var result outcome
-	select {
-	case result = <-done:
-	case <-base.Done():
-		t.Fatal("timed out waiting for rejected Tool to resume")
+	if err := svc.store.Set(context.Background(), "checkpoint_agent_reject", []byte("checkpoint")); err != nil {
+		t.Fatal(err)
 	}
-	if result.err != nil || result.result.Status != "rejected" || result.result.OperatorInstruction != instruction {
-		t.Fatalf("rejection was not returned to the blocked Tool: %#v err=%v", result.result, result.err)
+	if _, err := svc.ActivateAgentApprovals(context.Background(), "checkpoint_agent_reject", map[string]string{pending.ApprovalID: "interrupt_agent_reject"}); err != nil {
+		t.Fatal(err)
 	}
-	select {
-	case decision := <-notifications:
-		if decision.Status != "rejected" || decision.OperatorInstruction != instruction {
-			t.Fatalf("rejection decision notification lost operator context: %#v", decision)
-		}
-	default:
-		t.Fatal("rejection did not notify the active Agent stream")
+	const instruction = "inspect logs first"
+	if _, err := svc.DecideAgentApproval(context.Background(), pending.ApprovalID, domain.ApprovalStatusRejected, instruction, "operator"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.ResumeAgentApproval(context.Background(), pending.ApprovalID)
+	if err != nil || result.Status != domain.ApprovalStatusRejected || result.OperatorInstruction != instruction {
+		t.Fatalf("rejected resume = %#v err=%v", result, err)
 	}
 	if len(transport.calls) != 0 {
-		t.Fatalf("rejected operation executed %d times", len(transport.calls))
+		t.Fatalf("rejected Agent approval executed %d operations", len(transport.calls))
+	}
+}
+
+func waitForBackgroundTaskApproval(t *testing.T, svc *Service, taskID string) (domain.Task, domain.ExecResult) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		task, result, _, err := svc.GetTask(taskID)
+		if err == nil && task.Status == "approval_required" && result.RunID != "" && result.ApprovalID != "" {
+			return task, result
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("task did not enter approval_required: task=%#v result=%#v err=%v", task, result, err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -1724,10 +1702,7 @@ func TestBackgroundApprovalReturnsImmediatelyAndTracksExecution(t *testing.T) {
 	svc, transport, host := newTestService(t)
 	base, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	notifications := make(chan domain.ExecResult, 1)
-	ctx := WithApprovalNotifier(WithBlockingApprovals(WithSessionID(base, "session_blocking_task")), func(result domain.ExecResult) {
-		notifications <- result
-	})
+	ctx := WithSessionID(base, "session_blocking_task")
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var releaseOnce sync.Once
@@ -1749,25 +1724,9 @@ func TestBackgroundApprovalReturnsImmediatelyAndTracksExecution(t *testing.T) {
 		t.Fatalf("background task did not return immediately: %#v elapsed=%s", task, time.Since(startedAt))
 	}
 
-	var pending domain.ExecResult
-	select {
-	case pending = <-notifications:
-	case <-base.Done():
-		t.Fatal("timed out waiting for task approval notification")
-	}
+	_, pending := waitForBackgroundTaskApproval(t, svc, task.ID)
 	if pending.Status != "approval_required" || pending.RunID == "" || pending.ApprovalID == "" {
-		t.Fatalf("invalid background approval notification: %#v", pending)
-	}
-	deadline := time.Now().Add(time.Second)
-	for {
-		task, result, _, err := svc.GetTask(task.ID)
-		if err == nil && task.Status == "approval_required" && task.RunID == pending.RunID && result.ApprovalID == pending.ApprovalID {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("task did not enter approval_required: task=%#v result=%#v err=%v", task, result, err)
-		}
-		time.Sleep(10 * time.Millisecond)
+		t.Fatalf("invalid background approval state: %#v", pending)
 	}
 	if _, err := svc.ApproveAsync(context.Background(), pending.ApprovalID, "reviewed", "operator"); err != nil {
 		t.Fatal(err)
@@ -1777,7 +1736,7 @@ func TestBackgroundApprovalReturnsImmediatelyAndTracksExecution(t *testing.T) {
 	case <-base.Done():
 		t.Fatal("approved background task did not start")
 	}
-	deadline = time.Now().Add(time.Second)
+	deadline := time.Now().Add(time.Second)
 	for {
 		task, _, _, err := svc.GetTask(task.ID)
 		if err == nil && task.Status == "running" {
@@ -1807,10 +1766,7 @@ func TestBackgroundApprovalReturnsImmediatelyAndTracksExecution(t *testing.T) {
 
 func TestBackgroundApprovalRejectionUpdatesTask(t *testing.T) {
 	svc, transport, host := newTestService(t)
-	notifications := make(chan domain.ExecResult, 1)
-	ctx := WithApprovalNotifier(WithBlockingApprovals(WithSessionID(context.Background(), "session_rejected_task")), func(result domain.ExecResult) {
-		notifications <- result
-	})
+	ctx := WithSessionID(context.Background(), "session_rejected_task")
 	task, err := svc.StartTask(ctx, domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
 		Reason: "restart demo as a managed task",
@@ -1818,12 +1774,7 @@ func TestBackgroundApprovalRejectionUpdatesTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var pending domain.ExecResult
-	select {
-	case pending = <-notifications:
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for rejected background approval")
-	}
+	_, pending := waitForBackgroundTaskApproval(t, svc, task.ID)
 	const instruction = "inspect logs instead"
 	if err := svc.Reject(context.Background(), pending.ApprovalID, instruction, "operator"); err != nil {
 		t.Fatal(err)
@@ -1855,10 +1806,7 @@ func TestApprovedBackgroundTaskCanBeCancelledWhileRunning(t *testing.T) {
 	transport.execStarted = started
 	transport.execRelease = release
 	transport.mu.Unlock()
-	notifications := make(chan domain.ExecResult, 1)
-	ctx := WithApprovalNotifier(WithBlockingApprovals(WithSessionID(context.Background(), "session_cancel_task")), func(result domain.ExecResult) {
-		notifications <- result
-	})
+	ctx := WithSessionID(context.Background(), "session_cancel_task")
 	task, err := svc.StartTask(ctx, domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
 		Reason: "restart demo as a managed task",
@@ -1866,12 +1814,7 @@ func TestApprovedBackgroundTaskCanBeCancelledWhileRunning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var pending domain.ExecResult
-	select {
-	case pending = <-notifications:
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for cancellable background approval")
-	}
+	_, pending := waitForBackgroundTaskApproval(t, svc, task.ID)
 	if _, err := svc.ApproveAsync(context.Background(), pending.ApprovalID, "reviewed", "operator"); err != nil {
 		t.Fatal(err)
 	}
@@ -2130,6 +2073,28 @@ func TestRecoveryMarksUnconfirmedToolResultUnknown(t *testing.T) {
 	}
 	if len(messages) != 2 || messages[0].Status != "failed" || messages[1].ToolStatus != domain.ChatToolCallUnknown {
 		t.Fatalf("recovered context = %#v", messages)
+	}
+}
+
+func TestRecoveryInterruptsRunsWithoutAnExecutionOwner(t *testing.T) {
+	svc, _, host := newTestService(t)
+	ctx := context.Background()
+	run := domain.Run{
+		ID: "run-recovery", HostID: host.ID, RequestJSON: `{}`, RequestDigest: "digest",
+		Status: "running", StartedAt: time.Now().UTC(),
+	}
+	if err := svc.store.CreateRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.RecoverInterruptedTasks(ctx); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := svc.store.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Status != "interrupted" || recovered.CompletedAt.IsZero() || !strings.Contains(recovered.Error, "control plane restarted") {
+		t.Fatalf("orphaned run was not interrupted: %#v", recovered)
 	}
 }
 
@@ -2802,7 +2767,7 @@ func TestAuditPersistsAfterRequestCancellation(t *testing.T) {
 	}
 }
 
-func TestRejectPendingApprovalsForSession(t *testing.T) {
+func TestAbortApprovalsForSession(t *testing.T) {
 	svc, transport, host := newTestService(t)
 	request := domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
@@ -2818,7 +2783,7 @@ func TestRejectPendingApprovalsForSession(t *testing.T) {
 		t.Fatalf("other approval = %#v err=%v", other, err)
 	}
 
-	rejected, err := svc.RejectPendingApprovalsForSession(context.Background(), "session_stop", "Agent run stopped by the operator", "operator")
+	rejected, err := svc.AbortApprovalsForSession(context.Background(), "session_stop", "Agent run stopped by the operator", "operator")
 	if err != nil || rejected != 1 {
 		t.Fatalf("rejected approvals = %d err=%v", rejected, err)
 	}
@@ -2832,5 +2797,50 @@ func TestRejectPendingApprovalsForSession(t *testing.T) {
 	}
 	if len(transport.calls) != 0 {
 		t.Fatalf("rejected approval executed %d commands", len(transport.calls))
+	}
+}
+
+func TestAbortApprovalsForSessionRejectsPartiallyDecidedAgentGroup(t *testing.T) {
+	svc, transport, host := newTestService(t)
+	const (
+		sessionID    = "session_stop_agent_group"
+		checkpointID = "checkpoint_stop_agent_group"
+	)
+	ctx := WithAgentApprovalContinuation(WithSessionID(context.Background(), sessionID), checkpointID)
+	approvals := make([]domain.ExecResult, 0, 2)
+	for _, unit := range []string{"first", "second"} {
+		result, err := svc.Submit(ctx, domain.ExecRequest{
+			HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", unit},
+			Reason: "test stopping a partially decided approval group",
+		}, "eino-agent")
+		if err != nil || result.ApprovalID == "" {
+			t.Fatalf("Agent approval = %#v err=%v", result, err)
+		}
+		approvals = append(approvals, result)
+	}
+	if err := svc.store.Set(ctx, checkpointID, []byte("checkpoint")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ActivateAgentApprovals(ctx, checkpointID, map[string]string{
+		approvals[0].ApprovalID: "interrupt-first", approvals[1].ApprovalID: "interrupt-second",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.DecideAgentApproval(ctx, approvals[0].ApprovalID, domain.ApprovalStatusApproved, "approved first", "operator"); err != nil {
+		t.Fatal(err)
+	}
+	aborted, err := svc.AbortApprovalsForSession(ctx, sessionID, "Agent run stopped by the operator", "operator")
+	if err != nil || aborted != 2 {
+		t.Fatalf("aborted approvals = %d err=%v", aborted, err)
+	}
+	for _, result := range approvals {
+		approval, approvalErr := svc.store.GetApproval(ctx, result.ApprovalID)
+		run, runErr := svc.store.GetRun(ctx, result.RunID)
+		if approvalErr != nil || runErr != nil || approval.Status != domain.ApprovalStatusRejected || run.Status != domain.ApprovalStatusRejected {
+			t.Fatalf("aborted Agent approval=%#v run=%#v errors=%v/%v", approval, run, approvalErr, runErr)
+		}
+	}
+	if len(transport.calls) != 0 {
+		t.Fatalf("aborted Agent group executed %d operations", len(transport.calls))
 	}
 }

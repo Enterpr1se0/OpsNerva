@@ -647,10 +647,16 @@
   color: var(--light-accent);
 }
 
-:root[data-theme='light'] .tool-event summary .tool-transfer-route > span > b {
+:root[data-theme='light'] .tool-event summary .tool-transfer-endpoint > b {
   border-color: var(--light-accent-border);
   background: var(--light-accent-soft);
   color: var(--light-accent);
+}
+
+:root[data-theme='light'] .tool-event summary .tool-transfer-endpoint.workspace > b {
+  border-color: #a9c5dc;
+  background: #edf5fb;
+  color: #39739d;
 }
 
 :root[data-theme='light'] .tool-summary-copy .tool-transfer-route code,

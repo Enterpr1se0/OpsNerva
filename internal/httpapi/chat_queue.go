@@ -41,6 +41,8 @@ type chatQueueSession struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	accepting bool
+	pausedFor map[string]struct{}
+	changed   chan struct{}
 }
 
 func newChatMessageQueue() *chatMessageQueue {
@@ -58,8 +60,84 @@ func (q *chatMessageQueue) begin(sessionID string) (context.Context, bool) {
 		return nil, false
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	q.sessions[sessionID] = &chatQueueSession{ctx: ctx, cancel: cancel, accepting: true}
+	q.sessions[sessionID] = &chatQueueSession{
+		ctx: ctx, cancel: cancel, accepting: true,
+		pausedFor: make(map[string]struct{}), changed: make(chan struct{}),
+	}
 	return ctx, true
+}
+
+func (q *chatMessageQueue) pause(sessionID string, approvalIDs []string) (<-chan struct{}, error) {
+	if q == nil {
+		return nil, errChatQueueInactive
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	approvalSet := make(map[string]struct{}, len(approvalIDs))
+	for _, approvalID := range approvalIDs {
+		approvalID = strings.TrimSpace(approvalID)
+		if approvalID == "" {
+			return nil, errors.New("approval id is required")
+		}
+		approvalSet[approvalID] = struct{}{}
+	}
+	if len(approvalSet) == 0 {
+		return nil, errors.New("approval ids are required")
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	state := q.sessions[sessionID]
+	if state == nil || !state.accepting {
+		return nil, errChatQueueInactive
+	}
+	state.pausedFor = approvalSet
+	return state.changed, nil
+}
+
+func (q *chatMessageQueue) resume(sessionID, approvalID string) bool {
+	if q == nil {
+		return false
+	}
+	sessionID, approvalID = strings.TrimSpace(sessionID), strings.TrimSpace(approvalID)
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	state := q.sessions[sessionID]
+	if state == nil {
+		return false
+	}
+	if _, paused := state.pausedFor[approvalID]; !paused {
+		return false
+	}
+	delete(state.pausedFor, approvalID)
+	if len(state.pausedFor) > 0 {
+		return true
+	}
+	close(state.changed)
+	state.changed = make(chan struct{})
+	return true
+}
+
+func (q *chatMessageQueue) waitForResume(sessionID string, resumed <-chan struct{}) error {
+	if q == nil {
+		return errChatQueueInactive
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	q.mu.Lock()
+	state := q.sessions[sessionID]
+	if state == nil || resumed == nil {
+		q.mu.Unlock()
+		return errChatQueueInactive
+	}
+	ctx := state.ctx
+	q.mu.Unlock()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-resumed:
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return nil
+	}
 }
 
 func (q *chatMessageQueue) enqueue(sessionID, message, mode string, attachments []domain.ChatAttachment) (queuedChatMessage, int, error) {
@@ -130,6 +208,7 @@ func (q *chatMessageQueue) finish(sessionID string) {
 	sessionID = strings.TrimSpace(sessionID)
 	if state := q.sessions[sessionID]; state != nil {
 		state.cancel()
+		close(state.changed)
 	}
 	delete(q.sessions, sessionID)
 	q.mu.Unlock()
@@ -150,6 +229,8 @@ func (q *chatMessageQueue) clear(sessionID string) (int, bool) {
 	state.items = nil
 	state.accepting = false
 	state.cancel()
+	close(state.changed)
+	state.changed = make(chan struct{})
 	return count, true
 }
 

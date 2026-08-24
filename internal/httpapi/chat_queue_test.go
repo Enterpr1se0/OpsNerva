@@ -137,3 +137,46 @@ func TestChatMessageQueueIsBoundedAndCancelClearsIt(t *testing.T) {
 		t.Fatal("finished cancelled queue remained active")
 	}
 }
+
+func TestChatMessageQueuePauseRetainsFollowupsUntilExactApprovalResumes(t *testing.T) {
+	queue := newChatMessageQueue()
+	if _, started := queue.begin("session-paused"); !started {
+		t.Fatal("queue did not start")
+	}
+	defer queue.finish("session-paused")
+	queued, _, err := queue.enqueue("session-paused", "continue after approval", chatQueueModeFollowup, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumedSignal, err := queue.pause("session-paused", []string{"approval-one", "approval-two"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed := make(chan error, 1)
+	go func() { resumed <- queue.waitForResume("session-paused", resumedSignal) }()
+	if queue.resume("session-paused", "approval-three") {
+		t.Fatal("a different approval resumed the conversation")
+	}
+	if !queue.resume("session-paused", "approval-one") {
+		t.Fatal("the first queued approval was not accepted")
+	}
+	select {
+	case err := <-resumed:
+		t.Fatalf("partial approval group unexpectedly resumed: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if !queue.resume("session-paused", "approval-two") {
+		t.Fatal("the final approval decision was not accepted")
+	}
+	select {
+	case err := <-resumed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("paused conversation did not wake")
+	}
+	if snapshot := queue.snapshot("session-paused"); len(snapshot) != 1 || snapshot[0].ID != queued.ID {
+		t.Fatalf("queued followup changed while paused: %#v", snapshot)
+	}
+}

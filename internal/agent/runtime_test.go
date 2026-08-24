@@ -114,7 +114,7 @@ func (*toolActivityAgentRunner) Run(ctx context.Context, _ []*schema.Message, _ 
 
 func (r *modelFailureWithRunningToolRunner) Run(ctx context.Context, _ []*schema.Message, _ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
 	iterator, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
-	endpoint := normalizeToolCallErrors(func(toolCtx context.Context, _ *compose.ToolInput) (*compose.ToolOutput, error) {
+	endpoint := normalizeToolCallErrors(nil, func(toolCtx context.Context, _ *compose.ToolInput) (*compose.ToolOutput, error) {
 		close(r.started)
 		select {
 		case <-r.release:
@@ -137,7 +137,7 @@ func (r *modelFailureWithRunningToolRunner) Run(ctx context.Context, _ []*schema
 
 func (r *cancellableToolAgentRunner) Run(ctx context.Context, _ []*schema.Message, _ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
 	iterator, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
-	endpoint := normalizeToolCallErrors(func(toolCtx context.Context, _ *compose.ToolInput) (*compose.ToolOutput, error) {
+	endpoint := normalizeToolCallErrors(nil, func(toolCtx context.Context, _ *compose.ToolInput) (*compose.ToolOutput, error) {
 		close(r.started)
 		<-toolCtx.Done()
 		return nil, toolCtx.Err()
@@ -193,7 +193,7 @@ func (r *scriptedAgentRunner) snapshot() (int, [][]*schema.Message) {
 	return r.calls, append([][]*schema.Message(nil), r.inputs...)
 }
 
-func TestProviderSendsHelloAndAcceptsNonEmptyResponse(t *testing.T) {
+func TestProviderSendsConstrainedPromptAndAcceptsNonEmptyResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
 			http.NotFound(w, r)
@@ -201,6 +201,7 @@ func TestProviderSendsHelloAndAcceptsNonEmptyResponse(t *testing.T) {
 		}
 		var request struct {
 			ReasoningEffort string `json:"reasoning_effort"`
+			MaxTokens       int    `json:"max_tokens"`
 			Messages        []struct {
 				Content string `json:"content"`
 			} `json:"messages"`
@@ -208,8 +209,11 @@ func TestProviderSendsHelloAndAcceptsNonEmptyResponse(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Fatal(err)
 		}
-		if len(request.Messages) != 1 || request.Messages[0].Content != "Hello" {
+		if len(request.Messages) != 1 || request.Messages[0].Content != "Reply with exactly: Hello" {
 			t.Fatalf("unexpected test prompt %#v", request.Messages)
+		}
+		if request.MaxTokens != 512 {
+			t.Fatalf("max_tokens = %d, want 512", request.MaxTokens)
 		}
 		if request.ReasoningEffort != "high" {
 			t.Fatalf("reasoning_effort = %q, want high", request.ReasoningEffort)
@@ -262,7 +266,9 @@ func TestProviderRetriesTransientUpstreamFailure(t *testing.T) {
 }
 
 func TestProviderRejectsEmptyResponse(t *testing.T) {
+	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
   "id":"chatcmpl-test","object":"chat.completion","created":1,"model":"fixture-model",
@@ -276,6 +282,33 @@ func TestProviderRejectsEmptyResponse(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("empty model response was accepted")
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("empty response triggered %d requests, want 1", requests.Load())
+	}
+}
+
+func TestProviderRejectsReasoningOnlyResponseWithoutRetry(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+  "id":"chatcmpl-thinking","object":"chat.completion","created":1,"model":"fixture-model",
+  "choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning_content":"I should answer Hello."},"finish_reason":"length"}],
+  "usage":{"prompt_tokens":10,"completion_tokens":512,"total_tokens":522}
+}`))
+	}))
+	defer server.Close()
+
+	_, err := (&Runtime{}).TestProvider(context.Background(), config.Model{
+		BaseURL: server.URL + "/v1", Name: "fixture-model",
+	})
+	if err == nil || !strings.Contains(err.Error(), "512-token connection test budget") {
+		t.Fatalf("unexpected reasoning-only response error: %v", err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("reasoning-only response triggered %d requests, want 1", requests.Load())
 	}
 }
 

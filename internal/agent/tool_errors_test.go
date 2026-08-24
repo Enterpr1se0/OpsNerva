@@ -84,7 +84,7 @@ func TestToolCallActivityIsPublishedBeforeExecution(t *testing.T) {
 		notified = true
 		activities = append(activities, value)
 	})
-	endpoint := normalizeToolCallErrors(func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+	endpoint := normalizeToolCallErrors(nil, func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
 		executed = true
 		if !notified {
 			t.Fatal("tool endpoint started before its activity was published")

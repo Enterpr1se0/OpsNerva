@@ -891,16 +891,6 @@ func (s *Service) ReadWorkspaceFileAdvanced(ctx context.Context, workspaceID, re
 		HostID: host.ID, Mode: domain.ExecWorkspaceRead, WorkspaceID: workspaceID, RelativePath: relativePath,
 		MaxBytes: maxBytes, OffsetBytes: offset, TailLines: tailLines, Reason: "read a bounded file from an allowlisted workspace",
 	}, actor)
-	if result.Stdout != "" {
-		metadata, content := parseFileReadOutput(relativePath, result.Stdout)
-		if tailLines == 0 {
-			metadata.OffsetBytes = resolvedFileOffset(metadata.Size, offset)
-		}
-		metadata.ReturnedBytes = len(content)
-		decorateFileReadPage(&metadata, maxBytes, tailLines)
-		metadata.Sensitive = strings.Contains(content, "[REDACTED]")
-		result.File, result.Stdout = &metadata, content
-	}
 	return result, err
 }
 

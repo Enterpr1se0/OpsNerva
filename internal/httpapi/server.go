@@ -20,7 +20,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/Enterpr1se0/opsnerva/internal/agent"
@@ -74,6 +73,7 @@ func New(svc *service.Service, agentRuntime *agent.Runtime, options Options) *Se
 		applicationSnapshots: make(map[string]applicationSnapshotCacheEntry),
 	}
 	s.routes()
+	s.recoverAgentApprovals()
 	return s
 }
 
@@ -294,7 +294,7 @@ func (s *Server) setAgentToolEnabled(w http.ResponseWriter, r *http.Request, ena
 		writeErrorStatus(w, err, http.StatusBadRequest)
 		return
 	}
-	if err := s.agent.Reload(r.Context()); err != nil {
+	if err := s.reloadAgent(r.Context()); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -311,7 +311,7 @@ func (s *Server) reloadSkills(w http.ResponseWriter, r *http.Request) {
 		writeErrorStatus(w, agent.ErrUnavailable, http.StatusServiceUnavailable)
 		return
 	}
-	if err := s.agent.Reload(r.Context()); err != nil {
+	if err := s.reloadAgent(r.Context()); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -402,7 +402,7 @@ func (s *Server) setSkillEnabled(w http.ResponseWriter, r *http.Request, enabled
 		return
 	}
 	if s.agent != nil {
-		if err := s.agent.Reload(r.Context()); err != nil {
+		if err := s.reloadAgent(r.Context()); err != nil {
 			writeError(w, err)
 			return
 		}
@@ -556,7 +556,11 @@ func (s *Server) reloadAgent(ctx context.Context) error {
 	if s.agent == nil {
 		return nil
 	}
-	return s.agent.Reload(ctx)
+	if err := s.agent.Reload(ctx); err != nil {
+		return err
+	}
+	s.recoverAgentApprovals()
+	return nil
 }
 
 func (s *Server) listWorkspaceFiles(w http.ResponseWriter, r *http.Request) {
@@ -1061,7 +1065,7 @@ func (s *Server) saveSystemSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.agent != nil {
-		if err := s.agent.Reload(r.Context()); err != nil {
+		if err := s.reloadAgent(r.Context()); err != nil {
 			writeError(w, err)
 			return
 		}
@@ -1090,7 +1094,7 @@ func (s *Server) saveProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.agent != nil {
-		if err := s.agent.Reload(r.Context()); err != nil {
+		if err := s.reloadAgent(r.Context()); err != nil {
 			writeError(w, err)
 			return
 		}
@@ -1131,7 +1135,7 @@ func (s *Server) saveWebSearchSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.agent != nil {
-		if err := s.agent.Reload(r.Context()); err != nil {
+		if err := s.reloadAgent(r.Context()); err != nil {
 			writeError(w, err)
 			return
 		}
@@ -1194,7 +1198,7 @@ func (s *Server) saveModelProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if (result.Active || settings.SubagentModelProviderID == result.ID || settings.AutomaticApprovalModelProviderID == result.ID) && s.agent != nil {
-		if err := s.agent.Reload(r.Context()); err != nil {
+		if err := s.reloadAgent(r.Context()); err != nil {
 			writeError(w, err)
 			return
 		}
@@ -1247,7 +1251,7 @@ func (s *Server) activateModelProvider(w http.ResponseWriter, r *http.Request) {
 		writeError(w, agent.ErrUnavailable)
 		return
 	}
-	if err := s.agent.Reload(r.Context()); err != nil {
+	if err := s.reloadAgent(r.Context()); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -1265,7 +1269,7 @@ func (s *Server) deleteModelProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if wasActive && s.agent != nil {
-		if err := s.agent.Reload(r.Context()); err != nil {
+		if err := s.reloadAgent(r.Context()); err != nil {
 			writeError(w, err)
 			return
 		}
@@ -1571,7 +1575,37 @@ func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &input) {
 		return
 	}
-	result, err := s.service.ApproveAsync(r.Context(), r.PathValue("id"), input.Reason, actor(r))
+	approvalID := r.PathValue("id")
+	approval, err := s.service.GetApproval(r.Context(), approvalID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if approval.ContinuationKind == domain.ApprovalContinuationAgent {
+		result, decideErr := s.service.DecideAgentApproval(r.Context(), approvalID, domain.ApprovalStatusApproved, input.Reason, actor(r))
+		if decideErr != nil {
+			writeError(w, decideErr)
+			return
+		}
+		if !s.chatQueue.resume(approval.SessionID, approval.ID) {
+			if !s.chatSessionActive(approval.SessionID) {
+				group, groupErr := s.decidedAgentApprovalGroup(r.Context(), approval)
+				if groupErr != nil {
+					writeError(w, groupErr)
+					return
+				}
+				if len(group) > 0 {
+					if resumeErr := s.resumeAgentApprovals(r.Context(), group); resumeErr != nil {
+						writeError(w, resumeErr)
+						return
+					}
+				}
+			}
+		}
+		writeJSON(w, http.StatusAccepted, result)
+		return
+	}
+	result, err := s.service.ApproveAsync(r.Context(), approvalID, input.Reason, actor(r))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -1586,7 +1620,26 @@ func (s *Server) reject(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &input) {
 		return
 	}
-	err := s.service.Reject(r.Context(), r.PathValue("id"), input.Reason, actor(r))
+	approvalID := r.PathValue("id")
+	approval, err := s.service.GetApproval(r.Context(), approvalID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if approval.ContinuationKind == domain.ApprovalContinuationAgent {
+		_, err = s.service.DecideAgentApproval(r.Context(), approvalID, domain.ApprovalStatusRejected, input.Reason, actor(r))
+		if err == nil && !s.chatQueue.resume(approval.SessionID, approval.ID) {
+			if !s.chatSessionActive(approval.SessionID) {
+				var group []domain.Approval
+				group, err = s.decidedAgentApprovalGroup(r.Context(), approval)
+				if err == nil && len(group) > 0 {
+					err = s.resumeAgentApprovals(r.Context(), group)
+				}
+			}
+		}
+	} else {
+		err = s.service.Reject(r.Context(), approvalID, input.Reason, actor(r))
+	}
 	respond(w, map[string]any{"rejected": err == nil}, err)
 }
 
@@ -1686,6 +1739,13 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(sessionID) == "" {
 		sessionID = ids.New("session")
 	}
+	if activeTools, err := s.service.CountRunningChatToolCalls(r.Context(), sessionID); err != nil {
+		writeError(w, err)
+		return
+	} else if activeTools > 0 {
+		writeErrorStatus(w, agent.ErrSessionBusy, http.StatusConflict)
+		return
+	}
 	if _, err := s.service.PrepareChatSession(r.Context(), sessionID, workspaceID, actor(r)); err != nil {
 		writeErrorStatus(w, err, http.StatusBadRequest)
 		return
@@ -1696,99 +1756,13 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	streamStarted := streamAgentEvents(w, r, 10*time.Second, func(emit func(agent.Event)) {
-		defer s.chatQueue.finish(sessionID)
 		queryCtx, cancel := newChatRunContext(r.Context(), queueCtx)
 		defer cancel()
-		var started atomic.Bool
-		broadcast := func(event agent.Event) {
-			if event.Type == "session" {
-				started.Store(true)
-			}
-			event = s.chatEvents.publish(sessionID, event)
-			emit(event)
-		}
-		currentMessage, currentAttachments := message, attachments
-		for {
-			var completed *agent.Event
-			currentUserMessageID := ""
-			publish := func(event agent.Event) {
-				if event.UserMessageID != "" {
-					currentUserMessageID = event.UserMessageID
-				}
-				if event.Type == "done" {
-					copy := event
-					completed = &copy
-					return
-				}
-				broadcast(event)
-			}
-			_, err := s.agent.QueryWithAttachments(queryCtx, sessionID, currentMessage, currentAttachments, publish)
-			if err != nil {
-				if errors.Is(err, agent.ErrSteered) {
-					next, ok := s.chatQueue.nextAfterTurn(sessionID)
-					if !ok {
-						broadcast(agent.Event{Type: "done", SessionID: sessionID, UserMessageID: currentUserMessageID})
-						return
-					}
-					broadcast(agent.Event{Type: "turn_steered", SessionID: sessionID, UserMessageID: currentUserMessageID})
-					broadcast(agent.Event{
-						Type: "queue_started", MessageID: next.ID, SessionID: sessionID, Content: next.Message,
-						Status: "in_progress", QueueMode: next.Mode, QueueCount: len(s.chatQueue.snapshot(sessionID)), AttachmentCount: len(next.Attachments),
-					})
-					currentMessage, currentAttachments = next.Message, next.Attachments
-					continue
-				}
-				_, _ = s.chatQueue.clear(sessionID)
-				if !errors.Is(err, context.Canceled) {
-					event := agent.Event{Type: "model_error", Error: err.Error(), SessionID: sessionID, UserMessageID: currentUserMessageID}
-					if started.Load() {
-						broadcast(event)
-					} else {
-						emit(event)
-					}
-				}
-				return
-			}
-			// QueryWithAttachments owns one complete Agent turn, including every
-			// model/tool iteration. Only inject queued input after it returns.
-			next, ok := s.chatQueue.nextAfterTurn(sessionID)
-			if !ok {
-				if completed == nil {
-					completed = &agent.Event{Type: "done", SessionID: sessionID, UserMessageID: currentUserMessageID}
-				}
-				broadcast(*completed)
-				return
-			}
-			broadcast(agent.Event{Type: "turn_done", SessionID: sessionID, UserMessageID: currentUserMessageID, Content: completedContent(completed)})
-			broadcast(agent.Event{
-				Type: "queue_started", MessageID: next.ID, SessionID: sessionID, Content: next.Message,
-				Status: "in_progress", QueueMode: next.Mode, QueueCount: len(s.chatQueue.snapshot(sessionID)), AttachmentCount: len(next.Attachments),
-			})
-			currentMessage, currentAttachments = next.Message, next.Attachments
-		}
+		s.runChatTurns(queryCtx, sessionID, message, attachments, emit)
 	})
 	if !streamStarted {
 		s.chatQueue.finish(sessionID)
 	}
-}
-
-// newChatRunContext keeps an Agent turn alive across browser disconnects and
-// gives model and tool calls enough time to enforce their own retryable
-// timeouts. The conversation queue remains the owner of explicit cancellation.
-func newChatRunContext(requestCtx, queueCtx context.Context) (context.Context, context.CancelFunc) {
-	runCtx, cancel := context.WithCancel(context.WithoutCancel(requestCtx))
-	stopQueueCancel := context.AfterFunc(queueCtx, cancel)
-	return runCtx, func() {
-		stopQueueCancel()
-		cancel()
-	}
-}
-
-func completedContent(event *agent.Event) string {
-	if event == nil {
-		return ""
-	}
-	return event.Content
 }
 
 func (s *Server) queueChatMessage(w http.ResponseWriter, r *http.Request) {
@@ -2129,7 +2103,7 @@ func (s *Server) cancelChatSession(w http.ResponseWriter, r *http.Request) {
 			writeError(w, fmt.Errorf("cancel Agent session tools: %w", err))
 			return
 		}
-		rejectedApprovals, err = s.service.RejectPendingApprovalsForSession(r.Context(), sessionID, "Agent run stopped by the operator", actor(r))
+		rejectedApprovals, err = s.service.AbortApprovalsForSession(r.Context(), sessionID, "Agent run stopped by the operator", actor(r))
 		if err != nil {
 			writeError(w, fmt.Errorf("cancel Agent session approvals: %w", err))
 			return

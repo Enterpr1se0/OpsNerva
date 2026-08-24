@@ -89,6 +89,9 @@ func (s *Service) hasExecutionSubscribers(sessionID string) bool {
 }
 
 func (s *Service) publishExecutionEvent(event ExecutionEvent) {
+	if event.RunID != "" {
+		s.updateApprovalTask(event.RunID)
+	}
 	if event.SessionID == "" || event.RunID == "" {
 		return
 	}

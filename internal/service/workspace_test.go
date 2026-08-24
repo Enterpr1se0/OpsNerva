@@ -157,46 +157,18 @@ func runApprovedWorkspaceAccess(t *testing.T, svc *Service, invoke func(context.
 	t.Helper()
 	base, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	notifications := make(chan domain.ExecResult, 1)
-	ctx := WithApprovalNotifier(WithBlockingApprovals(base), func(result domain.ExecResult) {
-		notifications <- result
-	})
-	type outcome struct {
-		result domain.ExecResult
-		err    error
-	}
-	done := make(chan outcome, 1)
-	go func() {
-		result, err := invoke(ctx)
-		done <- outcome{result: result, err: err}
-	}()
-	var pending domain.ExecResult
-	select {
-	case pending = <-notifications:
-	case <-base.Done():
-		t.Fatal("timed out waiting for Workspace file approval")
+	pending, err := invoke(base)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if pending.Status != "approval_required" || pending.ApprovalID == "" {
 		t.Fatalf("Workspace file access skipped approval: %#v", pending)
 	}
-	select {
-	case early := <-done:
-		t.Fatalf("Workspace file access returned before approval: %#v", early)
-	default:
-	}
-	if _, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed file access", "operator"); err != nil {
+	completed, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed file access", "operator")
+	if err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case completed := <-done:
-		if completed.err != nil {
-			t.Fatal(completed.err)
-		}
-		return completed.result
-	case <-base.Done():
-		t.Fatal("timed out waiting for approved Workspace file access")
-		return domain.ExecResult{}
-	}
+	return completed
 }
 
 func TestWorkspaceAdminCreateUpdateAndRemove(t *testing.T) {

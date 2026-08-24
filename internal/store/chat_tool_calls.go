@@ -25,10 +25,50 @@ func chatToolCallTerminal(status string) bool {
 }
 
 func validateChatToolCallStatus(status string) error {
-	if status == domain.ChatToolCallRunning || chatToolCallTerminal(status) {
+	if status == domain.ChatToolCallRunning || status == domain.ChatToolCallApprovalRequired || chatToolCallTerminal(status) {
 		return nil
 	}
 	return fmt.Errorf("invalid chat tool call status %q", status)
+}
+
+func (s *Store) SetChatToolCallActiveStatus(ctx context.Context, sessionID, toolCallID, status, content string) (domain.ChatToolCall, error) {
+	if status != domain.ChatToolCallRunning && status != domain.ChatToolCallApprovalRequired {
+		return domain.ChatToolCall{}, fmt.Errorf("chat tool call status %q is not active", status)
+	}
+	call, err := s.GetChatToolCall(ctx, sessionID, toolCallID)
+	if err != nil {
+		return domain.ChatToolCall{}, err
+	}
+	if chatToolCallTerminal(call.Status) {
+		return call, nil
+	}
+	if strings.TrimSpace(content) == "" {
+		content = call.ResultJSON
+	}
+	content = preserveToolDisplay(call.ResultJSON, content)
+	content = toolContentWithLifecycle(content, status, call.RunID, "")
+	now := time.Now().UTC()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.ChatToolCall{}, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE chat_tool_calls SET status=?,result_json=?,error='',updated_at=?,completed_at=NULL
+WHERE session_id=? AND tool_call_id=? AND status IN (?,?)`, status, content, formatTime(now), sessionID, toolCallID,
+		domain.ChatToolCallRunning, domain.ChatToolCallApprovalRequired)
+	if err != nil {
+		return domain.ChatToolCall{}, err
+	}
+	if count, _ := result.RowsAffected(); count == 0 {
+		return domain.ChatToolCall{}, ErrNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE chat_messages SET content=?,status='completed' WHERE id=?`, content, call.MessageID); err != nil {
+		return domain.ChatToolCall{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.ChatToolCall{}, err
+	}
+	return s.GetChatToolCall(ctx, sessionID, toolCallID)
 }
 
 func runningToolContent(toolName, arguments string) string {
@@ -296,15 +336,15 @@ FROM chat_tool_calls WHERE session_id=? ORDER BY started_at,message_id`, session
 // independent from potentially very large persisted tool results.
 func (s *Store) CountRunningChatToolCalls(ctx context.Context, sessionID string) (int, error) {
 	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chat_tool_calls WHERE session_id=? AND status=?`,
-		sessionID, domain.ChatToolCallRunning).Scan(&count)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chat_tool_calls WHERE session_id=? AND status IN (?,?)`,
+		sessionID, domain.ChatToolCallRunning, domain.ChatToolCallApprovalRequired).Scan(&count)
 	return count, err
 }
 
 func (s *Store) ListRunningChatToolCalls(ctx context.Context) ([]domain.ChatToolCall, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT session_id,user_message_id,message_id,tool_call_id,run_id,tool_name,
 arguments_json,status,result_json,error,started_at,updated_at,completed_at
-FROM chat_tool_calls WHERE status=? ORDER BY started_at,message_id`, domain.ChatToolCallRunning)
+FROM chat_tool_calls WHERE status IN (?,?) ORDER BY started_at,message_id`, domain.ChatToolCallRunning, domain.ChatToolCallApprovalRequired)
 	if err != nil {
 		return nil, err
 	}

@@ -559,14 +559,15 @@ type ChatTokenUsage struct {
 }
 
 const (
-	ChatToolCallRunning     = "running"
-	ChatToolCallCompleted   = "completed"
-	ChatToolCallPartial     = "partial"
-	ChatToolCallFailed      = "failed"
-	ChatToolCallInterrupted = "interrupted"
-	ChatToolCallRejected    = "rejected"
-	ChatToolCallExpired     = "expired"
-	ChatToolCallUnknown     = "unknown"
+	ChatToolCallRunning          = "running"
+	ChatToolCallApprovalRequired = "approval_required"
+	ChatToolCallCompleted        = "completed"
+	ChatToolCallPartial          = "partial"
+	ChatToolCallFailed           = "failed"
+	ChatToolCallInterrupted      = "interrupted"
+	ChatToolCallRejected         = "rejected"
+	ChatToolCallExpired          = "expired"
+	ChatToolCallUnknown          = "unknown"
 )
 
 type ChatToolCall struct {
@@ -943,6 +944,13 @@ type CommandExplanation struct {
 }
 
 const (
+	ApprovalContinuationAgent = "agent"
+
+	ApprovalStatusPreparing = "preparing"
+	ApprovalStatusPending   = "pending"
+	ApprovalStatusApproved  = "approved"
+	ApprovalStatusRejected  = "rejected"
+
 	ApprovalAgentAllow  = "allow"
 	ApprovalAgentReject = "reject"
 	ApprovalAgentManual = "manual"
@@ -1014,18 +1022,21 @@ type AuditRunDeleteResult struct {
 }
 
 type Approval struct {
-	ID            string         `json:"id"`
-	RunID         string         `json:"run_id"`
-	SessionID     string         `json:"session_id,omitempty"`
-	HostID        string         `json:"host_id"`
-	RequestJSON   string         `json:"request_json"`
-	RequestCipher string         `json:"-"`
-	RequestDigest string         `json:"request_digest"`
-	Status        string         `json:"status"`
-	Reason        string         `json:"reason,omitempty"`
-	AIReview      *CommandReview `json:"ai_review,omitempty"`
-	CreatedAt     time.Time      `json:"created_at"`
-	DecidedAt     time.Time      `json:"decided_at,omitempty,omitzero"`
+	ID               string         `json:"id"`
+	RunID            string         `json:"run_id"`
+	SessionID        string         `json:"session_id,omitempty"`
+	HostID           string         `json:"host_id"`
+	RequestJSON      string         `json:"request_json"`
+	RequestCipher    string         `json:"-"`
+	RequestDigest    string         `json:"request_digest"`
+	Status           string         `json:"status"`
+	Reason           string         `json:"reason,omitempty"`
+	ContinuationKind string         `json:"continuation_kind,omitempty"`
+	CheckpointID     string         `json:"-"`
+	InterruptID      string         `json:"-"`
+	AIReview         *CommandReview `json:"ai_review,omitempty"`
+	CreatedAt        time.Time      `json:"created_at"`
+	DecidedAt        time.Time      `json:"decided_at,omitempty,omitzero"`
 }
 
 type Task struct {

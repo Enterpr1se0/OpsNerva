@@ -25,7 +25,7 @@ const liveToolOutputBufferChars=128<<10
 type ChatEntryImage = {id:string;name:string;mimeType:string;sizeBytes:number;url?:string}
 const workStatusKeys=['chat.cooking','chat.pondering','chat.brewing','chat.weaving','chat.polishing','chat.crunching'] as const
 type PendingChatImage = {id:string;file:File;url:string}
-type ChatEntry = { id: string; sourceMessageId?:string; persisted?:boolean; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; contentTruncated?:boolean; contentChars?:number; tool?: string; toolCallId?:string; runId?:string; transient?:boolean; progress?:boolean; startedAt?:number; liveStdout?:string; liveStderr?:string; liveOutput?:string; liveOutputStream?:'stdout'|'stderr'; transferredBytes?:number; transferTotalBytes?:number; images?:ChatEntryImage[]; tokenUsage?:ChatTokenUsage; active?: boolean; lifecycle?:'streaming'|'committed'; status?: 'pending' | 'completed' | 'failed' }
+type ChatEntry = { id: string; sourceMessageId?:string; persisted?:boolean; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; contentTruncated?:boolean; contentChars?:number; tool?: string; toolCallId?:string; runId?:string; transient?:boolean; progress?:boolean; startedAt?:number; liveStdout?:string; liveStderr?:string; liveOutput?:string; liveOutputStream?:'stdout'|'stderr'; transferredBytes?:number; transferTotalBytes?:number; images?:ChatEntryImage[]; tokenUsage?:ChatTokenUsage; active?: boolean; lifecycle?:'streaming'|'committed'; status?: 'pending' | 'waiting_for_approval' | 'completed' | 'failed' }
 type TaskToolEntryGroup={kind:'task_tool_group';id:string;tool:'TaskCreate'|'TaskUpdate';entries:ChatEntry[]}
 type ChatRenderItem={kind:'entry';entry:ChatEntry}|TaskToolEntryGroup
 type ModelRetryState = {attempt:number;max:number}
@@ -126,15 +126,15 @@ function commitAssistantLifecycle(entries:ChatEntry[],messageID:string,progress=
 
 function bindTurnUser(entries:ChatEntry[],userMessageID:string,clientUserEntryID:string){
 	if(!userMessageID||entries.some(item=>item.kind==='user'&&item.sourceMessageId===userMessageID))return entries
-	let index=clientUserEntryID?entries.findIndex(item=>item.kind==='user'&&item.id===clientUserEntryID&&item.status==='pending'):-1
-	if(index<0)for(let current=entries.length-1;current>=0;current--){if(entries[current].kind==='user'&&entries[current].status==='pending'){index=current;break}}
+	let index=clientUserEntryID?entries.findIndex(item=>item.kind==='user'&&item.id===clientUserEntryID&&(item.status==='pending'||item.status==='waiting_for_approval')):-1
+	if(index<0)for(let current=entries.length-1;current>=0;current--){if(entries[current].kind==='user'&&(entries[current].status==='pending'||entries[current].status==='waiting_for_approval')){index=current;break}}
 	return index<0?entries:entries.map((item,current)=>current===index?{...item,sourceMessageId:userMessageID}:item)
 }
 
-function updateTurnUserStatus(entries:ChatEntry[],status:'completed'|'failed',userMessageID:string|undefined,clientUserEntryID:string){
+function updateTurnUserStatus(entries:ChatEntry[],status:'pending'|'waiting_for_approval'|'completed'|'failed',userMessageID:string|undefined,clientUserEntryID:string){
 	let index=userMessageID?entries.findIndex(item=>item.kind==='user'&&item.sourceMessageId===userMessageID):-1
-	if(index<0&&!userMessageID&&clientUserEntryID)index=entries.findIndex(item=>item.kind==='user'&&item.id===clientUserEntryID&&item.status==='pending')
-	if(index<0&&!userMessageID)for(let current=entries.length-1;current>=0;current--){if(entries[current].kind==='user'&&entries[current].status==='pending'){index=current;break}}
+	if(index<0&&!userMessageID&&clientUserEntryID)index=entries.findIndex(item=>item.kind==='user'&&item.id===clientUserEntryID&&(item.status==='pending'||item.status==='waiting_for_approval'))
+	if(index<0&&!userMessageID)for(let current=entries.length-1;current>=0;current--){if(entries[current].kind==='user'&&(entries[current].status==='pending'||entries[current].status==='waiting_for_approval')){index=current;break}}
 	return index<0||entries[index].status===status?entries:entries.map((item,current)=>current===index?{...item,status}:item)
 }
 
@@ -2402,7 +2402,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	  const imageURLsRef=useRef(new Set<string>())
 	const reconnectErrorRef=useRef('')
   const sessionLoadRef=useRef('')
-  const currentApprovals=useMemo(()=>sessionId?approvals.filter(item=>item.session_id===sessionId):[],[approvals,sessionId])
+  const currentApprovals=useMemo(()=>sessionId?approvals.filter(item=>item.session_id===sessionId).sort((left,right)=>left.created_at.localeCompare(right.created_at)||left.id.localeCompare(right.id)):[],[approvals,sessionId])
 	const approvalCountsBySession=useMemo(()=>{const counts=new Map<string,number>();for(const approval of approvals){if(!approval.session_id)continue;counts.set(approval.session_id,(counts.get(approval.session_id)||0)+1)}return counts},[approvals])
 	const sessionBusy=running||detachedRunning
 	const queueingMessage=queueingMode!==null
@@ -2622,7 +2622,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		if(frame.type==='session'||frame.type==='title')void refreshSessions()
 		if(frame.type==='retry'){
 			setModelRetry({attempt:frame.retry_attempt||1,max:frame.retry_max||1})
-		}else if(['approval','reasoning','reasoning_reset','tool','tool_output','message_start','message','message_commit','message_reset','queued','queue_started','turn_done','turn_steered','done','interrupted','model_error','error'].includes(frame.type))setModelRetry(null)
+		}else if(['approval','approval_paused','approval_resuming','reasoning','reasoning_reset','tool','tool_output','message_start','message','message_commit','message_reset','queued','queue_started','turn_done','turn_steered','done','interrupted','model_error','error'].includes(frame.type))setModelRetry(null)
 		if(frame.type==='queued'&&frame.message_id){
 			if(!startedQueueMessageIDsRef.current.has(frame.message_id))setQueuedMessages(current=>insertQueuedMessage(current,{id:frame.message_id!,message:frame.content||'',mode:frame.queue_mode||'followup',attachment_count:frame.attachment_count||0,created_at:new Date().toISOString()},frame.queue_position))
 		}
@@ -2633,8 +2633,12 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		}
 		if(frame.type==='turn_done')setEntries(old=>updateTurnUserStatus(old.map(deactivateReasoning),'completed',frame.user_message_id,userEntryID))
 		if(frame.type==='turn_steered')setEntries(old=>updateTurnUserStatus(old.map(deactivateReasoning),'completed',frame.user_message_id,userEntryID))
-		if(frame.type==='approval'){
-			setEntries(old=>updateToolStatusByRunID(updateTurnUserStatus(old,'completed',frame.user_message_id,userEntryID),'approval_required',frame.run_id))
+		if(frame.type==='approval'||frame.type==='approval_paused'){
+			setEntries(old=>updateToolStatusByRunID(updateTurnUserStatus(old,'waiting_for_approval',frame.user_message_id,userEntryID),'approval_required',frame.run_id))
+			void refreshApprovals()
+		}
+		if(frame.type==='approval_resuming'){
+			setEntries(old=>updateToolStatusByRunID(updateTurnUserStatus(old,'pending',frame.user_message_id,userEntryID),'in_progress',frame.run_id))
 			void refreshApprovals()
 		}
 		if(frame.type==='tool_output')setEntries(old=>appendToolOutput(old,frame))
@@ -2670,7 +2674,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 				const runID=frame.run_id||toolContentRunID(frame.content!)
 				let index=callID?old.findIndex(item=>item.kind==='tool'&&item.toolCallId===callID):-1
 				if(index<0&&runID)index=old.findIndex(item=>item.kind==='tool'&&toolEntryRunID(item)===runID)
-				const transient=frame.status==='in_progress'
+				const transient=frame.status==='in_progress'||frame.status==='approval_required'
 				if(index>=0){
 					const current=old[index]
 					if(transient&&!current.transient&&settledToolStatus(toolContentStatus(current.content)))return old
@@ -2882,7 +2886,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		<ChatWorkspacePanel key={selectedWorkspace?.id||''} active={visible} mode={fileBrowserMode} onModeChange={setFileBrowserMode} workspaces={capabilities.workspaces} workspaceID={selectedWorkspace?.id||''} hosts={hosts} sftpHostID={sftpHostID} onSFTPHostChange={setSFTPHostID} shells={workspaceShells} switching={workspaceSwitching} disabled={sessionBusy||!!loadingSession} bound={!!selectedWorkspace&&boundWorkspaceID===selectedWorkspace.id} onSelect={switchWorkspace} onCreateShell={onCreateWorkspaceShell} onOpenShell={onOpenWorkspaceShell} onCollapse={collapseWorkspacePanel}/>
 	  {workspacePanelCollapsed&&<button type="button" className="chat-panel-open-button" onClick={()=>setWorkspaceCollapsed(false)} title={t('workspace.expandPanel')} aria-label={t('workspace.expandPanel')}><PanelLeftOpen size={15}/></button>}
     <div className="chat-main panel">
-	  <div className="session-approval-slot">{currentApprovals.length>0&&<ApprovalDialog key={currentApprovals[0].id} approval={currentApprovals[0]} pendingCount={currentApprovals.length} hosts={hosts} running={sessionBusy} stopping={stopping} onStop={()=>void stopAgent()} refreshApprovals={refreshApprovals} onApproved={result=>{setEntries(old=>updateToolRunStatus(old,result.run_id,result.status==='running'?'in_progress':result.status));if(result.shell?.kind==='workspace')onWorkspaceShellStarted(result.shell)}} onNotice={notify}/>}</div>
+	  <div className="session-approval-slot">{currentApprovals.length>0&&<ApprovalDialog key={currentApprovals[0].id} approval={currentApprovals[0]} pendingCount={currentApprovals.length} hosts={hosts} running={sessionBusy||toolsRunning} stopping={stopping} onStop={()=>void stopAgent()} refreshApprovals={refreshApprovals} onApproved={result=>{if(result.status==='running')setEntries(old=>updateToolRunStatus(old,result.run_id,'in_progress'));if(result.shell?.kind==='workspace')onWorkspaceShellStarted(result.shell)}} onNotice={notify}/>}</div>
 	      <div className="session-task-slot">{tasks&&<SessionTasks tasks={tasks} rows={taskRows} expanded={tasksExpanded} onExpanded={setTasksExpanded}/>}</div>
 		<div className="conversation-view">
 			<div className="messages" ref={messagesRef} onScroll={trackUserScroll} onWheel={pauseLatestOnWheel} onTouchMove={pauseLatestOnTouch}>
@@ -3096,7 +3100,7 @@ const ChatBubble=memo(function ChatBubble({ sessionID, entry, showActions, runs,
   if (entry.kind === 'tool') return <ToolEventCard sessionID={sessionID} entry={entry} runs={runs} hosts={hosts} onDisclosure={onToolDisclosure}/>
   if (entry.kind === 'reasoning') return <ReasoningCard content={entry.content} active={!!entry.active}/>
   if (entry.kind === 'assistant' && !entry.content) return null
-	return <div className={`bubble ${entry.kind} ${entry.status||''} ${entry.progress?'progress':''}`}><div className="avatar">{entry.kind === 'user' ? <UserRound size={17}/> : entry.kind === 'error' ? '!' : <Bot size={17}/>}</div><div><span className="bubble-label">{entry.kind === 'user' ? <>{t('chat.operator')}{entry.status==='failed'&&<em>{t('chat.turnIncomplete')}</em>}{entry.status==='pending'&&<em>{t('chat.processing')}</em>}</> : entry.kind === 'error' ? t('common.error') : 'OpsNerva'}</span>{entry.images&&entry.images.length>0&&<div className="message-images">{entry.images.map(image=>image.url?<a href={image.url} target="_blank" rel="noopener noreferrer" title={`${image.name} · ${formatFileSize(image.sizeBytes)}`} key={image.id}><img src={image.url} alt={image.name}/><span>{image.name}</span></a>:<span className="message-image-placeholder" title={`${image.name} · ${formatFileSize(image.sizeBytes)}`} key={image.id}><ImagePlus size={18}/><span>{image.name}</span></span>)}</div>}{entry.content&&<div className={`bubble-copy ${entry.kind==='assistant'&&entry.lifecycle!=='streaming'?'markdown-body':''}`}>{entry.kind==='assistant'&&entry.lifecycle!=='streaming'?<Suspense fallback={entry.content}><MarkdownMessage content={entry.content}/></Suspense>:entry.content}</div>}{showActions&&<div className="assistant-message-footer"><CopyButton value={entry.content} className="message-copy-button"/>{entry.tokenUsage&&<TokenUsageLine usage={entry.tokenUsage}/>}</div>}</div></div>
+	return <div className={`bubble ${entry.kind} ${entry.status||''} ${entry.progress?'progress':''}`}><div className="avatar">{entry.kind === 'user' ? <UserRound size={17}/> : entry.kind === 'error' ? '!' : <Bot size={17}/>}</div><div><span className="bubble-label">{entry.kind === 'user' ? <>{t('chat.operator')}{entry.status==='failed'&&<em>{t('chat.turnIncomplete')}</em>}{entry.status==='pending'&&<em>{t('chat.processing')}</em>}{entry.status==='waiting_for_approval'&&<em>{t('statusLabels.approval_required')}</em>}</> : entry.kind === 'error' ? t('common.error') : 'OpsNerva'}</span>{entry.images&&entry.images.length>0&&<div className="message-images">{entry.images.map(image=>image.url?<a href={image.url} target="_blank" rel="noopener noreferrer" title={`${image.name} · ${formatFileSize(image.sizeBytes)}`} key={image.id}><img src={image.url} alt={image.name}/><span>{image.name}</span></a>:<span className="message-image-placeholder" title={`${image.name} · ${formatFileSize(image.sizeBytes)}`} key={image.id}><ImagePlus size={18}/><span>{image.name}</span></span>)}</div>}{entry.content&&<div className={`bubble-copy ${entry.kind==='assistant'&&entry.lifecycle!=='streaming'?'markdown-body':''}`}>{entry.kind==='assistant'&&entry.lifecycle!=='streaming'?<Suspense fallback={entry.content}><MarkdownMessage content={entry.content}/></Suspense>:entry.content}</div>}{showActions&&<div className="assistant-message-footer"><CopyButton value={entry.content} className="message-copy-button"/>{entry.tokenUsage&&<TokenUsageLine usage={entry.tokenUsage}/>}</div>}</div></div>
 })
 
 function TokenUsageLine({usage}:{usage:ChatTokenUsage}){
@@ -3205,9 +3209,14 @@ function sshTunnelRoute(host:string,direction:string,localHost:string,localPort:
 function cleanFileChangeOutput(value:string){const lines=value.split(/\r?\n/),result:string[]=[];for(let index=0;index<lines.length;index++){if(lines[index]==='__OPS_FILE_VALIDATION_OK__')continue;if(lines[index]==='__OPS_FILE_AFTER__'){index++;continue}result.push(lines[index])}return result.join('\n').trim()}
 
 type ToolTarget={kind:'host'|'workspace'|'scope';label:string;name:string;id?:string}
-function ToolTransferRoute({sourceHost,sourcePath,destinationHost,destinationPath}:{sourceHost:string;sourcePath:string;destinationHost:string;destinationPath:string}){
-	const route=`${sourceHost}:${sourcePath} → ${destinationHost}:${destinationPath}`
-	return <span className="tool-transfer-route" title={route}><span><b>{sourceHost}</b><code>:{sourcePath}</code></span><i>→</i><span><b>{destinationHost}</b><code>:{destinationPath}</code></span></span>
+type ToolTransferEndpoint={kind:'host'|'workspace';name:string;path:string}
+type ToolTransferRouteValue={source:ToolTransferEndpoint;destination:ToolTransferEndpoint}
+function ToolTransferRouteEndpoint({endpoint}:{endpoint:ToolTransferEndpoint}){
+	return <span className={`tool-transfer-endpoint ${endpoint.kind}`}><b>{endpoint.kind==='workspace'?<FolderOpen size={11}/>:<Server size={11}/>}<span>{endpoint.name}</span></b><code>:{endpoint.path}</code></span>
+}
+function ToolTransferRoute({source,destination}:ToolTransferRouteValue){
+	const route=`${source.name}:${source.path} → ${destination.name}:${destination.path}`
+	return <span className="tool-transfer-route" title={route}><ToolTransferRouteEndpoint endpoint={source}/><i>→</i><ToolTransferRouteEndpoint endpoint={destination}/></span>
 }
 function hostIdentity(hosts:Host[],hostID:string){
 	const host=hosts.find(item=>item.id===hostID||item.name===hostID)
@@ -3387,7 +3396,15 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,onDisclosure}:{s
 	const filePath=textValue(file?.path)||remotePath||relativePath
 	const fileTarget=`${workspaceID?`${workspaceID}:`:''}${filePath}`
 	const eventToolLabel=shellOperation?shellActionLabel:structuredFileOperation?t(fileSearchMode?(workspaceID?'toolNames.workspace_file_search_mode':'toolNames.ssh_file_search_mode'):(workspaceID?'toolNames.workspace_file_read':'toolNames.ssh_file_read')):toolLabel(entry.tool||'')
-	const transferSummary=tunnelRoute||shellSummary||(workspaceUpload?`${workspaceID}:${relativePath} → ${hostName}:${remotePath}`:workspaceDownload?`${hostName}:${remotePath} → ${workspaceID}:${relativePath}`:sshTransfer?`${sourceHostName}:${sourcePath} → ${hostName}:${remotePath}`:'')
+	const fileTransferRoute:ToolTransferRouteValue|undefined=workspaceUpload
+		?{source:{kind:'workspace',name:workspaceID,path:relativePath},destination:{kind:'host',name:hostName,path:remotePath}}
+		:workspaceDownload
+			?{source:{kind:'host',name:hostName,path:remotePath},destination:{kind:'workspace',name:workspaceID,path:relativePath}}
+			:sshTransfer
+				?{source:{kind:'host',name:sourceHostName,path:sourcePath},destination:{kind:'host',name:hostName,path:remotePath}}
+				:undefined
+	const fileTransfer=!!fileTransferRoute
+	const transferSummary=tunnelRoute||shellSummary||(fileTransferRoute?`${fileTransferRoute.source.name}:${fileTransferRoute.source.path} → ${fileTransferRoute.destination.name}:${fileTransferRoute.destination.path}`:'')
   const planSteps=Array.isArray(payload.steps)?payload.steps.slice(0,toolCollectionPreviewItems).map(jsonRecord).filter((step):step is JsonRecord=>!!step):[]
   const planSummary=textValue(payload.goal)||textValue(planSteps.find(step=>textValue(step.status)==='in_progress'||textValue(step.status)==='blocked')?.title)
 	const genericArgumentSummary=executionTool?'':toolArgumentSummary(entry.tool,toolArguments)
@@ -3415,17 +3432,11 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,onDisclosure}:{s
 	const historyHostIDs=[...new Set(historyRuns.map(item=>textValue(item.host_id)).filter(Boolean))]
 	const listedHosts=[...recordArray(payload.hosts),...recordArray(resultPayload?.hosts)].slice(0,toolCollectionPreviewItems)
 	const targets:ToolTarget[]=[]
-	if(workspaceDownload){
-		if(hostID)targets.push({kind:'host',label:t('tool.sourceHost'),name:destinationHost.name,id:hostID})
-		if(workspaceID)targets.push({kind:'workspace',label:t('common.workspace'),name:workspaceID})
-	}else if(workspaceUpload){
-		if(workspaceID)targets.push({kind:'workspace',label:t('common.workspace'),name:workspaceID})
-		if(hostID)targets.push({kind:'host',label:t('tool.targetHost'),name:destinationHost.name,id:hostID})
-	}else if(workspaceTool&&workspaceID){
+	if(!fileTransfer&&workspaceTool&&workspaceID){
 		targets.push({kind:'workspace',label:t('common.workspace'),name:workspaceID})
-	}else if(hostID){
+	}else if(!fileTransfer&&hostID){
 		targets.push({kind:'host',label:t('tool.targetHost'),name:destinationHost.name,id:hostID})
-	}else if(workspaceID){
+	}else if(!fileTransfer&&workspaceID){
 		targets.push({kind:'workspace',label:t('common.workspace'),name:workspaceID})
 	}else if(entry.tool==='ssh_history'&&historyHostIDs.length>0){
 		for(const historyHostID of historyHostIDs.slice(0,3)){const historyHost=hostIdentity(hosts,historyHostID);targets.push({kind:'host',label:t('tool.historyHost'),name:historyHost.name,id:historyHost.id})}
@@ -3461,7 +3472,7 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,onDisclosure}:{s
 		void api.chatMessage(sessionID,initialEntry.sourceMessageId).then(message=>setFullContent(message.content)).catch(error=>setDetailError(errorText(error))).finally(()=>setLoadingDetail(false))
 	}
 		  return <details className={`tool-event tool-event-rich ${status}`} open={expanded}>
-			<summary onClick={event=>{event.preventDefault();toggleExpanded(event.currentTarget)}}><div className="tool-summary-icon">{toolSummaryIcon(entry.tool)}</div><div className="tool-summary-copy"><div className="tool-summary-heading"><b>{summaryLabel}</b>{sshTransfer?<ToolTransferRoute sourceHost={sourceHostName} sourcePath={sourcePath} destinationHost={hostName} destinationPath={remotePath}/>:<>{targets.length>0&&<div className="tool-summary-targets">{targets.map((target,index)=><span className={`tool-target-chip tool-target-${target.kind}`} title={`${target.label}: ${[target.name,target.id].filter(Boolean).join(' · ')}`} key={`${target.kind}_${target.id||target.name}_${index}`}>{target.kind==='host'?<Server size={11}/>:target.kind==='workspace'?<FolderOpen size={11}/>:<ListChecks size={11}/>} {(targets.length>1||target.kind==='scope')&&<em>{target.label}</em>}<b>{target.name||target.id}</b></span>)}</div>}{commandSummary!==summaryLabel&&<code title={previewText(commandSummary)}>{previewText(commandSummary)}</code>}</>}</div></div><div className="tool-summary-statuses">{loadingDetail&&<LoaderCircle className="spin" size={12}/>} {autoApproved&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}<span className={`tool-status ${status}`} key={status}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight className="tool-summary-chevron" size={14}/>{request&&<div className="tool-summary-meta"><span className={`tool-summary-permission ${permission}`}><em>{t('tool.permission')}</em><b>{permission}</b></span>{purpose&&<span className="tool-summary-purpose" title={purpose}><em>{t('tool.reason')}</em><b>{purpose}</b></span>}</div>}{status==='in_progress'&&<div className={`tool-live-progress ${transferTotal>0?'determinate':''}`} role="progressbar" aria-valuemin={transferTotal>0?0:undefined} aria-valuemax={transferTotal>0?transferTotal:undefined} aria-valuenow={transferTotal>0?transferred:undefined}><i><em style={transferTotal>0?{width:`${transferPercent}%`}:undefined}/></i><span>{transferTotal>0?`${formatFileSize(transferred)} / ${formatFileSize(transferTotal)}`:entry.liveOutputStream?.toUpperCase()||''}</span><time>{elapsed}</time></div>}{outputPreview&&<div className={`tool-summary-preview ${previewStream==='stderr'?'stderr':''}`}><span>{shellAction==='output'?shellActionLabel:(previewStream||'stdout').toUpperCase()}</span><pre>{outputPreview}</pre></div>}</summary>
+			<summary onClick={event=>{event.preventDefault();toggleExpanded(event.currentTarget)}}><div className="tool-summary-icon">{toolSummaryIcon(entry.tool)}</div><div className="tool-summary-copy"><div className="tool-summary-heading"><b>{summaryLabel}</b>{fileTransferRoute?<ToolTransferRoute {...fileTransferRoute}/>:<>{targets.length>0&&<div className="tool-summary-targets">{targets.map((target,index)=><span className={`tool-target-chip tool-target-${target.kind}`} title={`${target.label}: ${[target.name,target.id].filter(Boolean).join(' · ')}`} key={`${target.kind}_${target.id||target.name}_${index}`}>{target.kind==='host'?<Server size={11}/>:target.kind==='workspace'?<FolderOpen size={11}/>:<ListChecks size={11}/>} {(targets.length>1||target.kind==='scope')&&<em>{target.label}</em>}<b>{target.name||target.id}</b></span>)}</div>}{commandSummary!==summaryLabel&&<code title={previewText(commandSummary)}>{previewText(commandSummary)}</code>}</>}</div></div><div className="tool-summary-statuses">{loadingDetail&&<LoaderCircle className="spin" size={12}/>} {autoApproved&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}<span className={`tool-status ${status}`} key={status}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight className="tool-summary-chevron" size={14}/>{request&&<div className="tool-summary-meta"><span className={`tool-summary-permission ${permission}`}><em>{t('tool.permission')}</em><b>{permission}</b></span>{purpose&&<span className="tool-summary-purpose" title={purpose}><em>{t('tool.reason')}</em><b>{purpose}</b></span>}</div>}{status==='in_progress'&&<div className={`tool-live-progress ${transferTotal>0?'determinate':''}`} role="progressbar" aria-valuemin={transferTotal>0?0:undefined} aria-valuemax={transferTotal>0?transferTotal:undefined} aria-valuenow={transferTotal>0?transferred:undefined}><i><em style={transferTotal>0?{width:`${transferPercent}%`}:undefined}/></i><span>{transferTotal>0?`${formatFileSize(transferred)} / ${formatFileSize(transferTotal)}`:entry.liveOutputStream?.toUpperCase()||''}</span><time>{elapsed}</time></div>}{outputPreview&&<div className={`tool-summary-preview ${previewStream==='stderr'?'stderr':''}`}><span>{shellAction==='output'?shellActionLabel:(previewStream||'stdout').toUpperCase()}</span><pre>{outputPreview}</pre></div>}</summary>
 		{expanded&&<div className="tool-event-body">
 		  {detailError&&<div className="tool-detail-error">{detailError}</div>}
 		  {shellPrimaryAction&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellPrimaryContent||'—'}/><pre>{previewText(shellPrimaryContent||'—',toolOutputPreviewChars)}</pre></div></section>}
@@ -3480,7 +3491,7 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,onDisclosure}:{s
 	  {fileSearchMode&&searchResult&&<div className={`file-search-result ${searchFound?'found':'empty'}`}><Search size={15}/><div><b>{t(searchFound?'tool.searchMatched':'tool.searchNoMatches')}</b><span>{searchMatchModeLabel} · {searchPattern}</span></div></div>}
 	  {(textValue(payload.message)||textValue(payload.next_action))&&<div className={`tool-guidance ${payload.ok===false||['failed','denied','interrupted'].includes(status)?'error':''}`}><ShieldAlert size={15}/><div><b>{textValue(payload.code)||t('tool.result')}</b>{textValue(payload.message)&&<p>{textValue(payload.message)}</p>}{textValue(payload.next_action)&&<small>{t('common.next')} · {textValue(payload.next_action)}</small>}</div></div>}
 	  {instruction&&<div className="tool-instruction"><ShieldAlert size={15}/><div><b>{t('tool.operatorInstruction')}</b><p>{instruction}</p></div></div>}
-	  {sshTransfer&&transferTotal>0&&<div className="file-transfer-progress" role="progressbar" aria-valuemin={0} aria-valuemax={transferTotal} aria-valuenow={transferred}><div><span>{t('tool.transferProgress')}</span><b>{formatFileSize(transferred)} / {formatFileSize(transferTotal)}</b></div><i><em style={{width:`${transferPercent}%`}}/></i></div>}
+	  {fileTransfer&&transferTotal>0&&<div className="file-transfer-progress" role="progressbar" aria-valuemin={0} aria-valuemax={transferTotal} aria-valuenow={transferred}><div><span>{t('tool.transferProgress')}</span><b>{formatFileSize(transferred)} / {formatFileSize(transferTotal)}</b></div><i><em style={{width:`${transferPercent}%`}}/></i></div>}
 	  {shellOperation&&shellChunks.length>0?<ShellOutputChunks chunks={shellChunks} live={status==='in_progress'}/>:((stdout&&(!shellOutputAction||shellChunks.length>0))||stderr)&&<div className="tool-output-grid">{stdout&&(!shellOutputAction||shellChunks.length>0)&&<ToolOutputPanel kind="stdout" label={outputLabel('STDOUT',stdoutOmitted)} content={stdout} live={status==='in_progress'}/>} {stderr&&<ToolOutputPanel kind="stderr" label={outputLabel(t('tool.stderrResult'),stderrOmitted)} content={stderr} live={status==='in_progress'}/>}</div>}
 	  <LazyJSONDetails value={rawPayload}/>
     </div>}

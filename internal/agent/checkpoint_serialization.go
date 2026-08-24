@@ -8,4 +8,6 @@ func init() {
 	// values must be registered before Eino's gob-based checkpoint is encoded.
 	schema.RegisterName[map[string]any]("_opsnerva_map_string_any")
 	schema.RegisterName[[]any]("_opsnerva_any_slice")
+	schema.RegisterName[approvalInterrupt]("_opsnerva_approval_interrupt")
+	schema.RegisterName[approvalResumeDecision]("_opsnerva_approval_resume_decision")
 }

@@ -149,6 +149,12 @@ CREATE TABLE chat_messages (
   id TEXT PRIMARY KEY, session_id TEXT NOT NULL, role TEXT NOT NULL,
   content TEXT NOT NULL, tool_name TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'completed', created_at TEXT NOT NULL
+);
+CREATE TABLE approvals (
+  id TEXT PRIMARY KEY, run_id TEXT NOT NULL UNIQUE, host_id TEXT NOT NULL,
+  request_json TEXT NOT NULL, request_cipher TEXT NOT NULL DEFAULT '',
+  request_digest TEXT NOT NULL, status TEXT NOT NULL,
+  reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, decided_at TEXT
 );`)
 	if closeErr := db.Close(); err == nil {
 		err = closeErr
@@ -168,6 +174,9 @@ CREATE TABLE chat_messages (
 		{"ssh_shell_events", "content_encoding"},
 		{"model_providers", "reasoning_effort"},
 		{"chat_messages", "model_extra_json"},
+		{"approvals", "continuation_kind"},
+		{"approvals", "checkpoint_id"},
+		{"approvals", "interrupt_id"},
 	}
 	for _, expected := range columns {
 		table, column := expected.table, expected.column
@@ -193,5 +202,10 @@ CREATE TABLE chat_messages (
 		if !found {
 			t.Fatalf("%s.%s was not migrated", table, column)
 		}
+	}
+	var approvalContinuationIndex string
+	if err := st.db.QueryRowContext(context.Background(), `SELECT name FROM sqlite_master
+WHERE type='index' AND name='idx_approvals_continuation_checkpoint'`).Scan(&approvalContinuationIndex); err != nil {
+		t.Fatal(err)
 	}
 }

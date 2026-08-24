@@ -938,10 +938,7 @@ func TestApprovalGatedBackgroundScriptReturnsBeforeDecision(t *testing.T) {
 	if scriptTool == nil {
 		t.Fatal("ssh_run_script was not registered")
 	}
-	notifications := make(chan domain.ExecResult, 1)
-	toolCtx := service.WithApprovalNotifier(service.WithBlockingApprovals(service.WithSessionID(ctx, "background-approval")), func(result domain.ExecResult) {
-		notifications <- result
-	})
+	toolCtx := service.WithSessionID(ctx, "background-approval")
 	inputJSON, _ := json.Marshal(map[string]any{
 		"host_id": host.ID, "script": "sleep 8; echo bg-finished", "background": true,
 		"reason": "verify approval-gated background execution",
@@ -962,10 +959,14 @@ func TestApprovalGatedBackgroundScriptReturnsBeforeDecision(t *testing.T) {
 		t.Fatalf("background Tool result = %#v", result)
 	}
 	var pending domain.ExecResult
-	select {
-	case pending = <-notifications:
-	case <-ctx.Done():
-		t.Fatal("timed out waiting for background approval")
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		_, current, _, taskErr := svc.GetTask(result.TaskID)
+		if taskErr == nil && current.Status == "approval_required" && current.ApprovalID != "" {
+			pending = current
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if pending.Status != "approval_required" || pending.ApprovalID == "" {
 		t.Fatalf("background approval = %#v", pending)
@@ -973,7 +974,7 @@ func TestApprovalGatedBackgroundScriptReturnsBeforeDecision(t *testing.T) {
 	if err := svc.Reject(context.Background(), pending.ApprovalID, "test complete", "operator"); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(time.Second)
+	deadline = time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		task, taskResult, _, err := svc.GetTask(result.TaskID)
 		if err == nil && task.Status == "rejected" {
@@ -1166,46 +1167,26 @@ func TestFileReadMetadataOnlyKeepsSHA256WithoutContent(t *testing.T) {
 		t.Helper()
 		base, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		notifications := make(chan domain.ExecResult, 1)
-		toolCtx := service.WithApprovalNotifier(service.WithBlockingApprovals(base), func(result domain.ExecResult) {
-			notifications <- result
-		})
-		type outcome struct {
-			result ExecToolResult
-			err    error
-		}
-		done := make(chan outcome, 1)
 		beforeCalls := transport.callCount
-		go func() {
-			result, readErr := RunFileReadTool(toolCtx, svc, input, "eino-agent")
-			done <- outcome{result: result, err: readErr}
-		}()
-		var pending domain.ExecResult
-		select {
-		case pending = <-notifications:
-		case <-base.Done():
-			t.Fatal("timed out waiting for file-read approval")
+		pending, readErr := RunFileReadTool(base, svc, input, "eino-agent")
+		if readErr != nil {
+			t.Fatal(readErr)
 		}
 		if pending.Status != "approval_required" || pending.ApprovalID == "" || transport.callCount != beforeCalls {
 			t.Fatalf("file read skipped approval: %#v", pending)
 		}
-		_, approveErr := svc.Approve(ctx, pending.ApprovalID, "reviewed file access", "operator")
+		approved, approveErr := svc.Approve(ctx, pending.ApprovalID, "reviewed file access", "operator")
 		if approveErr != nil {
 			t.Fatal(approveErr)
 		}
 		if transport.callCount != beforeCalls+1 {
 			t.Fatalf("approved file read executed %d times", transport.callCount-beforeCalls)
 		}
-		select {
-		case completed := <-done:
-			if completed.err != nil {
-				t.Fatal(completed.err)
-			}
-			return completed.result
-		case <-base.Done():
-			t.Fatal("timed out waiting for approved file read")
-			return ExecToolResult{}
+		completed, compactErr := CompactExecToolResult(approved, nil)
+		if compactErr != nil {
+			t.Fatal(compactErr)
 		}
+		return completed
 	}
 	result := runRead(FileReadInput{HostID: host.ID, Path: "/etc/example.conf", MetadataOnly: true})
 	if result.Status != "completed" || result.Stdout != "" || result.File == nil || result.File.SHA256 != strings.Repeat("a", 64) || result.File.Size != 15 {
@@ -1674,8 +1655,10 @@ func TestToolErrorMiddlewareKeepsRecoverableFailuresInsideToolNode(t *testing.T)
 		t.Fatal(err)
 	}
 	node, err := compose.NewToolNode(context.Background(), &compose.ToolsNodeConfig{
-		Tools:               []tool.BaseTool{rawFailure},
-		ToolCallMiddlewares: []compose.ToolMiddleware{{Invokable: normalizeToolCallErrors}},
+		Tools: []tool.BaseTool{rawFailure},
+		ToolCallMiddlewares: []compose.ToolMiddleware{{Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
+			return normalizeToolCallErrors(nil, next)
+		}}},
 		UnknownToolsHandler: unknownToolResult,
 	})
 	if err != nil {
@@ -1746,8 +1729,10 @@ func TestToolErrorMiddlewarePreservesCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 	node, err := compose.NewToolNode(context.Background(), &compose.ToolsNodeConfig{
-		Tools:               []tool.BaseTool{cancelTool},
-		ToolCallMiddlewares: []compose.ToolMiddleware{{Invokable: normalizeToolCallErrors}},
+		Tools: []tool.BaseTool{cancelTool},
+		ToolCallMiddlewares: []compose.ToolMiddleware{{Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
+			return normalizeToolCallErrors(nil, next)
+		}}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1774,7 +1759,9 @@ func TestAgentLoopReturnsToolFailureToModelAndContinues(t *testing.T) {
 	agentInstance, err := adk.NewChatModelAgent(context.Background(), &adk.ChatModelAgentConfig{
 		Name: "tool-failure-test", Description: "tool failure regression", Model: chatModel, MaxIterations: 3,
 		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
-			Tools: []tool.BaseTool{rawFailure}, ToolCallMiddlewares: []compose.ToolMiddleware{{Invokable: normalizeToolCallErrors}},
+			Tools: []tool.BaseTool{rawFailure}, ToolCallMiddlewares: []compose.ToolMiddleware{{Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
+				return normalizeToolCallErrors(nil, next)
+			}}},
 		}},
 	})
 	if err != nil {

@@ -51,6 +51,7 @@ type Service struct {
 	hostSems                map[string]chan struct{}
 	taskMu                  sync.RWMutex
 	tasks                   map[string]*taskState
+	approvalTasks           map[string]*taskState
 	reviewerMu              sync.RWMutex
 	reviewer                ApprovalReviewer
 	automaticReviewer       AutomaticApprovalReviewer
@@ -91,27 +92,6 @@ type Service struct {
 	webRequests             singleflight.Group
 }
 
-const (
-	maxConcurrentApprovalExplanations = 2
-	maxQueuedApprovalExplanations     = 4
-)
-
-type approvalExplanationTask struct {
-	cancel context.CancelFunc
-}
-
-type ApprovalReviewer interface {
-	Review(context.Context, domain.CommandReviewInput) (domain.CommandReview, error)
-}
-
-type FreshApprovalReviewer interface {
-	ReviewFresh(context.Context, domain.CommandReviewInput) (domain.CommandReview, error)
-}
-
-type AutomaticApprovalReviewer interface {
-	Review(context.Context, domain.AutomaticApprovalInput) (domain.CommandReview, error)
-}
-
 type taskState struct {
 	task       domain.Task
 	result     domain.ExecResult
@@ -136,7 +116,7 @@ func New(st *store.Store, transport sshx.Transport, encryptor *security.Encrypto
 	result := &Service{
 		store: st, transport: transport, encryptor: encryptor, redactor: redactor, limits: limits,
 		workspaceSandboxPath: config.Default().WorkspaceSandboxPath,
-		globalSem:            make(chan struct{}, global), hostSems: make(map[string]chan struct{}), tasks: make(map[string]*taskState), workspaces: make(map[string]config.Workspace), validators: make(map[string]config.Validator), mcpRuntime: make(map[string]*mcpRuntimeState),
+		globalSem:            make(chan struct{}, global), hostSems: make(map[string]chan struct{}), tasks: make(map[string]*taskState), approvalTasks: make(map[string]*taskState), workspaces: make(map[string]config.Workspace), validators: make(map[string]config.Validator), mcpRuntime: make(map[string]*mcpRuntimeState),
 		mcpOAuthFlows: make(map[string]*mcpOAuthFlow), mcpOAuthByServer: make(map[string]*mcpOAuthFlow),
 		mcpActivitySubscribers: make(map[uint64]*mcpActivitySubscriber),
 		modelMetadata:          newModelMetadataCache(modelsDevMetadataURL),
@@ -163,7 +143,13 @@ func (s *Service) RecoverInterruptedTasks(ctx context.Context) error {
 	if err := s.store.InterruptActiveTasks(ctx); err != nil {
 		return err
 	}
+	if err := s.store.InterruptActiveRuns(ctx, "control plane restarted before the operation completed"); err != nil {
+		return err
+	}
 	if err := s.store.InterruptActiveSSHShells(ctx); err != nil {
+		return err
+	}
+	if err := s.store.AbortUnactivatedAgentApprovals(ctx, "control plane restarted before the Agent approval checkpoint became resumable"); err != nil {
 		return err
 	}
 	if err := s.store.FailPendingChatMessages(ctx); err != nil {
@@ -413,8 +399,8 @@ func (s *Service) DeleteChatSession(ctx context.Context, sessionID string, actor
 		return err
 	} else {
 		for _, call := range calls {
-			if call.Status == domain.ChatToolCallRunning {
-				return fmt.Errorf("conversation %q has a running function tool; stop it before deleting the conversation", sessionID)
+			if call.Status == domain.ChatToolCallRunning || call.Status == domain.ChatToolCallApprovalRequired {
+				return fmt.Errorf("conversation %q has an active function tool; stop it before deleting the conversation", sessionID)
 			}
 		}
 	}
@@ -794,65 +780,6 @@ func (s *Service) MCPHTTPAccess(ctx context.Context, token string) (enabled bool
 	return true, subtle.ConstantTimeCompare(expected, actual[:]) == 1, nil
 }
 
-func (s *Service) SetApprovalReviewer(reviewer ApprovalReviewer) {
-	s.reviewerMu.Lock()
-	s.reviewer = reviewer
-	s.reviewerMu.Unlock()
-}
-
-func (s *Service) approvalReviewer() ApprovalReviewer {
-	s.reviewerMu.RLock()
-	defer s.reviewerMu.RUnlock()
-	return s.reviewer
-}
-
-func (s *Service) SetAutomaticApprovalReviewer(reviewer AutomaticApprovalReviewer) {
-	s.reviewerMu.Lock()
-	s.automaticReviewer = reviewer
-	s.reviewerMu.Unlock()
-}
-
-func (s *Service) automaticApprovalReviewer() AutomaticApprovalReviewer {
-	s.reviewerMu.RLock()
-	defer s.reviewerMu.RUnlock()
-	return s.automaticReviewer
-}
-
-func (s *Service) registerApprovalExplanation(approvalID string, task *approvalExplanationTask) {
-	s.explanationMu.Lock()
-	previous := s.explanationActive[approvalID]
-	s.explanationActive[approvalID] = task
-	s.explanationMu.Unlock()
-	if previous != nil {
-		previous.cancel()
-	}
-}
-
-func (s *Service) clearApprovalExplanation(approvalID string, task *approvalExplanationTask) {
-	s.explanationMu.Lock()
-	if s.explanationActive[approvalID] == task {
-		delete(s.explanationActive, approvalID)
-	}
-	s.explanationMu.Unlock()
-}
-
-func (s *Service) cancelApprovalExplanation(ctx context.Context, approvalID, runID string) bool {
-	s.explanationMu.Lock()
-	task := s.explanationActive[approvalID]
-	if task != nil {
-		delete(s.explanationActive, approvalID)
-	}
-	s.explanationMu.Unlock()
-	if task == nil {
-		return false
-	}
-	task.cancel()
-	if runID != "" {
-		_ = s.store.UpdateRunAIReview(ctx, runID, "")
-	}
-	return true
-}
-
 func (s *Service) ModelProviderConfig(ctx context.Context, id string) (config.Model, domain.ModelProvider, error) {
 	provider, err := s.store.GetModelProvider(ctx, id)
 	if err != nil {
@@ -1204,12 +1131,7 @@ func (s *Service) TrustHostKey(ctx context.Context, id, fingerprint, actor strin
 }
 
 func (s *Service) Submit(ctx context.Context, req domain.ExecRequest, actor string) (domain.ExecResult, error) {
-	result, err := s.submit(ctx, req, actor, nil)
-	if err != nil || !blockingApprovalsFromContext(ctx) || result.Status != "approval_required" || result.ApprovalID == "" {
-		return result, err
-	}
-	notifyApproval(ctx, result)
-	return s.awaitApproval(ctx, result)
+	return s.submit(ctx, req, actor, nil)
 }
 
 func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor string, stream func(string, []byte)) (domain.ExecResult, error) {
@@ -1344,8 +1266,13 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 		}
 		approval := domain.Approval{
 			ID: ids.New("approval"), RunID: run.ID, HostID: host.ID, RequestJSON: requestRedacted, RequestCipher: requestCipher,
-			RequestDigest: digest, Status: "pending",
+			RequestDigest: digest, Status: domain.ApprovalStatusPending,
 			CreatedAt: now,
+		}
+		if continuation, ok := agentApprovalContinuationFromContext(ctx); ok {
+			approval.Status = domain.ApprovalStatusPreparing
+			approval.ContinuationKind = domain.ApprovalContinuationAgent
+			approval.CheckpointID = continuation.CheckpointID
 		}
 		if err := s.store.CreateApproval(ctx, approval); err != nil {
 			s.clearExecutionOwner(run.ID)
@@ -1376,484 +1303,6 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 		})
 	}
 	return s.execute(ctx, host, req, run, actor, stream)
-}
-
-func (s *Service) commandReviewInput(ctx context.Context, req domain.ExecRequest, host domain.Host, digest, sessionID string) domain.CommandReviewInput {
-	currentTask := ""
-	if sessionID != "" {
-		if tasks, err := s.store.ListAgentTasks(ctx, sessionID); err == nil {
-			currentTask = currentAgentTask(tasks)
-		}
-	}
-	return domain.CommandReviewInput{
-		Request:       req,
-		Host:          domain.HostCapability{ID: host.ID, Name: host.Name, AuthType: host.AuthType, SudoMode: host.SudoMode},
-		CurrentTask:   currentTask,
-		RequestDigest: digest,
-	}
-}
-
-func (s *Service) automaticApprovalInput(ctx context.Context, req domain.ExecRequest, host domain.Host, digest, sessionID string) domain.AutomaticApprovalInput {
-	input := domain.AutomaticApprovalInput{
-		Request: req, Host: domain.HostCapability{ID: host.ID, Name: host.Name, AuthType: host.AuthType, SudoMode: host.SudoMode},
-		UserRequest: s.redactor.Redact(approvalUserRequestFromContext(ctx)), RequestDigest: digest,
-	}
-	if sessionID == "" {
-		return input
-	}
-	if tasks, err := s.store.ListAgentTasks(ctx, sessionID); err == nil {
-		input.CurrentTask = s.redactor.Redact(currentAgentTask(tasks))
-	}
-	return input
-}
-
-func (s *Service) reviewForAutomaticApproval(ctx context.Context, reviewer AutomaticApprovalReviewer, input domain.AutomaticApprovalInput, timeoutSeconds int) domain.CommandReview {
-	if strings.TrimSpace(input.UserRequest) == "" {
-		return markAutomaticApprovalReview(s.normalizeCommandReview(domain.CommandReview{}, fmt.Errorf("current user request is unavailable for Auto approval"), timeoutSeconds))
-	}
-	if reviewer == nil {
-		return markAutomaticApprovalReview(s.normalizeCommandReview(domain.CommandReview{}, fmt.Errorf("Auto approval Agent is unavailable for the active model"), timeoutSeconds))
-	}
-	timeoutSeconds = effectiveSubagentTimeoutSeconds(timeoutSeconds)
-	reviewCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
-	defer cancel()
-	select {
-	case s.automaticApprovalSem <- struct{}{}:
-		defer func() { <-s.automaticApprovalSem }()
-	case <-reviewCtx.Done():
-		return markAutomaticApprovalReview(s.normalizeCommandReview(domain.CommandReview{}, reviewCtx.Err(), timeoutSeconds))
-	}
-	review, err := reviewer.Review(reviewCtx, input)
-	review = s.normalizeCommandReview(review, err, timeoutSeconds)
-	if review.Status == "completed" && review.Decision != domain.ApprovalAgentAllow && review.Decision != domain.ApprovalAgentReject && review.Decision != domain.ApprovalAgentManual {
-		review.Status = "degraded"
-		review.Errors = append(review.Errors, "Auto approval Agent returned an invalid decision")
-	}
-	if review.Status == "completed" && strings.TrimSpace(review.Reason) == "" {
-		review.Status = "degraded"
-		review.Errors = append(review.Errors, "Auto approval Agent returned no reason")
-	}
-	if review.Status == "completed" && (review.Explanation == nil || strings.TrimSpace(review.Explanation.Summary) == "" || strings.TrimSpace(review.Explanation.Mechanism) == "") {
-		review.Status = "degraded"
-		review.Errors = append(review.Errors, "Auto approval Agent returned no operation explanation")
-	}
-	return markAutomaticApprovalReview(review)
-}
-
-func markAutomaticApprovalReview(review domain.CommandReview) domain.CommandReview {
-	review.Kind = domain.CommandReviewKindAutomaticApproval
-	return review
-}
-
-// startPendingApprovalExplanation keeps model latency outside the human
-// approval response path. Explanation work is bounded globally and canceled as
-// soon as its approval is no longer pending.
-func (s *Service) startPendingApprovalExplanation(parent context.Context, approval domain.Approval, input domain.CommandReviewInput, reviewer ApprovalReviewer, timeoutSeconds int) {
-	baseCtx := context.WithoutCancel(parent)
-	timeoutSeconds = effectiveSubagentTimeoutSeconds(timeoutSeconds)
-	logger := observability.FromContext(baseCtx).With(
-		"component", "approval", "approval_id", approval.ID, "run_id", approval.RunID,
-	)
-	select {
-	case s.explanationSlots <- struct{}{}:
-	default:
-		review := domain.CommandReview{
-			Status: "unavailable",
-			Errors: []string{"approval Agent review skipped because the local queue is full"}, ReviewedAt: time.Now().UTC(),
-		}
-		persistCtx, cancelPersist := context.WithTimeout(baseCtx, 3*time.Second)
-		err := s.persistPendingApprovalExplanation(persistCtx, approval, review, 0)
-		cancelPersist()
-		if err != nil {
-			logger.ErrorContext(baseCtx, "persist skipped approval explanation failed", "error", err)
-		} else {
-			logger.WarnContext(baseCtx, "approval explanation skipped", "reason", "queue_full")
-		}
-		return
-	}
-
-	queuedAt := time.Now()
-	explanationCtx, cancelExplanation := context.WithTimeout(baseCtx, time.Duration(timeoutSeconds)*time.Second)
-	task := &approvalExplanationTask{cancel: cancelExplanation}
-	s.registerApprovalExplanation(approval.ID, task)
-	s.explainWG.Add(1)
-	go func() {
-		defer s.explainWG.Done()
-		defer func() { <-s.explanationSlots }()
-		defer cancelExplanation()
-		defer s.clearApprovalExplanation(approval.ID, task)
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				logger.ErrorContext(baseCtx, "approval Agent panicked", "panic", fmt.Sprint(recovered))
-			}
-		}()
-
-		select {
-		case s.explanationSem <- struct{}{}:
-			defer func() { <-s.explanationSem }()
-		case <-explanationCtx.Done():
-			if errors.Is(explanationCtx.Err(), context.Canceled) {
-				logger.InfoContext(baseCtx, "approval explanation canceled while queued", "queue_ms", time.Since(queuedAt).Milliseconds())
-				return
-			}
-			review := s.normalizeCommandReview(domain.CommandReview{}, explanationCtx.Err(), timeoutSeconds)
-			persistCtx, cancelPersist := context.WithTimeout(baseCtx, 3*time.Second)
-			err := s.persistPendingApprovalExplanation(persistCtx, approval, review, time.Since(queuedAt))
-			cancelPersist()
-			if err != nil {
-				logger.ErrorContext(baseCtx, "persist queued approval explanation timeout failed", "error", err)
-			}
-			return
-		}
-
-		started := time.Now()
-		logger.InfoContext(baseCtx, "approval explanation started", "queue_ms", started.Sub(queuedAt).Milliseconds())
-		review, reviewErr := reviewer.Review(explanationCtx, input)
-		if errors.Is(explanationCtx.Err(), context.Canceled) {
-			logger.InfoContext(baseCtx, "approval explanation canceled", "duration_ms", time.Since(started).Milliseconds())
-			return
-		}
-		review = s.normalizeCommandReview(review, reviewErr, timeoutSeconds)
-		persistCtx, cancelPersist := context.WithTimeout(baseCtx, 3*time.Second)
-		err := s.persistPendingApprovalExplanation(persistCtx, approval, review, time.Since(started))
-		cancelPersist()
-		if err != nil {
-			current, getErr := s.store.GetApproval(baseCtx, approval.ID)
-			if getErr == nil && current.Status != "pending" {
-				logger.InfoContext(baseCtx, "approval explanation discarded after decision", "status", current.Status, "duration_ms", time.Since(started).Milliseconds())
-				return
-			}
-			logger.ErrorContext(baseCtx, "persist approval explanation failed", "error", err, "duration_ms", time.Since(started).Milliseconds())
-			return
-		}
-		logger.InfoContext(baseCtx, "approval explanation completed", "status", review.Status, "duration_ms", time.Since(started).Milliseconds())
-	}()
-}
-
-func (s *Service) persistPendingApprovalExplanation(ctx context.Context, approval domain.Approval, review domain.CommandReview, duration time.Duration) error {
-	reviewJSON, err := json.Marshal(review)
-	if err != nil {
-		return fmt.Errorf("encode approval explanation: %w", err)
-	}
-	if err := s.store.UpdatePendingApprovalExplanation(ctx, approval.ID, approval.RunID, string(reviewJSON)); err != nil {
-		return err
-	}
-	s.audit(ctx, approval.RunID, "approval_agent_reviewed", "approval-agent", map[string]any{
-		"approval_id": approval.ID, "status": review.Status,
-		"model": review.Model, "duration_ms": duration.Milliseconds(),
-	})
-	notifyApproval(ctx, domain.ExecResult{
-		RunID: approval.RunID, Status: "approval_required",
-		ApprovalID: approval.ID,
-	})
-	return nil
-}
-
-func (s *Service) normalizeCommandReview(review domain.CommandReview, reviewErr error, timeoutSeconds int) domain.CommandReview {
-	if reviewErr != nil {
-		model := review.Model
-		message := reviewErr.Error()
-		if errors.Is(reviewErr, context.DeadlineExceeded) || strings.Contains(strings.ToLower(message), "context deadline exceeded") {
-			message = fmt.Sprintf("approval Agent did not respond within %d seconds", effectiveSubagentTimeoutSeconds(timeoutSeconds))
-		}
-		review = domain.CommandReview{
-			Status: "unavailable", Model: model,
-			Errors: []string{message}, ReviewedAt: time.Now().UTC(),
-		}
-	}
-	if review.Status != "completed" && review.Status != "degraded" && review.Status != "unavailable" {
-		review.Status = "degraded"
-	}
-	if review.ReviewedAt.IsZero() {
-		review.ReviewedAt = time.Now().UTC()
-	}
-	review.Decision = strings.ToLower(strings.TrimSpace(review.Decision))
-	review.Reason = s.redactor.Redact(strings.TrimSpace(review.Reason))
-	if len(review.Reason) > 1000 {
-		review.Reason = review.Reason[:1000]
-	}
-	if review.Explanation != nil {
-		review.Explanation.Summary = s.redactor.Redact(review.Explanation.Summary)
-		review.Explanation.Mechanism = s.redactor.Redact(review.Explanation.Mechanism)
-		for index := range review.Explanation.Risks {
-			review.Explanation.Risks[index] = s.redactor.Redact(review.Explanation.Risks[index])
-		}
-	}
-	if len(review.Errors) > 5 {
-		review.Errors = review.Errors[:5]
-	}
-	for index := range review.Errors {
-		review.Errors[index] = s.redactor.Redact(review.Errors[index])
-		if len(review.Errors[index]) > 800 {
-			review.Errors[index] = review.Errors[index][:800]
-		}
-	}
-	return review
-}
-
-func effectiveSubagentTimeoutSeconds(timeoutSeconds int) int {
-	if timeoutSeconds < domain.MinSubagentTimeoutSeconds || timeoutSeconds > domain.MaxSubagentTimeoutSeconds {
-		return domain.DefaultSubagentTimeoutSeconds
-	}
-	return timeoutSeconds
-}
-
-func (s *Service) Approve(ctx context.Context, approvalID, reason, actor string) (domain.ExecResult, error) {
-	approved, err := s.approveForExecution(ctx, approvalID, reason, actor)
-	if err != nil {
-		return domain.ExecResult{}, err
-	}
-	return s.executeApproved(ctx, approved)
-}
-
-func (s *Service) ApproveAsync(ctx context.Context, approvalID, reason, actor string) (domain.ExecResult, error) {
-	approved, err := s.approveForExecution(ctx, approvalID, reason, actor)
-	if err != nil {
-		return domain.ExecResult{}, err
-	}
-	if err := s.startApprovedExecution(ctx, approved); err != nil {
-		s.finishApprovedExecutionError(approved, err)
-		return domain.ExecResult{}, err
-	}
-	return execResultFromRun(approved.run, approved.approval.ID, ""), nil
-}
-
-type approvedExecution struct {
-	approval domain.Approval
-	request  domain.ExecRequest
-	run      domain.Run
-	host     domain.Host
-	actor    string
-}
-
-func (s *Service) approveForExecution(ctx context.Context, approvalID, reason, actor string) (approvedExecution, error) {
-	logger := observability.FromContext(ctx).With("component", "approval", "approval_id", approvalID, "actor", actor)
-	approval, err := s.store.GetApproval(ctx, approvalID)
-	if err != nil {
-		return approvedExecution{}, err
-	}
-	if approval.Status != "pending" {
-		logger.WarnContext(ctx, "approval decision ignored", "status", approval.Status)
-		return approvedExecution{}, fmt.Errorf("approval is %s", approval.Status)
-	}
-	requestData, err := s.encryptor.Decrypt(approval.RequestCipher)
-	if err != nil {
-		return approvedExecution{}, err
-	}
-	if len(requestData) == 0 {
-		requestData = []byte(approval.RequestJSON)
-	}
-	var req domain.ExecRequest
-	if err := json.Unmarshal(requestData, &req); err != nil {
-		return approvedExecution{}, err
-	}
-	_, digest, err := canonicalRequest(req)
-	if err != nil || digest != approval.RequestDigest {
-		return approvedExecution{}, fmt.Errorf("approved request digest no longer matches")
-	}
-	run, err := s.store.GetRun(ctx, approval.RunID)
-	if err != nil {
-		return approvedExecution{}, err
-	}
-	host, err := s.store.GetHost(ctx, approval.HostID)
-	if err != nil {
-		return approvedExecution{}, err
-	}
-	if err := s.store.ApprovePendingAndStartRun(ctx, approval.ID, run.ID, reason); err != nil {
-		return approvedExecution{}, err
-	}
-	s.cancelApprovalExplanation(ctx, approval.ID, approval.RunID)
-	run.Status = "running"
-	s.audit(ctx, run.ID, "approval_granted", actor, map[string]any{"approval_id": approval.ID, "reason": reason, "session_id": approval.SessionID})
-	logger.InfoContext(ctx, "approval granted", "run_id", run.ID, "session_id", approval.SessionID)
-	return approvedExecution{approval: approval, request: req, run: run, host: host, actor: actor}, nil
-}
-
-func (s *Service) startApprovedExecution(parent context.Context, approved approvedExecution) error {
-	executionCtx, cancel := context.WithCancel(context.WithoutCancel(parent))
-	s.executionMu.Lock()
-	if s.executionClosed {
-		s.executionMu.Unlock()
-		cancel()
-		return fmt.Errorf("service is shutting down")
-	}
-	if _, cancelled := s.cancelledExecutions[approved.run.ID]; cancelled {
-		delete(s.cancelledExecutions, approved.run.ID)
-		s.executionMu.Unlock()
-		cancel()
-		return context.Canceled
-	}
-	s.executionCancels[approved.run.ID] = cancel
-	s.executionWG.Add(1)
-	s.executionMu.Unlock()
-
-	stopServiceCancellation := context.AfterFunc(s.executionCtx, cancel)
-	go func() {
-		defer s.executionWG.Done()
-		defer stopServiceCancellation()
-		defer cancel()
-		defer func() {
-			s.executionMu.Lock()
-			delete(s.executionCancels, approved.run.ID)
-			delete(s.cancelledExecutions, approved.run.ID)
-			s.executionMu.Unlock()
-		}()
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				err := fmt.Errorf("approved execution stopped unexpectedly")
-				observability.FromContext(executionCtx).ErrorContext(executionCtx, "approved execution panicked", "run_id", approved.run.ID, "panic", s.redactor.Redact(fmt.Sprint(recovered)))
-				s.finishApprovedExecutionError(approved, err)
-			}
-		}()
-		_, _ = s.executeApproved(executionCtx, approved)
-	}()
-	return nil
-}
-
-func (s *Service) cancelApprovedExecution(runID string) bool {
-	if runID == "" {
-		return false
-	}
-	s.executionMu.Lock()
-	cancel := s.executionCancels[runID]
-	if cancel == nil {
-		s.cancelledExecutions[runID] = struct{}{}
-	}
-	s.executionMu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-	return true
-}
-
-func (s *Service) executeApproved(ctx context.Context, approved approvedExecution) (domain.ExecResult, error) {
-	result, err := s.execute(ctx, approved.host, approved.request, approved.run, approved.actor, nil)
-	if err == nil {
-		return result, nil
-	}
-	s.finishApprovedExecutionError(approved, err)
-	if result.RunID != "" {
-		return result, err
-	}
-	run, loadErr := s.store.GetRun(context.WithoutCancel(ctx), approved.run.ID)
-	if loadErr == nil {
-		result = execResultFromRun(run, approved.approval.ID, "")
-	}
-	return result, err
-}
-
-func (s *Service) finishApprovedExecutionError(approved approvedExecution, cause error) {
-	defer s.clearExecutionOwner(approved.run.ID)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	run, err := s.store.GetRun(ctx, approved.run.ID)
-	if err != nil || (run.Status != "created" && run.Status != "approval_required" && run.Status != "running") {
-		return
-	}
-	run.Status = "failed"
-	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
-		run.Status = "interrupted"
-	}
-	run.Error = s.redactor.Redact(cause.Error())
-	run.CompletedAt = time.Now().UTC()
-	if err := s.store.UpdateRun(ctx, run); err != nil {
-		observability.FromContext(ctx).ErrorContext(ctx, "persist approved execution failure failed", "run_id", run.ID, "error", err)
-		return
-	}
-	s.publishExecutionEvent(ExecutionEvent{SessionID: run.SessionID, RunID: run.ID, Status: run.Status})
-	s.audit(ctx, run.ID, "command_completed", approved.actor, map[string]any{"status": run.Status, "error": run.Error})
-	observability.FromContext(ctx).ErrorContext(ctx, "approved execution stopped before completion", "run_id", run.ID, "status", run.Status, "error", run.Error)
-}
-
-func (s *Service) Reject(ctx context.Context, approvalID, reason, actor string) error {
-	logger := observability.FromContext(ctx).With("component", "approval", "approval_id", approvalID, "actor", actor)
-	approval, err := s.store.GetApproval(ctx, approvalID)
-	if err != nil {
-		return err
-	}
-	if err := s.store.DecideApproval(ctx, approval.ID, "rejected", reason); err != nil {
-		return err
-	}
-	s.cancelApprovalExplanation(ctx, approval.ID, approval.RunID)
-	run, err := s.store.GetRun(ctx, approval.RunID)
-	if err != nil {
-		return err
-	}
-	run.Status = "rejected"
-	run.Error = reason
-	run.CompletedAt = time.Now().UTC()
-	if err := s.store.UpdateRun(ctx, run); err != nil {
-		return err
-	}
-	s.publishExecutionEvent(ExecutionEvent{SessionID: run.SessionID, RunID: run.ID, Status: run.Status})
-	s.audit(ctx, run.ID, "approval_rejected", actor, map[string]any{"approval_id": approval.ID, "reason": reason})
-	logger.InfoContext(ctx, "approval rejected", "run_id", run.ID, "session_id", approval.SessionID)
-	return nil
-}
-
-func (s *Service) RejectPendingApprovalsForSession(ctx context.Context, sessionID, reason, actor string) (int, error) {
-	approvals, err := s.store.ListPendingApprovalsForSession(ctx, sessionID)
-	if err != nil {
-		return 0, err
-	}
-	rejected := 0
-	for _, approval := range approvals {
-		if err := s.Reject(ctx, approval.ID, reason, actor); err != nil {
-			current, getErr := s.store.GetApproval(ctx, approval.ID)
-			if getErr == nil && current.Status != "pending" {
-				continue
-			}
-			return rejected, err
-		}
-		rejected++
-	}
-	return rejected, nil
-}
-
-// awaitApproval keeps an Agent Tool call suspended until its exact approval is
-// decided and, when approved, until the approved execution finishes. Decisions
-// remain durable in SQLite; polling also makes this work when the approval HTTP
-// request is handled by a different goroutine.
-func (s *Service) awaitApproval(ctx context.Context, initial domain.ExecResult) (domain.ExecResult, error) {
-	logger := observability.FromContext(ctx).With("component", "approval", "approval_id", initial.ApprovalID, "run_id", initial.RunID)
-	logger.DebugContext(ctx, "agent tool call paused for approval")
-	poll := time.NewTicker(250 * time.Millisecond)
-	heartbeat := time.NewTicker(15 * time.Second)
-	defer poll.Stop()
-	defer heartbeat.Stop()
-
-	for {
-		approval, err := s.store.GetApproval(ctx, initial.ApprovalID)
-		if err != nil {
-			return domain.ExecResult{}, err
-		}
-		run, err := s.store.GetRun(ctx, approval.RunID)
-		if err != nil {
-			return domain.ExecResult{}, err
-		}
-
-		switch approval.Status {
-		case "rejected":
-			logger.InfoContext(ctx, "agent tool approval wait finished", "status", approval.Status)
-			result := execResultFromRun(run, approval.ID, approval.Reason)
-			notifyApproval(ctx, result)
-			return result, nil
-		case "approved":
-			if run.Status != "created" && run.Status != "approval_required" && run.Status != "running" {
-				logger.InfoContext(ctx, "agent tool approval wait finished", "status", run.Status)
-				return execResultFromRun(run, approval.ID, ""), nil
-			}
-		}
-
-		select {
-		case <-ctx.Done():
-			logger.WarnContext(ctx, "agent tool approval wait canceled", "error", ctx.Err())
-			return domain.ExecResult{}, ctx.Err()
-		case <-poll.C:
-		case <-heartbeat.C:
-			notifyApproval(ctx, initial)
-		}
-	}
 }
 
 func execResultFromRun(run domain.Run, approvalID, operatorInstruction string) domain.ExecResult {
@@ -1909,6 +1358,7 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 			run.Error = prepareErr.Error()
 			run.CompletedAt = time.Now().UTC()
 			_ = s.store.UpdateRun(ctx, run)
+			s.publishExecutionEvent(ExecutionEvent{SessionID: run.SessionID, RunID: run.ID, Status: run.Status})
 			s.audit(ctx, run.ID, "command_failed", actor, map[string]any{"error": prepareErr.Error()})
 			logger.ErrorContext(ctx, "Workspace upload source validation failed", "error", prepareErr)
 			return domain.ExecResult{RunID: run.ID, Status: run.Status, AutoApproved: autoApproved, Stderr: prepareErr.Error(), CompletedAt: run.CompletedAt}, prepareErr
@@ -1932,6 +1382,7 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 			run.Error = prepareErr.Error()
 			run.CompletedAt = time.Now().UTC()
 			_ = s.store.UpdateRun(ctx, run)
+			s.publishExecutionEvent(ExecutionEvent{SessionID: run.SessionID, RunID: run.ID, Status: run.Status})
 			s.audit(ctx, run.ID, "command_failed", actor, map[string]any{"error": prepareErr.Error()})
 			logger.ErrorContext(ctx, "remote file change preparation failed", "error", prepareErr)
 			return domain.ExecResult{RunID: run.ID, Status: run.Status, AutoApproved: autoApproved, Stderr: prepareErr.Error(), Change: req.Change, CompletedAt: run.CompletedAt}, prepareErr
@@ -1970,6 +1421,7 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 		run.Error = err.Error()
 		run.CompletedAt = time.Now().UTC()
 		_ = s.store.UpdateRun(ctx, run)
+		s.publishExecutionEvent(ExecutionEvent{SessionID: run.SessionID, RunID: run.ID, Status: run.Status})
 		s.audit(ctx, run.ID, "command_failed", actor, map[string]any{"error": err.Error()})
 		logger.ErrorContext(ctx, "SSH credential preparation failed", "error", err)
 		return domain.ExecResult{RunID: run.ID, Status: run.Status, AutoApproved: autoApproved, CompletedAt: run.CompletedAt}, err
@@ -2092,6 +1544,23 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 	}
 	if run.Status == "completed" && (approvedReq.Mode == domain.ExecRemoteSearch || approvedReq.Mode == domain.ExecWorkspaceSearch) {
 		decorateFileSearchResult(&result, approvedReq.SearchPattern, approvedReq.SearchMatchMode, approvedReq.ContextLines)
+	}
+	if run.Status == "completed" && (approvedReq.Mode == domain.ExecRemoteRead || approvedReq.Mode == domain.ExecWorkspaceRead) && result.Stdout != "" {
+		path := approvedReq.RemotePath
+		if approvedReq.Mode == domain.ExecWorkspaceRead {
+			path = approvedReq.RelativePath
+		}
+		metadata, content := parseFileReadOutput(path, result.Stdout)
+		if approvedReq.Mode == domain.ExecRemoteRead || approvedReq.TailLines == 0 {
+			metadata.OffsetBytes = resolvedFileOffset(metadata.Size, approvedReq.OffsetBytes)
+		}
+		metadata.ReturnedBytes = len(content)
+		decorateFileReadPage(&metadata, approvedReq.MaxBytes, approvedReq.TailLines)
+		metadata.Sensitive = strings.Contains(content, "[REDACTED]")
+		result.File, result.Stdout = &metadata, content
+	}
+	if approvedReq.Mode == domain.ExecRemoteRead && approvedReq.MetadataOnly {
+		result.Stdout = ""
 	}
 	if approvedReq.Change != nil {
 		path := approvedReq.RemotePath
@@ -2440,11 +1909,10 @@ func (s *Service) StartTask(ctx context.Context, req domain.ExecRequest, actor s
 			state.task.RunID = result.RunID
 			state.task.Status = "approval_required"
 			state.approvalID = result.ApprovalID
+			s.approvalTasks[result.RunID] = state
 			taskSnapshot, resultSnapshot := state.task, state.result
 			s.taskMu.Unlock()
 			_ = s.store.UpsertTask(context.Background(), taskSnapshot, resultSnapshot, "")
-			notifyApproval(ctx, result)
-			s.trackApprovalTask(taskCtx, state, result.ApprovalID, actor)
 			return
 		}
 		s.taskMu.Lock()
@@ -2466,72 +1934,6 @@ func (s *Service) StartTask(ctx context.Context, req domain.ExecRequest, actor s
 		_ = s.store.UpsertTask(context.Background(), taskSnapshot, resultSnapshot, taskErr)
 	}()
 	return task, nil
-}
-
-func (s *Service) trackApprovalTask(ctx context.Context, state *taskState, approvalID, actor string) {
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		approval, approvalErr := s.store.GetApproval(context.Background(), approvalID)
-		if approvalErr == nil {
-			run, runErr := s.store.GetRun(context.Background(), approval.RunID)
-			if runErr == nil {
-				result := execResultFromRun(run, approval.ID, "")
-				if approval.Status == "rejected" {
-					result.OperatorInstruction = approval.Reason
-				}
-				status := run.Status
-				if approval.Status == "pending" {
-					status = "approval_required"
-					result.Status = status
-				}
-				terminal := terminalExecutionStatus(status)
-				s.taskMu.Lock()
-				if s.tasks[state.task.ID] != state {
-					s.taskMu.Unlock()
-					return
-				}
-				changed := state.task.Status != status || terminal
-				if changed {
-					state.task.RunID = run.ID
-					state.task.Status = status
-					state.task.OperatorInstruction = result.OperatorInstruction
-					state.result = result
-					if terminal {
-						state.task.EndedAt = time.Now().UTC()
-						delete(s.tasks, state.task.ID)
-					}
-				}
-				taskSnapshot, resultSnapshot, taskErr := state.task, state.result, state.err
-				s.taskMu.Unlock()
-				if changed {
-					_ = s.store.UpsertTask(context.Background(), taskSnapshot, resultSnapshot, taskErr)
-				}
-				if terminal {
-					return
-				}
-			}
-		}
-		select {
-		case <-ctx.Done():
-			s.taskMu.Lock()
-			if s.tasks[state.task.ID] != state {
-				s.taskMu.Unlock()
-				return
-			}
-			state.task.Status = "interrupted"
-			state.task.EndedAt = time.Now().UTC()
-			state.result.Status = "interrupted"
-			state.err = ctx.Err().Error()
-			taskSnapshot, resultSnapshot, taskErr := state.task, state.result, state.err
-			delete(s.tasks, state.task.ID)
-			s.taskMu.Unlock()
-			_ = s.store.UpsertTask(context.Background(), taskSnapshot, resultSnapshot, taskErr)
-			s.audit(context.Background(), taskSnapshot.RunID, "task_interrupted", actor, map[string]any{"task_id": taskSnapshot.ID})
-			return
-		case <-ticker.C:
-		}
-	}
 }
 
 func (s *Service) GetTask(id string) (domain.Task, domain.ExecResult, string, error) {
@@ -2599,6 +2001,7 @@ func (s *Service) CancelTask(id, actor string) error {
 	state.result.CompletedAt = state.task.EndedAt
 	taskSnapshot, resultSnapshot, taskErr := state.task, state.result, state.err
 	delete(s.tasks, id)
+	delete(s.approvalTasks, runID)
 	s.taskMu.Unlock()
 
 	if cancel != nil {
@@ -2680,142 +2083,6 @@ func (s *Service) SearchRunSummariesMatchingPage(ctx context.Context, filter dom
 	default:
 		return domain.RunSearchPage{}, fmt.Errorf("invalid history match_mode: use literal or regex")
 	}
-}
-
-// RetryApprovalExplanation reruns the tool-free command explainer for an
-// existing pending approval. It never decides the approval or
-// executes the operation.
-func (s *Service) RetryApprovalExplanation(ctx context.Context, approvalID, actor string) (domain.Approval, error) {
-	logger := observability.FromContext(ctx).With("component", "approval", "approval_id", approvalID, "actor", actor)
-	approval, err := s.store.GetApproval(ctx, approvalID)
-	if err != nil {
-		return domain.Approval{}, err
-	}
-	if approval.Status != "pending" {
-		return domain.Approval{}, fmt.Errorf("approval is %s", approval.Status)
-	}
-	settings, err := s.store.GetSystemSettings(ctx)
-	if err != nil {
-		return domain.Approval{}, err
-	}
-	if !settings.ApprovalExplanationsEnabled {
-		return domain.Approval{}, fmt.Errorf("approval explanations are disabled in system settings")
-	}
-	reviewer := s.approvalReviewer()
-	if reviewer == nil {
-		return domain.Approval{}, fmt.Errorf("approval Agent is unavailable for the active model")
-	}
-
-	requestData, err := s.encryptor.Decrypt(approval.RequestCipher)
-	if err != nil {
-		return domain.Approval{}, err
-	}
-	if len(requestData) == 0 {
-		requestData = []byte(approval.RequestJSON)
-	}
-	var req domain.ExecRequest
-	if err := json.Unmarshal(requestData, &req); err != nil {
-		return domain.Approval{}, err
-	}
-	_, digest, err := canonicalRequest(req)
-	if err != nil || digest != approval.RequestDigest {
-		return domain.Approval{}, fmt.Errorf("approval request digest no longer matches")
-	}
-	run, err := s.store.GetRun(ctx, approval.RunID)
-	if err != nil {
-		return domain.Approval{}, err
-	}
-	host, err := s.store.GetHost(ctx, approval.HostID)
-	if err != nil {
-		return domain.Approval{}, err
-	}
-
-	currentTask := ""
-	if approval.SessionID != "" {
-		if tasks, taskErr := s.store.ListAgentTasks(ctx, approval.SessionID); taskErr == nil {
-			currentTask = currentAgentTask(tasks)
-		}
-	}
-	input := domain.CommandReviewInput{
-		Request: req, Host: domain.HostCapability{ID: host.ID, Name: host.Name, AuthType: host.AuthType, SudoMode: host.SudoMode},
-		CurrentTask: currentTask, RequestDigest: digest,
-	}
-
-	retryCtx, cancelRetry := context.WithCancel(ctx)
-	task := &approvalExplanationTask{cancel: cancelRetry}
-	s.registerApprovalExplanation(approval.ID, task)
-	defer cancelRetry()
-	defer s.clearApprovalExplanation(approval.ID, task)
-
-	// Close the decision race between the initial read and task registration.
-	current, err := s.store.GetApproval(retryCtx, approval.ID)
-	if err != nil {
-		return domain.Approval{}, err
-	}
-	if current.Status != "pending" {
-		return domain.Approval{}, fmt.Errorf("approval is %s", current.Status)
-	}
-	if err := s.store.UpdateRunAIReview(retryCtx, run.ID, ""); err != nil {
-		return domain.Approval{}, err
-	}
-
-	logger.InfoContext(ctx, "approval explanation retry started", "run_id", run.ID)
-	started := time.Now()
-	timeoutSeconds := effectiveSubagentTimeoutSeconds(settings.SubagentTimeoutSeconds)
-	explanationCtx, cancel := context.WithTimeout(retryCtx, time.Duration(timeoutSeconds)*time.Second)
-	defer cancel()
-	select {
-	case s.explanationSem <- struct{}{}:
-		defer func() { <-s.explanationSem }()
-	case <-explanationCtx.Done():
-		return domain.Approval{}, explanationCtx.Err()
-	}
-	var review domain.CommandReview
-	var reviewErr error
-	if freshReviewer, ok := reviewer.(FreshApprovalReviewer); ok {
-		review, reviewErr = freshReviewer.ReviewFresh(explanationCtx, input)
-	} else {
-		review, reviewErr = reviewer.Review(explanationCtx, input)
-	}
-	cancel()
-	if retryCtx.Err() != nil {
-		return domain.Approval{}, retryCtx.Err()
-	}
-	review = s.normalizeCommandReview(review, reviewErr, timeoutSeconds)
-	reviewJSON, err := json.Marshal(review)
-	if err != nil {
-		return domain.Approval{}, err
-	}
-	if err := s.store.UpdatePendingApprovalExplanation(retryCtx, approval.ID, run.ID, string(reviewJSON)); err != nil {
-		return domain.Approval{}, err
-	}
-	s.audit(ctx, run.ID, "command_ai_explanation_retried", actor, map[string]any{
-		"approval_id": approval.ID, "status": review.Status,
-		"model": review.Model, "duration_ms": time.Since(started).Milliseconds(),
-	})
-	logger.InfoContext(ctx, "approval explanation retry completed", "run_id", run.ID, "status", review.Status,
-		"duration_ms", time.Since(started).Milliseconds())
-
-	approval.RequestJSON = string(requestData)
-	approval.AIReview = &review
-	return approval, nil
-}
-
-func (s *Service) ListApprovals(ctx context.Context, status string, limit int) ([]domain.Approval, error) {
-	approvals, err := s.store.ListApprovals(ctx, status, limit)
-	if err != nil {
-		return nil, err
-	}
-	for index := range approvals {
-		plain, decryptErr := s.encryptor.Decrypt(approvals[index].RequestCipher)
-		if decryptErr != nil {
-			return nil, decryptErr
-		}
-		if len(plain) > 0 {
-			approvals[index].RequestJSON = string(plain)
-		}
-	}
-	return approvals, nil
 }
 
 func (s *Service) ListAudit(ctx context.Context, runID string, limit int) ([]domain.AuditEvent, error) {
