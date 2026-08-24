@@ -98,8 +98,13 @@ func TestSSHTunnelInputValidation(t *testing.T) {
 		{name: "invalid direction", config: domain.SSHTunnelConfig{Direction: "sideways", RemotePort: 80}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := svc.StartSSHTunnel(context.Background(), host.ID, test.config, "test invalid tunnel", "test"); err == nil {
+			_, err := svc.StartSSHTunnel(context.Background(), host.ID, test.config, "test invalid tunnel", "test")
+			var validation *InputValidationError
+			if err == nil {
 				t.Fatal("invalid tunnel input was accepted")
+			}
+			if !errors.As(err, &validation) {
+				t.Fatalf("tunnel input error is not typed validation: %T %v", err, err)
 			}
 		})
 	}

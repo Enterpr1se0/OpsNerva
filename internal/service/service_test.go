@@ -778,11 +778,11 @@ func TestAgentHostAvailabilityFiltersAndEnforcesAccess(t *testing.T) {
 		_, err := svc.Submit(ctx, domain.ExecRequest{
 			HostID: hostID, Mode: domain.ExecProgram, Program: "uname", Reason: "verify Agent host access",
 		}, "eino-agent")
-		if err == nil || err.Error() != "host is not available to Agent" {
+		if !errors.Is(err, ErrAgentHostAccessDenied) {
 			t.Fatalf("Agent request for unavailable host %q was not rejected: %v", hostID, err)
 		}
 	}
-	if _, err := svc.ProbeHost(ctx, hidden.ID, "eino-agent"); err == nil || err.Error() != "host is not available to Agent" {
+	if _, err := svc.ProbeHost(ctx, hidden.ID, "eino-agent"); !errors.Is(err, ErrAgentHostAccessDenied) {
 		t.Fatalf("Agent probe for unavailable host was not rejected: %v", err)
 	}
 
@@ -794,6 +794,36 @@ func TestAgentHostAvailabilityFiltersAndEnforcesAccess(t *testing.T) {
 	}
 	if len(transport.calls) != 1 {
 		t.Fatalf("rejected Agent requests reached SSH transport: %d calls", len(transport.calls))
+	}
+}
+
+func TestToolInputValidationIsTyped(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "execution contract",
+			err: validateExecutionRequest(domain.Host{}, domain.ExecRequest{
+				Mode: domain.ExecScript, Script: "sudo id", Reason: "test direct sudo rejection",
+			}),
+		},
+		{name: "remote path", err: validateRemoteFilePath("relative.txt")},
+		{name: "file search", err: validateFileSearchInput("needle", "contains", 0)},
+		{
+			name: "host transfer",
+			err: validateSSHFileTransferRequest(domain.ExecRequest{
+				HostID: "destination", SourceHostID: "source", SourcePath: "relative.txt",
+			}),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var validation *InputValidationError
+			if !errors.As(test.err, &validation) {
+				t.Fatalf("input error is not typed validation: %T %v", test.err, test.err)
+			}
+		})
 	}
 }
 

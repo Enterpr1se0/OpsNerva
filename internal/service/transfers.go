@@ -67,7 +67,8 @@ func (s *Service) bindSSHFileTransfer(ctx context.Context, destination domain.Ho
 	return connections, nil
 }
 
-func validateSSHFileTransferRequest(req domain.ExecRequest) error {
+func validateSSHFileTransferRequest(req domain.ExecRequest) (err error) {
+	defer func() { err = asInputValidationError(err) }()
 	if strings.TrimSpace(req.SourceHostID) == "" || strings.TrimSpace(req.HostID) == "" {
 		return fmt.Errorf("source_host_id and destination_host_id are required")
 	}

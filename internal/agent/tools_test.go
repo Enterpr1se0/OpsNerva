@@ -33,6 +33,21 @@ type backgroundToolTransport struct {
 	release chan struct{}
 }
 
+type toolSchemaProperty struct {
+	Description string   `json:"description"`
+	Enum        []string `json:"enum"`
+}
+
+type toolSchemaContract struct {
+	Properties        map[string]toolSchemaProperty `json:"properties"`
+	OneOf             []json.RawMessage             `json:"oneOf"`
+	DependentRequired map[string][]string           `json:"dependentRequired"`
+}
+
+func schemaEnumEquals(property toolSchemaProperty, expected ...string) bool {
+	return strings.Join(property.Enum, ",") == strings.Join(expected, ",")
+}
+
 func enableFullAccessForTest(t *testing.T, svc *service.Service) {
 	t.Helper()
 	mode := domain.ApprovalModeFullAccess
@@ -157,6 +172,7 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 	}
 
 	seen := make(map[string]bool, len(descriptors))
+	totalSchemaBytes := 0
 	for _, descriptor := range descriptors {
 		if descriptor.Name == "" || descriptor.Description == "" || descriptor.Category == "" || descriptor.Guard == "" {
 			t.Fatalf("incomplete descriptor: %#v", descriptor)
@@ -170,6 +186,19 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 		seen[descriptor.Name] = true
 		if !json.Valid(descriptor.InputSchema) {
 			t.Fatalf("invalid schema for %s: %s", descriptor.Name, descriptor.InputSchema)
+		}
+		if len(descriptor.InputSchema) > 16<<10 {
+			t.Fatalf("schema for %s is too large: %d bytes", descriptor.Name, len(descriptor.InputSchema))
+		}
+		totalSchemaBytes += len(descriptor.InputSchema)
+		var contract toolSchemaContract
+		if err := json.Unmarshal(descriptor.InputSchema, &contract); err != nil {
+			t.Fatal(err)
+		}
+		for field, property := range contract.Properties {
+			if strings.TrimSpace(property.Description) == "" {
+				t.Fatalf("%s.%s is missing its field description: %s", descriptor.Name, field, descriptor.InputSchema)
+			}
 		}
 		schemaText := string(descriptor.InputSchema)
 		if strings.Contains(schemaText, `"expected_changes"`) || strings.Contains(schemaText, `"rollback"`) {
@@ -248,6 +277,17 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 			if descriptor.Guard != "approval_required" || !strings.Contains(schema, `"action"`) || !strings.Contains(schema, `"direction"`) || !strings.Contains(schema, `"local_host"`) || !strings.Contains(schema, `"remote_host"`) || !strings.Contains(schema, `"remote_port"`) || !strings.Contains(schema, `"local_port"`) || !strings.Contains(schema, `"tunnel_id"`) {
 				t.Fatalf("ssh_tunnel metadata does not reflect its runtime schema: %#v", descriptor)
 			}
+			if !schemaEnumEquals(contract.Properties["action"], "start", "list", "stop") ||
+				!schemaEnumEquals(contract.Properties["direction"], "local", "reverse") || len(contract.OneOf) != 3 || strings.Contains(descriptor.Description, "-L") || strings.Contains(descriptor.Description, "-R") {
+				t.Fatalf("ssh_tunnel contract is ambiguous: %#v schema=%s", descriptor, descriptor.InputSchema)
+			}
+		}
+		if descriptor.Name == "ssh_task" {
+			if !schemaEnumEquals(contract.Properties["action"], "status", "cancel") ||
+				!schemaEnumEquals(contract.Properties["block_until"], "terminal", "output") ||
+				len(contract.OneOf) != 2 || strings.Join(contract.DependentRequired["block_until"], ",") != "wait_seconds" {
+				t.Fatalf("ssh_task contract is ambiguous: %#v schema=%s", descriptor, descriptor.InputSchema)
+			}
 		}
 		if descriptor.Name == "ssh_shell" {
 			schema := string(descriptor.InputSchema)
@@ -303,6 +343,9 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 				t.Fatalf("web_extract metadata does not reflect its runtime schema: %#v", descriptor)
 			}
 		}
+	}
+	if totalSchemaBytes > 64<<10 {
+		t.Fatalf("built-in tool schemas are too large: %d bytes", totalSchemaBytes)
 	}
 	if seen["ssh_host_list"] {
 		t.Fatal("internal Agent catalog still exposes ssh_host_list")
@@ -527,7 +570,7 @@ func TestWorkspaceShellActionValidationRejectsRunFieldsOnInput(t *testing.T) {
 	}
 }
 
-func TestSSHTunnelListAllowsReasonWithoutHidingRealInputErrors(t *testing.T) {
+func TestSSHTunnelListRejectsEveryOtherParameter(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir()+"/tunnel-tools.db")
 	if err != nil {
@@ -558,7 +601,7 @@ func TestSSHTunnelListAllowsReasonWithoutHidingRealInputErrors(t *testing.T) {
 		t.Fatal("ssh_tunnel tool was not loaded")
 	}
 
-	resultJSON, err := tunnelTool.InvokableRun(ctx, `{"action":" LIST ","reason":"check existing tunnels before starting one"}`)
+	resultJSON, err := tunnelTool.InvokableRun(ctx, `{"action":" LIST "}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -570,16 +613,44 @@ func TestSSHTunnelListAllowsReasonWithoutHidingRealInputErrors(t *testing.T) {
 		t.Fatalf("unexpected tunnel list: %#v", tunnels)
 	}
 
-	failureJSON, err := tunnelTool.InvokableRun(ctx, `{"action":"list","host_id":"host-unexpected"}`)
+	for _, arguments := range []string{
+		`{"action":"list","host_id":"host-unexpected"}`,
+		`{"action":"list","reason":"unused audit note"}`,
+	} {
+		failureJSON, err := tunnelTool.InvokableRun(ctx, arguments)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var failure domain.ToolFailure
+		if err := json.Unmarshal([]byte(failureJSON), &failure); err != nil {
+			t.Fatal(err)
+		}
+		if failure.OK || failure.Code != "validation_failed" || failure.Message != "action=list accepts only action" {
+			t.Fatalf("unexpected invalid list result for %s: %#v", arguments, failure)
+		}
+	}
+}
+
+func TestSSHTunnelDirectionUsesNamedValues(t *testing.T) {
+	result, err := RunSSHTunnelTool(context.Background(), nil, SSHTunnelInput{Action: "start", Direction: "-L"}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var failure domain.ToolFailure
-	if err := json.Unmarshal([]byte(failureJSON), &failure); err != nil {
+	failure, ok := result.(domain.ToolFailure)
+	if !ok || failure.Code != "validation_failed" || failure.Retryable || failure.Message != "direction must be local or reverse" {
+		t.Fatalf("invalid tunnel direction was not exposed as non-retryable input validation: %#v", result)
+	}
+}
+
+func TestSSHTaskBlockUntilUsesWaitConditions(t *testing.T) {
+	result, err := RunTaskTool(context.Background(), nil, TaskInput{
+		TaskID: "task_test", Action: "status", WaitSeconds: 10, BlockUntil: "completed",
+	}, "test")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if failure.OK || failure.Code != "validation_failed" || !strings.Contains(failure.Message, "host_id") {
-		t.Fatalf("unexpected invalid list result: %#v", failure)
+	if result.Code != "validation_failed" || result.Retryable || result.Message != "block_until must be terminal or output" {
+		t.Fatalf("invalid task wait condition was not exposed as non-retryable input validation: %#v", result)
 	}
 }
 

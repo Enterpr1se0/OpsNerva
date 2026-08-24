@@ -31,65 +31,65 @@ func New(svc *service.Service, version string) *Server {
 	instance.server = server
 	server.AddReceivingMiddleware(instance.trackToolCalls)
 
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_host_inspect", Description: "Inspect one SSH host's OS, user, and uptime.", Annotations: readOnlyAnnotations("Inspect SSH host")},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_host_inspect", Description: "Inspect one SSH host's OS, user, and uptime.", InputSchema: inputSchema[agent.HostInput](), Annotations: readOnlyAnnotations("Inspect SSH host")},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.HostInput) (*mcp.CallToolResult, sshx.HostInfo, error) {
 			output, err := svc.ProbeHost(ctx, input.HostID, "mcp-client")
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_host_list", Description: "List SSH host IDs and capabilities; excludes connection data and secrets.", Annotations: readOnlyAnnotations("List SSH hosts")},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_host_list", Description: "List SSH host IDs and capabilities; excludes connection data and secrets.", InputSchema: inputSchema[struct{}](), Annotations: readOnlyAnnotations("List SSH hosts")},
 		func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, agent.HostListOutput, error) {
 			hosts, err := svc.ListHostCapabilities(ctx)
 			return nil, agent.HostListOutput{Hosts: hosts}, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_exec", Description: agent.SSHExecToolDescription, Annotations: changeAnnotations("Execute SSH program", true)},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_exec", Description: agent.SSHExecToolDescription, InputSchema: inputSchema[agent.ExecInput](), Annotations: changeAnnotations("Execute SSH program", true)},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.ExecInput) (*mcp.CallToolResult, agent.ExecToolResult, error) {
 			output, err := agent.RunExecutionTool(ctx, svc, execRequest(input), "mcp-client")
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_run_script", Description: agent.SSHScriptToolDescription, Annotations: changeAnnotations("Run SSH script", true)},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_run_script", Description: agent.SSHScriptToolDescription, InputSchema: inputSchema[agent.ScriptInput](), Annotations: changeAnnotations("Run SSH script", true)},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.ScriptInput) (*mcp.CallToolResult, agent.ExecToolResult, error) {
 			output, err := agent.RunExecutionTool(ctx, svc, scriptRequest(input), "mcp-client")
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_task", Description: "Wait for, read, or cancel a background SSH task.", Annotations: changeAnnotations("Manage SSH task", false)},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_task", Description: agent.SSHTaskToolDescription, InputSchema: inputSchema[agent.TaskInput](), Annotations: changeAnnotations("Manage SSH task", false)},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.TaskInput) (*mcp.CallToolResult, agent.ExecToolResult, error) {
 			output, err := agent.RunTaskTool(ctx, svc, input, "mcp-client")
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_read", Description: "Read, page, tail, inspect metadata, or search one remote file.", InputSchema: fileSearchInputSchema[agent.FileReadInput](), Annotations: readOnlyAnnotations("Read SSH file")},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_read", Description: "Read, page, tail, inspect metadata, or search one remote file.", InputSchema: inputSchema[agent.FileReadInput](), Annotations: readOnlyAnnotations("Read SSH file")},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.FileReadInput) (*mcp.CallToolResult, agent.ExecToolResult, error) {
 			output, err := agent.RunFileReadTool(ctx, svc, input, "mcp-client")
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_list", Description: "List a remote directory.", Annotations: readOnlyAnnotations("List SSH files")},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_list", Description: "List a remote directory.", InputSchema: inputSchema[agent.FileListInput](), Annotations: readOnlyAnnotations("List SSH files")},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.FileListInput) (*mcp.CallToolResult, agent.ExecToolResult, error) {
 			output, err := svc.ListFiles(ctx, input.HostID, input.Path, "mcp-client")
 			compact, err := agent.CompactExecToolResult(output, err)
 			return nil, compact, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_edit", Description: "Create a remote text file or replace/delete one exact unique line block; read existing files first.", Annotations: changeAnnotations("Edit SSH file", true)},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_edit", Description: "Create a remote text file or replace/delete one exact unique line block; read existing files first.", InputSchema: inputSchema[agent.FileEditInput](), Annotations: changeAnnotations("Edit SSH file", true)},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.FileEditInput) (*mcp.CallToolResult, agent.ExecToolResult, error) {
 			output, err := svc.EditRemoteFile(ctx, input.HostID, input.Path, input.OldText, input.NewText, input.ValidatorID, input.Elevated, input.Reason, "mcp-client")
 			compact, err := agent.CompactExecToolResult(output, err)
 			return nil, compact, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_transfer", Description: "Transfer one SHA256-bound file between SSH hosts.", Annotations: changeAnnotations("Transfer SSH file", true)},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_transfer", Description: "Transfer one SHA256-bound file between SSH hosts.", InputSchema: inputSchema[agent.SSHFileTransferInput](), Annotations: changeAnnotations("Transfer SSH file", true)},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.SSHFileTransferInput) (*mcp.CallToolResult, agent.ExecToolResult, error) {
 			output, err := svc.TransferFileBetweenHosts(ctx, input.SourceHostID, input.SourcePath, input.ExpectedSHA256, input.DestinationHostID, input.DestinationPath, input.ExpectedDestinationSHA256, input.TimeoutSeconds, input.Reason, "mcp-client")
 			compact, err := agent.CompactExecToolResult(output, err)
 			return nil, compact, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_tunnel", Description: "Start, list, or stop local and reverse SSH port forwarding.", Annotations: changeAnnotations("Manage SSH tunnel", false)},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_tunnel", Description: agent.SSHTunnelToolDescription, InputSchema: inputSchema[agent.SSHTunnelInput](), Annotations: changeAnnotations("Manage SSH tunnel", false)},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.SSHTunnelInput) (*mcp.CallToolResult, any, error) {
 			output, err := agent.RunSSHTunnelTool(ctx, svc, input, "mcp-client")
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_shell", Description: agent.SSHShellToolDescription, Annotations: changeAnnotations("Manage SSH shell", true)},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_shell", Description: agent.SSHShellToolDescription, InputSchema: inputSchema[agent.SSHShellInput](), Annotations: changeAnnotations("Manage SSH shell", true)},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.SSHShellInput) (*mcp.CallToolResult, any, error) {
 			output, err := agent.RunSSHShellTool(ctx, svc, input, "mcp-client")
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_history", Description: "Search this MCP session's audited SSH runs with bounded redacted output and cursor pagination.", InputSchema: fileSearchInputSchema[agent.HistorySearchInput](), Annotations: readOnlyAnnotations("Search SSH history")},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_history", Description: "Search this MCP session's audited SSH runs with bounded redacted output and cursor pagination.", InputSchema: inputSchema[agent.HistorySearchInput](), Annotations: readOnlyAnnotations("Search SSH history")},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.HistorySearchInput) (*mcp.CallToolResult, agent.HistoryOutput, error) {
 			output, err := agent.ReadHistoryTool(ctx, svc, input)
 			return nil, output, err
@@ -215,17 +215,16 @@ func boolHint(value bool) *bool {
 	return &value
 }
 
-func fileSearchInputSchema[T any]() *jsonschema.Schema {
-	schema, err := jsonschema.For[T](nil)
+func inputSchema[T any]() *jsonschema.Schema {
+	encoded, err := agent.InputSchemaJSON[T]()
 	if err != nil {
 		panic(err)
 	}
-	matchMode, ok := schema.Properties["match_mode"]
-	if !ok {
-		panic("file search input schema is missing match_mode")
+	var schema jsonschema.Schema
+	if err := json.Unmarshal(encoded, &schema); err != nil {
+		panic(err)
 	}
-	matchMode.Enum = []any{string(domain.FileSearchLiteral), string(domain.FileSearchRegex)}
-	return schema
+	return &schema
 }
 
 func (s *Server) Run(ctx context.Context) error {

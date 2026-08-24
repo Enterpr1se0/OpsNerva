@@ -1642,7 +1642,8 @@ func (s *Service) hydrateHostSecrets(host domain.Host, includeSudo bool) (domain
 	return host, nil
 }
 
-func validateExecutionRequest(host domain.Host, req domain.ExecRequest) error {
+func validateExecutionRequest(host domain.Host, req domain.ExecRequest) (err error) {
+	defer func() { err = asInputValidationError(err) }()
 	if isWorkspaceMode(req.Mode) {
 		if host.AuthType != "workspace" || req.Elevated {
 			return fmt.Errorf("invalid workspace execution target")
@@ -1732,7 +1733,8 @@ func validateExecutionRequest(host domain.Host, req domain.ExecRequest) error {
 	return nil
 }
 
-func validateRequestLimits(req domain.ExecRequest, limits config.Limits, redactor *security.Redactor) error {
+func validateRequestLimits(req domain.ExecRequest, limits config.Limits, redactor *security.Redactor) (err error) {
+	defer func() { err = asInputValidationError(err) }()
 	if req.Mode == domain.ExecSSHTunnelStart {
 		if req.Program != "" || len(req.Args) != 0 || req.Script != "" || req.Cwd != "" || len(req.Env) != 0 ||
 			req.RemotePath != "" || req.SourceHostID != "" || req.SourcePath != "" || req.WorkspaceID != "" ||
@@ -2058,7 +2060,7 @@ func (s *Service) ReadFile(ctx context.Context, hostID, path string, maxBytes in
 
 func (s *Service) ListFiles(ctx context.Context, hostID, path string, actor string) (domain.ExecResult, error) {
 	if !posixpath.IsAbs(path) {
-		return domain.ExecResult{}, fmt.Errorf("remote directory path must be absolute")
+		return domain.ExecResult{}, asInputValidationError(fmt.Errorf("remote directory path must be absolute"))
 	}
 	return s.Submit(ctx, domain.ExecRequest{HostID: hostID, Mode: domain.ExecProgram, Program: "ls", Args: []string{"-la", "--", path}, Reason: "list a remote directory for diagnosis"}, actor)
 }

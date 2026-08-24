@@ -136,7 +136,8 @@ func resolvedFileOffset(size, requested int64) int64 {
 	return size + requested
 }
 
-func validateFileSearchInput(pattern string, matchMode domain.FileSearchMatchMode, contextLines int) error {
+func validateFileSearchInput(pattern string, matchMode domain.FileSearchMatchMode, contextLines int) (err error) {
+	defer func() { err = asInputValidationError(err) }()
 	if strings.TrimSpace(pattern) == "" || len(pattern) > 512 || strings.ContainsAny(pattern, "\x00\r\n") {
 		return fmt.Errorf("invalid search pattern: use 1-512 characters on one line")
 	}
@@ -527,7 +528,8 @@ func validatorAllowsPath(validator config.Validator, path string) bool {
 	return false
 }
 
-func validateRemoteFilePath(path string) error {
+func validateRemoteFilePath(path string) (err error) {
+	defer func() { err = asInputValidationError(err) }()
 	if !posixpath.IsAbs(path) || strings.ContainsAny(path, "\x00\r\n") || posixpath.Clean(path) != path {
 		return fmt.Errorf("remote file path must be a clean absolute path")
 	}

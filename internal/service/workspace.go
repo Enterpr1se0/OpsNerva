@@ -1961,10 +1961,10 @@ func (s *Service) resolveWorkspacePath(workspace config.Workspace, relative stri
 	relative = normalizedWorkspaceRelativePath(relative)
 	localRelative := filepath.FromSlash(relative)
 	if path.IsAbs(relative) || filepath.IsAbs(localRelative) {
-		return "", fmt.Errorf(`workspace path must be relative; omit path or use "." for the Workspace root (examples: "src", "src/main.go"); absolute paths such as "/workspace" are invalid`)
+		return "", asInputValidationError(fmt.Errorf(`workspace path must be relative; omit path or use "." for the Workspace root (examples: "src", "src/main.go"); absolute paths such as "/workspace" are invalid`))
 	}
 	if path.Clean(relative) != relative || relative == ".." || strings.HasPrefix(relative, "../") || strings.ContainsAny(relative, "\\\x00\r\n") {
-		return "", fmt.Errorf(`workspace path must be clean and relative (examples: ".", "src", "src/main.go")`)
+		return "", asInputValidationError(fmt.Errorf(`workspace path must be clean and relative (examples: ".", "src", "src/main.go")`))
 	}
 	for _, component := range strings.Split(relative, "/") {
 		if isSensitiveWorkspaceComponent(component) {

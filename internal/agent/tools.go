@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"regexp"
 	"strings"
 	"time"
@@ -18,13 +17,14 @@ import (
 
 	"github.com/cloudwego/eino/components/tool"
 	toolutils "github.com/cloudwego/eino/components/tool/utils"
-	einojsonschema "github.com/eino-contrib/jsonschema"
 )
 
 const (
 	SSHExecToolDescription   = "Run exactly one non-interactive remote executable with separate argv items. Never use bash/sh, shell syntax, a command string, prompts, or terminal UIs; use ssh_run_script for Bash and ssh_shell for a PTY. Use top -b -n 1 for a top snapshot."
 	SSHScriptToolDescription = "Run non-interactive remote Bash syntax, pipelines, or multiple steps without a PTY. Pass the script body directly, never bash -c; use ssh_shell when a prompt or terminal UI is required."
 	SSHShellToolDescription  = "Manage an interactive SSH PTY for prompts and terminal UIs. action=start already opens a login shell: do not input bash; use input/output, continue after next_sequence, and always close it. Never send secrets."
+	SSHTaskToolDescription   = "Read, wait for, or cancel a background SSH task. status returns output after supplied byte offsets without stopping the task."
+	SSHTunnelToolDescription = "Start, list, or stop SSH port forwarding. direction is local or reverse."
 )
 
 // ToolDescriptor exposes the runtime function schema to the administrator.
@@ -81,6 +81,25 @@ func DescribeTools(ctx context.Context, tools []tool.BaseTool) ([]ToolDescriptor
 	return descriptors, nil
 }
 
+// InputSchemaJSON returns the same Eino-derived JSON Schema used by InferTool.
+// MCP converts this standard schema into its SDK type instead of reflecting the
+// Go input type with a second, incompatible struct-tag implementation.
+func InputSchemaJSON[T any]() (json.RawMessage, error) {
+	params, err := toolutils.GoStruct2ParamsOneOf[T]()
+	if err != nil {
+		return nil, err
+	}
+	inputSchema, err := params.ToJSONSchema()
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(inputSchema)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(encoded), nil
+}
+
 func toolCategory(name string) string {
 	switch {
 	case isAgentTaskTool(name):
@@ -125,7 +144,7 @@ func toolGuard(name string) string {
 }
 
 type HostInput struct {
-	HostID string `json:"host_id" jsonschema:"registered host identifier"`
+	HostID string `json:"host_id" jsonschema_description:"registered host identifier"`
 }
 
 type HostListOutput struct {
@@ -140,9 +159,9 @@ type ExecInput struct {
 	Cwd            string            `json:"cwd,omitempty" jsonschema_description:"absolute remote working directory"`
 	Env            map[string]string `json:"env,omitempty" jsonschema_description:"non-secret environment variables"`
 	Elevated       bool              `json:"elevated,omitempty" jsonschema_description:"managed root access; never use sudo or a password"`
-	TimeoutSeconds int               `json:"timeout_seconds,omitempty" jsonschema_description:"1-600; default uses configured sync/background timeout"`
-	MaxOutputBytes int               `json:"max_output_bytes,omitempty" jsonschema_description:"per-stream output limit; omit for complete output"`
-	OutputView     string            `json:"output_view,omitempty" jsonschema_description:"with max_output_bytes: head, tail, or head_tail (default)"`
+	TimeoutSeconds int               `json:"timeout_seconds,omitempty" jsonschema:"minimum=1,maximum=600" jsonschema_description:"1-600; default uses configured sync/background timeout"`
+	MaxOutputBytes int               `json:"max_output_bytes,omitempty" jsonschema:"minimum=0,maximum=4194304" jsonschema_description:"per-stream output limit; omit for complete output"`
+	OutputView     string            `json:"output_view,omitempty" jsonschema:"enum=head,enum=tail,enum=head_tail" jsonschema_description:"with max_output_bytes: head, tail, or head_tail (default)"`
 	Reason         string            `json:"reason" jsonschema_description:"one-sentence purpose"`
 }
 
@@ -153,26 +172,26 @@ type ScriptInput struct {
 	Cwd            string            `json:"cwd,omitempty" jsonschema_description:"absolute remote working directory"`
 	Env            map[string]string `json:"env,omitempty" jsonschema_description:"non-secret environment variables"`
 	Elevated       bool              `json:"elevated,omitempty" jsonschema_description:"managed root access; never include sudo or a password"`
-	TimeoutSeconds int               `json:"timeout_seconds,omitempty" jsonschema_description:"1-600; default uses configured sync/background timeout"`
-	MaxOutputBytes int               `json:"max_output_bytes,omitempty" jsonschema_description:"per-stream output limit; omit for complete output"`
-	OutputView     string            `json:"output_view,omitempty" jsonschema_description:"with max_output_bytes: head, tail, or head_tail (default)"`
+	TimeoutSeconds int               `json:"timeout_seconds,omitempty" jsonschema:"minimum=1,maximum=600" jsonschema_description:"1-600; default uses configured sync/background timeout"`
+	MaxOutputBytes int               `json:"max_output_bytes,omitempty" jsonschema:"minimum=0,maximum=4194304" jsonschema_description:"per-stream output limit; omit for complete output"`
+	OutputView     string            `json:"output_view,omitempty" jsonschema:"enum=head,enum=tail,enum=head_tail" jsonschema_description:"with max_output_bytes: head, tail, or head_tail (default)"`
 	Reason         string            `json:"reason" jsonschema_description:"one-sentence purpose"`
 }
 
 type SSHTunnelInput struct {
-	Action     string `json:"action" jsonschema:"start, list, or stop"`
-	HostID     string `json:"host_id,omitempty" jsonschema:"start: SSH host ID"`
-	Direction  string `json:"direction,omitempty" jsonschema:"start: local (-L, default) or reverse (-R)"`
-	LocalHost  string `json:"local_host,omitempty" jsonschema:"start: local listener bind IP for local forwarding, or client-side target host for reverse forwarding; default 127.0.0.1"`
-	LocalPort  int    `json:"local_port,omitempty" jsonschema:"start: local listener port for local forwarding (0 selects one), or client-side target port for reverse forwarding"`
-	RemoteHost string `json:"remote_host,omitempty" jsonschema:"start: host-side target for local forwarding, or SSH-server bind IP for reverse forwarding; default 127.0.0.1"`
-	RemotePort int    `json:"remote_port,omitempty" jsonschema:"start: host-side target port for local forwarding, or SSH-server listener port for reverse forwarding (0 selects one)"`
-	TunnelID   string `json:"tunnel_id,omitempty" jsonschema:"stop: tunnel ID"`
-	Reason     string `json:"reason,omitempty" jsonschema:"start: one-sentence purpose"`
+	Action     string `json:"action" jsonschema:"enum=start,enum=list,enum=stop" jsonschema_description:"start, list, or stop"`
+	HostID     string `json:"host_id,omitempty" jsonschema_description:"start only: SSH host ID"`
+	Direction  string `json:"direction,omitempty" jsonschema:"enum=local,enum=reverse" jsonschema_description:"start only: local (default) or reverse"`
+	LocalHost  string `json:"local_host,omitempty" jsonschema_description:"start only: local listener for local forwarding, or client-side target for reverse; default 127.0.0.1"`
+	LocalPort  int    `json:"local_port,omitempty" jsonschema:"minimum=0,maximum=65535" jsonschema_description:"start only: local listener port for local forwarding (0 selects one), or client-side target port for reverse"`
+	RemoteHost string `json:"remote_host,omitempty" jsonschema_description:"start only: host-side target for local forwarding, or SSH-server listener for reverse; default 127.0.0.1"`
+	RemotePort int    `json:"remote_port,omitempty" jsonschema:"minimum=0,maximum=65535" jsonschema_description:"start only: host-side target port for local forwarding, or SSH-server listener port for reverse (0 selects one)"`
+	TunnelID   string `json:"tunnel_id,omitempty" jsonschema_description:"stop only: tunnel ID"`
+	Reason     string `json:"reason,omitempty" jsonschema_description:"start only: one-sentence purpose"`
 }
 
 type SSHShellInput struct {
-	Action         string  `json:"action" jsonschema_description:"start, input, output, list, interrupt, or close"`
+	Action         string  `json:"action" jsonschema:"enum=start,enum=input,enum=output,enum=list,enum=interrupt,enum=close" jsonschema_description:"start, input, output, list, interrupt, or close"`
 	HostID         string  `json:"host_id,omitempty" jsonschema_description:"start: SSH host ID"`
 	ShellID        string  `json:"shell_id,omitempty" jsonschema_description:"input/output/interrupt/close: shell ID"`
 	Input          string  `json:"input,omitempty" jsonschema_description:"input: exact non-secret bytes; the login shell already exists, so do not send bash or sh"`
@@ -180,8 +199,8 @@ type SSHShellInput struct {
 	Cwd            string  `json:"cwd,omitempty" jsonschema_description:"start: absolute remote directory"`
 	Elevated       bool    `json:"elevated,omitempty" jsonschema_description:"start: managed root shell"`
 	AfterSequence  *uint64 `json:"after_sequence,omitempty" jsonschema_description:"output: events after next_sequence; omit for cursor, 0 to replay"`
-	WaitSeconds    *int    `json:"wait_seconds,omitempty" jsonschema_description:"input/output: delay before read, 0-600; default 5"`
-	MaxOutputBytes *int    `json:"max_output_bytes,omitempty" jsonschema_description:"input/output: page bytes, 4096-4194304; default 131072"`
+	WaitSeconds    *int    `json:"wait_seconds,omitempty" jsonschema:"minimum=0,maximum=600" jsonschema_description:"input/output: delay before read, 0-600; default 5"`
+	MaxOutputBytes *int    `json:"max_output_bytes,omitempty" jsonschema:"minimum=4096,maximum=4194304" jsonschema_description:"input/output: page bytes, 4096-4194304; default 131072"`
 	Reason         string  `json:"reason,omitempty" jsonschema_description:"audit note; required for start"`
 }
 
@@ -251,118 +270,104 @@ func invalidSSHShellValue(input SSHShellInput, action, message string, allowed [
 }
 
 type FileReadInput struct {
-	HostID       string                     `json:"host_id" jsonschema:"registered host identifier"`
-	Path         string                     `json:"path" jsonschema:"absolute remote file path"`
-	MetadataOnly bool                       `json:"metadata_only,omitempty" jsonschema:"metadata and SHA256 only"`
-	FullContent  bool                       `json:"full_content,omitempty" jsonschema:"complete file; incompatible with range/search/metadata_only"`
-	MaxBytes     int                        `json:"max_bytes,omitempty" jsonschema:"page bytes; default 131072"`
-	OffsetBytes  int64                      `json:"offset_bytes,omitempty" jsonschema:"byte offset; negative reads from end; incompatible with tail_lines"`
-	TailLines    int                        `json:"tail_lines,omitempty" jsonschema:"final line count; incompatible with offset_bytes"`
-	Pattern      string                     `json:"pattern,omitempty" jsonschema:"search pattern; requires match_mode and forbids ranges"`
-	MatchMode    domain.FileSearchMatchMode `json:"match_mode,omitempty" jsonschema:"with pattern: literal or POSIX regex"`
-	ContextLines int                        `json:"context_lines,omitempty" jsonschema:"search context line count"`
-	Elevated     bool                       `json:"elevated,omitempty" jsonschema:"read with managed root access"`
+	HostID       string                     `json:"host_id" jsonschema_description:"registered host identifier"`
+	Path         string                     `json:"path" jsonschema_description:"absolute remote file path"`
+	MetadataOnly bool                       `json:"metadata_only,omitempty" jsonschema_description:"metadata and SHA256 only"`
+	FullContent  bool                       `json:"full_content,omitempty" jsonschema_description:"complete file; incompatible with range, search, and metadata_only"`
+	MaxBytes     int                        `json:"max_bytes,omitempty" jsonschema:"minimum=1" jsonschema_description:"page bytes; omit for default 131072"`
+	OffsetBytes  int64                      `json:"offset_bytes,omitempty" jsonschema_description:"byte offset; negative reads from end; incompatible with tail_lines"`
+	TailLines    int                        `json:"tail_lines,omitempty" jsonschema:"minimum=1" jsonschema_description:"final line count; incompatible with offset_bytes"`
+	Pattern      string                     `json:"pattern,omitempty" jsonschema:"minLength=1,maxLength=512" jsonschema_description:"search pattern; requires match_mode and forbids ranges"`
+	MatchMode    domain.FileSearchMatchMode `json:"match_mode,omitempty" jsonschema:"enum=literal,enum=regex" jsonschema_description:"with pattern: literal or POSIX regex"`
+	ContextLines int                        `json:"context_lines,omitempty" jsonschema:"minimum=0" jsonschema_description:"with pattern: search context line count"`
+	Elevated     bool                       `json:"elevated,omitempty" jsonschema_description:"read with managed root access"`
 }
 
 type FileListInput struct {
-	HostID string `json:"host_id" jsonschema:"registered host identifier"`
-	Path   string `json:"path" jsonschema:"absolute remote directory path"`
+	HostID string `json:"host_id" jsonschema_description:"registered host identifier"`
+	Path   string `json:"path" jsonschema_description:"absolute remote directory path"`
 }
 
 type FileEditInput struct {
-	HostID      string `json:"host_id" jsonschema:"registered host identifier"`
-	Path        string `json:"path" jsonschema:"absolute remote file"`
-	OldText     string `json:"old_text" jsonschema:"exact complete lines from latest read; must match once; empty creates a new file"`
-	NewText     string `json:"new_text" jsonschema:"replacement lines; empty deletes old_text"`
-	ValidatorID string `json:"validator_id,omitempty" jsonschema:"listed validator ID only; never a command"`
-	Elevated    bool   `json:"elevated,omitempty" jsonschema:"edit with managed root access"`
-	Reason      string `json:"reason" jsonschema:"one-sentence purpose"`
+	HostID      string `json:"host_id" jsonschema_description:"registered host identifier"`
+	Path        string `json:"path" jsonschema_description:"absolute remote file"`
+	OldText     string `json:"old_text" jsonschema_description:"exact complete lines from latest read; must match once; empty creates a new file"`
+	NewText     string `json:"new_text" jsonschema_description:"replacement lines; empty deletes old_text"`
+	ValidatorID string `json:"validator_id,omitempty" jsonschema_description:"listed validator ID only; never a command"`
+	Elevated    bool   `json:"elevated,omitempty" jsonschema_description:"edit with managed root access"`
+	Reason      string `json:"reason" jsonschema_description:"one-sentence purpose"`
 }
 
 type SSHFileTransferInput struct {
-	SourceHostID              string `json:"source_host_id" jsonschema:"registered source SSH host identifier"`
-	SourcePath                string `json:"source_path" jsonschema:"absolute source file; no symlinks"`
-	ExpectedSHA256            string `json:"expected_sha256" jsonschema:"source SHA256 from ssh_file_read"`
-	DestinationHostID         string `json:"destination_host_id" jsonschema:"registered destination SSH host identifier"`
-	DestinationPath           string `json:"destination_path" jsonschema:"absolute destination file path"`
-	ExpectedDestinationSHA256 string `json:"expected_destination_sha256,omitempty" jsonschema:"omit to create; destination SHA256 to replace"`
-	TimeoutSeconds            int    `json:"timeout_seconds,omitempty" jsonschema:"1-600"`
-	Reason                    string `json:"reason" jsonschema:"one-sentence purpose"`
+	SourceHostID              string `json:"source_host_id" jsonschema_description:"registered source SSH host identifier"`
+	SourcePath                string `json:"source_path" jsonschema_description:"absolute source file; no symlinks"`
+	ExpectedSHA256            string `json:"expected_sha256" jsonschema_description:"source SHA256 from ssh_file_read"`
+	DestinationHostID         string `json:"destination_host_id" jsonschema_description:"registered destination SSH host identifier"`
+	DestinationPath           string `json:"destination_path" jsonschema_description:"absolute destination file path"`
+	ExpectedDestinationSHA256 string `json:"expected_destination_sha256,omitempty" jsonschema_description:"omit to create; destination SHA256 to replace"`
+	TimeoutSeconds            int    `json:"timeout_seconds,omitempty" jsonschema:"minimum=1,maximum=600" jsonschema_description:"1-600"`
+	Reason                    string `json:"reason" jsonschema_description:"one-sentence purpose"`
 }
 
 type WorkspacePathInput struct {
-	Path string `json:"path,omitempty" jsonschema:"Workspace-relative directory; default ."`
+	Path string `json:"path,omitempty" jsonschema_description:"Workspace-relative directory; default ."`
 }
 
 type WorkspaceReadInput struct {
-	Path         string                     `json:"path" jsonschema:"Workspace-relative file"`
-	FullContent  bool                       `json:"full_content,omitempty" jsonschema:"complete file; incompatible with range/tail/search"`
-	MaxBytes     int                        `json:"max_bytes,omitempty" jsonschema:"page bytes; default 131072"`
-	OffsetBytes  int64                      `json:"offset_bytes,omitempty" jsonschema:"byte offset; negative reads from end; incompatible with tail_lines"`
-	TailLines    int                        `json:"tail_lines,omitempty" jsonschema:"final line count; incompatible with offset_bytes"`
-	Pattern      string                     `json:"pattern,omitempty" jsonschema:"search pattern; requires match_mode and forbids ranges"`
-	MatchMode    domain.FileSearchMatchMode `json:"match_mode,omitempty" jsonschema:"with pattern: literal or POSIX regex"`
-	ContextLines int                        `json:"context_lines,omitempty" jsonschema:"search context line count"`
+	Path         string                     `json:"path" jsonschema_description:"Workspace-relative file"`
+	FullContent  bool                       `json:"full_content,omitempty" jsonschema_description:"complete file; incompatible with range, tail, and search"`
+	MaxBytes     int                        `json:"max_bytes,omitempty" jsonschema:"minimum=1" jsonschema_description:"page bytes; omit for default 131072"`
+	OffsetBytes  int64                      `json:"offset_bytes,omitempty" jsonschema_description:"byte offset; negative reads from end; incompatible with tail_lines"`
+	TailLines    int                        `json:"tail_lines,omitempty" jsonschema:"minimum=1" jsonschema_description:"final line count; incompatible with offset_bytes"`
+	Pattern      string                     `json:"pattern,omitempty" jsonschema:"minLength=1,maxLength=512" jsonschema_description:"search pattern; requires match_mode and forbids ranges"`
+	MatchMode    domain.FileSearchMatchMode `json:"match_mode,omitempty" jsonschema:"enum=literal,enum=regex" jsonschema_description:"with pattern: literal or POSIX regex"`
+	ContextLines int                        `json:"context_lines,omitempty" jsonschema:"minimum=0" jsonschema_description:"with pattern: search context line count"`
 }
 
 type WorkspaceFileEditInput struct {
-	Path        string `json:"path" jsonschema:"Workspace-relative file"`
-	OldText     string `json:"old_text" jsonschema:"exact complete lines from latest read; must match once; empty creates a new file"`
-	NewText     string `json:"new_text" jsonschema:"replacement lines; empty deletes old_text"`
-	ValidatorID string `json:"validator_id,omitempty" jsonschema:"listed Workspace validator ID only; never a command"`
-	Reason      string `json:"reason" jsonschema:"one-sentence purpose"`
+	Path        string `json:"path" jsonschema_description:"Workspace-relative file"`
+	OldText     string `json:"old_text" jsonschema_description:"exact complete lines from latest read; must match once; empty creates a new file"`
+	NewText     string `json:"new_text" jsonschema_description:"replacement lines; empty deletes old_text"`
+	ValidatorID string `json:"validator_id,omitempty" jsonschema_description:"listed Workspace validator ID only; never a command"`
+	Reason      string `json:"reason" jsonschema_description:"one-sentence purpose"`
 }
 
 type WorkspaceFileDeleteInput struct {
-	Path      string `json:"path" jsonschema:"existing Workspace-relative path; not root"`
-	Recursive bool   `json:"recursive,omitempty" jsonschema:"required only for non-empty directories"`
-	Reason    string `json:"reason" jsonschema:"one-sentence deletion purpose"`
-}
-
-func fileSearchSchemaOption() toolutils.Option {
-	return toolutils.WithSchemaModifier(func(jsonTagName string, _ reflect.Type, _ reflect.StructTag, schema *einojsonschema.Schema) {
-		if jsonTagName == "match_mode" {
-			schema.Enum = []any{string(domain.FileSearchLiteral), string(domain.FileSearchRegex)}
-		}
-		if jsonTagName == "query_scope" {
-			schema.Enum = []any{"all", "request", "output"}
-		}
-		if jsonTagName == "output_view" {
-			schema.Enum = []any{"head", "tail", "head_tail"}
-		}
-	})
+	Path      string `json:"path" jsonschema_description:"existing Workspace-relative path; not root"`
+	Recursive bool   `json:"recursive,omitempty" jsonschema_description:"required only for non-empty directories"`
+	Reason    string `json:"reason" jsonschema_description:"one-sentence deletion purpose"`
 }
 
 type WorkspaceUploadInput struct {
-	HostID         string `json:"host_id" jsonschema:"destination SSH host ID"`
-	Path           string `json:"path" jsonschema:"Workspace-relative source file"`
-	ExpectedSHA256 string `json:"expected_sha256" jsonschema:"source SHA256 from workspace_file_read"`
-	RemotePath     string `json:"remote_path" jsonschema:"absolute remote destination"`
-	Reason         string `json:"reason" jsonschema:"one-sentence purpose"`
+	HostID         string `json:"host_id" jsonschema_description:"destination SSH host ID"`
+	Path           string `json:"path" jsonschema_description:"Workspace-relative source file"`
+	ExpectedSHA256 string `json:"expected_sha256" jsonschema_description:"source SHA256 from workspace_file_read"`
+	RemotePath     string `json:"remote_path" jsonschema_description:"absolute remote destination"`
+	Reason         string `json:"reason" jsonschema_description:"one-sentence purpose"`
 }
 
 type WorkspaceDownloadInput struct {
-	HostID         string `json:"host_id" jsonschema:"source SSH host ID"`
-	RemotePath     string `json:"remote_path" jsonschema:"absolute remote source file; no symlinks"`
-	ExpectedSHA256 string `json:"expected_sha256" jsonschema:"source SHA256 from ssh_file_read"`
-	Path           string `json:"path" jsonschema:"new Workspace-relative destination"`
-	TimeoutSeconds int    `json:"timeout_seconds,omitempty" jsonschema:"1-600"`
-	Reason         string `json:"reason" jsonschema:"one-sentence purpose"`
+	HostID         string `json:"host_id" jsonschema_description:"source SSH host ID"`
+	RemotePath     string `json:"remote_path" jsonschema_description:"absolute remote source file; no symlinks"`
+	ExpectedSHA256 string `json:"expected_sha256" jsonschema_description:"source SHA256 from ssh_file_read"`
+	Path           string `json:"path" jsonschema_description:"new Workspace-relative destination"`
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty" jsonschema:"minimum=1,maximum=600" jsonschema_description:"1-600"`
+	Reason         string `json:"reason" jsonschema_description:"one-sentence purpose"`
 }
 
 type WorkspaceShellInput struct {
-	Action         string            `json:"action" jsonschema:"run, start, input, output, list, interrupt, or close"`
-	Script         string            `json:"script,omitempty" jsonschema:"run: complete non-interactive Bash or PowerShell script"`
-	ShellID        string            `json:"shell_id,omitempty" jsonschema:"input/output/interrupt/close: shell ID"`
-	Input          string            `json:"input,omitempty" jsonschema:"input: exact non-secret bytes"`
-	Submit         bool              `json:"submit,omitempty" jsonschema:"input: append carriage return if no newline"`
-	Cwd            string            `json:"cwd,omitempty" jsonschema:"run/start: Workspace-relative directory; default root"`
-	Env            map[string]string `json:"env,omitempty" jsonschema:"run/start: non-secret environment variables"`
-	TimeoutSeconds int               `json:"timeout_seconds,omitempty" jsonschema:"run: 1-600"`
-	AfterSequence  *uint64           `json:"after_sequence,omitempty" jsonschema:"output: events after next_sequence; omit for cursor, 0 to replay"`
-	WaitSeconds    *int              `json:"wait_seconds,omitempty" jsonschema:"input/output: delay before read, 0-600; default 5"`
-	MaxOutputBytes *int              `json:"max_output_bytes,omitempty" jsonschema:"input/output: page bytes, 4096-4194304; default 131072"`
-	Reason         string            `json:"reason,omitempty" jsonschema:"audit note; required for run/start"`
+	Action         string            `json:"action" jsonschema:"enum=run,enum=start,enum=input,enum=output,enum=list,enum=interrupt,enum=close" jsonschema_description:"run, start, input, output, list, interrupt, or close"`
+	Script         string            `json:"script,omitempty" jsonschema_description:"run only: complete non-interactive Bash or PowerShell script"`
+	ShellID        string            `json:"shell_id,omitempty" jsonschema_description:"input, output, interrupt, or close: shell ID"`
+	Input          string            `json:"input,omitempty" jsonschema_description:"input only: exact non-secret bytes"`
+	Submit         bool              `json:"submit,omitempty" jsonschema_description:"input only: append carriage return if no newline"`
+	Cwd            string            `json:"cwd,omitempty" jsonschema_description:"run or start: Workspace-relative directory; default root"`
+	Env            map[string]string `json:"env,omitempty" jsonschema_description:"run or start: non-secret environment variables"`
+	TimeoutSeconds int               `json:"timeout_seconds,omitempty" jsonschema:"minimum=1,maximum=600" jsonschema_description:"run only: 1-600"`
+	AfterSequence  *uint64           `json:"after_sequence,omitempty" jsonschema_description:"output only: events after next_sequence; omit for cursor, 0 to replay"`
+	WaitSeconds    *int              `json:"wait_seconds,omitempty" jsonschema:"minimum=0,maximum=600" jsonschema_description:"input or output: delay before read, 0-600; default 5"`
+	MaxOutputBytes *int              `json:"max_output_bytes,omitempty" jsonschema:"minimum=4096,maximum=4194304" jsonschema_description:"input or output: page bytes, 4096-4194304; default 131072"`
+	Reason         string            `json:"reason,omitempty" jsonschema_description:"audit note; required for run or start"`
 }
 
 func workspaceShellProvidedFields(input WorkspaceShellInput) []string {
@@ -431,41 +436,41 @@ func invalidWorkspaceShellValue(input WorkspaceShellInput, action, message strin
 }
 
 type HistorySearchInput struct {
-	RunID         string                     `json:"run_id,omitempty" jsonschema:"exact run ID; combine with query for bounded excerpts"`
-	Query         string                     `json:"query,omitempty" jsonschema:"list search, or bounded matching excerpts when run_id is set"`
-	MatchMode     domain.FileSearchMatchMode `json:"match_mode,omitempty" jsonschema:"literal (default) or regex"`
-	QueryScope    string                     `json:"query_scope,omitempty" jsonschema:"all (default), request, or output"`
-	HostID        string                     `json:"host_id,omitempty" jsonschema:"SSH host ID"`
-	ToolName      string                     `json:"tool_name,omitempty" jsonschema:"exact tool name"`
-	Status        string                     `json:"status,omitempty" jsonschema:"exact run status"`
-	StartedAfter  string                     `json:"started_after,omitempty" jsonschema:"inclusive RFC3339 lower bound"`
-	StartedBefore string                     `json:"started_before,omitempty" jsonschema:"inclusive RFC3339 upper bound"`
-	Limit         int                        `json:"limit,omitempty" jsonschema:"list results, or run_id query matches per stream; default 20, maximum 100"`
-	Cursor        string                     `json:"cursor,omitempty" jsonschema:"search continuation cursor from next_cursor"`
-	AfterStdout   int                        `json:"after_stdout_bytes,omitempty" jsonschema:"run_id detail: stdout byte offset"`
-	AfterStderr   int                        `json:"after_stderr_bytes,omitempty" jsonschema:"run_id detail: stderr byte offset"`
-	MaxOutput     int                        `json:"max_output_bytes,omitempty" jsonschema:"run_id detail/excerpts: per-stream bytes, 1024-65536, default 16384"`
-	OutputView    string                     `json:"output_view,omitempty" jsonschema:"run_id detail: head, tail, or head_tail (default)"`
+	RunID         string                     `json:"run_id,omitempty" jsonschema_description:"exact run ID; combine with query for bounded excerpts"`
+	Query         string                     `json:"query,omitempty" jsonschema:"maxLength=4096" jsonschema_description:"list search, or bounded matching excerpts with run_id"`
+	MatchMode     domain.FileSearchMatchMode `json:"match_mode,omitempty" jsonschema:"enum=literal,enum=regex" jsonschema_description:"with query: literal (default) or regex"`
+	QueryScope    string                     `json:"query_scope,omitempty" jsonschema:"enum=all,enum=request,enum=output" jsonschema_description:"with query: all (default), request, or output"`
+	HostID        string                     `json:"host_id,omitempty" jsonschema_description:"list filter: SSH host ID"`
+	ToolName      string                     `json:"tool_name,omitempty" jsonschema_description:"list filter: exact tool name"`
+	Status        string                     `json:"status,omitempty" jsonschema_description:"list filter: exact run status"`
+	StartedAfter  string                     `json:"started_after,omitempty" jsonschema_description:"list filter: inclusive RFC3339 lower bound"`
+	StartedBefore string                     `json:"started_before,omitempty" jsonschema_description:"list filter: inclusive RFC3339 upper bound"`
+	Limit         int                        `json:"limit,omitempty" jsonschema:"minimum=1,maximum=100" jsonschema_description:"list results, or run_id query matches per stream; default 20, maximum 100"`
+	Cursor        string                     `json:"cursor,omitempty" jsonschema_description:"list continuation cursor from next_cursor"`
+	AfterStdout   int                        `json:"after_stdout_bytes,omitempty" jsonschema:"minimum=0" jsonschema_description:"run_id detail: stdout byte offset"`
+	AfterStderr   int                        `json:"after_stderr_bytes,omitempty" jsonschema:"minimum=0" jsonschema_description:"run_id detail: stderr byte offset"`
+	MaxOutput     int                        `json:"max_output_bytes,omitempty" jsonschema:"minimum=1024,maximum=65536" jsonschema_description:"run_id detail or excerpts: per-stream bytes, 1024-65536; default 16384"`
+	OutputView    string                     `json:"output_view,omitempty" jsonschema:"enum=head,enum=tail,enum=head_tail" jsonschema_description:"run_id detail: head, tail, or head_tail (default)"`
 }
 
 type WebSearchInput struct {
-	Query           string   `json:"query" jsonschema:"public query; no private data or secrets"`
-	MaxResults      int      `json:"max_results,omitempty" jsonschema:"result count; default 5, maximum is configured"`
-	Topic           string   `json:"topic,omitempty" jsonschema:"general (default), news, or finance"`
-	SearchDepth     string   `json:"search_depth,omitempty" jsonschema:"basic (default), advanced, fast, or ultra-fast; advanced costs more credits"`
-	TimeRange       string   `json:"time_range,omitempty" jsonschema:"day, week, month, or year"`
-	StartDate       string   `json:"start_date,omitempty" jsonschema:"inclusive YYYY-MM-DD lower bound; do not combine with time_range"`
-	EndDate         string   `json:"end_date,omitempty" jsonschema:"inclusive YYYY-MM-DD upper bound; do not combine with time_range"`
-	ChunksPerSource int      `json:"chunks_per_source,omitempty" jsonschema:"1-3 relevant chunks per source; only with search_depth=advanced"`
-	IncludeDomains  []string `json:"include_domains,omitempty" jsonschema:"public domains to include; no schemes or paths"`
-	ExcludeDomains  []string `json:"exclude_domains,omitempty" jsonschema:"public domains to exclude; no schemes or paths"`
+	Query           string   `json:"query" jsonschema_description:"public query; no private data or secrets"`
+	MaxResults      int      `json:"max_results,omitempty" jsonschema:"minimum=1,maximum=20" jsonschema_description:"result count; default 5, maximum is configured"`
+	Topic           string   `json:"topic,omitempty" jsonschema:"enum=general,enum=news,enum=finance" jsonschema_description:"general (default), news, or finance"`
+	SearchDepth     string   `json:"search_depth,omitempty" jsonschema:"enum=basic,enum=advanced,enum=fast,enum=ultra-fast" jsonschema_description:"basic (default), advanced, fast, or ultra-fast"`
+	TimeRange       string   `json:"time_range,omitempty" jsonschema:"enum=day,enum=week,enum=month,enum=year" jsonschema_description:"day, week, month, or year"`
+	StartDate       string   `json:"start_date,omitempty" jsonschema_description:"inclusive YYYY-MM-DD lower bound; do not combine with time_range"`
+	EndDate         string   `json:"end_date,omitempty" jsonschema_description:"inclusive YYYY-MM-DD upper bound; do not combine with time_range"`
+	ChunksPerSource int      `json:"chunks_per_source,omitempty" jsonschema:"minimum=1,maximum=3" jsonschema_description:"1-3 relevant chunks per source; only with search_depth=advanced"`
+	IncludeDomains  []string `json:"include_domains,omitempty" jsonschema_description:"public domains to include; no schemes or paths"`
+	ExcludeDomains  []string `json:"exclude_domains,omitempty" jsonschema_description:"public domains to exclude; no schemes or paths"`
 }
 
 type WebExtractInput struct {
-	URLs            []string `json:"urls" jsonschema:"1-5 public HTTP(S) URLs; no private data or addresses"`
-	Query           string   `json:"query,omitempty" jsonschema:"focus extraction on passages relevant to this query"`
-	ExtractDepth    string   `json:"extract_depth,omitempty" jsonschema:"basic (default) or advanced; advanced costs more credits"`
-	ChunksPerSource int      `json:"chunks_per_source,omitempty" jsonschema:"1-5 relevant chunks per URL; requires query"`
+	URLs            []string `json:"urls" jsonschema:"minItems=1,maxItems=5" jsonschema_description:"1-5 public HTTP(S) URLs; no private data or addresses"`
+	Query           string   `json:"query,omitempty" jsonschema_description:"focus extraction on passages relevant to this query"`
+	ExtractDepth    string   `json:"extract_depth,omitempty" jsonschema:"enum=basic,enum=advanced" jsonschema_description:"basic (default) or advanced"`
+	ChunksPerSource int      `json:"chunks_per_source,omitempty" jsonschema:"minimum=1,maximum=5" jsonschema_description:"1-5 relevant chunks per URL; requires query"`
 }
 
 type HistoryRunSummary struct {
@@ -844,14 +849,14 @@ func historyRunSummaries(runs []domain.Run) []HistoryRunSummary {
 }
 
 type TaskInput struct {
-	TaskID           string `json:"task_id" jsonschema:"long-running task identifier"`
-	Action           string `json:"action" jsonschema:"status or cancel"`
-	WaitSeconds      int    `json:"wait_seconds,omitempty" jsonschema:"status: wait 0-60; deadline leaves task running"`
-	BlockUntil       string `json:"block_until,omitempty" jsonschema:"status wait condition: terminal (default) or output"`
-	AfterStdoutBytes int    `json:"after_stdout_bytes,omitempty" jsonschema:"status: stdout offset from prior stdout_total_bytes"`
-	AfterStderrBytes int    `json:"after_stderr_bytes,omitempty" jsonschema:"status: stderr offset from prior stderr_total_bytes"`
-	MaxOutputBytes   int    `json:"max_output_bytes,omitempty" jsonschema:"status: per-stream output limit"`
-	OutputView       string `json:"output_view,omitempty" jsonschema:"with max_output_bytes: head, tail, or head_tail (default)"`
+	TaskID           string `json:"task_id" jsonschema_description:"long-running task identifier"`
+	Action           string `json:"action" jsonschema:"enum=status,enum=cancel" jsonschema_description:"status or cancel"`
+	WaitSeconds      int    `json:"wait_seconds,omitempty" jsonschema:"minimum=0,maximum=60" jsonschema_description:"status only: wait 0-60; deadline leaves task running"`
+	BlockUntil       string `json:"block_until,omitempty" jsonschema:"enum=terminal,enum=output" jsonschema_description:"status only: wait condition; terminal (default) or output"`
+	AfterStdoutBytes int    `json:"after_stdout_bytes,omitempty" jsonschema:"minimum=0" jsonschema_description:"status only: stdout offset from prior stdout_total_bytes"`
+	AfterStderrBytes int    `json:"after_stderr_bytes,omitempty" jsonschema:"minimum=0" jsonschema_description:"status only: stderr offset from prior stderr_total_bytes"`
+	MaxOutputBytes   int    `json:"max_output_bytes,omitempty" jsonschema:"minimum=0,maximum=4194304" jsonschema_description:"status only: per-stream output limit"`
+	OutputView       string `json:"output_view,omitempty" jsonschema:"enum=head,enum=tail,enum=head_tail" jsonschema_description:"with max_output_bytes: head, tail, or head_tail (default)"`
 }
 
 const maxToolOutputViewBytes = 4 << 20
@@ -1146,7 +1151,7 @@ func RunTaskTool(ctx context.Context, svc *service.Service, input TaskInput, act
 		normalized, normalizedErr := normalizeTaskResult(task, result, taskErr, getErr)
 		return compactExecToolResult(normalized), normalizedErr
 	default:
-		return CompactExecToolResult(domain.ExecResult{TaskID: input.TaskID}, fmt.Errorf("invalid task action: use status or cancel"))
+		return CompactExecToolResult(domain.ExecResult{TaskID: input.TaskID}, invalidToolInput("invalid action: use status or cancel"))
 	}
 }
 
@@ -1363,24 +1368,33 @@ func RunExecutionTool(ctx context.Context, svc *service.Service, request domain.
 }
 
 func RunSSHTunnelTool(ctx context.Context, svc *service.Service, input SSHTunnelInput, actor string) (any, error) {
-	switch strings.ToLower(strings.TrimSpace(input.Action)) {
+	action := strings.ToLower(strings.TrimSpace(input.Action))
+	direction := strings.ToLower(strings.TrimSpace(input.Direction))
+	if action == "start" && direction != "" && direction != string(domain.SSHTunnelDirectionLocal) && direction != string(domain.SSHTunnelDirectionReverse) {
+		return normalizeValueToolResult(ctx, "ssh_tunnel", domain.SSHTunnel{}, invalidToolInput("direction must be local or reverse"))
+	}
+	switch action {
 	case "start":
 		if input.TunnelID != "" {
 			return normalizeValueToolResult(ctx, "ssh_tunnel", domain.SSHTunnel{}, invalidToolInput("tunnel_id is only valid with action=stop"))
 		}
+		input.Direction = direction
 		result, err := svc.StartSSHTunnel(ctx, input.HostID, domain.SSHTunnelConfig{
 			Direction: domain.SSHTunnelDirection(input.Direction), LocalHost: input.LocalHost, LocalPort: input.LocalPort,
 			RemoteHost: input.RemoteHost, RemotePort: input.RemotePort,
 		}, input.Reason, actor)
 		return CompactExecToolResult(result, err)
 	case "list":
-		if input.HostID != "" || input.Direction != "" || input.LocalHost != "" || input.LocalPort != 0 || input.RemoteHost != "" || input.RemotePort != 0 || input.TunnelID != "" {
-			return normalizeValueToolResult(ctx, "ssh_tunnel", domain.SSHTunnelList{}, invalidToolInput("action=list does not accept host_id, direction, local_host, local_port, remote_host, remote_port, or tunnel_id"))
+		if input.HostID != "" || input.Direction != "" || input.LocalHost != "" || input.LocalPort != 0 || input.RemoteHost != "" || input.RemotePort != 0 || input.TunnelID != "" || input.Reason != "" {
+			return normalizeValueToolResult(ctx, "ssh_tunnel", domain.SSHTunnelList{}, invalidToolInput("action=list accepts only action"))
 		}
 		return svc.ListSSHTunnels(), nil
 	case "stop":
-		if input.HostID != "" || input.Direction != "" || input.LocalHost != "" || input.LocalPort != 0 || input.RemoteHost != "" || input.RemotePort != 0 {
-			return normalizeValueToolResult(ctx, "ssh_tunnel", domain.SSHTunnel{}, invalidToolInput("action=stop accepts tunnel_id and optional reason only"))
+		if input.HostID != "" || input.Direction != "" || input.LocalHost != "" || input.LocalPort != 0 || input.RemoteHost != "" || input.RemotePort != 0 || input.Reason != "" {
+			return normalizeValueToolResult(ctx, "ssh_tunnel", domain.SSHTunnel{}, invalidToolInput("action=stop accepts only action and tunnel_id"))
+		}
+		if strings.TrimSpace(input.TunnelID) == "" {
+			return normalizeValueToolResult(ctx, "ssh_tunnel", domain.SSHTunnel{}, invalidToolInput("action=stop requires tunnel_id"))
 		}
 		tunnel, err := svc.StopSSHTunnel(ctx, input.TunnelID, actor)
 		return normalizeValueToolResult(ctx, "ssh_tunnel", tunnel, err)
@@ -1797,8 +1811,15 @@ func RunWorkspaceShellTool(ctx context.Context, svc *service.Service, input Work
 
 func classifyToolError(err error) (string, bool, string) {
 	var selectionErr *service.ExecutionToolSelectionError
+	var inputValidation *service.InputValidationError
 	if errors.As(err, &selectionErr) {
 		return "wrong_tool", false, selectionErr.NextAction
+	}
+	if errors.As(err, &inputValidation) {
+		return "validation_failed", false, "correct the tool input using the error message; do not repeat unchanged input"
+	}
+	if errors.Is(err, service.ErrAgentHostAccessDenied) || errors.Is(err, service.ErrAgentRootAccessDenied) || errors.Is(err, service.ErrHostAgentRootUnavailable) {
+		return "denied", false, "respect the host Agent and root access settings; do not retry unchanged input"
 	}
 	message := strings.ToLower(err.Error())
 	switch {
@@ -1952,7 +1973,7 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_tunnel", "Start, list, or stop local (-L) and reverse (-R) SSH port forwarding with configurable listener addresses.", func(ctx context.Context, input SSHTunnelInput) (any, error) {
+	if err := appendTool(toolutils.InferTool("ssh_tunnel", SSHTunnelToolDescription, func(ctx context.Context, input SSHTunnelInput) (any, error) {
 		return RunSSHTunnelTool(ctx, svc, input, "eino-agent")
 	})); err != nil {
 		return nil, err
@@ -1962,14 +1983,14 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_task", "Wait for, read, or cancel a background SSH task. Status returns output after supplied byte offsets without stopping the task.", func(ctx context.Context, input TaskInput) (ExecToolResult, error) {
+	if err := appendTool(toolutils.InferTool("ssh_task", SSHTaskToolDescription, func(ctx context.Context, input TaskInput) (ExecToolResult, error) {
 		return RunTaskTool(ctx, svc, input, "eino-agent")
 	})); err != nil {
 		return nil, err
 	}
 	if err := appendTool(toolutils.InferTool("ssh_file_read", "Read, page, tail, inspect metadata, or search one remote file.", func(ctx context.Context, input FileReadInput) (ExecToolResult, error) {
 		return RunFileReadTool(ctx, svc, input, "eino-agent")
-	}, fileSearchSchemaOption())); err != nil {
+	})); err != nil {
 		return nil, err
 	}
 	if err := appendTool(toolutils.InferTool("ssh_file_list", "List a remote directory (read-only).", func(ctx context.Context, input FileListInput) (ExecToolResult, error) {
@@ -2002,7 +2023,7 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	}
 	if err := appendTool(toolutils.InferTool("workspace_file_read", "Read, page, tail, or search one file in the current Workspace.", func(ctx context.Context, input WorkspaceReadInput) (ExecToolResult, error) {
 		return RunWorkspaceFileReadTool(ctx, svc, input, "eino-agent")
-	}, fileSearchSchemaOption())); err != nil {
+	})); err != nil {
 		return nil, err
 	}
 	if err := appendTool(toolutils.InferTool("workspace_file_edit", "Create a text file or replace/delete one exact unique line block in the current Workspace; read existing files first."+validatorHint(workspaceValidatorIDs), func(ctx context.Context, input WorkspaceFileEditInput) (ExecToolResult, error) {
@@ -2083,7 +2104,7 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	if err := appendTool(toolutils.InferTool("ssh_history", "Search this conversation's audited run summaries with literal or POSIX regex matching and cursor pagination. Use run_id for a bounded redacted detail page; combine run_id and query for bounded matching excerpts, with limit as the per-stream match cap.", func(ctx context.Context, input HistorySearchInput) (any, error) {
 		result, err := ReadHistoryTool(ctx, svc, input)
 		return normalizeValueToolResult(ctx, "ssh_history", result, err)
-	}, fileSearchSchemaOption())); err != nil {
+	})); err != nil {
 		return nil, err
 	}
 	tools = append(tools, svc.MCPTools()...)

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/service"
 
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
@@ -36,6 +37,13 @@ func TestTypedToolInputErrorIsReportedAsValidationFailure(t *testing.T) {
 	failure := toolFailureFromError("ssh_tunnel", invalidToolInput("action=list does not accept host_id"))
 	if failure.OK || failure.Code != "validation_failed" || failure.Retryable || !strings.Contains(failure.Message, "host_id") {
 		t.Fatalf("unexpected typed input failure: %#v", failure)
+	}
+}
+
+func TestAgentHostAccessErrorIsReportedAsDenial(t *testing.T) {
+	failure := toolFailureFromError("ssh_exec", service.ErrAgentHostAccessDenied)
+	if failure.OK || failure.Code != "denied" || failure.Retryable {
+		t.Fatalf("unexpected Agent host access failure: %#v", failure)
 	}
 }
 

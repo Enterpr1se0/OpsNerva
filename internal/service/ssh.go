@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -13,6 +14,8 @@ import (
 )
 
 const maxProxyJumpDepth = 4
+
+var ErrAgentHostAccessDenied = errors.New("host is not available to Agent")
 
 type sshConnectionBinding struct {
 	Target sshHostBinding   `json:"target"`
@@ -81,7 +84,7 @@ func (s *Service) resolveSSHConnection(ctx context.Context, target domain.Host) 
 
 func requireAgentHostAccess(actor string, host domain.Host) error {
 	if actor == "eino-agent" && !host.AgentEnabled {
-		return fmt.Errorf("host is not available to Agent")
+		return ErrAgentHostAccessDenied
 	}
 	return nil
 }
