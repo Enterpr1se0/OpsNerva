@@ -28,6 +28,8 @@ type PendingChatImage = {id:string;file:File;url:string}
 type ChatEntry = { id: string; sourceMessageId?:string; persisted?:boolean; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; contentTruncated?:boolean; contentChars?:number; tool?: string; toolCallId?:string; runId?:string; transient?:boolean; progress?:boolean; startedAt?:number; liveStdout?:string; liveStderr?:string; liveOutput?:string; liveOutputStream?:'stdout'|'stderr'; transferredBytes?:number; transferTotalBytes?:number; images?:ChatEntryImage[]; tokenUsage?:ChatTokenUsage; active?: boolean; lifecycle?:'streaming'|'committed'; status?: 'pending' | 'waiting_for_approval' | 'completed' | 'failed' }
 type TaskToolEntryGroup={kind:'task_tool_group';id:string;tool:'TaskCreate'|'TaskUpdate';entries:ChatEntry[]}
 type ChatRenderItem={kind:'entry';entry:ChatEntry}|TaskToolEntryGroup
+type LiveSSHTaskSnapshot={id:string;revision:number;task?:JsonRecord;result?:JsonRecord;error?:string}
+type LiveSSHTaskEvent={type?:string;task_id?:string;revision?:number;snapshot?:{task?:JsonRecord;result?:JsonRecord;error?:string};stream?:string;offset_bytes?:number;total_bytes?:number;content?:string}
 type ModelRetryState = {attempt:number;max:number}
 type ActiveChatStream = { id: string; sessionId: string; controller: AbortController }
 type ConnectionRetryState = {attempt:number;readyAt:number}
@@ -3149,6 +3151,7 @@ function previewText(value:string,limit=toolValuePreviewChars){
 function toolLabel(value:string){return i18n.t(`toolNames.${value}`,{defaultValue:value})}
 function toolSummaryIcon(name:string|undefined){
 	if(name?.startsWith('Task'))return <ListChecks size={15}/>
+	if(name==='ssh_task')return <Activity size={15}/>
 	if(name?.startsWith('workspace_'))return <FolderOpen size={15}/>
 	if(name?.startsWith('web_'))return <Search size={15}/>
 	if(name==='skill')return <BookOpen size={15}/>
@@ -3169,6 +3172,61 @@ function limitedRecordEntries(value:JsonRecord,limit=toolCollectionPreviewItems)
 	return{entries,truncated}
 }
 function hasRecordEntries(value:JsonRecord){for(const key in value)if(Object.prototype.hasOwnProperty.call(value,key))return true;return false}
+function activeSSHTaskStatus(status:string){return['in_progress','running','approval_required','waiting_for_approval'].includes(status)}
+function liveSSHTaskSnapshot(taskID:string,value:JsonRecord|undefined):LiveSSHTaskSnapshot|undefined{
+	if(!value)return undefined
+	const task=jsonRecord(value.task)
+	return{id:taskID,revision:numberValue(task?.revision),task,result:jsonRecord(value.result),error:textValue(value.error)}
+}
+function appendLiveTaskOutput(snapshot:LiveSSHTaskSnapshot,event:LiveSSHTaskEvent){
+	const stream=event.stream==='stderr'?'stderr':'stdout'
+	const result={...(snapshot.result||{})}
+	const totalKey=stream==='stderr'?'stderr_total_bytes':'stdout_total_bytes'
+	const offsetKey=stream==='stderr'?'stderr_offset_bytes':'stdout_offset_bytes'
+	const omittedKey=stream==='stderr'?'stderr_omitted_bytes':'stdout_omitted_bytes'
+	const currentTotal=numberValue(result[totalKey])
+	if(numberValue(event.offset_bytes)!==currentTotal)return snapshot
+	let content=`${textValue(result[stream])}${event.content||''}`
+	if(content.length>liveToolOutputBufferChars){content=content.slice(-liveToolOutputBufferChars);if(content.length&&/^[\uDC00-\uDFFF]/.test(content))content=content.slice(1)}
+	const total=numberValue(event.total_bytes)
+	const retainedBytes=new TextEncoder().encode(content).byteLength
+	const offset=Math.max(0,total-retainedBytes)
+	result[stream]=content;result[totalKey]=total;result[offsetKey]=offset;result[omittedKey]=offset
+	if(offset>0){result.output_limited=true;result.output_view='tail'}
+	return{...snapshot,revision:numberValue(event.revision),task:{...(snapshot.task||{}),revision:numberValue(event.revision)},result}
+}
+function useLiveSSHTaskSnapshot(visible:boolean,enabled:boolean,sessionID:string,taskID:string,storedStatus:string){
+	const [snapshot,setSnapshot]=useState<LiveSSHTaskSnapshot>()
+	const current=snapshot?.id===taskID?snapshot:undefined
+	const unavailable=!!current?.error&&!textValue(current.task?.id)
+	const liveStatus=unavailable?'failed':textValue(current?.task?.status)||textValue(current?.result?.status)
+	const watching=enabled&&!!taskID&&activeSSHTaskStatus(liveStatus||storedStatus)
+	useEffect(()=>{setSnapshot(undefined)},[taskID])
+	useEffect(()=>{
+		if(!visible||!watching||!sessionID)return
+		return subscribeApplicationEvents<JsonRecord|LiveSSHTaskEvent>('tasks',event=>{
+			if(event.type!=='event'||!event.data)return
+			if(event.mode==='snapshot'){
+				const next=liveSSHTaskSnapshot(taskID,jsonRecord(jsonRecord(event.data)?.[taskID]))
+				if(next)setSnapshot(next)
+				return
+			}
+			const update=event.data as LiveSSHTaskEvent
+			if(update.task_id!==taskID)return
+			if(update.type==='status'){
+				const next=liveSSHTaskSnapshot(taskID,jsonRecord(update.snapshot))
+				if(next)setSnapshot(next)
+				return
+			}
+			if(update.type==='output')setSnapshot(current=>{
+				if(!current||numberValue(update.revision)<=current.revision)return current
+				if(numberValue(update.revision)!==current.revision+1)return current
+				return appendLiveTaskOutput(current,update)
+			})
+		},{taskId:taskID,sessionId:sessionID})
+	},[sessionID,taskID,visible,watching])
+	return current
+}
 function previewStructuredValue(value:unknown,depth=0):unknown{
 	if(typeof value==='string')return previewText(value)
 	if(value===null||typeof value!=='object')return value
@@ -3242,6 +3300,21 @@ function recordArray(value:unknown,fromEnd=false){
 	if(!Array.isArray(value))return[]
 	const selected=fromEnd?value.slice(-toolCollectionPreviewItems):value.slice(0,toolCollectionPreviewItems)
 	return selected.map(jsonRecord).filter((item):item is JsonRecord=>!!item)
+}
+type ToolWorkspaceDirectoryEntry={name:string;type:'file'|'directory';size?:number}
+function parseWorkspaceDirectoryOutput(value:string):ToolWorkspaceDirectoryEntry[]|undefined{
+	if(!value)return
+	try{
+		const result=jsonRecord(JSON.parse(value))
+		if(!result||!Array.isArray(result.entries))return
+		const entries:ToolWorkspaceDirectoryEntry[]=[]
+		for(const value of result.entries){
+			const entry=jsonRecord(value),name=textValue(entry?.name),type=textValue(entry?.type)
+			if(!entry||!name||(type!=='file'&&type!=='directory')||(entry.size!==undefined&&(typeof entry.size!=='number'||!Number.isFinite(entry.size))))return
+			entries.push({name,type,size:typeof entry.size==='number'?entry.size:undefined})
+		}
+		return entries
+	}catch{return}
 }
 function recordTableRows(value:JsonRecord){
 	const {entries,truncated}=limitedRecordEntries(value,toolCollectionPreviewItems-1)
@@ -3320,7 +3393,27 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,onDisclosure}:{s
 	const [detailError,setDetailError]=useState('')
 	const entry=fullContent?{...initialEntry,content:fullContent,contentTruncated:false}:initialEntry
 	useEffect(()=>{setFullContent('');setLoadingDetail(false);setDetailError('')},[initialEntry.sourceMessageId])
-  const payload=parseRecord(entry.content)
+	const storedPayload=parseRecord(entry.content)
+	const storedDisplay=jsonRecord(storedPayload._display)
+	const storedToolArguments=jsonRecord(storedDisplay?.arguments)
+	const sshTaskOperation=entry.tool==='ssh_task'
+	const sshTaskAction=textValue(storedToolArguments?.action)
+	const sshTaskID=sshTaskOperation?(textValue(storedPayload.task_id)||textValue(jsonRecord(storedPayload.result)?.task_id)||textValue(storedToolArguments?.task_id)):''
+	const storedSSHTaskStatus=textValue(storedPayload.status)||textValue(jsonRecord(storedPayload.result)?.status)
+	const currentLiveSSHTask=useLiveSSHTaskSnapshot(chatVisible,sshTaskOperation&&sshTaskAction==='status',sessionID,sshTaskID,storedSSHTaskStatus)
+	const liveSSHTaskUnavailable=!!currentLiveSSHTask?.error&&!textValue(currentLiveSSHTask.task?.id)
+	const liveSSHTaskStatus=liveSSHTaskUnavailable?'failed':textValue(currentLiveSSHTask?.task?.status)||textValue(currentLiveSSHTask?.result?.status)
+	const useLiveSSHTask=!!currentLiveSSHTask&&activeSSHTaskStatus(storedSSHTaskStatus)
+	const payload=useLiveSSHTask?{
+		...storedPayload,
+		...currentLiveSSHTask.result,
+		task_id:sshTaskID,
+		run_id:textValue(currentLiveSSHTask.result?.run_id)||textValue(currentLiveSSHTask.task?.run_id)||textValue(storedPayload.run_id),
+		status:liveSSHTaskStatus||storedSSHTaskStatus,
+		wait_deadline_reached:false,
+		...(currentLiveSSHTask.error?{message:currentLiveSSHTask.error,code:liveSSHTaskUnavailable?'task_status_unavailable':'remote_failed'}:{}),
+		_display:storedDisplay,
+	}:storedPayload
 	const taskPayload=jsonRecord(payload.task)
 	const resultPayload=jsonRecord(payload.result)
   const runID=entry.runId||textValue(payload.run_id)||textValue(taskPayload?.run_id)||textValue(resultPayload?.run_id)
@@ -3331,13 +3424,14 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,onDisclosure}:{s
 	const executionTool=!!entry.tool&&['ssh_exec','ssh_run_script','ssh_tunnel','ssh_shell','ssh_file_read','ssh_file_list','ssh_file_edit','ssh_file_transfer','workspace_file_list','workspace_file_read','workspace_file_edit','workspace_file_delete','workspace_file_upload','workspace_file_download','workspace_shell'].includes(entry.tool)
 	const request=executionTool?displayRequest:undefined
 	const shellPayload=jsonRecord(payload.shell)||jsonRecord(resultPayload?.shell)
-	const destinationHostID=textValue(display?.host_id)||run?.host_id||textValue(request?.host_id)||textValue(toolArguments?.host_id)||textValue(toolArguments?.destination_host_id)||textValue(shellPayload?.host_id)||textValue(payload.host_id)||textValue(resultPayload?.host_id)
+	const destinationHostID=textValue(display?.host_id)||run?.host_id||textValue(request?.host_id)||textValue(toolArguments?.host_id)||textValue(toolArguments?.destination_host_id)||textValue(shellPayload?.host_id)||textValue(currentLiveSSHTask?.task?.host_id)||textValue(payload.host_id)||textValue(resultPayload?.host_id)
 	const destinationHost=hostIdentity(hosts,destinationHostID)
   const hostID=destinationHost.id
   const hostName=destinationHost.name||hostID||'—'
-  const payloadStatus=textValue(payload.status)||textValue(taskPayload?.status)||textValue(resultPayload?.status)
+  const rawPayloadStatus=textValue(payload.status)||textValue(taskPayload?.status)||textValue(resultPayload?.status)
+	const payloadStatus=sshTaskOperation?(rawPayloadStatus==='running'?'in_progress':rawPayloadStatus==='waiting_for_approval'?'approval_required':rawPayloadStatus):rawPayloadStatus
   const runStatus=run?.status==='running'?'in_progress':run?.status
-  const status=payloadStatus==='approval_required'&&runStatus&&runStatus!=='approval_required'?runStatus:payloadStatus||runStatus||'completed'
+  const status=sshTaskOperation?payloadStatus||runStatus||'completed':payloadStatus==='approval_required'&&runStatus&&runStatus!=='approval_required'?runStatus:payloadStatus||runStatus||'completed'
 	const program=request?fullProgram(request):''
 	const script=request?textValue(request.script):''
 	const change=jsonRecord(request?.change)||jsonRecord(payload.change)||jsonRecord(resultPayload?.change)
@@ -3407,7 +3501,7 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,onDisclosure}:{s
 	const file=jsonRecord(payload.file)||jsonRecord(resultPayload?.file)
 	const filePath=textValue(file?.path)||remotePath||relativePath
 	const fileTarget=`${workspaceID?`${workspaceID}:`:''}${filePath}`
-	const eventToolLabel=shellOperation?shellActionLabel:structuredFileOperation?t(fileSearchMode?(workspaceID?'toolNames.workspace_file_search_mode':'toolNames.ssh_file_search_mode'):(workspaceID?'toolNames.workspace_file_read':'toolNames.ssh_file_read')):toolLabel(entry.tool||'')
+	const eventToolLabel=sshTaskOperation?t(sshTaskAction==='cancel'?'tool.taskCancel':'tool.taskStatus'):shellOperation?shellActionLabel:structuredFileOperation?t(fileSearchMode?(workspaceID?'toolNames.workspace_file_search_mode':'toolNames.ssh_file_search_mode'):(workspaceID?'toolNames.workspace_file_read':'toolNames.ssh_file_read')):toolLabel(entry.tool||'')
 	const workspaceTransferRoute:WorkspaceTransferRouteValue|undefined=workspaceUpload
 		?{source:{kind:'workspace',name:workspaceID,path:relativePath},destination:{kind:'host',name:hostName,path:remotePath}}
 		:workspaceDownload
@@ -3418,13 +3512,14 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,onDisclosure}:{s
 	const transferSummary=tunnelRoute||shellSummary||(workspaceTransferRoute?`${workspaceTransferRoute.source.name}:${workspaceTransferRoute.source.path} → ${workspaceTransferRoute.destination.name}:${workspaceTransferRoute.destination.path}`:sshTransfer?`${sourceHostName}:${sourcePath} → ${hostName}:${remotePath}`:'')
   const planSteps=Array.isArray(payload.steps)?payload.steps.slice(0,toolCollectionPreviewItems).map(jsonRecord).filter((step):step is JsonRecord=>!!step):[]
   const planSummary=textValue(payload.goal)||textValue(planSteps.find(step=>textValue(step.status)==='in_progress'||textValue(step.status)==='blocked')?.title)
-	const genericArgumentSummary=executionTool?'':toolArgumentSummary(entry.tool,toolArguments)
+	const genericArgumentSummary=executionTool||sshTaskOperation?'':toolArgumentSummary(entry.tool,toolArguments)
 	const webTool=entry.tool==='web_search'||entry.tool==='web_extract'
 	const webSummary=webTool?textValue(payload.query):''
 	const operation=filePath||(script?t('tool.bashScript'):program||genericArgumentSummary||eventToolLabel||t('tool.result'))
   const env=request?jsonRecord(request.env):undefined
 	const rawStdout=shellOperation&&(shellAction==='input'||shellAction==='output')?(shellChunks.length?shellChunkStdout:shellOutput):textValue(payload.stdout)||textValue(resultPayload?.stdout)||entry.liveStdout||run?.stdout_redacted||''
 	const stdout=change?cleanFileChangeOutput(rawStdout):rawStdout
+	const workspaceDirectoryEntries=useMemo(()=>entry.tool==='workspace_file_list'?parseWorkspaceDirectoryOutput(stdout):undefined,[entry.tool,stdout])
 	  const stderr=(shellOperation&&shellChunks.length?shellChunkStderr:'')||textValue(payload.stderr)||textValue(resultPayload?.stderr)||entry.liveStderr||run?.stderr_redacted||run?.error||''
 	const outputView=textValue(payload.output_view)||textValue(resultPayload?.output_view)
 	const stdoutOmitted=numberValue(payload.stdout_omitted_bytes)||numberValue(resultPayload?.stdout_omitted_bytes)
@@ -3437,7 +3532,7 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,onDisclosure}:{s
 		const previewStream=status==='in_progress'&&entry.liveOutput?entry.liveOutputStream:stdout?'stdout':stderr?'stderr':undefined
 		const previewContent=status==='in_progress'&&entry.liveOutput?entry.liveOutput:previewStream==='stderr'?stderr:stdout
 	  const outputPreview=status==='in_progress'?latestOutput(previewContent,1):''
-		const commandSummary=transferSummary||(fileSearchMode?`${fileTarget} · ${searchMatchModeLabel} pattern=${JSON.stringify(searchPattern)}`:filePath)||program||(script?compactScript(script):'')||planSummary||genericArgumentSummary||webSummary||operation
+		const commandSummary=transferSummary||(fileSearchMode?`${fileTarget} · ${searchMatchModeLabel} pattern=${JSON.stringify(searchPattern)}`:filePath)||program||(script?compactScript(script):'')||planSummary||(sshTaskOperation?sshTaskID:'')||genericArgumentSummary||webSummary||operation
 	const summaryLabel=eventToolLabel||entry.tool||t('common.functions')
 	const historyRuns=[...recordArray(payload.runs),...recordArray(resultPayload?.runs)].slice(0,toolCollectionPreviewItems)
 	const historyHostIDs=[...new Set(historyRuns.map(item=>textValue(item.host_id)).filter(Boolean))]
@@ -3458,7 +3553,8 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,onDisclosure}:{s
   const instruction=textValue(payload.operator_instruction)||textValue(taskPayload?.operator_instruction)||textValue(resultPayload?.operator_instruction)
   const rawPayload={...payload};delete rawPayload._display
 		const firstSeenAt=useRef(Date.now())
-		const persistedStartedAt=run?.started_at?Date.parse(run.started_at):entry.startedAt
+		const liveTaskStartedAt=textValue(currentLiveSSHTask?.task?.started_at)
+		const persistedStartedAt=run?.started_at?Date.parse(run.started_at):liveTaskStartedAt?Date.parse(liveTaskStartedAt):entry.startedAt
 		const startedAt=Number.isFinite(persistedStartedAt)?persistedStartedAt!:firstSeenAt.current
 		const [now,setNow]=useState(Date.now())
 		useEffect(()=>{
@@ -3482,28 +3578,25 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,onDisclosure}:{s
 		setLoadingDetail(true);setDetailError('')
 		void api.chatMessage(sessionID,initialEntry.sourceMessageId).then(message=>setFullContent(message.content)).catch(error=>setDetailError(errorText(error))).finally(()=>setLoadingDetail(false))
 	}
-		  return <details className={`tool-event tool-event-rich ${status}`} open={expanded}>
-			<summary onClick={event=>{event.preventDefault();toggleExpanded(event.currentTarget)}}><div className="tool-summary-icon">{toolSummaryIcon(entry.tool)}</div><div className="tool-summary-copy"><div className="tool-summary-heading"><b>{summaryLabel}</b>{sshTransfer?<ToolTransferRoute sourceHost={sourceHostName} sourcePath={sourcePath} destinationHost={hostName} destinationPath={remotePath}/>:workspaceTransferRoute?<WorkspaceTransferRoute {...workspaceTransferRoute}/>:<>{targets.length>0&&<div className="tool-summary-targets">{targets.map((target,index)=><span className={`tool-target-chip tool-target-${target.kind}`} title={`${target.label}: ${[target.name,target.id].filter(Boolean).join(' · ')}`} key={`${target.kind}_${target.id||target.name}_${index}`}>{target.kind==='host'?<Server size={11}/>:target.kind==='workspace'?<FolderOpen size={11}/>:<ListChecks size={11}/>} {(targets.length>1||target.kind==='scope')&&<em>{target.label}</em>}<b>{target.name||target.id}</b></span>)}</div>}{commandSummary!==summaryLabel&&<code title={previewText(commandSummary)}>{previewText(commandSummary)}</code>}</>}</div></div><div className="tool-summary-statuses">{loadingDetail&&<LoaderCircle className="spin" size={12}/>} {autoApproved&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}<span className={`tool-status ${status}`} key={status}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight className="tool-summary-chevron" size={14}/>{request&&<div className="tool-summary-meta"><span className={`tool-summary-permission ${permission}`}><em>{t('tool.permission')}</em><b>{permission}</b></span>{purpose&&<span className="tool-summary-purpose" title={purpose}><em>{t('tool.reason')}</em><b>{purpose}</b></span>}</div>}{status==='in_progress'&&<div className={`tool-live-progress ${transferTotal>0?'determinate':''}`} role="progressbar" aria-valuemin={transferTotal>0?0:undefined} aria-valuemax={transferTotal>0?transferTotal:undefined} aria-valuenow={transferTotal>0?transferred:undefined}><i><em style={transferTotal>0?{width:`${transferPercent}%`}:undefined}/></i><span>{transferTotal>0?`${formatFileSize(transferred)} / ${formatFileSize(transferTotal)}`:entry.liveOutputStream?.toUpperCase()||''}</span><time>{elapsed}</time></div>}{outputPreview&&<div className={`tool-summary-preview ${previewStream==='stderr'?'stderr':''}`}><span>{shellAction==='output'?shellActionLabel:(previewStream||'stdout').toUpperCase()}</span><pre>{outputPreview}</pre></div>}</summary>
+		  return <details className={`tool-event tool-event-rich ${sshTaskOperation?'ssh-task-tool ':''}${status}`} open={expanded}>
+			<summary onClick={event=>{event.preventDefault();toggleExpanded(event.currentTarget)}}><div className="tool-summary-icon">{toolSummaryIcon(entry.tool)}</div><div className="tool-summary-copy"><div className="tool-summary-heading"><b>{summaryLabel}</b>{sshTransfer?<ToolTransferRoute sourceHost={sourceHostName} sourcePath={sourcePath} destinationHost={hostName} destinationPath={remotePath}/>:workspaceTransferRoute?<WorkspaceTransferRoute {...workspaceTransferRoute}/>:<>{targets.length>0&&<div className="tool-summary-targets">{targets.map((target,index)=><span className={`tool-target-chip tool-target-${target.kind}`} title={`${target.label}: ${[target.name,target.id].filter(Boolean).join(' · ')}`} key={`${target.kind}_${target.id||target.name}_${index}`}>{target.kind==='host'?<Server size={11}/>:target.kind==='workspace'?<FolderOpen size={11}/>:<ListChecks size={11}/>} {(targets.length>1||target.kind==='scope')&&<em>{target.label}</em>}<b>{target.name||target.id}</b></span>)}</div>}{commandSummary!==summaryLabel&&<code className={sshTaskOperation?'tool-task-id':undefined} title={previewText(commandSummary)}>{previewText(commandSummary)}</code>}</>}</div></div><div className="tool-summary-statuses">{loadingDetail&&<LoaderCircle className="spin" size={12}/>} {autoApproved&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}<span className={`tool-status ${status}`} key={status}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight className="tool-summary-chevron" size={14}/>{request&&<div className="tool-summary-meta"><span className={`tool-summary-permission ${permission}`}><em>{t('tool.permission')}</em><b>{permission}</b></span>{purpose&&<span className="tool-summary-purpose" title={purpose}><em>{t('tool.reason')}</em><b>{purpose}</b></span>}</div>}{status==='in_progress'&&<div className={`tool-live-progress ${transferTotal>0?'determinate':''}`} role="progressbar" aria-valuemin={transferTotal>0?0:undefined} aria-valuemax={transferTotal>0?transferTotal:undefined} aria-valuenow={transferTotal>0?transferred:undefined}><i><em style={transferTotal>0?{width:`${transferPercent}%`}:undefined}/></i><span>{transferTotal>0?`${formatFileSize(transferred)} / ${formatFileSize(transferTotal)}`:sshTaskOperation?t('tool.liveTask'):entry.liveOutputStream?.toUpperCase()||''}</span><time>{elapsed}</time></div>}{outputPreview&&<div className={`tool-summary-preview ${previewStream==='stderr'?'stderr':''}`}><span>{shellAction==='output'?shellActionLabel:(previewStream||'stdout').toUpperCase()}</span><pre>{outputPreview}</pre></div>}</summary>
 		{expanded&&<div className="tool-event-body">
 		  {detailError&&<div className="tool-detail-error">{detailError}</div>}
 		  {shellPrimaryAction&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellPrimaryContent||'—'}/><pre>{previewText(shellPrimaryContent||'—',toolOutputPreviewChars)}</pre></div></section>}
 		  {shellOutputAction&&!shellChunks.length&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellOutput||'—'}/><pre>{previewText(shellOutput||'—',toolOutputPreviewChars)}</pre></div></section>}
-		  {!executionTool&&toolArguments&&hasRecordEntries(toolArguments)&&<CompactTable title={t('tool.actualParameters')} columns={[t('tool.parameter'),t('tool.value')]} rows={limitedRecordEntries(toolArguments).entries.map(([key,value])=>[key,safeToolArgument(value,key)])}/>}
-      {request?<div className="tool-execution-layout">
-        <section className="tool-command-pane">
+		  {!executionTool&&!sshTaskOperation&&toolArguments&&hasRecordEntries(toolArguments)&&<CompactTable title={t('tool.actualParameters')} columns={[t('tool.parameter'),t('tool.value')]} rows={limitedRecordEntries(toolArguments).entries.map(([key,value])=>[key,safeToolArgument(value,key)])}/>}
+      {request?<section className="tool-command-pane">
 		  <div className="tool-command-head"><span>{shellOperation?t('sshShell.title'):tunnelOperation?t('tunnels.forwarding'):structuredFileOperation?t(fileSearchMode?'tool.searchOperation':'tool.readOperation'):filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}</div>
 			  <div className="tool-command-block"><CopyButton value={script||(program?()=>fullProgram(request,true):commandSummary)}/>{shellOperation?<pre>{shellSummary}</pre>:tunnelOperation?<pre>{tunnelRoute||requestMode}</pre>:workspaceUpload?<pre>workspace_upload {workspaceID}:{relativePath} → {hostName}:{remotePath}</pre>:workspaceDownload?<pre>workspace_download {hostName}:{remotePath} → {workspaceID}:{relativePath}</pre>:sshTransfer?<pre>{sourceHostName}:{sourcePath} → {hostName}:{remotePath}</pre>:structuredFileOperation?<pre>{fileSearchMode?'search':'read'} {fileTarget}</pre>:filePath?<pre>{requestMode} {workspaceID?`${workspaceID}:`:''}{filePath}</pre>:script?<pre>{previewText(script,toolOutputPreviewChars)}</pre>:program?<pre><span className="prompt-sign">$</span> {previewText(program)}</pre>:<pre>{requestMode} {remotePath}</pre>}</div>
 		  {change&&textValue(change.diff)&&<DiffViewer change={change}/>}
 		  {env&&hasRecordEntries(env)&&<CompactTable title={t('tool.environment')} columns={[t('tool.key'),t('tool.value')]} rows={recordTableRows(env)}/>}
-        </section>
-		{(exitCode!=='—'||duration!=='—'||waitDeadlineReached||shellHasMore)&&<aside className="tool-context-pane"><dl className="tool-context-grid">{exitCode!=='—'&&<div><dt>{t('tool.exitCode')}</dt><dd>{exitCode}</dd></div>}{duration!=='—'&&<div><dt>{t('tool.duration')}</dt><dd>{duration}</dd></div>}{(waitDeadlineReached||shellHasMore)&&<div><dt>{t('common.status')}</dt><dd>{waitDeadlineReached?t('tool.waitDeadline'):t('tool.moreOutput')}</dd></div>}</dl></aside>}
-      </div>:!shellPrimaryAction&&!shellOutputAction&&(webTool?<WebToolResult tool={entry.tool!} payload={payload}/>:<GenericToolResult payload={payload}/>)}
-	  {file&&<FileMetadataPanel file={file}/>}
+      </section>:!sshTaskOperation&&!shellPrimaryAction&&!shellOutputAction&&(webTool?<WebToolResult tool={entry.tool!} payload={payload}/>:<GenericToolResult payload={payload}/>)}
 	  {fileSearchMode&&searchResult&&<div className={`file-search-result ${searchFound?'found':'empty'}`}><Search size={15}/><div><b>{t(searchFound?'tool.searchMatched':'tool.searchNoMatches')}</b><span>{searchMatchModeLabel} · {searchPattern}</span></div></div>}
 	  {(textValue(payload.message)||textValue(payload.next_action))&&<div className={`tool-guidance ${payload.ok===false||['failed','denied','interrupted'].includes(status)?'error':''}`}><ShieldAlert size={15}/><div><b>{textValue(payload.code)||t('tool.result')}</b>{textValue(payload.message)&&<p>{textValue(payload.message)}</p>}{textValue(payload.next_action)&&<small>{t('common.next')} · {textValue(payload.next_action)}</small>}</div></div>}
 	  {instruction&&<div className="tool-instruction"><ShieldAlert size={15}/><div><b>{t('tool.operatorInstruction')}</b><p>{instruction}</p></div></div>}
 	  {fileTransfer&&transferTotal>0&&<div className="file-transfer-progress" role="progressbar" aria-valuemin={0} aria-valuemax={transferTotal} aria-valuenow={transferred}><div><span>{t('tool.transferProgress')}</span><b>{formatFileSize(transferred)} / {formatFileSize(transferTotal)}</b></div><i><em style={{width:`${transferPercent}%`}}/></i></div>}
-	  {shellOperation&&shellChunks.length>0?<ShellOutputChunks chunks={shellChunks} live={status==='in_progress'}/>:((stdout&&(!shellOutputAction||shellChunks.length>0))||stderr)&&<div className="tool-output-grid">{stdout&&(!shellOutputAction||shellChunks.length>0)&&<ToolOutputPanel kind="stdout" label={outputLabel('STDOUT',stdoutOmitted)} content={stdout} live={status==='in_progress'}/>} {stderr&&<ToolOutputPanel kind="stderr" label={outputLabel(t('tool.stderrResult'),stderrOmitted)} content={stderr} live={status==='in_progress'}/>}</div>}
+	  {workspaceDirectoryEntries!==undefined?<div className="tool-output-grid"><WorkspaceDirectoryOutput entries={workspaceDirectoryEntries} content={stdout}/>{stderr&&<ToolOutputPanel kind="stderr" label={outputLabel(t('tool.stderrResult'),stderrOmitted)} content={stderr} live={status==='in_progress'}/>}</div>:shellOperation&&shellChunks.length>0?<ShellOutputChunks chunks={shellChunks} live={status==='in_progress'}/>:((stdout&&(!shellOutputAction||shellChunks.length>0))||stderr)&&<div className="tool-output-grid">{stdout&&(!shellOutputAction||shellChunks.length>0)&&<ToolOutputPanel kind="stdout" label={outputLabel('STDOUT',stdoutOmitted)} content={stdout} live={status==='in_progress'}/>} {stderr&&<ToolOutputPanel kind="stderr" label={outputLabel(t('tool.stderrResult'),stderrOmitted)} content={stderr} live={status==='in_progress'}/>}</div>}
+	  {(request||sshTaskOperation)&&(exitCode!=='—'||duration!=='—'||waitDeadlineReached||shellHasMore||sshTaskOperation&&(!!runID||numberValue(payload.stdout_total_bytes)>0||numberValue(payload.stderr_total_bytes)>0))&&<aside className="tool-context-pane"><dl className="tool-context-grid">{sshTaskOperation&&runID&&<div><dt>{t('tool.runId')}</dt><dd>{runID}</dd></div>}{exitCode!=='—'&&<div><dt>{t('tool.exitCode')}</dt><dd>{exitCode}</dd></div>}{duration!=='—'&&<div><dt>{t('tool.duration')}</dt><dd>{duration}</dd></div>}{sshTaskOperation&&numberValue(payload.stdout_total_bytes)>0&&<div><dt>STDOUT</dt><dd>{formatFileSize(numberValue(payload.stdout_total_bytes))}</dd></div>}{sshTaskOperation&&numberValue(payload.stderr_total_bytes)>0&&<div><dt>STDERR</dt><dd>{formatFileSize(numberValue(payload.stderr_total_bytes))}</dd></div>}{(waitDeadlineReached||shellHasMore)&&<div><dt>{t('common.status')}</dt><dd>{waitDeadlineReached?t('tool.waitDeadline'):t('tool.moreOutput')}</dd></div>}</dl></aside>}
 	  <LazyJSONDetails value={rawPayload}/>
     </div>}
   </details>
@@ -3517,7 +3610,13 @@ function ToolOutputPanel({kind,label,content,live}:{kind:'stdout'|'stderr';label
 		const output=outputRef.current
 		if(live&&output&&stickToBottom.current)output.scrollTop=output.scrollHeight
 	},[preview,live])
-	return <div className={`tool-output ${kind} ${live?'live':''}`}><span>{label}</span><CopyButton value={content}/><pre ref={outputRef} onScroll={event=>{const output=event.currentTarget;stickToBottom.current=output.scrollHeight-output.scrollTop-output.clientHeight<32}}>{preview}</pre></div>
+	return <div className={`tool-output ${kind} ${live?'live':''}`}><span>{label}</span><div className="tool-output-frame"><CopyButton value={content}/><pre ref={outputRef} onScroll={event=>{const output=event.currentTarget;stickToBottom.current=output.scrollHeight-output.scrollTop-output.clientHeight<32}}>{preview}</pre></div></div>
+}
+
+function WorkspaceDirectoryOutput({entries,content}:{entries:ToolWorkspaceDirectoryEntry[];content:string}){
+	const {t}=useTranslation()
+	const visible=entries.slice(0,toolCollectionPreviewItems),omitted=entries.length-visible.length
+	return <div className="tool-output workspace-directory-output"><span>STDOUT</span><div className="tool-output-frame"><CopyButton value={content}/><div className="tool-directory-list">{visible.length?visible.map(entry=><div className={`tool-directory-entry ${entry.type}`} key={`${entry.type}:${entry.name}`}>{entry.type==='directory'?<FolderOpen size={14}/>:<FileText size={14}/>}<b title={entry.name}>{entry.name}</b><small>{entry.type==='directory'?t('workspace.directory'):formatFileSize(entry.size||0)}</small></div>):<div className="tool-directory-empty">{t('workspace.emptyDirectory')}</div>}{omitted>0&&<div className="tool-directory-omitted">{t('tool.previewItemsOmitted',{count:omitted})}</div>}</div></div></div>
 }
 
 function ShellOutputChunks({chunks,live}:{chunks:JsonRecord[];live:boolean}){
@@ -3534,12 +3633,6 @@ function LazyJSONDetails({value}:{value:JsonRecord}){
 	const [open,setOpen]=useState(false)
 	const formatted=open?JSON.stringify(previewStructuredValue(value),null,2):''
 	return <details className="tool-raw" open={open} onToggle={event=>setOpen(event.currentTarget.open)}><summary>{t('tool.rawJson')}</summary>{open&&<CopyablePre value={()=>JSON.stringify(value,null,2)}>{previewText(formatted,toolOutputPreviewChars)}</CopyablePre>}</details>
-}
-
-function FileMetadataPanel({file}:{file:JsonRecord}){
-	const {t}=useTranslation()
-	const after=textValue(file.sha256),validator=textValue(file.validator)
-	return <section className="file-metadata-panel"><div className="file-metadata-head"><FileText size={16}/><div><b>{t('tool.fileDetails')}</b><span>{textValue(file.path)}</span></div>{file.validation_ok===true&&<em><Check size={12}/>{t('tool.validated')}</em>}</div><dl><div><dt>{t('tool.bytesRead')}</dt><dd>{typeof file.returned_bytes==='number'?`${file.returned_bytes} B`:'—'}</dd></div>{file.has_more===true&&<div><dt>{t('tool.nextOffset')}</dt><dd>{numberValue(file.next_offset)}</dd></div>}<div><dt>{t('tool.mode')}</dt><dd>{textValue(file.mode)||'—'}</dd></div><div><dt>{t('tool.owner')}</dt><dd>{[textValue(file.owner),textValue(file.group)].filter(Boolean).join(':')||'—'}</dd></div><div><dt>{t('tool.validator')}</dt><dd>{validator||'—'}</dd></div></dl>{after&&<div className="hash-row"><span>{t('tool.after')}</span><code>{after}</code></div>}{file.sensitive===true&&<div className="file-sensitive"><ShieldAlert size={13}/>{t('tool.sensitive')}</div>}</section>
 }
 
 function CompactTable({title,columns,rows}:{title:string;columns:string[];rows:Array<Array<unknown>>}){
@@ -3927,7 +4020,7 @@ function ApprovalDialog({
     }
   };
   const decisionDisabled = !!decisionBusy;
-  return (
+  return createPortal(
     <div className="approval-modal-backdrop">
       <section
         className={`approval-dialog ${rootExecution ? "elevated" : ""}`}
@@ -4134,7 +4227,8 @@ function ApprovalDialog({
           </button>
         </div>
       </section>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

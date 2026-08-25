@@ -90,7 +90,7 @@ func (s *Service) hasExecutionSubscribers(sessionID string) bool {
 
 func (s *Service) publishExecutionEvent(event ExecutionEvent) {
 	if event.RunID != "" {
-		s.updateApprovalTask(event.RunID)
+		s.updateApprovalTask(event)
 	}
 	if event.SessionID == "" || event.RunID == "" {
 		return
@@ -266,7 +266,7 @@ func (s *Service) CancelSessionToolExecutions(ctx context.Context, sessionID str
 
 func terminalExecutionStatus(status string) bool {
 	switch status {
-	case "completed", "partial", "failed", "interrupted", "rejected", "denied", "expired":
+	case "completed", "partial", "failed", "interrupted", "rejected", "denied", "expired", "cancelled":
 		return true
 	default:
 		return false

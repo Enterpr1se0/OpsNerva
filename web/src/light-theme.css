@@ -554,7 +554,6 @@
   .web-source-failures,
   .tool-no-arguments,
   .tool-schema-raw,
-  .file-metadata-panel,
   .command-review-panel,
   .approval-operation,
   .approval-request-detail
@@ -626,6 +625,20 @@
   color: #27352e;
 }
 
+:root[data-theme='light'] .workspace-directory-output .tool-output-frame {
+  border-color: var(--light-border);
+  background: #f2f4f3;
+}
+
+:root[data-theme='light'] .tool-directory-entry.directory {
+  background: var(--light-accent-soft);
+  color: var(--light-accent);
+}
+
+:root[data-theme='light'] .tool-directory-entry > b {
+  color: var(--light-text-secondary);
+}
+
 :root[data-theme='light'] .tool-command-head {
   border-color: var(--light-border);
   background: #eaeeec;
@@ -634,6 +647,13 @@
 :root[data-theme='light'] .tool-summary-icon {
   background: var(--light-accent-soft);
   color: var(--light-accent);
+}
+
+:root[data-theme='light'] .ssh-task-tool .tool-summary-icon,
+:root[data-theme='light'] .tool-summary-copy code.tool-task-id {
+  border-color: #a9c5dc;
+  background: #edf5fb;
+  color: #39739d;
 }
 
 :root[data-theme='light'] .task-tool-group-count {

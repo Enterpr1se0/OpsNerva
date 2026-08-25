@@ -180,7 +180,8 @@ const en = {
     targetHost: 'Target host', sourceHost: 'Source host', historyHost: 'Result host', scope: 'Scope', allHosts: 'All hosts ({{count}})', moreHosts: '{{count}} more hosts', sourceFile: 'Source file', filePath: 'File path', workingDirectory: 'Working directory', defaultDirectory: 'Default directory',
     permission: 'Permission', sandbox: 'Bubblewrap sandbox', exitCode: 'Exit code', duration: 'Duration', runId: 'Run ID',
     reason: 'Purpose', result: 'Tool result', operatorInstruction: 'Operator instruction',
-    rawJson: 'Raw JSON', fileDetails: 'File changes', diff: 'File diff', fileEdit: 'Edit file', bytesRead: 'Bytes read', nextOffset: 'Next offset', validated: 'Validated', mode: 'Mode', owner: 'Owner', validator: 'Validator', after: 'After', index: 'Index', key: 'Key', value: 'Value', stderrResult: 'STDERR / result', outputOmitted: '{{count}} B omitted', previewOmitted: '{{count}} characters omitted', previewItemsOmitted: '{{count}} items omitted', moreItemsOmitted: 'More items omitted', waitDeadline: 'Wait ended; task still running', moreOutput: 'More output', sensitive: 'Sensitive content is redacted. Do not overwrite the source file with placeholders.',
+    rawJson: 'Raw JSON', diff: 'File diff', fileEdit: 'Edit file', index: 'Index', key: 'Key', value: 'Value', stderrResult: 'STDERR / result', outputOmitted: '{{count}} B omitted', previewOmitted: '{{count}} characters omitted', previewItemsOmitted: '{{count}} items omitted', moreItemsOmitted: 'More items omitted', waitDeadline: 'Wait ended; task still running', moreOutput: 'More output',
+    taskStatus: 'Background task status', taskCancel: 'Cancel background task', liveTask: 'LIVE',
     matchModeLiteral: 'Literal', matchModeRegex: 'Regular expression', searchMatched: 'Matches found', searchNoMatches: 'No matches found', transferProgress: 'Transfer progress',
   },
   approval: {
@@ -253,7 +254,7 @@ const en = {
     debugHint: 'Debug logs are off. Set OPSNERVA_LOG_LEVEL=debug and restart the service.',
     columns: { time: 'Time', level: 'Level', component: 'Component', event: 'Event / fields' }, general: 'general', emptyTitle: 'No matching server logs',
   },
-  statusLabels: { pending: 'pending', completed: 'completed', skipped: 'skipped', partial: 'partial', closed: 'closed', expired: 'expired', failed: 'failed', unknown: 'result unknown', active: 'active', running: 'running', retrying: 'retrying', stopping: 'stopping', stopped: 'stopped', blocked: 'blocked', in_progress: 'in progress', ready: 'ready', error: 'error', connecting: 'connecting', interrupted: 'interrupted', rejected: 'rejected', approval_required: 'approval required' },
+  statusLabels: { pending: 'pending', completed: 'completed', skipped: 'skipped', partial: 'partial', closed: 'closed', expired: 'expired', failed: 'failed', unknown: 'result unknown', active: 'active', running: 'running', retrying: 'retrying', stopping: 'stopping', stopped: 'stopped', cancelled: 'cancelled', blocked: 'blocked', in_progress: 'in progress', ready: 'ready', error: 'error', connecting: 'connecting', interrupted: 'interrupted', rejected: 'rejected', approval_required: 'approval required' },
   toolCategories: { planning: 'Task orchestration', execution: 'Command execution', hosts: 'SSH hosts', tasks: 'Long tasks', remote_files: 'Remote files', workspace: 'Workspace', web: 'Web search', history: 'Audit history', approvals: 'Approvals', skills: 'Skills', mcp: 'External MCP' },
   toolGuards: { read_only: 'Read only', approval_required: 'Approval control', agent_state: 'Agent state', audited_control: 'Audited control', external_mcp: 'External MCP' },
   toolNames: {

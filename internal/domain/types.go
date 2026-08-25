@@ -1046,11 +1046,30 @@ type Task struct {
 	ToolMeta
 	ID                  string    `json:"id"`
 	RunID               string    `json:"run_id"`
+	SessionID           string    `json:"session_id,omitempty"`
 	HostID              string    `json:"host_id"`
 	Status              string    `json:"status"`
+	Revision            uint64    `json:"revision"`
 	OperatorInstruction string    `json:"operator_instruction,omitempty"`
 	StartedAt           time.Time `json:"started_at"`
 	EndedAt             time.Time `json:"ended_at,omitempty,omitzero"`
+}
+
+type TaskSnapshot struct {
+	Task   Task       `json:"task"`
+	Result ExecResult `json:"result"`
+	Error  string     `json:"error,omitempty"`
+}
+
+type TaskEvent struct {
+	Type        string        `json:"type"`
+	TaskID      string        `json:"task_id,omitempty"`
+	Revision    uint64        `json:"revision,omitempty"`
+	Snapshot    *TaskSnapshot `json:"snapshot,omitempty"`
+	Stream      string        `json:"stream,omitempty"`
+	OffsetBytes int           `json:"offset_bytes,omitempty"`
+	TotalBytes  int           `json:"total_bytes,omitempty"`
+	Content     string        `json:"content,omitempty"`
 }
 
 type AuditEvent struct {

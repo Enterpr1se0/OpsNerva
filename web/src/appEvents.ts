@@ -1,8 +1,8 @@
 import type { ServerLogResponse } from './types'
 
-export type ApplicationEventTopic='connections'|'approvals'|'sessions'|'chat_state'|'audit'|'mcp_activity'|'health'|'logs'
+export type ApplicationEventTopic='connections'|'approvals'|'sessions'|'chat_state'|'tasks'|'audit'|'mcp_activity'|'health'|'logs'
 export type ApplicationLogSubscription={level?:string;component?:string;q?:string;limit?:number}
-export type ApplicationEventSubscription={logs?:ApplicationLogSubscription;sessionId?:string;mcpSessionId?:string}
+export type ApplicationEventSubscription={logs?:ApplicationLogSubscription;sessionId?:string;mcpSessionId?:string;taskId?:string}
 export type ApplicationEvent<T=unknown>={type:'event'|'error'|'heartbeat';topic?:ApplicationEventTopic;mode?:'snapshot'|'delta';sequence?:number;data?:T;error?:string}
 
 type ApplicationEventListener=(event:ApplicationEvent)=>void
@@ -67,9 +67,12 @@ class ApplicationEventClient{
 		if(this.socket?.readyState!==WebSocket.OPEN)return
 		const topics=Array.from(this.listeners.keys()).sort()
 		const logs=Array.from(this.listeners.get('logs')?.values()||[]).at(-1)?.options?.logs
-		const sessionId=Array.from(this.listeners.get('chat_state')?.values()||[]).at(-1)?.options?.sessionId
+		const chatSessionId=Array.from(this.listeners.get('chat_state')?.values()||[]).at(-1)?.options?.sessionId
+		const taskSessionId=Array.from(this.listeners.get('tasks')?.values()||[]).find(registration=>registration.options?.sessionId)?.options?.sessionId
+		const sessionId=chatSessionId||taskSessionId
 		const mcpSessionId=Array.from(this.listeners.get('mcp_activity')?.values()||[]).at(-1)?.options?.mcpSessionId
-		this.socket.send(JSON.stringify({type:'subscribe',topics,logs,session_id:sessionId,mcp_session_id:mcpSessionId}))
+		const taskIds=[...new Set(Array.from(this.listeners.get('tasks')?.values()||[]).map(registration=>registration.options?.taskId).filter((value):value is string=>!!value))].sort()
+		this.socket.send(JSON.stringify({type:'subscribe',topics,logs,session_id:sessionId,mcp_session_id:mcpSessionId,task_ids:taskIds}))
 	}
 
 	private disconnect(){

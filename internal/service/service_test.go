@@ -604,6 +604,7 @@ func TestWaitTaskBlocksUntilNewOutput(t *testing.T) {
 		time.Sleep(120 * time.Millisecond)
 		svc.taskMu.Lock()
 		state.result.Stdout = "old-new"
+		notifyTaskWaitersLocked(state)
 		svc.taskMu.Unlock()
 	}()
 	started := time.Now()
@@ -1883,6 +1884,10 @@ func TestApprovedBackgroundTaskCanBeCancelledWhileRunning(t *testing.T) {
 		if err == nil && terminalExecutionStatus(run.Status) {
 			if run.Status != "interrupted" {
 				t.Fatalf("cancelled execution run status = %s", run.Status)
+			}
+			cancelled, result, _, taskErr := svc.GetTask(task.ID)
+			if taskErr != nil || cancelled.Status != "cancelled" || result.Status != "cancelled" {
+				t.Fatalf("worker completion overwrote cancellation: task=%#v result=%#v err=%v", cancelled, result, taskErr)
 			}
 			return
 		}

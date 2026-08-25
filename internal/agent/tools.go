@@ -1139,8 +1139,8 @@ func RunTaskTool(ctx context.Context, svc *service.Service, input TaskInput, act
 		if input.WaitSeconds != 0 || input.BlockUntil != "" || input.AfterStdoutBytes != 0 || input.AfterStderrBytes != 0 || input.MaxOutputBytes != 0 || input.OutputView != "" {
 			return CompactExecToolResult(domain.ExecResult{TaskID: input.TaskID}, invalidToolInput("action=cancel accepts only action and task_id"))
 		}
-		cancelErr := svc.CancelTask(input.TaskID, actor)
-		task, result, taskErr, getErr := svc.GetTask(input.TaskID)
+		cancelErr := svc.CancelTaskForContext(ctx, input.TaskID, actor)
+		task, result, taskErr, getErr := svc.GetTaskForContext(ctx, input.TaskID)
 		if task.ID == "" {
 			task.ID = input.TaskID
 		}
@@ -1331,11 +1331,11 @@ func ReadHistoryTool(ctx context.Context, svc *service.Service, input HistorySea
 		NextCursor: encodeHistoryCursor(page.NextStartedAt, page.NextID), ScanLimited: page.ScanLimited}, nil
 }
 
-func taskStartToolResult(svc *service.Service, task domain.Task, startErr error) (domain.ExecResult, error) {
+func taskStartToolResult(ctx context.Context, svc *service.Service, task domain.Task, startErr error) (domain.ExecResult, error) {
 	if task.ID == "" {
 		return normalizeTaskResult(task, domain.ExecResult{}, "", startErr)
 	}
-	storedTask, result, taskErr, getErr := svc.GetTask(task.ID)
+	storedTask, result, taskErr, getErr := svc.GetTaskForContext(ctx, task.ID)
 	if getErr == nil {
 		task = storedTask
 	} else if startErr == nil {
@@ -1355,7 +1355,7 @@ func RunExecutionTool(ctx context.Context, svc *service.Service, request domain.
 	} else {
 		var task domain.Task
 		task, err = svc.StartTask(ctx, request, actor)
-		result, err = taskStartToolResult(svc, task, err)
+		result, err = taskStartToolResult(ctx, svc, task, err)
 	}
 	if !request.Background {
 		result, err = normalizeExecResult(result, err)

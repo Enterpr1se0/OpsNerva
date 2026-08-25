@@ -175,8 +175,10 @@ DROP INDEX IF EXISTS idx_agent_task_files_session;
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL DEFAULT '',
+  session_id TEXT NOT NULL DEFAULT '',
   host_id TEXT NOT NULL,
   status TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 0,
   result_json TEXT NOT NULL DEFAULT '{}',
   error TEXT NOT NULL DEFAULT '',
   started_at TEXT NOT NULL,
@@ -394,6 +396,12 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
 		return err
 	}
 	if err := s.ensureColumn(ctx, "approvals", "interrupt_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "tasks", "session_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "tasks", "revision", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_approvals_continuation_checkpoint

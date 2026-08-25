@@ -52,6 +52,8 @@ type Service struct {
 	taskMu                  sync.RWMutex
 	tasks                   map[string]*taskState
 	approvalTasks           map[string]*taskState
+	taskSubscribers         map[string]map[uint64]*taskSubscriber
+	taskSubscriberID        uint64
 	reviewerMu              sync.RWMutex
 	reviewer                ApprovalReviewer
 	automaticReviewer       AutomaticApprovalReviewer
@@ -92,15 +94,6 @@ type Service struct {
 	webRequests             singleflight.Group
 }
 
-type taskState struct {
-	task       domain.Task
-	result     domain.ExecResult
-	err        string
-	cancel     context.CancelFunc
-	approvalID string
-	sessionID  string
-}
-
 type HistoryResult struct {
 	Run       domain.Run `json:"run"`
 	StdoutRaw string     `json:"stdout_raw,omitempty"`
@@ -116,7 +109,7 @@ func New(st *store.Store, transport sshx.Transport, encryptor *security.Encrypto
 	result := &Service{
 		store: st, transport: transport, encryptor: encryptor, redactor: redactor, limits: limits,
 		workspaceSandboxPath: config.Default().WorkspaceSandboxPath,
-		globalSem:            make(chan struct{}, global), hostSems: make(map[string]chan struct{}), tasks: make(map[string]*taskState), approvalTasks: make(map[string]*taskState), workspaces: make(map[string]config.Workspace), validators: make(map[string]config.Validator), mcpRuntime: make(map[string]*mcpRuntimeState),
+		globalSem:            make(chan struct{}, global), hostSems: make(map[string]chan struct{}), tasks: make(map[string]*taskState), approvalTasks: make(map[string]*taskState), taskSubscribers: make(map[string]map[uint64]*taskSubscriber), workspaces: make(map[string]config.Workspace), validators: make(map[string]config.Validator), mcpRuntime: make(map[string]*mcpRuntimeState),
 		mcpOAuthFlows: make(map[string]*mcpOAuthFlow), mcpOAuthByServer: make(map[string]*mcpOAuthFlow),
 		mcpActivitySubscribers: make(map[uint64]*mcpActivitySubscriber),
 		modelMetadata:          newModelMetadataCache(modelsDevMetadataURL),
@@ -429,7 +422,7 @@ func (s *Service) hasActiveTaskForSession(sessionID string) bool {
 	s.taskMu.RLock()
 	defer s.taskMu.RUnlock()
 	for _, state := range s.tasks {
-		if state.sessionID == sessionID {
+		if state.task.SessionID == sessionID {
 			return true
 		}
 	}
@@ -1154,10 +1147,10 @@ func (s *Service) TrustHostKey(ctx context.Context, id, fingerprint, actor strin
 }
 
 func (s *Service) Submit(ctx context.Context, req domain.ExecRequest, actor string) (domain.ExecResult, error) {
-	return s.submit(ctx, req, actor, nil)
+	return s.submit(ctx, req, actor, executionObserver{})
 }
 
-func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor string, stream func(string, []byte)) (domain.ExecResult, error) {
+func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor string, observer executionObserver) (domain.ExecResult, error) {
 	normalizeRequest(&req, s.limits)
 	if err := validateRequestLimits(req, s.limits, s.redactor); err != nil {
 		return domain.ExecResult{}, err
@@ -1280,6 +1273,9 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 		if err := s.store.CreateRun(ctx, run); err != nil {
 			return domain.ExecResult{}, err
 		}
+		if observer.RunStarted != nil {
+			observer.RunStarted(run)
+		}
 		s.audit(ctx, run.ID, "auto_approval_agent_rejected", "auto-approval-agent", map[string]any{
 			"reason": commandExplanation.Reason, "model": commandExplanation.Model,
 		})
@@ -1318,6 +1314,9 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 		if commandExplanation != nil && commandExplanation.Status == "pending" && explanationInput != nil && reviewer != nil {
 			s.startPendingApprovalExplanation(ctx, approval, *explanationInput, reviewer, settings.SubagentTimeoutSeconds)
 		}
+		if observer.RunStarted != nil {
+			observer.RunStarted(run)
+		}
 		return domain.ExecResult{RunID: run.ID, Status: run.Status, ApprovalID: approval.ID}, nil
 	}
 	run.Status = "running"
@@ -1332,7 +1331,10 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 			"reason": commandExplanation.Reason, "model": commandExplanation.Model,
 		})
 	}
-	return s.execute(ctx, host, req, run, actor, stream)
+	if observer.RunStarted != nil {
+		observer.RunStarted(run)
+	}
+	return s.execute(ctx, host, req, run, actor, observer.Output)
 }
 
 func execResultFromRun(run domain.Run, approvalID, operatorInstruction string) domain.ExecResult {
@@ -1467,7 +1469,7 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 	var tunnel *domain.SSHTunnel
 	var shell *domain.SSHShell
 	var outputSink *executionOutputSink
-	if stream != nil || s.hasExecutionSubscribers(run.SessionID) {
+	if stream != nil || s.hasExecutionSubscribers(run.SessionID) || s.hasApprovalTask(run.ID) {
 		outputSink = s.newExecutionOutputSink(run, stream)
 	}
 	if req.Mode == domain.ExecSSHTunnelStart {
@@ -1882,176 +1884,6 @@ func hasAnyArg(args []string, candidates ...string) bool {
 
 func containsCredentialControl(value string) bool {
 	return strings.ContainsAny(value, "\x00\r\n")
-}
-
-func (s *Service) StartTask(ctx context.Context, req domain.ExecRequest, actor string) (domain.Task, error) {
-	req.Background = true
-	host, err := s.store.GetHost(ctx, strings.TrimSpace(req.HostID))
-	if err != nil {
-		return domain.Task{}, err
-	}
-	background := s.executionCtx
-	if background == nil {
-		background = context.Background()
-	}
-	if sessionID := SessionIDFromContext(ctx); sessionID != "" {
-		background = WithSessionID(background, sessionID)
-	}
-	if owner, ok := executionOwnerFromContext(ctx); ok {
-		background = context.WithValue(background, executionOwnerContextKey{}, owner)
-	}
-	taskCtx, cancel := context.WithCancel(background)
-	// GetHost accepts either an ID or a display name, while tasks.host_id is a
-	// foreign key and must always persist the canonical ID. Keep req unchanged
-	// so the execution audit still records the identifier the caller supplied.
-	task := domain.Task{ID: ids.New("task"), HostID: host.ID, Status: "running", StartedAt: time.Now().UTC()}
-	state := &taskState{task: task, result: domain.ExecResult{Status: "running"}, cancel: cancel, sessionID: SessionIDFromContext(ctx)}
-	if err := s.store.UpsertTask(context.Background(), task, state.result, ""); err != nil {
-		cancel()
-		return domain.Task{}, err
-	}
-	s.taskMu.Lock()
-	s.tasks[task.ID] = state
-	s.taskMu.Unlock()
-	go func() {
-		result, err := s.submit(taskCtx, req, actor, func(streamName string, data []byte) {
-			s.taskMu.Lock()
-			if s.tasks[state.task.ID] != state {
-				s.taskMu.Unlock()
-				return
-			}
-			chunk := s.redactor.Redact(string(data))
-			if streamName == "stderr" {
-				state.result.Stderr += chunk
-			} else {
-				state.result.Stdout += chunk
-			}
-			taskSnapshot, resultSnapshot, taskErr := state.task, state.result, state.err
-			s.taskMu.Unlock()
-			_ = s.store.UpsertTask(context.Background(), taskSnapshot, resultSnapshot, taskErr)
-		})
-		if err == nil && result.Status == "approval_required" && result.ApprovalID != "" {
-			s.taskMu.Lock()
-			if s.tasks[state.task.ID] != state {
-				s.taskMu.Unlock()
-				_ = s.Reject(context.Background(), result.ApprovalID, "background task cancelled", actor)
-				return
-			}
-			state.result = result
-			state.task.RunID = result.RunID
-			state.task.Status = "approval_required"
-			state.approvalID = result.ApprovalID
-			s.approvalTasks[result.RunID] = state
-			taskSnapshot, resultSnapshot := state.task, state.result
-			s.taskMu.Unlock()
-			_ = s.store.UpsertTask(context.Background(), taskSnapshot, resultSnapshot, "")
-			return
-		}
-		s.taskMu.Lock()
-		if s.tasks[state.task.ID] != state {
-			s.taskMu.Unlock()
-			return
-		}
-		state.result = result
-		state.task.RunID = result.RunID
-		state.task.EndedAt = time.Now().UTC()
-		state.task.Status = result.Status
-		if err != nil {
-			state.err = err.Error()
-			state.task.Status = "failed"
-		}
-		taskSnapshot, resultSnapshot, taskErr := state.task, state.result, state.err
-		delete(s.tasks, state.task.ID)
-		s.taskMu.Unlock()
-		_ = s.store.UpsertTask(context.Background(), taskSnapshot, resultSnapshot, taskErr)
-	}()
-	return task, nil
-}
-
-func (s *Service) GetTask(id string) (domain.Task, domain.ExecResult, string, error) {
-	s.taskMu.RLock()
-	state, ok := s.tasks[id]
-	if ok {
-		task, result, taskErr := state.task, state.result, state.err
-		s.taskMu.RUnlock()
-		return task, result, taskErr, nil
-	}
-	s.taskMu.RUnlock()
-	return s.store.GetTask(context.Background(), id)
-}
-
-// WaitTask waits inside the control plane so callers do not need to spend one
-// Tool invocation per poll. It always returns immediately for terminal tasks.
-func (s *Service) WaitTask(ctx context.Context, id string, afterStdout, afterStderr int, wait time.Duration, blockUntil string) (domain.Task, domain.ExecResult, string, bool, error) {
-	if wait <= 0 {
-		task, result, taskErr, err := s.GetTask(id)
-		return task, result, taskErr, false, err
-	}
-	deadline := time.NewTimer(wait)
-	defer deadline.Stop()
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		task, result, taskErr, err := s.GetTask(id)
-		if err != nil {
-			return task, result, taskErr, false, err
-		}
-		terminal := terminalExecutionStatus(task.Status)
-		if terminal || (blockUntil == "output" && (len(result.Stdout) > afterStdout || len(result.Stderr) > afterStderr)) {
-			return task, result, taskErr, false, nil
-		}
-		select {
-		case <-ctx.Done():
-			return domain.Task{}, domain.ExecResult{}, "", false, ctx.Err()
-		case <-deadline.C:
-			return task, result, taskErr, true, nil
-		case <-ticker.C:
-		}
-	}
-}
-
-func (s *Service) CancelTask(id, actor string) error {
-	s.taskMu.Lock()
-	state, ok := s.tasks[id]
-	if !ok {
-		s.taskMu.Unlock()
-		if _, _, _, err := s.store.GetTask(context.Background(), id); err != nil {
-			return err
-		}
-		return fmt.Errorf("task is not running and cannot be cancelled")
-	}
-	if state.task.Status != "running" && state.task.Status != "waiting_for_approval" && state.task.Status != "approval_required" {
-		s.taskMu.Unlock()
-		return fmt.Errorf("task is not running and cannot be cancelled")
-	}
-	cancel := state.cancel
-	approvalID := state.approvalID
-	runID := state.task.RunID
-	state.task.Status = "cancelled"
-	state.task.EndedAt = time.Now().UTC()
-	state.result.Status = "cancelled"
-	state.result.CompletedAt = state.task.EndedAt
-	taskSnapshot, resultSnapshot, taskErr := state.task, state.result, state.err
-	delete(s.tasks, id)
-	delete(s.approvalTasks, runID)
-	s.taskMu.Unlock()
-
-	if cancel != nil {
-		cancel()
-	}
-	if approvalID != "" {
-		approval, err := s.store.GetApproval(context.Background(), approvalID)
-		if err == nil && approval.Status == "pending" {
-			if rejectErr := s.Reject(context.Background(), approvalID, "background task cancelled", actor); rejectErr != nil {
-				s.cancelApprovedExecution(runID)
-			}
-		} else {
-			s.cancelApprovedExecution(runID)
-		}
-	}
-	s.audit(context.Background(), runID, "task_cancelled", actor, map[string]any{"task_id": id})
-	_ = s.store.UpsertTask(context.Background(), taskSnapshot, resultSnapshot, taskErr)
-	return nil
 }
 
 func (s *Service) ReadFile(ctx context.Context, hostID, path string, maxBytes int, actor string) (domain.ExecResult, error) {

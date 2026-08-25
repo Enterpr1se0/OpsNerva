@@ -925,7 +925,8 @@ func TestRunScriptBackgroundReturnsTaskAndUnifiedTaskToolReturnsOutput(t *testin
 	inputJSON, _ := json.Marshal(map[string]any{
 		"host_id": host.Name, "script": "printf 'background complete\\n'", "background": true, "reason": "verify background script execution",
 	})
-	startedJSON, err := scriptTool.InvokableRun(ctx, string(inputJSON))
+	toolCtx := service.WithSessionID(ctx, "background-script")
+	startedJSON, err := scriptTool.InvokableRun(toolCtx, string(inputJSON))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -953,7 +954,7 @@ func TestRunScriptBackgroundReturnsTaskAndUnifiedTaskToolReturnsOutput(t *testin
 	getInput, _ := json.Marshal(map[string]string{"task_id": started.TaskID, "action": "status"})
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		resultJSON, getErr := taskTool.InvokableRun(ctx, string(getInput))
+		resultJSON, getErr := taskTool.InvokableRun(toolCtx, string(getInput))
 		if getErr != nil {
 			t.Fatal(getErr)
 		}
@@ -1109,7 +1110,7 @@ func TestSSHExecPersistsArgumentsAndBackgroundWithOriginalToolCall(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	toolCtx := service.WithExecutionOwner(ctx, "call-exec-history", "ssh_exec", string(inputJSON))
+	toolCtx := service.WithExecutionOwner(service.WithSessionID(ctx, "background-history"), "call-exec-history", "ssh_exec", string(inputJSON))
 	startedJSON, err := execTool.InvokableRun(toolCtx, string(inputJSON))
 	if err != nil {
 		t.Fatal(err)

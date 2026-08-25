@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Enterpr1se0/opsnerva/internal/agent"
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
@@ -20,16 +21,22 @@ import (
 const applicationWebSocketMaxMessage = 16 << 10
 const applicationSnapshotCacheTTL = 200 * time.Millisecond
 const applicationSnapshotCacheLimit = 256
+const applicationTaskOutputLimit = 64 << 10
+const applicationTaskSubscriptionLimit = 32
 
 var applicationEventIntervals = map[string]time.Duration{
-	"connections":  time.Second,
-	"approvals":    time.Second,
-	"sessions":     2 * time.Second,
-	"chat_state":   2 * time.Second,
-	"audit":        time.Second,
-	"mcp_activity": 0,
-	"health":       30 * time.Second,
-	"logs":         time.Second,
+	"connections": time.Second,
+	"approvals":   time.Second,
+	"sessions":    2 * time.Second,
+	"chat_state":  2 * time.Second,
+	"audit":       time.Second,
+	"health":      30 * time.Second,
+	"logs":        time.Second,
+}
+
+var applicationPushTopics = map[string]struct{}{
+	"mcp_activity": {},
+	"tasks":        {},
 }
 
 type applicationWebSocketLogFilter struct {
@@ -45,6 +52,7 @@ type applicationWebSocketCommand struct {
 	Logs         applicationWebSocketLogFilter `json:"logs,omitempty"`
 	SessionID    string                        `json:"session_id,omitempty"`
 	MCPSessionID string                        `json:"mcp_session_id,omitempty"`
+	TaskIDs      []string                      `json:"task_ids,omitempty"`
 }
 
 type applicationWebSocketEvent struct {
@@ -61,6 +69,7 @@ type applicationWebSocketSubscription struct {
 	logs         applicationWebSocketLogFilter
 	sessionID    string
 	mcpSessionID string
+	taskIDs      []string
 }
 
 type applicationTopicState struct {
@@ -112,9 +121,14 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 	var previousLogs []observability.LogEntry
 	var mcpEvents <-chan domain.MCPActivityEvent
 	var unsubscribeMCP func()
+	var taskEvents <-chan domain.TaskEvent
+	var unsubscribeTasks func()
 	defer func() {
 		if unsubscribeMCP != nil {
 			unsubscribeMCP()
+		}
+		if unsubscribeTasks != nil {
+			unsubscribeTasks()
 		}
 	}()
 	var sequence uint64
@@ -139,6 +153,11 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 				unsubscribeMCP = nil
 				mcpEvents = nil
 			}
+			if unsubscribeTasks != nil {
+				unsubscribeTasks()
+				unsubscribeTasks = nil
+				taskEvents = nil
+			}
 			subscription = next
 			states = make(map[string]applicationTopicState)
 			previousLogs = nil
@@ -148,6 +167,16 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 				if err != nil {
 					_ = websocket.JSON.Send(connection, applicationWebSocketEvent{Type: "error", Topic: "mcp_activity", Error: err.Error()})
 				} else if send("mcp_activity", "snapshot", payload) != nil {
+					return
+				}
+			}
+			if _, subscribed := subscription.topics["tasks"]; subscribed {
+				var snapshots map[string]domain.TaskSnapshot
+				snapshots, taskEvents, unsubscribeTasks = s.service.SubscribeTaskEvents(ctx, subscription.sessionID, subscription.taskIDs)
+				payload, err := json.Marshal(applicationTaskSnapshots(snapshots))
+				if err != nil {
+					_ = websocket.JSON.Send(connection, applicationWebSocketEvent{Type: "error", Topic: "tasks", Error: err.Error()})
+				} else if send("tasks", "snapshot", payload) != nil {
 					return
 				}
 			}
@@ -162,6 +191,30 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 			if send("mcp_activity", "delta", payload) != nil {
 				return
 			}
+		case event := <-taskEvents:
+			if event.Type == "resync" {
+				if unsubscribeTasks != nil {
+					unsubscribeTasks()
+				}
+				var snapshots map[string]domain.TaskSnapshot
+				snapshots, taskEvents, unsubscribeTasks = s.service.SubscribeTaskEvents(ctx, subscription.sessionID, subscription.taskIDs)
+				payload, err := json.Marshal(applicationTaskSnapshots(snapshots))
+				if err != nil {
+					continue
+				}
+				if send("tasks", "snapshot", payload) != nil {
+					return
+				}
+				continue
+			}
+			event = applicationTaskEvent(event)
+			payload, err := json.Marshal(event)
+			if err != nil {
+				continue
+			}
+			if send("tasks", "delta", payload) != nil {
+				return
+			}
 		case now := <-tick.C:
 			topics := make([]string, 0, len(subscription.topics))
 			for topic := range subscription.topics {
@@ -169,7 +222,7 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 			}
 			sort.Strings(topics)
 			for _, topic := range topics {
-				if topic == "mcp_activity" {
+				if _, pushed := applicationPushTopics[topic]; pushed {
 					continue
 				}
 				state := states[topic]
@@ -279,7 +332,9 @@ func readApplicationWebSocket(ctx context.Context, connection *websocket.Conn, u
 		topics := make(map[string]struct{}, len(command.Topics))
 		for _, value := range command.Topics {
 			topic := strings.ToLower(strings.TrimSpace(value))
-			if _, ok := applicationEventIntervals[topic]; !ok {
+			_, intervalTopic := applicationEventIntervals[topic]
+			_, pushTopic := applicationPushTopics[topic]
+			if !intervalTopic && !pushTopic {
 				return fmt.Errorf("unsupported application event topic %q", value)
 			}
 			topics[topic] = struct{}{}
@@ -291,8 +346,34 @@ func readApplicationWebSocket(ctx context.Context, connection *websocket.Conn, u
 		}
 		command.SessionID = strings.TrimSpace(command.SessionID)
 		command.MCPSessionID = strings.TrimSpace(command.MCPSessionID)
+		taskIDs := make([]string, 0, len(command.TaskIDs))
+		seenTaskIDs := make(map[string]struct{}, len(command.TaskIDs))
+		for _, value := range command.TaskIDs {
+			taskID := strings.TrimSpace(value)
+			if taskID == "" {
+				continue
+			}
+			if len(taskID) > 256 {
+				return fmt.Errorf("task_id must not exceed 256 bytes")
+			}
+			if _, exists := seenTaskIDs[taskID]; exists {
+				continue
+			}
+			seenTaskIDs[taskID] = struct{}{}
+			taskIDs = append(taskIDs, taskID)
+		}
+		if len(taskIDs) > applicationTaskSubscriptionLimit {
+			return fmt.Errorf("task_ids must not contain more than %d entries", applicationTaskSubscriptionLimit)
+		}
+		sort.Strings(taskIDs)
 		if _, subscribed := topics["chat_state"]; subscribed && command.SessionID == "" {
 			return fmt.Errorf("session_id is required for application event topic chat_state")
+		}
+		if _, subscribed := topics["tasks"]; subscribed && len(taskIDs) == 0 {
+			return fmt.Errorf("task_ids is required for application event topic tasks")
+		}
+		if _, subscribed := topics["tasks"]; subscribed && command.SessionID == "" {
+			return fmt.Errorf("session_id is required for application event topic tasks")
 		}
 		if len(command.SessionID) > 256 {
 			return fmt.Errorf("session_id must not exceed 256 bytes")
@@ -300,7 +381,7 @@ func readApplicationWebSocket(ctx context.Context, connection *websocket.Conn, u
 		if len(command.MCPSessionID) > 256 {
 			return fmt.Errorf("mcp_session_id must not exceed 256 bytes")
 		}
-		next := applicationWebSocketSubscription{topics: topics, logs: command.Logs, sessionID: command.SessionID, mcpSessionID: command.MCPSessionID}
+		next := applicationWebSocketSubscription{topics: topics, logs: command.Logs, sessionID: command.SessionID, mcpSessionID: command.MCPSessionID, taskIDs: taskIDs}
 		select {
 		case updates <- next:
 		default:
@@ -369,6 +450,49 @@ func (s *Server) applicationTopicSnapshot(ctx context.Context, topic string, sub
 		return nil, fmt.Errorf("unsupported application event topic %q", topic)
 	}
 	return json.Marshal(value)
+}
+
+func applicationTaskSnapshots(snapshots map[string]domain.TaskSnapshot) map[string]domain.TaskSnapshot {
+	for taskID, snapshot := range snapshots {
+		snapshot.Result = applicationTaskResult(snapshot.Result)
+		snapshots[taskID] = snapshot
+	}
+	return snapshots
+}
+
+func applicationTaskEvent(event domain.TaskEvent) domain.TaskEvent {
+	if event.Snapshot != nil {
+		snapshot := *event.Snapshot
+		snapshot.Result = applicationTaskResult(snapshot.Result)
+		event.Snapshot = &snapshot
+	}
+	return event
+}
+
+func applicationTaskResult(result domain.ExecResult) domain.ExecResult {
+	stdoutTotal, stderrTotal := len(result.Stdout), len(result.Stderr)
+	result.Stdout, result.StdoutOffsetBytes = applicationOutputTail(result.Stdout, applicationTaskOutputLimit)
+	result.Stderr, result.StderrOffsetBytes = applicationOutputTail(result.Stderr, applicationTaskOutputLimit)
+	result.StdoutTotalBytes, result.StderrTotalBytes = stdoutTotal, stderrTotal
+	result.StdoutOmittedBytes, result.StderrOmittedBytes = result.StdoutOffsetBytes, result.StderrOffsetBytes
+	result.OutputLimited = result.StdoutOmittedBytes > 0 || result.StderrOmittedBytes > 0
+	if result.OutputLimited {
+		result.OutputView = "tail"
+	} else {
+		result.OutputView = ""
+	}
+	return result
+}
+
+func applicationOutputTail(value string, limit int) (string, int) {
+	if limit <= 0 || len(value) <= limit {
+		return value, 0
+	}
+	start := len(value) - limit
+	for start < len(value) && !utf8.RuneStart(value[start]) {
+		start++
+	}
+	return value[start:], start
 }
 
 func (s *Server) applicationHealth() map[string]any {
