@@ -546,8 +546,10 @@ func (s *Service) SendSSHShellInput(ctx context.Context, id, expectedSessionID, 
 	secretPrompt := state.secretPrompt
 	shell := state.shell
 	state.mu.Unlock()
-	if err := s.requireCurrentAgentSSHAccess(ctx, actor, shell.HostID, shell.Elevated); err != nil {
-		return err
+	if shell.Kind == domain.SSHShellKindSSH {
+		if err := s.requireCurrentAgentSSHAccess(ctx, actor, shell.HostID, shell.Elevated); err != nil {
+			return err
+		}
 	}
 	if persistent && secretPrompt {
 		return fmt.Errorf("the remote terminal is requesting a credential; wait for the operator to use the private Web terminal input")
