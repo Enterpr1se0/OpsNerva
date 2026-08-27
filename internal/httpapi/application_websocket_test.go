@@ -157,7 +157,7 @@ type applicationTaskEventTransport struct {
 }
 
 func (*applicationTaskEventTransport) Probe(context.Context, sshx.ConnectionSpec) (sshx.HostInfo, error) {
-	return sshx.HostInfo{}, nil
+	return sshx.HostInfo{Shell: "sh", ShellPath: "/bin/sh"}, nil
 }
 
 func (*applicationTaskEventTransport) ScanHostKey(context.Context, sshx.ConnectionSpec) (sshx.HostKey, error) {

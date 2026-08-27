@@ -113,7 +113,7 @@ func (t *fileReadToolTransport) Exec(_ context.Context, _ sshx.ConnectionSpec, r
 }
 
 func (*fileReadToolTransport) Probe(context.Context, sshx.ConnectionSpec) (sshx.HostInfo, error) {
-	return sshx.HostInfo{}, nil
+	return sshx.HostInfo{Shell: "sh", ShellPath: "/bin/sh"}, nil
 }
 
 func (*fileReadToolTransport) ScanHostKey(context.Context, sshx.ConnectionSpec) (sshx.HostKey, error) {
@@ -129,7 +129,7 @@ func (*fileReadToolTransport) StoredHostKey(domain.Host) (sshx.HostKey, bool) {
 }
 
 func (*backgroundToolTransport) Probe(context.Context, sshx.ConnectionSpec) (sshx.HostInfo, error) {
-	return sshx.HostInfo{}, nil
+	return sshx.HostInfo{Shell: "sh", ShellPath: "/bin/sh"}, nil
 }
 
 func (*backgroundToolTransport) ScanHostKey(context.Context, sshx.ConnectionSpec) (sshx.HostKey, error) {

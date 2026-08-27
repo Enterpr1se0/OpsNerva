@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS hosts (
   username TEXT NOT NULL,
   agent_enabled INTEGER NOT NULL DEFAULT 1,
   agent_root_enabled INTEGER NOT NULL DEFAULT 0,
+  detected_shell TEXT NOT NULL DEFAULT '',
+  detected_shell_binding TEXT NOT NULL DEFAULT '',
   auth_type TEXT NOT NULL DEFAULT 'agent',
 	  private_key_cipher TEXT NOT NULL DEFAULT '',
   known_hosts_file TEXT NOT NULL DEFAULT '',
@@ -363,6 +365,12 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
 		return err
 	}
 	if err := s.ensureColumn(ctx, "hosts", "agent_root_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "hosts", "detected_shell", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "hosts", "detected_shell_binding", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "ssh_shell_events", "content_encoding", "TEXT NOT NULL DEFAULT ''"); err != nil {

@@ -31,12 +31,12 @@ func New(svc *service.Service, version string) *Server {
 	instance.server = server
 	server.AddReceivingMiddleware(instance.trackToolCalls)
 
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_host_inspect", Description: "Inspect one SSH host's OS, user, and uptime.", InputSchema: inputSchema[agent.HostInput](), Annotations: readOnlyAnnotations("Inspect SSH host")},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_host_inspect", Description: "Inspect one SSH host's OS, user, shell, and uptime.", InputSchema: inputSchema[agent.HostInput](), Annotations: readOnlyAnnotations("Inspect SSH host")},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.HostInput) (*mcp.CallToolResult, sshx.HostInfo, error) {
 			output, err := svc.ProbeHost(ctx, input.HostID, "mcp-client")
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_host_list", Description: "List SSH host IDs and capabilities; excludes connection data and secrets.", InputSchema: inputSchema[struct{}](), Annotations: readOnlyAnnotations("List SSH hosts")},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_host_list", Description: "List Agent-enabled SSH host IDs, root access, and detected shells.", InputSchema: inputSchema[struct{}](), Annotations: readOnlyAnnotations("List SSH hosts")},
 		func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, agent.HostListOutput, error) {
 			hosts, err := svc.ListHostCapabilities(ctx)
 			return nil, agent.HostListOutput{Hosts: hosts}, err

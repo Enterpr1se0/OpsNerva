@@ -32,12 +32,14 @@ created_at TEXT NOT NULL,updated_at TEXT NOT NULL)`)
 		t.Fatal(err)
 	}
 	defer st.Close()
-	var columns int
-	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name='agent_root_enabled'`).Scan(&columns); err != nil {
-		t.Fatal(err)
-	}
-	if columns != 1 {
-		t.Fatalf("agent_root_enabled column count = %d", columns)
+	for _, column := range []string{"agent_root_enabled", "detected_shell", "detected_shell_binding"} {
+		var columns int
+		if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name=?`, column).Scan(&columns); err != nil {
+			t.Fatal(err)
+		}
+		if columns != 1 {
+			t.Fatalf("%s column count = %d", column, columns)
+		}
 	}
 }
 
@@ -73,6 +75,37 @@ func TestHostAgentRootSettingRoundTrips(t *testing.T) {
 	host, err = st.GetHost(ctx, host.ID)
 	if err != nil || host.AgentRootEnabled {
 		t.Fatalf("disabled Agent root setting did not persist: host=%#v err=%v", host, err)
+	}
+}
+
+func TestHostDetectedShellRoundTripsWithoutChangingConnectionRevision(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "host-shell.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	host, err := st.UpsertHost(ctx, domain.Host{
+		ID: "host-shell", Name: "shell", Address: "192.0.2.12", Port: 22, User: "ops",
+		AgentEnabled: true, AuthType: "agent", SudoMode: "none",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	connectionUpdatedAt := host.UpdatedAt
+	if err := st.SetHostDetectedShell(ctx, host.ID, "connection-digest", "/usr/bin/bash"); err != nil {
+		t.Fatal(err)
+	}
+	host, err = st.GetHost(ctx, host.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if host.DetectedShell != "/usr/bin/bash" || host.DetectedShellBinding != "connection-digest" {
+		t.Fatalf("detected shell was not persisted: %#v", host)
+	}
+	if !host.UpdatedAt.Equal(connectionUpdatedAt) {
+		t.Fatalf("detected shell changed the SSH connection revision: %s -> %s", connectionUpdatedAt, host.UpdatedAt)
 	}
 }
 

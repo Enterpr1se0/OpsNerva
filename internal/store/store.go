@@ -247,7 +247,7 @@ func (s *Store) UpsertHost(ctx context.Context, host domain.Host) (domain.Host, 
 INSERT INTO hosts(id,name,address,port,username,agent_enabled,agent_root_enabled,auth_type,private_key_cipher,known_hosts_file,proxy_jump_host_id,proxy_id,password_cipher,sudo_mode,sudo_password_cipher,created_at,updated_at)
 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET name=excluded.name,address=excluded.address,port=excluded.port,
-username=excluded.username,agent_enabled=excluded.agent_enabled,agent_root_enabled=excluded.agent_root_enabled,auth_type=excluded.auth_type,private_key_cipher=excluded.private_key_cipher,
+username=excluded.username,agent_enabled=excluded.agent_enabled,agent_root_enabled=excluded.agent_root_enabled,detected_shell='',detected_shell_binding='',auth_type=excluded.auth_type,private_key_cipher=excluded.private_key_cipher,
 known_hosts_file=excluded.known_hosts_file,proxy_jump_host_id=excluded.proxy_jump_host_id,
 proxy_id=excluded.proxy_id,password_cipher=excluded.password_cipher,
 sudo_mode=excluded.sudo_mode,sudo_password_cipher=excluded.sudo_password_cipher,updated_at=excluded.updated_at`,
@@ -262,7 +262,7 @@ sudo_mode=excluded.sudo_mode,sudo_password_cipher=excluded.sudo_password_cipher,
 }
 
 func (s *Store) GetHost(ctx context.Context, id string) (domain.Host, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id,name,address,port,username,agent_enabled,agent_root_enabled,auth_type,private_key_cipher,
+	row := s.db.QueryRowContext(ctx, `SELECT id,name,address,port,username,agent_enabled,agent_root_enabled,detected_shell,detected_shell_binding,auth_type,private_key_cipher,
 known_hosts_file,proxy_jump_host_id,proxy_id,password_cipher,
 sudo_mode,sudo_password_cipher,created_at,updated_at FROM hosts WHERE id=? OR name=?`, id, id)
 	return scanHost(row)
@@ -277,6 +277,17 @@ func (s *Store) SetHostAgentRootEnabled(ctx context.Context, id string, enabled 
 		return domain.Host{}, ErrNotFound
 	}
 	return s.GetHost(ctx, id)
+}
+
+func (s *Store) SetHostDetectedShell(ctx context.Context, id, binding, shell string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE hosts SET detected_shell=?,detected_shell_binding=? WHERE id=? AND auth_type<>'workspace'`, shell, binding, id)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) UpsertProxy(ctx context.Context, proxy domain.Proxy) (domain.Proxy, error) {
@@ -718,7 +729,7 @@ func scanModelProvider(row scanner) (domain.ModelProvider, error) {
 }
 
 func (s *Store) ListHosts(ctx context.Context) ([]domain.Host, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,address,port,username,agent_enabled,agent_root_enabled,auth_type,private_key_cipher,
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,address,port,username,agent_enabled,agent_root_enabled,detected_shell,detected_shell_binding,auth_type,private_key_cipher,
 known_hosts_file,proxy_jump_host_id,proxy_id,password_cipher,
 sudo_mode,sudo_password_cipher,created_at,updated_at FROM hosts WHERE auth_type<>'workspace' ORDER BY name`)
 	if err != nil {
@@ -775,7 +786,7 @@ func scanHost(row scanner) (domain.Host, error) {
 	var host domain.Host
 	var agentEnabled, agentRootEnabled int
 	var created, updated string
-	err := row.Scan(&host.ID, &host.Name, &host.Address, &host.Port, &host.User, &agentEnabled, &agentRootEnabled, &host.AuthType,
+	err := row.Scan(&host.ID, &host.Name, &host.Address, &host.Port, &host.User, &agentEnabled, &agentRootEnabled, &host.DetectedShell, &host.DetectedShellBinding, &host.AuthType,
 		&host.PrivateKeyCipher, &host.KnownHostsFile, &host.ProxyJumpHostID, &host.ProxyID,
 		&host.PasswordCipher, &host.SudoMode, &host.SudoCipher, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {

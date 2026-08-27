@@ -28,20 +28,24 @@ import (
 )
 
 type fakeTransport struct {
-	mu             sync.Mutex
-	calls          []domain.ExecRequest
-	hosts          []domain.Host
-	stdout         []byte
-	stderr         []byte
-	exitCode       int
-	execErr        error
-	execStarted    chan struct{}
-	execRelease    <-chan struct{}
-	execStartOnce  sync.Once
-	tunnelOpenErrs []error
-	tunnelClients  []*fakeTunnelClient
-	tunnelSpecs    []sshx.ConnectionSpec
-	storedKeys     map[string]sshx.HostKey
+	mu                    sync.Mutex
+	calls                 []domain.ExecRequest
+	hosts                 []domain.Host
+	stdout                []byte
+	stderr                []byte
+	exitCode              int
+	execErr               error
+	execStarted           chan struct{}
+	execRelease           <-chan struct{}
+	execStartOnce         sync.Once
+	tunnelOpenErrs        []error
+	tunnelClients         []*fakeTunnelClient
+	tunnelSpecs           []sshx.ConnectionSpec
+	storedKeys            map[string]sshx.HostKey
+	probeCalls            int
+	probeErr              error
+	connectionShells      []string
+	shellConnectionShells []string
 }
 
 type fakeTunnelClient struct {
@@ -194,6 +198,7 @@ func (f *fakeTransport) Exec(ctx context.Context, connection sshx.ConnectionSpec
 	f.mu.Lock()
 	f.calls = append(f.calls, req)
 	f.hosts = append(f.hosts, connection.Target)
+	f.connectionShells = append(f.connectionShells, connection.ShellPath)
 	stdout, stderr, exitCode, execErr := f.stdout, f.stderr, f.exitCode, f.execErr
 	started, release := f.execStarted, f.execRelease
 	f.mu.Unlock()
@@ -660,7 +665,10 @@ func TestNormalizeRequestUsesSeparateSyncAndBackgroundTimeoutDefaults(t *testing
 }
 
 func (f *fakeTransport) Probe(context.Context, sshx.ConnectionSpec) (sshx.HostInfo, error) {
-	return sshx.HostInfo{Hostname: "fixture"}, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.probeCalls++
+	return sshx.HostInfo{Hostname: "fixture", Shell: "bash", ShellPath: "/usr/bin/bash"}, f.probeErr
 }
 func (f *fakeTransport) ScanHostKey(context.Context, sshx.ConnectionSpec) (sshx.HostKey, error) {
 	return sshx.HostKey{Fingerprint: "SHA256:test"}, nil
@@ -775,6 +783,9 @@ func TestAgentHostAvailabilityFiltersAndEnforcesAccess(t *testing.T) {
 	if len(capabilities) != 1 || capabilities[0].ID != enabled.ID {
 		t.Fatalf("Agent host catalog included unavailable hosts: %#v", capabilities)
 	}
+	if capabilities[0].Root || capabilities[0].Shell != "bash" {
+		t.Fatalf("Agent host catalog returned incorrect effective capabilities: %#v", capabilities[0])
+	}
 	for _, hostID := range []string{hidden.ID, target.ID} {
 		_, err := svc.Submit(ctx, domain.ExecRequest{
 			HostID: hostID, Mode: domain.ExecProgram, Program: "uname", Reason: "verify Agent host access",
@@ -795,6 +806,33 @@ func TestAgentHostAvailabilityFiltersAndEnforcesAccess(t *testing.T) {
 	}
 	if len(transport.calls) != 1 {
 		t.Fatalf("rejected Agent requests reached SSH transport: %d calls", len(transport.calls))
+	}
+}
+
+func TestAgentHostCatalogKeepsProbeFailureExplicit(t *testing.T) {
+	svc, transport, enabled := newTestService(t)
+	transport.probeErr = errors.New("host unreachable")
+
+	capabilities, err := svc.ListHostCapabilities(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(capabilities) != 1 || capabilities[0].ID != enabled.ID || capabilities[0].Shell != "unknown" {
+		t.Fatalf("Agent host catalog did not preserve a probe failure explicitly: %#v", capabilities)
+	}
+	transport.probeErr = nil
+	capabilities, err = svc.ListHostCapabilities(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capabilities[0].Shell != "bash" || transport.probeCalls != 2 {
+		t.Fatalf("successful retry did not refresh shell capability: capability=%#v probes=%d", capabilities[0], transport.probeCalls)
+	}
+	if _, err := svc.ListHostCapabilities(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if transport.probeCalls != 2 {
+		t.Fatalf("successful shell detection was not reused: probes=%d", transport.probeCalls)
 	}
 }
 

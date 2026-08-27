@@ -62,7 +62,7 @@ func TestDefaultSystemPromptKeepsHardOperationalRules(t *testing.T) {
 }
 
 func TestDefaultSystemPromptUsesInjectedHostCatalog(t *testing.T) {
-	if !strings.Contains(DefaultSystemPrompt, "Use the injected SSH host catalog") || !strings.Contains(DefaultSystemPrompt, "use ssh_host_inspect for live host facts") {
+	if !strings.Contains(DefaultSystemPrompt, "Use the injected SSH host catalog") || !strings.Contains(DefaultSystemPrompt, "root access, and detected shell") || !strings.Contains(DefaultSystemPrompt, "use ssh_host_inspect for other live host facts") {
 		t.Fatalf("default system prompt does not use the injected host catalog: %s", DefaultSystemPrompt)
 	}
 	if strings.Contains(DefaultSystemPrompt, "ssh_host_list") {

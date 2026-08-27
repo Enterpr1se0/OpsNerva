@@ -32,6 +32,13 @@ func hostSupportsRoot(host domain.Host) bool {
 	}
 }
 
+func hostCapability(host domain.Host) domain.HostCapability {
+	return domain.HostCapability{
+		ID: host.ID, Name: host.Name, User: host.User,
+		Root: host.AgentRootEnabled && hostSupportsRoot(host),
+	}
+}
+
 func requireAgentRootAccess(actor string, host domain.Host, elevated bool) error {
 	rootOperation := elevated || strings.EqualFold(strings.TrimSpace(host.User), "root")
 	if actor != "eino-agent" || !rootOperation {

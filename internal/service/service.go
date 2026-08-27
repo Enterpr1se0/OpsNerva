@@ -90,6 +90,7 @@ type Service struct {
 	tunnels                 map[string]*sshTunnelState
 	shellMu                 sync.RWMutex
 	shells                  map[string]*sshShellState
+	hostShellProbes         singleflight.Group
 	webSem                  chan struct{}
 	webRequests             singleflight.Group
 }
@@ -1049,25 +1050,6 @@ func (s *Service) withStoredHostKey(host domain.Host) domain.Host {
 	return host
 }
 
-func (s *Service) ListHostCapabilities(ctx context.Context) ([]domain.HostCapability, error) {
-	hosts, err := s.store.ListHosts(ctx)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]domain.HostCapability, 0, len(hosts))
-	for _, host := range hosts {
-		if !host.AgentEnabled {
-			continue
-		}
-		connection, _, resolveErr := s.resolveSSHConnection(ctx, host)
-		if resolveErr == nil && requireAgentSSHAccess("eino-agent", connection) != nil {
-			continue
-		}
-		result = append(result, domain.HostCapability{ID: host.ID, Name: host.Name, User: host.User, AgentRootEnabled: host.AgentRootEnabled, AuthType: host.AuthType, SudoMode: host.SudoMode})
-	}
-	return result, nil
-}
-
 func (s *Service) DeleteHost(ctx context.Context, id, actor string) error {
 	if s.hasSSHTunnelForHost(id) {
 		return fmt.Errorf("%w: stop the tunnel before deleting host %q", ErrHostHasActiveTunnel, id)
@@ -1096,7 +1078,7 @@ func (s *Service) ProbeHost(ctx context.Context, id, actor string) (sshx.HostInf
 	if err != nil {
 		return sshx.HostInfo{}, err
 	}
-	connection, _, err := s.resolveSSHConnection(ctx, host)
+	connection, binding, err := s.resolveSSHConnection(ctx, host)
 	if err != nil {
 		return sshx.HostInfo{}, err
 	}
@@ -1107,7 +1089,17 @@ func (s *Service) ProbeHost(ctx context.Context, id, actor string) (sshx.HostInf
 	if err != nil {
 		return sshx.HostInfo{}, err
 	}
-	return s.transport.Probe(ctx, connection)
+	info, err := s.transport.Probe(ctx, connection)
+	if err == nil {
+		shellPath, detectErr := detectedShellPathFromHostInfo(info)
+		if detectErr != nil {
+			return sshx.HostInfo{}, detectErr
+		}
+		if storeErr := s.storeDetectedHostShell(ctx, host.ID, binding, shellPath); storeErr != nil {
+			return sshx.HostInfo{}, storeErr
+		}
+	}
+	return info, err
 }
 
 func (s *Service) ScanHostKey(ctx context.Context, id string) (sshx.HostKey, error) {
@@ -1435,16 +1427,18 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 	defer release()
 	var connection sshx.ConnectionSpec
 	if !isWorkspaceMode(req.Mode) && req.Mode != domain.ExecSSHFileTransfer {
+		var currentDigest string
 		latestHost, connectionErr := s.store.GetHost(ctx, host.ID)
 		if connectionErr == nil {
-			var currentDigest string
 			connection, currentDigest, connectionErr = s.resolveSSHConnection(ctx, latestHost)
 			if connectionErr == nil {
 				connectionErr = verifySSHRequestBinding(req, currentDigest)
 			}
 		}
 		if connectionErr == nil {
-			connection, connectionErr = s.hydrateSSHConnection(connection, req.Elevated)
+			connection, connectionErr = s.prepareSSHExecutionConnection(
+				ctx, connection, currentDigest, req.Elevated, requiresDetectedShell(req.Mode, transportReq.Mode),
+			)
 		}
 		err = connectionErr
 	}

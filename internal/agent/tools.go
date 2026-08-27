@@ -1955,7 +1955,7 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 		return nil
 	}
 
-	if err := appendTool(toolutils.InferTool("ssh_host_inspect", "Inspect one SSH host's OS, user, and uptime (read-only).", func(ctx context.Context, input HostInput) (any, error) {
+	if err := appendTool(toolutils.InferTool("ssh_host_inspect", "Inspect one SSH host's OS, user, shell, and uptime (read-only).", func(ctx context.Context, input HostInput) (any, error) {
 		capability, err := svc.ProbeHost(ctx, input.HostID, "eino-agent")
 		return normalizeValueToolResult(ctx, "ssh_host_inspect", capability, err)
 	})); err != nil {

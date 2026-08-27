@@ -41,7 +41,7 @@ func (s *Store) ConfigurationSnapshot(ctx context.Context) (ConfigurationSnapsho
 	if err := proxyRows.Close(); err != nil {
 		return ConfigurationSnapshot{}, err
 	}
-	hostRows, err := tx.QueryContext(ctx, `SELECT id,name,address,port,username,agent_enabled,agent_root_enabled,auth_type,private_key_cipher,
+	hostRows, err := tx.QueryContext(ctx, `SELECT id,name,address,port,username,agent_enabled,agent_root_enabled,detected_shell,detected_shell_binding,auth_type,private_key_cipher,
 known_hosts_file,proxy_jump_host_id,proxy_id,password_cipher,sudo_mode,sudo_password_cipher,created_at,updated_at
 FROM hosts WHERE auth_type<>'workspace' ORDER BY name`)
 	if err != nil {
@@ -113,7 +113,7 @@ VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,url=exclu
 			return fmt.Errorf("host id %q belongs to an internal workspace", host.ID)
 		}
 		_, err = tx.ExecContext(ctx, `INSERT INTO hosts(id,name,address,port,username,agent_enabled,agent_root_enabled,auth_type,private_key_cipher,known_hosts_file,proxy_jump_host_id,proxy_id,password_cipher,sudo_mode,sudo_password_cipher,created_at,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,address=excluded.address,port=excluded.port,username=excluded.username,agent_enabled=excluded.agent_enabled,agent_root_enabled=excluded.agent_root_enabled,auth_type=excluded.auth_type,private_key_cipher=excluded.private_key_cipher,known_hosts_file=excluded.known_hosts_file,proxy_jump_host_id=excluded.proxy_jump_host_id,proxy_id=excluded.proxy_id,password_cipher=excluded.password_cipher,sudo_mode=excluded.sudo_mode,sudo_password_cipher=excluded.sudo_password_cipher,updated_at=excluded.updated_at`,
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,address=excluded.address,port=excluded.port,username=excluded.username,agent_enabled=excluded.agent_enabled,agent_root_enabled=excluded.agent_root_enabled,detected_shell='',detected_shell_binding='',auth_type=excluded.auth_type,private_key_cipher=excluded.private_key_cipher,known_hosts_file=excluded.known_hosts_file,proxy_jump_host_id=excluded.proxy_jump_host_id,proxy_id=excluded.proxy_id,password_cipher=excluded.password_cipher,sudo_mode=excluded.sudo_mode,sudo_password_cipher=excluded.sudo_password_cipher,updated_at=excluded.updated_at`,
 			host.ID, host.Name, host.Address, host.Port, host.User, boolInt(host.AgentEnabled), boolInt(host.AgentRootEnabled), host.AuthType, host.PrivateKeyCipher, host.KnownHostsFile, host.ProxyJumpHostID, host.ProxyID, host.PasswordCipher, host.SudoMode, host.SudoCipher, formatTime(now), formatTime(now))
 		if err != nil {
 			return fmt.Errorf("import host %q: %w", host.Name, err)

@@ -19,35 +19,37 @@ type WorkspaceInput struct {
 }
 
 type Host struct {
-	ID                  string    `json:"id"`
-	Name                string    `json:"name"`
-	Address             string    `json:"address"`
-	Port                int       `json:"port"`
-	User                string    `json:"user"`
-	AgentEnabled        bool      `json:"agent_enabled"`
-	AgentRootEnabled    bool      `json:"agent_root_enabled"`
-	AuthType            string    `json:"auth_type"`
-	PrivateKeyCipher    string    `json:"-"`
-	HasPrivateKey       bool      `json:"has_private_key"`
-	KnownHostsFile      string    `json:"known_hosts_file,omitempty"`
-	ProxyJumpHostID     string    `json:"proxy_jump_host_id,omitempty"`
-	ProxyID             string    `json:"proxy_id,omitempty"`
-	ProxyURL            string    `json:"-"`
-	ProxyUsername       string    `json:"-"`
-	ProxyPasswordCipher string    `json:"-"`
-	ProxyUpdatedAt      time.Time `json:"-"`
-	PasswordCipher      string    `json:"-"`
-	HasPassword         bool      `json:"has_password"`
-	SudoMode            string    `json:"sudo_mode"`
-	SudoCipher          string    `json:"-"`
-	HasSudoPassword     bool      `json:"has_sudo_password"`
-	Password            string    `json:"-"`
-	SudoPassword        string    `json:"-"`
-	PrivateKey          []byte    `json:"-"`
-	ProxyPassword       string    `json:"-"`
-	HostKey             *HostKey  `json:"host_key,omitempty"`
-	CreatedAt           time.Time `json:"created_at"`
-	UpdatedAt           time.Time `json:"updated_at"`
+	ID                   string    `json:"id"`
+	Name                 string    `json:"name"`
+	Address              string    `json:"address"`
+	Port                 int       `json:"port"`
+	User                 string    `json:"user"`
+	AgentEnabled         bool      `json:"agent_enabled"`
+	AgentRootEnabled     bool      `json:"agent_root_enabled"`
+	DetectedShell        string    `json:"-"`
+	DetectedShellBinding string    `json:"-"`
+	AuthType             string    `json:"auth_type"`
+	PrivateKeyCipher     string    `json:"-"`
+	HasPrivateKey        bool      `json:"has_private_key"`
+	KnownHostsFile       string    `json:"known_hosts_file,omitempty"`
+	ProxyJumpHostID      string    `json:"proxy_jump_host_id,omitempty"`
+	ProxyID              string    `json:"proxy_id,omitempty"`
+	ProxyURL             string    `json:"-"`
+	ProxyUsername        string    `json:"-"`
+	ProxyPasswordCipher  string    `json:"-"`
+	ProxyUpdatedAt       time.Time `json:"-"`
+	PasswordCipher       string    `json:"-"`
+	HasPassword          bool      `json:"has_password"`
+	SudoMode             string    `json:"sudo_mode"`
+	SudoCipher           string    `json:"-"`
+	HasSudoPassword      bool      `json:"has_sudo_password"`
+	Password             string    `json:"-"`
+	SudoPassword         string    `json:"-"`
+	PrivateKey           []byte    `json:"-"`
+	ProxyPassword        string    `json:"-"`
+	HostKey              *HostKey  `json:"host_key,omitempty"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 type HostKey struct {
@@ -74,12 +76,11 @@ type HostInput struct {
 }
 
 type HostCapability struct {
-	ID               string `json:"id"`
-	Name             string `json:"name"`
-	User             string `json:"user"`
-	AgentRootEnabled bool   `json:"agent_root_enabled"`
-	AuthType         string `json:"auth_type"`
-	SudoMode         string `json:"sudo_mode"`
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	User  string `json:"user"`
+	Root  bool   `json:"root"`
+	Shell string `json:"shell,omitempty"`
 }
 
 const (

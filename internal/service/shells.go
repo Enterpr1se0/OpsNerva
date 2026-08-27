@@ -161,7 +161,7 @@ func (s *Service) StartOperatorSSHShell(ctx context.Context, hostID, surface, ac
 	if err := validateExecutionRequest(host, req); err != nil {
 		return domain.SSHShell{}, err
 	}
-	connection, err = s.hydrateSSHConnection(connection, false)
+	connection, err = s.prepareSSHExecutionConnection(ctx, connection, digest, false, true)
 	if err != nil {
 		return domain.SSHShell{}, err
 	}

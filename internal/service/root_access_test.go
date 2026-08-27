@@ -48,6 +48,17 @@ func TestHostSupportsRootUsesActualConnectionCapabilities(t *testing.T) {
 	}
 }
 
+func TestHostCapabilityReportsEffectiveRootAccess(t *testing.T) {
+	available := hostCapability(domain.Host{ID: "root", User: "root", AgentRootEnabled: true})
+	if !available.Root {
+		t.Fatalf("root login capability = %#v", available)
+	}
+	unavailable := hostCapability(domain.Host{ID: "unsupported", User: "ops", AgentRootEnabled: true, SudoMode: "none"})
+	if unavailable.Root {
+		t.Fatalf("unsupported root capability = %#v", unavailable)
+	}
+}
+
 func TestAgentAvailabilityDoesNotChangeRootSetting(t *testing.T) {
 	ctx := context.Background()
 	svc, _, _ := newTestService(t)

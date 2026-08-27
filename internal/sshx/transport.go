@@ -29,6 +29,8 @@ type HostInfo struct {
 	Kernel       string `json:"kernel"`
 	Architecture string `json:"architecture"`
 	User         string `json:"user"`
+	Shell        string `json:"shell"`
+	ShellPath    string `json:"-"`
 	Uptime       string `json:"uptime"`
 }
 
@@ -42,8 +44,9 @@ type HostKey struct {
 // ConnectionSpec is resolved by the control plane. Jumps are ordered from the
 // first reachable bastion to the target's immediate bastion.
 type ConnectionSpec struct {
-	Target domain.Host
-	Jumps  []domain.Host
+	Target    domain.Host
+	Jumps     []domain.Host
+	ShellPath string
 }
 
 type Transport interface {
@@ -102,9 +105,9 @@ type TunnelTransport interface {
 }
 
 const (
-	remoteCommandShell      = "/bin/sh"
-	remoteScriptCommand     = `/bin/sh -c 'if shell_path=$(command -v bash 2>/dev/null) && [ -x "$shell_path" ]; then exec "$shell_path" -s; fi; exec /bin/sh -s'`
-	remoteLoginShellCommand = `/bin/sh -c 'if shell_path=$(command -v bash 2>/dev/null) && [ -x "$shell_path" ]; then exec "$shell_path" -l; fi; exec /bin/sh -l'`
+	remoteCommandShell               = "/bin/sh"
+	remoteScriptDetectionCommand     = `/bin/sh -c 'if shell_path=$(command -v bash 2>/dev/null) && [ -x "$shell_path" ]; then exec "$shell_path" -s; fi; exec /bin/sh -s'`
+	remoteLoginShellDetectionCommand = `/bin/sh -c 'if shell_path=$(command -v bash 2>/dev/null) && [ -x "$shell_path" ]; then exec "$shell_path" -l; fi; exec /bin/sh -l'`
 )
 
 const probeScript = `probe_hostname=""
@@ -131,6 +134,12 @@ if command -v whoami >/dev/null 2>&1; then probe_user=$(whoami 2>/dev/null) || p
 if [ -z "$probe_user" ] && command -v id >/dev/null 2>&1; then probe_user=$(id -un 2>/dev/null) || probe_user=""; fi
 printf '%s\n' "${probe_user:-${USER:-${LOGNAME:-unknown}}}"
 
+if probe_shell=$(command -v bash 2>/dev/null) && [ -x "$probe_shell" ]; then
+	printf '%s\n' "$probe_shell"
+else
+	printf '%s\n' '/bin/sh'
+fi
+
 probe_uptime=""
 if command -v uptime >/dev/null 2>&1; then probe_uptime=$(uptime -p 2>/dev/null) || probe_uptime=$(uptime 2>/dev/null) || probe_uptime=""; fi
 if [ -z "$probe_uptime" ]; then
@@ -142,13 +151,22 @@ printf '%s\n' "$probe_uptime"`
 
 func parseProbeOutput(output []byte) (HostInfo, error) {
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	if len(lines) < 5 {
+	if len(lines) < 6 {
 		return HostInfo{}, fmt.Errorf("unexpected probe output")
 	}
-	return HostInfo{Hostname: lines[0], Kernel: lines[1], Architecture: lines[2], User: lines[3], Uptime: strings.Join(lines[4:], "\n")}, nil
+	shellPath := strings.TrimSpace(lines[4])
+	shell := posixpath.Base(shellPath)
+	if shell != "bash" && shell != "sh" {
+		return HostInfo{}, fmt.Errorf("unexpected probe shell %q", shellPath)
+	}
+	return HostInfo{
+		Hostname: strings.TrimSpace(lines[0]), Kernel: strings.TrimSpace(lines[1]),
+		Architecture: strings.TrimSpace(lines[2]), User: strings.TrimSpace(lines[3]),
+		Shell: shell, ShellPath: shellPath, Uptime: strings.TrimSpace(strings.Join(lines[5:], "\n")),
+	}, nil
 }
 
-func buildRemoteCommand(req domain.ExecRequest) (string, io.Reader, error) {
+func buildRemoteCommand(req domain.ExecRequest, shellPath string) (string, io.Reader, error) {
 	if req.Mode == "" {
 		if req.Script != "" {
 			req.Mode = domain.ExecScript
@@ -174,18 +192,42 @@ func buildRemoteCommand(req domain.ExecRequest) (string, io.Reader, error) {
 		if strings.TrimSpace(req.Script) == "" {
 			return "", nil, fmt.Errorf("script is empty")
 		}
-		return prefix + remoteScriptCommand, strings.NewReader(req.Script), nil
+		command, err := selectedRemoteShellCommand(shellPath, "-s", remoteScriptDetectionCommand)
+		if err != nil {
+			return "", nil, err
+		}
+		return prefix + command, strings.NewReader(req.Script), nil
 	default:
 		return "", nil, fmt.Errorf("unsupported execution mode %q", req.Mode)
 	}
 }
 
-func buildRemoteLoginShellCommand(cwd string) (string, error) {
+func buildRemoteLoginShellCommand(cwd, shellPath string) (string, error) {
 	prefix, err := remotePrefix(cwd, nil)
 	if err != nil {
 		return "", err
 	}
-	return prefix + remoteLoginShellCommand, nil
+	command, err := selectedRemoteShellCommand(shellPath, "-l", remoteLoginShellDetectionCommand)
+	if err != nil {
+		return "", err
+	}
+	return prefix + command, nil
+}
+
+func selectedRemoteShellCommand(shellPath, argument, detectionCommand string) (string, error) {
+	shellPath = strings.TrimSpace(shellPath)
+	if shellPath == "" {
+		return detectionCommand, nil
+	}
+	if strings.ContainsAny(shellPath, "\x00\r\n") {
+		return "", fmt.Errorf("detected shell path contains unsupported control characters")
+	}
+	switch posixpath.Base(shellPath) {
+	case "bash", "sh":
+		return shellQuote(shellPath) + " " + argument, nil
+	default:
+		return "", fmt.Errorf("unsupported detected shell %q", shellPath)
+	}
 }
 
 func applyElevation(host domain.Host, req domain.ExecRequest, command string, stdin io.Reader) (string, io.Reader, error) {

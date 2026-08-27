@@ -36,7 +36,10 @@ func (s *fakeShellSession) HostStatus(context.Context) (sshx.HostStatus, error) 
 	}, nil
 }
 
-func (f *fakeTransport) OpenShell(_ context.Context, _ sshx.ConnectionSpec, _ domain.ExecRequest, cols, rows int, callback func(string, []byte)) (sshx.ShellSession, error) {
+func (f *fakeTransport) OpenShell(_ context.Context, connection sshx.ConnectionSpec, _ domain.ExecRequest, cols, rows int, callback func(string, []byte)) (sshx.ShellSession, error) {
+	f.mu.Lock()
+	f.shellConnectionShells = append(f.shellConnectionShells, connection.ShellPath)
+	f.mu.Unlock()
 	code := 0
 	session := &fakeShellSession{
 		callback: callback, done: make(chan struct{}), cols: cols, rows: rows,

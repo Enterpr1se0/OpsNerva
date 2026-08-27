@@ -334,7 +334,7 @@ Web 的 **Extensions / MCP Servers** 还支持反向角色：让 OpsNerva 作为
 
 主要工具：
 
-- `ssh_host_list` / `ssh_host_inspect`
+- `ssh_host_list`（MCP）返回 Agent 可用主机的 `id/name/user/root/shell`；内置 Agent 直接从 system prompt 获取同结构目录。Shell 探测成功后按 SSH 连接配置持久化，供远端脚本、文件操作和交互 Shell 复用；`ssh_host_inspect` 会实时检查并刷新结果。
 - `ssh_exec` / `ssh_run_script`（可选 `background: true` 启动后台任务，默认同步执行）
 - `ssh_tunnel`（`action=start|list|stop`；`direction=local|reverse`；监听 IP 可配置）
 - `ssh_shell`（`action=start|input|output|list|interrupt|close`；MCP 终端与 Web、会话终端隔离）

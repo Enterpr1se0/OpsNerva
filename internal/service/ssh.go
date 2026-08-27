@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
@@ -79,7 +80,11 @@ func (s *Service) resolveSSHConnection(ctx context.Context, target domain.Host) 
 		return sshx.ConnectionSpec{}, "", err
 	}
 	digest := sha256.Sum256(data)
-	return connection, hex.EncodeToString(digest[:]), nil
+	digestText := hex.EncodeToString(digest[:])
+	if target.DetectedShellBinding == digestText {
+		connection.ShellPath = strings.TrimSpace(target.DetectedShell)
+	}
+	return connection, digestText, nil
 }
 
 func requireAgentHostAccess(actor string, host domain.Host) error {

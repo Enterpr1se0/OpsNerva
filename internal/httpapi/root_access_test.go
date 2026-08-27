@@ -23,7 +23,7 @@ func (rootAccessTransport) Exec(context.Context, sshx.ConnectionSpec, domain.Exe
 	return sshx.RawResult{}, nil
 }
 func (rootAccessTransport) Probe(context.Context, sshx.ConnectionSpec) (sshx.HostInfo, error) {
-	return sshx.HostInfo{}, nil
+	return sshx.HostInfo{Shell: "sh", ShellPath: "/bin/sh"}, nil
 }
 func (rootAccessTransport) ScanHostKey(context.Context, sshx.ConnectionSpec) (sshx.HostKey, error) {
 	return sshx.HostKey{}, nil

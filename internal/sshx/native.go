@@ -94,7 +94,7 @@ func (t *NativeSSHTransport) OpenShell(ctx context.Context, connection Connectio
 	if rows < 5 || rows > 200 {
 		rows = 32
 	}
-	command, err := buildRemoteLoginShellCommand(req.Cwd)
+	command, err := buildRemoteLoginShellCommand(req.Cwd, connection.ShellPath)
 	if err != nil {
 		return nil, err
 	}
@@ -258,7 +258,7 @@ func (t *NativeSSHTransport) execWithCallback(ctx context.Context, connection Co
 	if req.Mode == domain.ExecWorkspaceUpload {
 		return t.transfer(ctx, connection, req)
 	}
-	command, stdin, err := buildRemoteCommand(req)
+	command, stdin, err := buildRemoteCommand(req, connection.ShellPath)
 	if err != nil {
 		return RawResult{}, err
 	}
@@ -408,6 +408,9 @@ func (t *NativeSSHTransport) transfer(ctx context.Context, connection Connection
 }
 
 func (t *NativeSSHTransport) Probe(ctx context.Context, connection ConnectionSpec) (HostInfo, error) {
+	// A probe is the authoritative refresh path and must not depend on a
+	// previously detected shell that may no longer exist on the remote host.
+	connection.ShellPath = ""
 	result, err := t.Exec(ctx, connection, domain.ExecRequest{Mode: domain.ExecScript, Script: probeScript, TimeoutSeconds: 15})
 	if err != nil {
 		return HostInfo{}, err

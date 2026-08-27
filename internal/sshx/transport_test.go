@@ -31,7 +31,7 @@ func TestBuildRemoteProgramQuotesArguments(t *testing.T) {
 	command, stdin, err := buildRemoteCommand(domain.ExecRequest{
 		Mode: domain.ExecProgram, Program: "printf", Args: []string{"%s", "hello; rm -rf /"}, Cwd: "/srv/app",
 		Env: map[string]string{"MODE": "safe value"},
-	})
+	}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestBuildRemoteProgramQuotesArguments(t *testing.T) {
 }
 
 func TestManagedSudoPasswordUsesStdin(t *testing.T) {
-	command, stdin, err := applyElevation(domain.Host{SudoMode: "password", SudoPassword: "sudo-secret"}, domain.ExecRequest{Elevated: true}, remoteScriptCommand, strings.NewReader("echo ok\n"))
+	command, stdin, err := applyElevation(domain.Host{SudoMode: "password", SudoPassword: "sudo-secret"}, domain.ExecRequest{Elevated: true}, remoteScriptDetectionCommand, strings.NewReader("echo ok\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ exec "$@"
 			command, stdin, err := applyElevation(
 				domain.Host{SudoMode: "password", SudoPassword: password},
 				domain.ExecRequest{Elevated: true},
-				remoteScriptCommand,
+				remoteScriptDetectionCommand,
 				strings.NewReader("printf 'command-input-ok\\n'\n"),
 			)
 			if err != nil {
@@ -132,11 +132,11 @@ exec "$@"
 func TestBuildRemoteScriptSelectsAvailableShellAndUsesStdin(t *testing.T) {
 	command, stdin, err := buildRemoteCommand(domain.ExecRequest{
 		Mode: domain.ExecScript, Script: "uname -a", Env: map[string]string{"MODE": "safe value"},
-	})
+	}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if command != "env MODE='safe value' "+remoteScriptCommand {
+	if command != "env MODE='safe value' "+remoteScriptDetectionCommand {
 		t.Fatalf("unexpected command %q", command)
 	}
 	data, _ := io.ReadAll(stdin)
@@ -145,11 +145,35 @@ func TestBuildRemoteScriptSelectsAvailableShellAndUsesStdin(t *testing.T) {
 	}
 }
 
+func TestBuildRemoteScriptAndLoginShellReuseDetectedPath(t *testing.T) {
+	command, stdin, err := buildRemoteCommand(domain.ExecRequest{
+		Mode: domain.ExecScript, Script: "printf ok", Env: map[string]string{"MODE": "safe"},
+	}, "/usr/local/bin/bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command != "env MODE='safe' '/usr/local/bin/bash' -s" || strings.Contains(command, "command -v") {
+		t.Fatalf("script did not reuse detected shell: %q", command)
+	}
+	data, _ := io.ReadAll(stdin)
+	if string(data) != "printf ok" {
+		t.Fatalf("unexpected stdin %q", data)
+	}
+
+	command, err = buildRemoteLoginShellCommand("/srv/app", "/bin/sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command != "cd '/srv/app' && '/bin/sh' -l" || strings.Contains(command, "command -v") {
+		t.Fatalf("login shell did not reuse detected shell: %q", command)
+	}
+}
+
 func TestRemoteScriptFallsBackToPOSIXShellWhenBashIsUnavailable(t *testing.T) {
 	if _, err := os.Stat(remoteCommandShell); err != nil {
 		t.Skip("POSIX shell is unavailable")
 	}
-	command, stdin, err := buildRemoteCommand(domain.ExecRequest{Mode: domain.ExecScript, Script: "printf 'shell-fallback-ok\\n'"})
+	command, stdin, err := buildRemoteCommand(domain.ExecRequest{Mode: domain.ExecScript, Script: "printf 'shell-fallback-ok\\n'"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,11 +190,11 @@ func TestRemoteScriptFallsBackToPOSIXShellWhenBashIsUnavailable(t *testing.T) {
 }
 
 func TestBuildRemoteLoginShellSelectsAvailableShell(t *testing.T) {
-	command, err := buildRemoteLoginShellCommand("/srv/app")
+	command, err := buildRemoteLoginShellCommand("/srv/app", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if command != "cd '/srv/app' && "+remoteLoginShellCommand {
+	if command != "cd '/srv/app' && "+remoteLoginShellDetectionCommand {
 		t.Fatalf("unexpected login shell command %q", command)
 	}
 }
@@ -193,7 +217,7 @@ func TestProbeScriptFallsBackWhenCommonUtilitiesAreMissing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Hostname == "" || info.Kernel == "" || info.Architecture == "" || info.User == "" || info.Uptime == "" {
+	if info.Hostname == "" || info.Kernel == "" || info.Architecture == "" || info.User == "" || info.Shell != "sh" || info.Uptime == "" {
 		t.Fatalf("probe fallback returned incomplete info: %#v", info)
 	}
 }
