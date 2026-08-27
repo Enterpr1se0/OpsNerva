@@ -46,7 +46,7 @@ stdio 通过 `exec.Command(command,args...)` 启动，不解析 Shell；Streamab
 
 `ssh_exec` 接收 program 与 args，服务对每个参数进行 POSIX 单引号编码，并通过 `golang.org/x/crypto/ssh` 在进程内建立连接，不调用本地 SSH 程序或 shell。同步 Tool 结果默认返回完整 stdout/stderr；调用方可设置 `max_output_bytes` 和 `output_view=head|tail|head_tail` 仅精炼模型视图，返回值同时携带每个流的总字节数、省略字节数和 `output_limited`，因此不存在静默截断。
 
-`ssh_exec` 只接受单个非交互可执行文件及分离的 argv；Shell 语法和多步骤操作使用 `ssh_run_script`，提示或终端 UI 使用 `ssh_shell`。`ssh_run_script` 将脚本通过 stdin 传给远端 `bash -se`。服务端使用 Bash AST 校验语法并拒绝脚本内直接调用 sudo；提权只能使用结构化的 `elevated` 参数。后台执行返回 task ID；未显式指定 `timeout_seconds` 时，后台命令使用 `max_timeout_seconds`，同步命令使用 `sync_timeout_seconds`。`ssh_task status` 可在 Service 内阻塞等待终态或指定字节偏移后的新输出，单次最长 60 秒，并可只返回 stdout/stderr 增量；等待截止只返回仍在运行的任务和 `wait_deadline_reached=true`，不会终止或改写任务。
+`ssh_exec` 只接受单个非交互可执行文件及分离的 argv；Shell 语法和多步骤操作使用 `ssh_run_script`，提示或终端 UI 使用 `ssh_shell`。`ssh_run_script` 将脚本通过 stdin 传给远端 Shell：已安装 Bash 时使用 Bash，否则使用 POSIX `/bin/sh`。服务端使用 Shell AST 检查并拒绝脚本内直接调用 sudo；提权只能使用结构化的 `elevated` 参数。后台执行返回 task ID；未显式指定 `timeout_seconds` 时，后台命令使用 `max_timeout_seconds`，同步命令使用 `sync_timeout_seconds`。`ssh_task status` 可在 Service 内阻塞等待终态或指定字节偏移后的新输出，单次最长 60 秒，并可只返回 stdout/stderr 增量；等待截止只返回仍在运行的任务和 `wait_deadline_reached=true`，不会终止或改写任务。
 
 `ssh_tunnel` 的 `start` 进入同一套 Run、审批模式和加密审计状态机；`list` 与 `stop` 直接操作进程内 Tunnel Registry。本地转发由控制面在指定 IP 建立 TCP Listener，再以 `direct-tcpip` channel 连接主机侧目标；反向转发通过 `tcpip-forward` 请求 SSH 服务端监听指定 IP，并接收 `forwarded-tcpip` channel 后回拨控制面侧目标。Registry 将用户创建的长期隧道状态与一次 SSH 连接对应的 Listener、Client 和连接集合分离；连接异常结束时关闭该次运行时，保留隧道 ID、已分配端口和累计流量，以 1–30 秒指数退避重建运行时。每次重连重新从 Store 解析主机、代理、ProxyJump、认证和 Host Key 配置，不持有旧凭据，也不生成重复执行 Run。`stop` 与 Service Shutdown 共用生命周期取消，能够终止退避等待、连接建立、Listener、SSH Client 和全部活动连接并等待 worker 退出；不把隧道恢复为跨重启持久状态。
 
@@ -56,7 +56,7 @@ stdio 通过 `exec.Command(command,args...)` 启动，不解析 Shell；Streamab
 
 Workspace 与 SSH 文件读取共享 `tail_lines` 语义。Agent 侧 Workspace 生命周期包括审批控制的 `workspace_file_delete`、Workspace→SSH 的 `workspace_file_upload` 和 SSH→Workspace 的 `workspace_file_download`；下载绑定远端 SHA256，拒绝符号链接、超过 100 MiB 的源和已存在的本地目标，并在同目录临时文件校验后原子提交。文件编辑先规范化 UTF-8 BOM 与 CRLF，再唯一匹配模型提交的原文块并由 Service 生成 diff；UTF-16 明确拒绝。`workspace_shell` 省略 cwd 时在请求中固定绑定 `.`，执行环境统一声明 UTF-8，Windows PowerShell 脚本继续通过系统临时目录中的 BOM 文件启动，但进程工作目录始终是 Workspace 根。
 
-`ssh_file_read` 在同一次受审计操作中返回有界内容、mode/owner/mtime 与 SHA256，`workspace_file_read` 使用相同的范围语义。普通读取默认限制为 128 KiB；未到文件末尾时通过 `has_more/next_offset` 显式分页，`full_content=true` 才取消默认页限制。`offset_bytes` 非负时是从文件开头计算的零基偏移，负数表示读取文件末尾对应字节数，返回元数据记录解析后的实际非负偏移。两者都以可选 `pattern` 切换到字面量搜索模式，并支持上下文与结果行数参数；搜索和范围参数互斥，独立的 `ssh_file_search`、`workspace_file_search` 不再注册到 Agent 或 MCP。内部仍以不同执行模式保留参数校验和审计语义。现有文件由 `ssh_file_edit` 或 `workspace_file_edit` 以 `old_text/new_text` 编辑；不提供专用的新建文件 Tool。Service 在审批前规范化文本、生成 diff 并计算新增、删除行数，`ExecRequest.change` 是审批、审计和 Web 展示的变更来源。Tool 参数 `validator_id` 只能引用启动配置中的 scope 对应 ID，配置项以固定 program/args 执行并拒绝 Tool 提供的 Shell 命令。远程 Bash 事务脚本在批准后才生成：同目录写入并同步临时文件、确认原文唯一、应用后运行白名单 validator，再原子提交。编辑链路不校验旧文件 SHA、不创建持久备份、不写 `file_operations`，也不提供恢复 Tool。
+`ssh_file_read` 在同一次受审计操作中返回有界内容、mode/owner/mtime 与 SHA256，`workspace_file_read` 使用相同的范围语义。普通读取默认限制为 128 KiB；未到文件末尾时通过 `has_more/next_offset` 显式分页，`full_content=true` 才取消默认页限制。`offset_bytes` 非负时是从文件开头计算的零基偏移，负数表示读取文件末尾对应字节数，返回元数据记录解析后的实际非负偏移。两者都以可选 `pattern` 切换到字面量搜索模式，并支持上下文与结果行数参数；搜索和范围参数互斥，独立的 `ssh_file_search`、`workspace_file_search` 不再注册到 Agent 或 MCP。内部仍以不同执行模式保留参数校验和审计语义。现有文件由 `ssh_file_edit` 或 `workspace_file_edit` 以 `old_text/new_text` 编辑；不提供专用的新建文件 Tool。Service 在审批前规范化文本、生成 diff 并计算新增、删除行数，`ExecRequest.change` 是审批、审计和 Web 展示的变更来源。Tool 参数 `validator_id` 只能引用启动配置中的 scope 对应 ID，配置项以固定 program/args 执行并拒绝 Tool 提供的 Shell 命令。远程 Shell 事务脚本在批准后才生成：同目录写入并同步临时文件、确认原文唯一、应用后运行白名单 validator，再原子提交。编辑链路不校验旧文件 SHA、不创建持久备份、不写 `file_operations`，也不提供恢复 Tool。
 
 `ssh_file_transfer` 由控制端分别建立源、目标两条内部 SSH/SFTP 连接并用 `io.Copy` 中继，不要求远端主机互通，不调用本地或远端 `scp`，也不在控制端落盘。请求以目标主机作为 Run 主机，同时绑定源主机 ID、源路径及 SHA256、目标路径和两端 `ssh_connection_digest`。未提供目标 SHA256 时只允许创建新文件；提供后只允许替换该精确版本，并在写入前后复核。Transport 拒绝符号链接和非普通文件，先写目标同目录的随机独占临时文件，流式计算源 SHA256，通过后使用 SFTP rename 提交；进度按字节事件发送，冲突、取消和超时会清理临时文件。一次传输只占一个全局执行槽，并按稳定顺序同时占用两台主机的并发槽，避免反向传输死锁。
 
@@ -82,7 +82,7 @@ Host 后端直接以服务账户执行，拥有宿主机文件系统与网络权
 
 双后端到内置单后端的升级是显式破坏性迁移。检测到旧 `transport_backend`、`config_alias`、自由格式 `proxy_jump` 或 `identity_file` 列时，Store 会清理旧主机及依赖的 runs、approvals、tasks，再删除这些列，不保留运行时兼容分支。废弃的 `file_operations` 表会在启动迁移时直接删除。
 
-提权是 `ExecRequest.elevated` 的结构化属性，不是任意命令字符串。通过当前审批模式后 Transport 才按主机配置包装为 `sudo -n -- bash -c ...` 或 `sudo -S -p '' -- bash -c ...`。sudo 密码只拼接到远端 stdin，不进入请求摘要、审计 JSON 或模型工具参数。
+提权是 `ExecRequest.elevated` 的结构化属性，不是任意命令字符串。通过当前审批模式后 Transport 才按主机配置包装为 `sudo -n -- /bin/sh -c ...` 或 `sudo -S -p '' -- /bin/sh -c ...`。sudo 密码只拼接到远端 stdin，不进入请求摘要、审计 JSON 或模型工具参数。
 
 ## Approval state machine
 

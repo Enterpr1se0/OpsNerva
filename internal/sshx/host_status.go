@@ -67,7 +67,7 @@ func (s *nativeShellSession) HostStatus(ctx context.Context) (HostStatus, error)
 	session.Stdout = &stdout
 	session.Stderr = &stderr
 	done := make(chan error, 1)
-	go func() { done <- session.Run("sh -s") }()
+	go func() { done <- session.Run(remoteCommandShell + " -s") }()
 	select {
 	case err = <-done:
 	case <-ctx.Done():

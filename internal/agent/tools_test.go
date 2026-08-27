@@ -224,7 +224,8 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 			}
 		}
 		if descriptor.Name == "ssh_run_script" && (!strings.Contains(string(descriptor.InputSchema), `"background"`) ||
-			!strings.Contains(string(descriptor.InputSchema), "do not wrap") || !strings.Contains(descriptor.Description, "without a PTY")) {
+			!strings.Contains(string(descriptor.InputSchema), "do not wrap") || !strings.Contains(descriptor.Description, "without a PTY") ||
+			!strings.Contains(descriptor.Description, "POSIX sh")) {
 			t.Fatalf("ssh_run_script metadata does not distinguish non-interactive scripts: %#v", descriptor)
 		}
 		if descriptor.Name == "ssh_shell" && (!strings.Contains(descriptor.Description, "login shell") || !strings.Contains(descriptor.Description, "terminal UI")) {

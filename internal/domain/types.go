@@ -663,10 +663,10 @@ type SSHTunnelConfig struct {
 
 type ExecRequest struct {
 	HostID                    string              `json:"host_id" jsonschema:"registered host identifier; never an address or credential"`
-	Mode                      ExecMode            `json:"mode,omitempty" jsonschema:"program for argv execution or script for a reviewed bash script"`
+	Mode                      ExecMode            `json:"mode,omitempty" jsonschema:"program for argv execution or script for a reviewed remote shell script"`
 	Program                   string              `json:"program,omitempty" jsonschema:"remote executable name for program mode"`
 	Args                      []string            `json:"args,omitempty" jsonschema:"separate arguments; do not include shell quoting"`
-	Script                    string              `json:"script,omitempty" jsonschema:"bash script content for script mode"`
+	Script                    string              `json:"script,omitempty" jsonschema:"remote shell script content for script mode"`
 	Background                bool                `json:"background,omitempty" jsonschema:"run as a cancellable background task"`
 	Change                    *FileChange         `json:"change,omitempty"`
 	TextEdit                  *TextEdit           `json:"text_edit,omitempty"`

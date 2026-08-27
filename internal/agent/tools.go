@@ -20,8 +20,8 @@ import (
 )
 
 const (
-	SSHExecToolDescription   = "Run exactly one non-interactive remote executable with separate argv items. Never use bash/sh, shell syntax, a command string, prompts, or terminal UIs; use ssh_run_script for Bash and ssh_shell for a PTY. Use top -b -n 1 for a top snapshot."
-	SSHScriptToolDescription = "Run non-interactive remote Bash syntax, pipelines, or multiple steps without a PTY. Pass the script body directly, never bash -c; use ssh_shell when a prompt or terminal UI is required."
+	SSHExecToolDescription   = "Run exactly one non-interactive remote executable with separate argv items. Never use bash/sh, shell syntax, a command string, prompts, or terminal UIs; use ssh_run_script for shell syntax and ssh_shell for a PTY. Use top -b -n 1 for a top snapshot."
+	SSHScriptToolDescription = "Run a non-interactive remote shell script without a PTY. Bash is selected when installed, otherwise POSIX sh; use portable syntax unless Bash availability is known. Pass the body directly, never bash -c or sh -c; use ssh_shell for prompts or terminal UIs."
 	SSHShellToolDescription  = "Manage an interactive SSH PTY for prompts and terminal UIs. action=start already opens a login shell: do not input bash; use input/output, continue after next_sequence, and always close it. Never send secrets."
 	SSHTaskToolDescription   = "Read, wait for, or cancel a background SSH task. status returns output after supplied byte offsets without stopping the task."
 	SSHTunnelToolDescription = "Start, list, or stop SSH port forwarding. direction is local or reverse."
@@ -167,7 +167,7 @@ type ExecInput struct {
 
 type ScriptInput struct {
 	HostID         string            `json:"host_id" jsonschema_description:"registered host identifier"`
-	Script         string            `json:"script" jsonschema_description:"non-interactive Bash body; do not wrap in bash -c or sh -c"`
+	Script         string            `json:"script" jsonschema_description:"non-interactive shell body; use portable syntax unless Bash is known; do not wrap in bash -c or sh -c"`
 	Background     bool              `json:"background,omitempty" jsonschema_description:"cancellable background task; default false"`
 	Cwd            string            `json:"cwd,omitempty" jsonschema_description:"absolute remote working directory"`
 	Env            map[string]string `json:"env,omitempty" jsonschema_description:"non-secret environment variables"`

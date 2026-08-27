@@ -174,7 +174,7 @@ const zh = {
     title: '任务', blocked: '{{count}} 个阻塞', operation: '操作', operations: '操作记录', operationCount: '{{count}} 次',
   },
   tool: {
-    bashScript: 'Bash 脚本', moreLines: '{{line}} ...（另有 {{count}} 行）', fileOperation: '文件操作', readOperation: '读取文件', searchOperation: '搜索文件',
+    shellScript: 'Shell 脚本', moreLines: '{{line}} ...（另有 {{count}} 行）', fileOperation: '文件操作', readOperation: '读取文件', searchOperation: '搜索文件',
     fullScript: '完整脚本', fullCommand: '完整命令', originalArgs: 'ARGV · 原始参数', environment: '环境变量',
     actualParameters: '实际调用参数', normalizedRequest: '执行请求', parameter: '参数',
     targetHost: '目标主机', sourceHost: '源主机', historyHost: '结果主机', scope: '范围', allHosts: '全部主机（{{count}}）', moreHosts: '另有 {{count}} 台主机', sourceFile: '源文件', filePath: '文件路径', workingDirectory: '工作目录', defaultDirectory: '默认目录',
@@ -258,7 +258,7 @@ const zh = {
   toolCategories: { planning: '任务编排', execution: '命令执行', hosts: 'SSH 主机', tasks: '长任务', remote_files: '远程文件', workspace: 'Workspace', web: '网络搜索', history: '审计历史', approvals: '审批', skills: 'Skills', mcp: '外部 MCP' },
   toolGuards: { read_only: '只读', approval_required: '审批控制', agent_state: 'Agent 状态', audited_control: '审计控制', external_mcp: '外部 MCP' },
   toolNames: {
-    ssh_exec: '执行远程命令', ssh_run_script: '执行 Bash 脚本', ssh_file_read: '读取远程文件', ssh_file_search_mode: '搜索远程文件', ssh_file_list: '列出远程目录',
+    ssh_exec: '执行远程命令', ssh_run_script: '执行 Shell 脚本', ssh_file_read: '读取远程文件', ssh_file_search_mode: '搜索远程文件', ssh_file_list: '列出远程目录',
     ssh_file_edit: '编辑远程文件', ssh_file_transfer: '在主机间传输文件',
     ssh_task: '管理后台任务', ssh_tunnel: '管理 SSH 端口转发', ssh_shell: 'SSH Shell', ssh_host_list: '列出主机', ssh_host_inspect: '检查主机',
     workspace_file_list: '列出 Workspace 目录', workspace_file_read: '读取 Workspace 文件', workspace_file_search_mode: '搜索 Workspace 文件', workspace_file_edit: '编辑 Workspace 文件', workspace_file_delete: '删除 Workspace 文件',

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 func TestCaptureBufferPreservesCompleteOutput(t *testing.T) {
@@ -37,7 +38,7 @@ func TestBuildRemoteProgramQuotesArguments(t *testing.T) {
 	if stdin != nil {
 		t.Fatal("program mode unexpectedly has stdin")
 	}
-	wantParts := []string{"cd -- '/srv/app' &&", "MODE='safe value'", "'hello; rm -rf /'"}
+	wantParts := []string{"cd '/srv/app' &&", "MODE='safe value'", "'hello; rm -rf /'"}
 	for _, part := range wantParts {
 		if !strings.Contains(command, part) {
 			t.Fatalf("command %q does not contain %q", command, part)
@@ -46,11 +47,11 @@ func TestBuildRemoteProgramQuotesArguments(t *testing.T) {
 }
 
 func TestManagedSudoPasswordUsesStdin(t *testing.T) {
-	command, stdin, err := applyElevation(domain.Host{SudoMode: "password", SudoPassword: "sudo-secret"}, domain.ExecRequest{Elevated: true}, "bash -s", strings.NewReader("echo ok\n"))
+	command, stdin, err := applyElevation(domain.Host{SudoMode: "password", SudoPassword: "sudo-secret"}, domain.ExecRequest{Elevated: true}, remoteScriptCommand, strings.NewReader("echo ok\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, part := range []string{"sudo -S -p '' -- bash -c", "IFS= read -r OPSNERVA_SUDO_INPUT", "exec bash -c"} {
+	for _, part := range []string{"sudo -S -p '' -- /bin/sh -c", "IFS= read -r OPSNERVA_SUDO_INPUT", "exec /bin/sh -c"} {
 		if !strings.Contains(command, part) {
 			t.Fatalf("managed sudo command %q does not contain %q", command, part)
 		}
@@ -69,6 +70,9 @@ func TestManagedSudoPasswordUsesStdin(t *testing.T) {
 }
 
 func TestManagedSudoDoesNotFeedPasswordToCommand(t *testing.T) {
+	if _, err := os.Stat(remoteCommandShell); err != nil {
+		t.Skip("POSIX shell is unavailable")
+	}
 	dir := t.TempDir()
 	fakeSudo := filepath.Join(dir, "sudo")
 	if err := os.WriteFile(fakeSudo, []byte(`#!/bin/sh
@@ -98,7 +102,7 @@ exec "$@"
 			command, stdin, err := applyElevation(
 				domain.Host{SudoMode: "password", SudoPassword: password},
 				domain.ExecRequest{Elevated: true},
-				"bash -s",
+				remoteScriptCommand,
 				strings.NewReader("printf 'command-input-ok\\n'\n"),
 			)
 			if err != nil {
@@ -125,12 +129,14 @@ exec "$@"
 	}
 }
 
-func TestBuildRemoteScriptUsesStdin(t *testing.T) {
-	command, stdin, err := buildRemoteCommand(domain.ExecRequest{Mode: domain.ExecScript, Script: "uname -a"})
+func TestBuildRemoteScriptSelectsAvailableShellAndUsesStdin(t *testing.T) {
+	command, stdin, err := buildRemoteCommand(domain.ExecRequest{
+		Mode: domain.ExecScript, Script: "uname -a", Env: map[string]string{"MODE": "safe value"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if command != "bash -s" {
+	if command != "env MODE='safe value' "+remoteScriptCommand {
 		t.Fatalf("unexpected command %q", command)
 	}
 	data, _ := io.ReadAll(stdin)
@@ -139,8 +145,44 @@ func TestBuildRemoteScriptUsesStdin(t *testing.T) {
 	}
 }
 
+func TestRemoteScriptFallsBackToPOSIXShellWhenBashIsUnavailable(t *testing.T) {
+	if _, err := os.Stat(remoteCommandShell); err != nil {
+		t.Skip("POSIX shell is unavailable")
+	}
+	command, stdin, err := buildRemoteCommand(domain.ExecRequest{Mode: domain.ExecScript, Script: "printf 'shell-fallback-ok\\n'"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	process := exec.Command(remoteCommandShell, "-c", command)
+	process.Env = []string{"PATH=/opsnerva-no-bash"}
+	process.Stdin = stdin
+	output, err := process.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run script without Bash: %v: %s", err, output)
+	}
+	if string(output) != "shell-fallback-ok\n" {
+		t.Fatalf("unexpected fallback output %q", output)
+	}
+}
+
+func TestBuildRemoteLoginShellSelectsAvailableShell(t *testing.T) {
+	command, err := buildRemoteLoginShellCommand("/srv/app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command != "cd '/srv/app' && "+remoteLoginShellCommand {
+		t.Fatalf("unexpected login shell command %q", command)
+	}
+}
+
 func TestProbeScriptFallsBackWhenCommonUtilitiesAreMissing(t *testing.T) {
-	cmd := exec.Command("/bin/bash", "-se")
+	if _, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(probeScript), "probe.sh"); err != nil {
+		t.Fatalf("probe script is not POSIX-compatible: %v", err)
+	}
+	if _, err := os.Stat(remoteCommandShell); err != nil {
+		t.Skip("POSIX shell is unavailable")
+	}
+	cmd := exec.Command(remoteCommandShell, "-se")
 	cmd.Env = []string{"PATH=/opsnerva-no-such-path"}
 	cmd.Stdin = strings.NewReader(probeScript)
 	output, err := cmd.Output()

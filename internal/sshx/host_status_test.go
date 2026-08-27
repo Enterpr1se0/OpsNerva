@@ -1,6 +1,17 @@
 package sshx
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"mvdan.cc/sh/v3/syntax"
+)
+
+func TestHostStatusScriptUsesPOSIXSyntax(t *testing.T) {
+	if _, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(hostStatusScript), "host-status.sh"); err != nil {
+		t.Fatalf("host status script is not POSIX-compatible: %v", err)
+	}
+}
 
 func TestParseHostStatus(t *testing.T) {
 	status, err := parseHostStatus("cpu\t1000\t250\n" +

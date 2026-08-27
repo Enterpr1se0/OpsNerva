@@ -94,13 +94,9 @@ func (t *NativeSSHTransport) OpenShell(ctx context.Context, connection Connectio
 	if rows < 5 || rows > 200 {
 		rows = 32
 	}
-	command := "exec bash -l"
-	if req.Cwd != "" {
-		prefix, err := remotePrefix(req.Cwd, nil)
-		if err != nil {
-			return nil, err
-		}
-		command = prefix + command
+	command, err := buildRemoteLoginShellCommand(req.Cwd)
+	if err != nil {
+		return nil, err
 	}
 	command, initialInput, err := applyElevation(connection.Target, req, command, nil)
 	if err != nil {

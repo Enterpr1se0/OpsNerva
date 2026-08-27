@@ -17,14 +17,14 @@ import (
 )
 
 func TestRemoteFileReadScriptDoesNotExposeMetadataMarkersOnMissingFile(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash is unavailable")
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("POSIX shell is unavailable")
 	}
 	target := filepath.Join(t.TempDir(), "missing.conf")
 	script := buildRemoteFileReadScript(domain.ExecRequest{
 		Mode: domain.ExecRemoteRead, RemotePath: target,
 	})
-	command := exec.Command("bash", "-se")
+	command := exec.Command("sh", "-se")
 	command.Stdin = strings.NewReader(script)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -44,8 +44,8 @@ func TestRemoteFileReadScriptDoesNotExposeMetadataMarkersOnMissingFile(t *testin
 }
 
 func TestRemoteFileReadScriptKeepsParseableMetadata(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash is unavailable")
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("POSIX shell is unavailable")
 	}
 	target := filepath.Join(t.TempDir(), "config.conf")
 	content := "enabled=true\n"
@@ -55,7 +55,7 @@ func TestRemoteFileReadScriptKeepsParseableMetadata(t *testing.T) {
 	script := buildRemoteFileReadScript(domain.ExecRequest{
 		Mode: domain.ExecRemoteRead, RemotePath: target,
 	})
-	command := exec.Command("bash", "-se")
+	command := exec.Command("sh", "-se")
 	command.Stdin = strings.NewReader(script)
 	output, err := command.Output()
 	if err != nil {
@@ -123,8 +123,8 @@ func TestRemoteFileEditBuildsReviewedDiffAndScriptAfterApproval(t *testing.T) {
 }
 
 func TestRemoteFileSearchSupportsExplicitModesAndNoMatchSuccess(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash is unavailable")
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("POSIX shell is unavailable")
 	}
 	directory := t.TempDir()
 	target := filepath.Join(directory, "config.yaml")
@@ -139,7 +139,7 @@ func TestRemoteFileSearchSupportsExplicitModesAndNoMatchSuccess(t *testing.T) {
 		if strings.Contains(script, "head -n") {
 			t.Fatalf("remote search still truncates output:\n%s", script)
 		}
-		command := exec.Command("bash", "-se")
+		command := exec.Command("sh", "-se")
 		command.Stdin = strings.NewReader(script)
 		return command.CombinedOutput()
 	}
@@ -158,7 +158,7 @@ func TestRemoteFileSearchSupportsExplicitModesAndNoMatchSuccess(t *testing.T) {
 	missingScript := buildRemoteFileSearchScript(domain.ExecRequest{
 		Mode: domain.ExecRemoteSearch, RemotePath: filepath.Join(directory, "missing"), SearchPattern: "x", SearchMatchMode: domain.FileSearchLiteral,
 	})
-	missingCommand := exec.Command("bash", "-se")
+	missingCommand := exec.Command("sh", "-se")
 	missingCommand.Stdin = strings.NewReader(missingScript)
 	missingOutput, err := missingCommand.CombinedOutput()
 	if err == nil || !strings.Contains(string(missingOutput), "No such file") {
@@ -213,7 +213,7 @@ func TestFileEditHeredocMarkerCannotTerminateFromContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := buildRemoteFileChangeScript("/etc/app.conf", "/etc/.app.tmp", edit, "")
-	if _, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(script), "remote-edit.sh"); err != nil {
+	if _, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(script), "remote-edit.sh"); err != nil {
 		t.Fatalf("generated remote edit script is invalid: %v\n%s", err, script)
 	}
 	if strings.Contains(script, change.Diff) {
@@ -265,8 +265,8 @@ func TestBuildTextEditNormalizesInputAndBuildsMinimalDiff(t *testing.T) {
 }
 
 func TestRemoteFileChangePreservesLineEndingsAndFinalNewlineState(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash is unavailable")
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("POSIX shell is unavailable")
 	}
 	for _, testCase := range []struct {
 		name, original, oldText, newText, expected string
@@ -286,7 +286,7 @@ func TestRemoteFileChangePreservesLineEndingsAndFinalNewlineState(t *testing.T) 
 				t.Fatal(err)
 			}
 			script := buildRemoteFileChangeScript(target, filepath.Join(directory, ".edit.tmp"), edit, "")
-			command := exec.Command("bash", "-se")
+			command := exec.Command("sh", "-se")
 			command.Stdin = strings.NewReader(script)
 			if output, err := command.CombinedOutput(); err != nil {
 				t.Fatalf("edit script failed: %v\n%s\n%s", err, output, script)
@@ -300,8 +300,8 @@ func TestRemoteFileChangePreservesLineEndingsAndFinalNewlineState(t *testing.T) 
 }
 
 func TestRemoteFileChangeCreatesMissingFileWithoutPatch(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash is unavailable")
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("POSIX shell is unavailable")
 	}
 	directory := t.TempDir()
 	target := filepath.Join(directory, "created.conf")
@@ -313,7 +313,7 @@ func TestRemoteFileChangeCreatesMissingFileWithoutPatch(t *testing.T) {
 		t.Fatalf("create change = %#v", change)
 	}
 	script := buildRemoteFileChangeScript(target, filepath.Join(directory, ".create.tmp"), edit, "")
-	command := exec.Command("bash", "-se")
+	command := exec.Command("sh", "-se")
 	command.Stdin = strings.NewReader(script)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("create script failed: %v\n%s\n%s", err, output, script)
@@ -325,8 +325,8 @@ func TestRemoteFileChangeCreatesMissingFileWithoutPatch(t *testing.T) {
 }
 
 func TestRemoteFileChangeScriptsApplyWithoutPersistentBackups(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash is unavailable")
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("POSIX shell is unavailable")
 	}
 	directory := t.TempDir()
 	target := filepath.Join(directory, "app.conf")
@@ -341,7 +341,7 @@ func TestRemoteFileChangeScriptsApplyWithoutPersistentBackups(t *testing.T) {
 	if strings.Contains(script, "patch ") {
 		t.Fatalf("remote edit still depends on patch:\n%s", script)
 	}
-	command := exec.Command("bash", "-se")
+	command := exec.Command("sh", "-se")
 	command.Stdin = strings.NewReader(script)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("edit script failed: %v\n%s\n%s", err, output, script)
@@ -362,8 +362,8 @@ func TestRemoteFileChangeScriptsApplyWithoutPersistentBackups(t *testing.T) {
 }
 
 func TestRemoteFileChangeRejectsAmbiguousOldText(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash is unavailable")
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("POSIX shell is unavailable")
 	}
 	directory := t.TempDir()
 	target := filepath.Join(directory, "app.conf")
@@ -375,7 +375,7 @@ func TestRemoteFileChangeRejectsAmbiguousOldText(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := buildRemoteFileChangeScript(target, filepath.Join(directory, ".edit.tmp"), edit, "")
-	command := exec.Command("bash", "-se")
+	command := exec.Command("sh", "-se")
 	command.Stdin = strings.NewReader(script)
 	output, err := command.CombinedOutput()
 	if err == nil || !strings.Contains(string(output), "matched 2 blocks") {
@@ -388,8 +388,8 @@ func TestRemoteFileChangeRejectsAmbiguousOldText(t *testing.T) {
 }
 
 func TestRemoteFileChangeRejectsConcurrentTargetChange(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash is unavailable")
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("POSIX shell is unavailable")
 	}
 	directory := t.TempDir()
 	target := filepath.Join(directory, "app.conf")
@@ -402,7 +402,7 @@ func TestRemoteFileChangeRejectsConcurrentTargetChange(t *testing.T) {
 	}
 	validatorCommand := "sh -c " + shellQuote("printf 'external=true\\n' > "+shellQuote(target))
 	script := buildRemoteFileChangeScript(target, filepath.Join(directory, ".edit.tmp"), edit, validatorCommand)
-	command := exec.Command("bash", "-se")
+	command := exec.Command("sh", "-se")
 	command.Stdin = strings.NewReader(script)
 	output, err := command.CombinedOutput()
 	var exitError *exec.ExitError

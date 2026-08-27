@@ -3263,7 +3263,7 @@ function fullProgram(request:JsonRecord,full=false){
 	const command=[program,...args].filter(Boolean).map(shellArg).join(' ')
 	return full?command:previewText(command,toolOutputPreviewChars)
 }
-function compactScript(script:string){const source=script.length>toolOutputPreviewChars?script.slice(0,toolOutputPreviewChars):script,lines=source.split(/\r?\n/).map(line=>line.trim()).filter(Boolean);if(!lines.length)return i18n.t('tool.bashScript');const first=previewText(lines[0],180);return lines.length===1&&source.length===script.length?first:i18n.t('tool.moreLines',{line:first,count:Math.max(1,lines.length-1)})}
+function compactScript(script:string){const source=script.length>toolOutputPreviewChars?script.slice(0,toolOutputPreviewChars):script,lines=source.split(/\r?\n/).map(line=>line.trim()).filter(Boolean);if(!lines.length)return i18n.t('tool.shellScript');const first=previewText(lines[0],180);return lines.length===1&&source.length===script.length?first:i18n.t('tool.moreLines',{line:first,count:Math.max(1,lines.length-1)})}
 function latestOutput(value:string,limit=3){const tail=value.length>toolOutputPreviewChars?value.slice(-toolOutputPreviewChars):value;return tail.trimEnd().split(/\r?\n/).filter(line=>line.trim()!=='').slice(-limit).map(line=>previewText(line,180)).join('\n')}
 function formatDuration(value:unknown,run?:Run){if(typeof value==='number'&&Number.isFinite(value))return value>=1e9?`${(value/1e9).toFixed(2)} s`:`${(value/1e6).toFixed(1)} ms`;if(run?.completed_at){const ms=Date.parse(run.completed_at)-Date.parse(run.started_at);if(Number.isFinite(ms))return ms>=1000?`${(ms/1000).toFixed(2)} s`:`${ms} ms`}return'—'}
 function numberValue(value:unknown){return typeof value==='number'&&Number.isFinite(value)?value:0}
@@ -3515,7 +3515,7 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,onDisclosure}:{s
 	const genericArgumentSummary=executionTool||sshTaskOperation?'':toolArgumentSummary(entry.tool,toolArguments)
 	const webTool=entry.tool==='web_search'||entry.tool==='web_extract'
 	const webSummary=webTool?textValue(payload.query):''
-	const operation=filePath||(script?t('tool.bashScript'):program||genericArgumentSummary||eventToolLabel||t('tool.result'))
+	const operation=filePath||(script?t('tool.shellScript'):program||genericArgumentSummary||eventToolLabel||t('tool.result'))
   const env=request?jsonRecord(request.env):undefined
 	const rawStdout=shellOperation&&(shellAction==='input'||shellAction==='output')?(shellChunks.length?shellChunkStdout:shellOutput):textValue(payload.stdout)||textValue(resultPayload?.stdout)||entry.liveStdout||run?.stdout_redacted||''
 	const stdout=change?cleanFileChangeOutput(rawStdout):rawStdout

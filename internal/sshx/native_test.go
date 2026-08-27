@@ -233,10 +233,14 @@ func (s *testSSHServer) handleSession(channel ssh.Channel, requests <-chan *ssh.
 				}
 				return
 			}
-			if strings.Contains(payload.Command, "bash -s") {
-				_, _ = io.ReadAll(channel)
+			output := "native-ok\n"
+			if strings.Contains(payload.Command, remoteScriptCommand) {
+				script, _ := io.ReadAll(channel)
+				if string(script) == probeScript {
+					output = "native-test\nLinux 6.1\nx86_64\nops\nup 1 hour\n"
+				}
 			}
-			_, _ = io.WriteString(channel, "native-ok\n")
+			_, _ = io.WriteString(channel, output)
 			exitStatus := uint32(0)
 			if strings.Contains(payload.Command, "exit-seven") {
 				exitStatus = 7
@@ -327,6 +331,14 @@ func TestNativeSSHTrustExecAndExitStatus(t *testing.T) {
 	}
 	if result.ExitCode != 7 {
 		t.Fatalf("remote exit status was not preserved: %#v", result)
+	}
+
+	info, err := transport.Probe(context.Background(), connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Hostname != "native-test" || info.Kernel != "Linux 6.1" || info.Architecture != "x86_64" || info.User != "ops" || info.Uptime != "up 1 hour" {
+		t.Fatalf("unexpected native SSH probe result: %#v", info)
 	}
 }
 

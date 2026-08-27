@@ -101,6 +101,12 @@ type TunnelTransport interface {
 	OpenTunnel(context.Context, ConnectionSpec) (TunnelClient, error)
 }
 
+const (
+	remoteCommandShell      = "/bin/sh"
+	remoteScriptCommand     = `/bin/sh -c 'if shell_path=$(command -v bash 2>/dev/null) && [ -x "$shell_path" ]; then exec "$shell_path" -s; fi; exec /bin/sh -s'`
+	remoteLoginShellCommand = `/bin/sh -c 'if shell_path=$(command -v bash 2>/dev/null) && [ -x "$shell_path" ]; then exec "$shell_path" -l; fi; exec /bin/sh -l'`
+)
+
 const probeScript = `probe_hostname=""
 if command -v hostname >/dev/null 2>&1; then probe_hostname=$(hostname 2>/dev/null) || probe_hostname=""; fi
 if [ -z "$probe_hostname" ]; then IFS= read -r probe_hostname </proc/sys/kernel/hostname || probe_hostname="unknown"; fi
@@ -168,17 +174,25 @@ func buildRemoteCommand(req domain.ExecRequest) (string, io.Reader, error) {
 		if strings.TrimSpace(req.Script) == "" {
 			return "", nil, fmt.Errorf("script is empty")
 		}
-		return prefix + "bash -s", strings.NewReader(req.Script), nil
+		return prefix + remoteScriptCommand, strings.NewReader(req.Script), nil
 	default:
 		return "", nil, fmt.Errorf("unsupported execution mode %q", req.Mode)
 	}
+}
+
+func buildRemoteLoginShellCommand(cwd string) (string, error) {
+	prefix, err := remotePrefix(cwd, nil)
+	if err != nil {
+		return "", err
+	}
+	return prefix + remoteLoginShellCommand, nil
 }
 
 func applyElevation(host domain.Host, req domain.ExecRequest, command string, stdin io.Reader) (string, io.Reader, error) {
 	if !req.Elevated {
 		return command, stdin, nil
 	}
-	wrapped := "bash -c " + shellQuote(command)
+	wrapped := remoteCommandShell + " -c " + shellQuote(command)
 	switch host.SudoMode {
 	case "nopasswd":
 		return "sudo -n -- " + wrapped, stdin, nil
@@ -196,7 +210,7 @@ func applyElevation(host domain.Host, req domain.ExecRequest, command string, st
 		// credential (or otherwise does not prompt), it leaves the password unread
 		// and would otherwise pass it to the elevated command. The gate below
 		// discards everything through the marker before starting the real command,
-		// regardless of whether sudo consumed the password line. For `bash -s`,
+		// regardless of whether sudo consumed the password line. For streamed scripts,
 		// this prevents the password from becoming the first script command.
 		marker, err := newSudoInputMarker(host.SudoPassword)
 		if err != nil {
@@ -207,7 +221,7 @@ func applyElevation(host domain.Host, req domain.ExecRequest, command string, st
 			"if [ \"$" + inputVariable + "\" = " + shellQuote(marker) + " ]; then " +
 			"unset " + inputVariable + "; exec " + wrapped + "; fi; done; exit 1"
 		framedInput := io.MultiReader(strings.NewReader(host.SudoPassword+"\n"+marker+"\n"), stdin)
-		return "sudo -S -p '' -- bash -c " + shellQuote(gate), framedInput, nil
+		return "sudo -S -p '' -- " + remoteCommandShell + " -c " + shellQuote(gate), framedInput, nil
 	default:
 		return "", nil, fmt.Errorf("managed sudo is disabled for this host")
 	}
@@ -232,7 +246,7 @@ func remotePrefix(cwd string, env map[string]string) (string, error) {
 		if !posixpath.IsAbs(cwd) {
 			return "", fmt.Errorf("cwd must be an absolute path")
 		}
-		parts = append(parts, "cd -- "+shellQuote(cwd)+" &&")
+		parts = append(parts, "cd "+shellQuote(cwd)+" &&")
 	}
 	if len(env) > 0 {
 		keys := make([]string, 0, len(env))

@@ -31,7 +31,7 @@ func executionToolSelectionError(req domain.ExecRequest, program string) error {
 	if isShellInterpreter(program) && len(req.Args) > 0 {
 		example := map[string]any{
 			"host_id": req.HostID,
-			"script":  "<Bash script body>",
+			"script":  "<shell script body>",
 			"reason":  exampleReason,
 		}
 		if body, ok := shellCommandBody(req.Args); ok {
@@ -40,7 +40,7 @@ func executionToolSelectionError(req domain.ExecRequest, program string) error {
 		return &ExecutionToolSelectionError{
 			Message:       fmt.Sprintf("ssh_exec does not accept shell interpreter %q; pass the script body directly to ssh_run_script", program),
 			SuggestedTool: "ssh_run_script",
-			NextAction:    "call ssh_run_script with script set to the Bash body; do not wrap it in bash -c or sh -c",
+			NextAction:    "call ssh_run_script with script set to the shell body; do not wrap it in bash -c or sh -c",
 			Example:       example,
 		}
 	}

@@ -174,7 +174,7 @@ const en = {
     title: 'Tasks', blocked: '{{count}} blocked', operation: 'Operation', operations: 'Operations', operationCount: '{{count}} operations',
   },
   tool: {
-    bashScript: 'Bash script', moreLines: '{{line}} ... (+{{count}} lines)', fileOperation: 'File operation', readOperation: 'Read file', searchOperation: 'Search file',
+    shellScript: 'Shell script', moreLines: '{{line}} ... (+{{count}} lines)', fileOperation: 'File operation', readOperation: 'Read file', searchOperation: 'Search file',
     fullScript: 'Full script', fullCommand: 'Full command', originalArgs: 'ARGV · original arguments', environment: 'Environment variables',
     actualParameters: 'Actual call parameters', normalizedRequest: 'Execution request', parameter: 'Parameter',
     targetHost: 'Target host', sourceHost: 'Source host', historyHost: 'Result host', scope: 'Scope', allHosts: 'All hosts ({{count}})', moreHosts: '{{count}} more hosts', sourceFile: 'Source file', filePath: 'File path', workingDirectory: 'Working directory', defaultDirectory: 'Default directory',
@@ -258,7 +258,7 @@ const en = {
   toolCategories: { planning: 'Task orchestration', execution: 'Command execution', hosts: 'SSH hosts', tasks: 'Long tasks', remote_files: 'Remote files', workspace: 'Workspace', web: 'Web search', history: 'Audit history', approvals: 'Approvals', skills: 'Skills', mcp: 'External MCP' },
   toolGuards: { read_only: 'Read only', approval_required: 'Approval control', agent_state: 'Agent state', audited_control: 'Audited control', external_mcp: 'External MCP' },
   toolNames: {
-    ssh_exec: 'Run remote command', ssh_run_script: 'Run Bash script', ssh_file_read: 'Read remote file', ssh_file_search_mode: 'Search remote file', ssh_file_list: 'List remote directory',
+    ssh_exec: 'Run remote command', ssh_run_script: 'Run Shell script', ssh_file_read: 'Read remote file', ssh_file_search_mode: 'Search remote file', ssh_file_list: 'List remote directory',
     ssh_file_edit: 'Edit remote file', ssh_file_transfer: 'Transfer file between hosts',
     ssh_task: 'Manage background task', ssh_tunnel: 'Manage SSH port forwarding', ssh_shell: 'SSH Shell', ssh_host_list: 'List hosts', ssh_host_inspect: 'Inspect host',
     workspace_file_list: 'List Workspace directory', workspace_file_read: 'Read Workspace file', workspace_file_search_mode: 'Search Workspace file', workspace_file_edit: 'Edit Workspace file', workspace_file_delete: 'Delete Workspace entry',
