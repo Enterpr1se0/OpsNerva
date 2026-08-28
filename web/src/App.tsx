@@ -340,6 +340,13 @@ function errorText(error: unknown) {
 function isAbortError(error:unknown){return error instanceof DOMException&&error.name==='AbortError'}
 
 function keepEquivalent<T>(current:T,next:T){return JSON.stringify(current)===JSON.stringify(next)?current:next}
+function applyLifecycleDelta<T extends{id:string}>(current:T[],value:T,removed=false){
+	const index=current.findIndex(item=>item.id===value.id)
+	if(removed)return index<0?current:current.filter(item=>item.id!==value.id)
+	if(index<0)return[...current,value]
+	const next=[...current];next[index]=value
+	return keepEquivalent(current,next)
+}
 function keepEquivalentHealth(current:Health|null,next:Health){
 	if(!current)return next
 	const currentState=[current.status,current.agent_available,current.model]
@@ -567,14 +574,12 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 		try{setCapabilities(await api.capabilities())}
 		catch(err){notify(errorText(err),'error')}
 	},[notify])
-	const refreshApprovals=useCallback(async(decidedID?:string)=>{
-		if(decidedID)setApprovals(current=>current.filter(item=>item.id!==decidedID))
-		try{const next=await api.approvals();setApprovals(current=>keepEquivalent(current,next))}
-		catch(err){notify(errorText(err),'error')}
-	},[notify])
+	const dismissApproval=useCallback((approvalID:string)=>{
+		setApprovals(current=>current.filter(item=>item.id!==approvalID))
+	},[])
 	const refreshBootstrap=useCallback(async()=>{
-		await Promise.all([refreshHealth(),refreshHosts(),refreshProviders(),refreshSettings(),refreshCapabilities(),refreshApprovals()])
-	},[refreshApprovals,refreshCapabilities,refreshHealth,refreshHosts,refreshProviders,refreshSettings])
+		await Promise.all([refreshHealth(),refreshHosts(),refreshProviders(),refreshSettings(),refreshCapabilities()])
+	},[refreshCapabilities,refreshHealth,refreshHosts,refreshProviders,refreshSettings])
 	const refreshConfiguration=useCallback(async()=>{
 		await Promise.all([refreshHealth(),refreshHosts(),refreshProviders(),refreshProxies(),refreshSettings(),refreshCapabilities()])
 	},[refreshCapabilities,refreshHealth,refreshHosts,refreshProviders,refreshProxies,refreshSettings])
@@ -609,8 +614,8 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 		}catch(err){notify(errorText(err),'error');throw err}
 	},[notify,refreshRuns,t])
 	const refreshChat=useCallback(async()=>{
-		await Promise.all([refreshHealth(),refreshHosts(),refreshProviders(),refreshSettings(),refreshCapabilities(),refreshApprovals()])
-	},[refreshApprovals,refreshCapabilities,refreshHealth,refreshHosts,refreshProviders,refreshSettings])
+		await Promise.all([refreshHealth(),refreshHosts(),refreshProviders(),refreshSettings(),refreshCapabilities()])
+	},[refreshCapabilities,refreshHealth,refreshHosts,refreshProviders,refreshSettings])
 	const removeSessionState=useCallback((sessionID:string)=>{
 		setApprovals(current=>current.filter(item=>item.session_id!==sessionID))
 		setSSHShells(current=>current.filter(item=>item.session_id!==sessionID))
@@ -650,31 +655,37 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 		return()=>{window.removeEventListener('focus',sync);window.removeEventListener('blur',sync);document.removeEventListener('visibilitychange',sync)}
 	},[])
 	useEffect(() => { void refreshBootstrap();void refreshConnections() }, [refreshBootstrap,refreshConnections])
-	useEffect(()=>subscribeApplicationEvents<{tunnels:SSHTunnel[];shells:SSHShell[]}>('connections',event=>{
+	useEffect(()=>subscribeApplicationEvents<{tunnels?:SSHTunnel[];shells?:SSHShell[];tunnel?:SSHTunnel;shell?:SSHShell;removed?:boolean}>('connections',event=>{
 		if(event.type!=='event'||!event.data)return
+		if(event.mode==='delta'){
+			if(event.data.tunnel)setSSHTunnels(current=>applyLifecycleDelta(current,event.data!.tunnel!,event.data!.removed))
+			if(event.data.shell)setSSHShells(current=>applyLifecycleDelta(current,event.data!.shell!,event.data!.removed))
+			return
+		}
 		setSSHTunnels(current=>keepEquivalent(current,event.data!.tunnels||[]))
 		setSSHShells(current=>keepEquivalent(current,event.data!.shells||[]))
 	}),[])
 	useEffect(()=>subscribeApplicationEvents<Approval[]>('approvals',event=>{
+		if(event.type==='error'&&event.error){notify(event.error,'error');return}
 		if(event.type==='event'&&event.data)setApprovals(current=>keepEquivalent(current,event.data!))
-	}),[])
+	}),[notify])
 	useEffect(()=>subscribeApplicationEvents<Health>('health',event=>{
 		if(event.type==='event'&&event.data)setHealth(current=>keepEquivalentHealth(current,event.data!))
 	}),[])
 	useEffect(()=>{
 		if(page!=='audit'||auditView!=='runs')return
 		return subscribeApplicationEvents<{id?:string;type?:string}>('audit',event=>{
+			if(event.type==='error'&&event.error){notify(event.error,'error');return}
 			if(event.type!=='event')return
 			if(event.data?.type==='audit_records_deleted')void refreshRuns(true)
 			else void refreshAudit()
 		})
-	},[auditView,page,refreshAudit,refreshRuns])
+	},[auditView,notify,page,refreshAudit,refreshRuns])
 	useEffect(()=>{
 		if(page==='extensions')void refreshExtensions()
-		else if(page==='audit'&&auditView==='runs')void refreshAudit()
 		else if(page==='ssh')void Promise.all([refreshHosts(),refreshConnections()])
 		else if(page==='config')void refreshConfiguration()
-	},[auditView,page,refreshAudit,refreshConfiguration,refreshConnections,refreshExtensions,refreshHosts])
+	},[page,refreshConfiguration,refreshConnections,refreshExtensions,refreshHosts])
 	useLayoutEffect(()=>{
 		const previous=previousPageRef.current
 		previousPageRef.current=page
@@ -818,7 +829,7 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 				hosts={hosts} providers={providers} approvals={approvals} runs={runs} workspaceShells={workspaceShells}
 				capabilities={capabilities} settings={settings} imageTypes={settings?.chat_image_allowed_types||defaultChatImageTypes}
 					agentAvailable={!!health?.agent_available} modelName={health?.model?.model} contextWindow={health?.model?.context_window||0} refreshConnections={refreshConnections}
-				refreshApprovals={refreshApprovals} onCreateWorkspaceShell={createWorkspaceShell} onOpenWorkspaceShell={setSelectedShell} onWorkspaceShellStarted={observeAgentWorkspaceShell} onSettingsChanged={setSettings}
+				dismissApproval={dismissApproval} onCreateWorkspaceShell={createWorkspaceShell} onOpenWorkspaceShell={setSelectedShell} onWorkspaceShellStarted={observeAgentWorkspaceShell} onSettingsChanged={setSettings}
 				onHostChanged={hostChanged}
 				onModelChanged={modelChanged}
 				sidebarTarget={chatSidebarTarget} onSessionDeleted={removeSessionState} onError={reportError}
@@ -2358,7 +2369,7 @@ const ChatSessionSidebar=memo(function ChatSessionSidebar({sessions,historyError
 	</>
 })
 
-function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, workspaceShells, capabilities, settings, imageTypes, agentAvailable, modelName, contextWindow, refreshConnections, refreshApprovals, onCreateWorkspaceShell, onOpenWorkspaceShell, onWorkspaceShellStarted, onSettingsChanged, onHostChanged, onModelChanged, sidebarTarget, onSessionDeleted, onError }: {visible:boolean;onActivate:()=>void;hosts:Host[];providers:ModelProvider[];approvals:Approval[];runs:Run[];workspaceShells:SSHShell[];capabilities:ToolCapabilities;settings:SystemSettings|null;imageTypes:string[];agentAvailable:boolean;modelName?:string;contextWindow:number;refreshConnections:()=>Promise<void>;refreshApprovals:(decidedID?:string)=>Promise<void>;onCreateWorkspaceShell:(workspaceID:string)=>Promise<void>;onOpenWorkspaceShell:(shell:SSHShell)=>void;onWorkspaceShellStarted:(shell:SSHShell)=>void;onSettingsChanged:(settings:SystemSettings)=>void;onHostChanged:(host:Host)=>void;onModelChanged:(provider:ModelProvider)=>void;sidebarTarget:HTMLDivElement|null;onSessionDeleted:(sessionID:string)=>void;onError:(message:string)=>void}) {
+function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, workspaceShells, capabilities, settings, imageTypes, agentAvailable, modelName, contextWindow, refreshConnections, dismissApproval, onCreateWorkspaceShell, onOpenWorkspaceShell, onWorkspaceShellStarted, onSettingsChanged, onHostChanged, onModelChanged, sidebarTarget, onSessionDeleted, onError }: {visible:boolean;onActivate:()=>void;hosts:Host[];providers:ModelProvider[];approvals:Approval[];runs:Run[];workspaceShells:SSHShell[];capabilities:ToolCapabilities;settings:SystemSettings|null;imageTypes:string[];agentAvailable:boolean;modelName?:string;contextWindow:number;refreshConnections:()=>Promise<void>;dismissApproval:(approvalID:string)=>void;onCreateWorkspaceShell:(workspaceID:string)=>Promise<void>;onOpenWorkspaceShell:(shell:SSHShell)=>void;onWorkspaceShellStarted:(shell:SSHShell)=>void;onSettingsChanged:(settings:SystemSettings)=>void;onHostChanged:(host:Host)=>void;onModelChanged:(provider:ModelProvider)=>void;sidebarTarget:HTMLDivElement|null;onSessionDeleted:(sessionID:string)=>void;onError:(message:string)=>void}) {
 		const {t,i18n:instance}=useTranslation()
 		const notify=useNotifier()
 		const activeContextWindow=contextWindow
@@ -2412,6 +2423,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	  const imageURLsRef=useRef(new Set<string>())
 	const reconnectErrorRef=useRef('')
   const sessionLoadRef=useRef('')
+	const initialSessionRestoredRef=useRef(false)
   const currentApprovals=useMemo(()=>sessionId?approvals.filter(item=>item.session_id===sessionId).sort((left,right)=>left.created_at.localeCompare(right.created_at)||left.id.localeCompare(right.id)):[],[approvals,sessionId])
 	const approvalCountsBySession=useMemo(()=>{const counts=new Map<string,number>();for(const approval of approvals){if(!approval.session_id)continue;counts.set(approval.session_id,(counts.get(approval.session_id)||0)+1)}return counts},[approvals])
 	const sessionBusy=running||detachedRunning
@@ -2449,14 +2461,6 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	const addImages=(files:File[])=>{const accepted=files.filter(file=>imageTypes.includes(file.type));if(accepted.length!==files.length)setImageNotice(t('chat.imageTypeRejected'));if(!accepted.length)return;const next=accepted.map(file=>{const url=URL.createObjectURL(file);imageURLsRef.current.add(url);return{id:clientId(),file,url}});setPendingImages(current=>[...current,...next])}
 	const removePendingImage=(id:string)=>{setPendingImages(current=>{const target=current.find(image=>image.id===id);if(target){URL.revokeObjectURL(target.url);imageURLsRef.current.delete(target.url)}return current.filter(image=>image.id!==id)});setImageInputKey(value=>value+1)}
 	const clearPendingImages=useCallback(()=>{for(const image of pendingImages){URL.revokeObjectURL(image.url);imageURLsRef.current.delete(image.url)}setPendingImages([]);setImageInputKey(value=>value+1);setImageNotice('')},[pendingImages])
-  const refreshSessions = useCallback(async () => {
-    try {
-      const items = await api.chatSessions(); setSessions(current=>keepEquivalent(current,items)); setHistoryError(''); return items
-    } catch (err) { setHistoryError(errorText(err)); return [] }
-	}, [])
-	useEffect(()=>subscribeApplicationEvents<ChatSession[]>('sessions',event=>{
-		if(event.type==='event'&&event.data)setSessions(current=>keepEquivalent(current,event.data!))
-	}),[])
 
   const detachActiveStream = useCallback(() => {
     const stream=activeStreamRef.current
@@ -2484,6 +2488,18 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	} catch (err) { if(sessionLoadRef.current===requestID)setHistoryError(errorText(err)) }
 	finally { if(sessionLoadRef.current===requestID)setLoadingSession('') }
 	}, [activeContextWindow])
+	useEffect(()=>subscribeApplicationEvents<ChatSession[]>('sessions',event=>{
+		if(event.type==='error'){setHistoryError(event.error||'');return}
+		if(event.type!=='event'||!event.data)return
+		const items=event.data
+		setSessions(current=>keepEquivalent(current,items));setHistoryError('')
+		if(initialSessionRestoredRef.current)return
+		initialSessionRestoredRef.current=true
+		const remembered=recalledSession()
+		if(remembered===newSessionMarker)return
+		const target=items.some(item=>item.id===remembered)?remembered:items[0]?.id
+		if(target)void loadSession(target)
+	}),[loadSession])
 
 	const loadOlderMessages=useCallback(async()=>{
 		if(!sessionId||!historyHasMore||!historyCursor||loadingOlderMessages)return
@@ -2538,20 +2554,6 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		})
 	},[])
 
-  useEffect(() => {
-    let active = true
-    void (async () => {
-      const items = await api.chatSessions().catch((err) => { if (active) setHistoryError(errorText(err)); return [] })
-      if (!active) return
-      setSessions(items)
-      const remembered = recalledSession()
-      if (remembered === newSessionMarker) return
-      const target = items.some((item) => item.id === remembered) ? remembered : items[0]?.id
-      if (target) await loadSession(target)
-    })()
-    return () => { active = false }
-  }, [loadSession])
-
 	const newChat=useCallback(()=>{
 		if(workspaceSwitching)return
 		onActivate()
@@ -2560,8 +2562,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		sessionLoadRef.current=''
     setLoadingSession('')
 	    stickToLatest.current=true;lastMessagesScrollTop.current=0;startedQueueMessageIDsRef.current.clear();setSessionId('');setBoundWorkspaceID('');setEntries([]);setHistoryHasMore(false);setHistoryCursor(null);setLoadingOlderMessages(false); setMessage('');clearPendingImages(); setHistoryError('');setContextUsage({tokens:0,window:activeContextWindow});setDetachedRunning(false);setQueuedMessages([]);setQueueingMode(null);setStopping(false);setCompressingContext(false);setModelRetry(null);setConnectionRetry(null);setTasks(null); rememberSession(newSessionMarker)
-    void refreshSessions()
-	},[activeContextWindow,clearPendingImages,detachActiveStream,onActivate,refreshSessions,workspaceSwitching])
+	},[activeContextWindow,clearPendingImages,detachActiveStream,onActivate,workspaceSwitching])
 
 	const switchSession=useCallback((id:string)=>{
 		if(workspaceSwitching)return
@@ -2575,8 +2576,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		lastAgentEventSessionRef.current=id;lastAgentEventIDRef.current=0
 		setDetachedRunning(false);setQueuedMessages([]);setQueueingMode(null);setStopping(false);setConnectionRetry(null);setHistoryHasMore(false);setHistoryCursor(null);setLoadingOlderMessages(false)
     void loadSession(id)
-    void refreshSessions()
-	},[detachActiveStream,loadSession,loadingSession,onActivate,refreshSessions,sessionId,workspaceSwitching])
+	},[detachActiveStream,loadSession,loadingSession,onActivate,sessionId,workspaceSwitching])
 	const openSessionRename=useCallback((session:ChatSession)=>{setSessionRenameError('');setSessionRenameCandidate(session)},[])
 	const openSessionDelete=useCallback((session:ChatSession)=>setSessionDeleteCandidate(session),[])
 
@@ -2588,10 +2588,9 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			const session=await api.setChatSessionWorkspace(sessionId,id)
 			setWorkspaceID(session.workspace_id);setBoundWorkspaceID(session.workspace_id)
 			setSessions(current=>current.map(item=>item.id===session.id?{...item,workspace_id:session.workspace_id,updated_at:session.updated_at}:item))
-			void refreshSessions()
 		}catch(err){setHistoryError(errorText(err))}
 		finally{setWorkspaceSwitching(false)}
-	},[loadingSession,refreshSessions,selectedWorkspace?.id,sessionBusy,sessionId,workspaceSwitching])
+	},[loadingSession,selectedWorkspace?.id,sessionBusy,sessionId,workspaceSwitching])
 
   const removeSession = async () => {
     if(!sessionDeleteCandidate)return
@@ -2599,9 +2598,9 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
     setDeletingSession(true)
     try {
       await api.deleteChatSession(session.id)
+	  setSessions(current=>current.filter(item=>item.id!==session.id))
 	  onSessionDeleted(session.id)
       if (session.id === sessionId) newChat()
-      await refreshSessions()
     } catch (err) { setHistoryError(errorText(err)) }
     finally { setDeletingSession(false); setSessionDeleteCandidate(null) }
   }
@@ -2629,7 +2628,6 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			rememberSession(frame.session_id)
 		}
 		if(frame.user_message_id)setEntries(old=>bindTurnUser(old,frame.user_message_id!,userEntryID))
-		if(frame.type==='session'||frame.type==='title')void refreshSessions()
 		if(frame.type==='retry'){
 			setModelRetry({attempt:frame.retry_attempt||1,max:frame.retry_max||1})
 		}else if(['approval','approval_paused','approval_resuming','reasoning','reasoning_reset','tool','tool_output','message_start','message','message_commit','message_reset','queued','queue_started','turn_done','turn_steered','done','interrupted','model_error','error'].includes(frame.type))setModelRetry(null)
@@ -2645,11 +2643,9 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		if(frame.type==='turn_steered')setEntries(old=>updateTurnUserStatus(old.map(deactivateReasoning),'completed',frame.user_message_id,userEntryID))
 		if(frame.type==='approval'||frame.type==='approval_paused'){
 			setEntries(old=>updateToolStatusByRunID(updateTurnUserStatus(old,'waiting_for_approval',frame.user_message_id,userEntryID),'approval_required',frame.run_id))
-			void refreshApprovals()
 		}
 		if(frame.type==='approval_resuming'){
 			setEntries(old=>updateToolStatusByRunID(updateTurnUserStatus(old,'pending',frame.user_message_id,userEntryID),'in_progress',frame.run_id))
-			void refreshApprovals()
 		}
 		if(frame.type==='tool_output')setEntries(old=>appendToolOutput(old,frame))
 		if(frame.type==='context_usage'&&frame.context_tokens!==undefined)setContextUsage({tokens:frame.context_tokens,window:frame.context_window||activeContextWindow})
@@ -2694,7 +2690,6 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 				return[...old.map(deactivateReasoning),entry]
 			})
 			if(/^Task(Create|Get|Update|List)$/.test(frame.tool_name||'')){const nextTasks=tasksFromToolContent(frame.content);if(nextTasks)setTasks(nextTasks.items.length?nextTasks:null)}
-			if(/approval_id|approval_required/.test(frame.content))void refreshApprovals()
 		}
 		if(frame.type==='message_start'&&frame.message_id)setEntries(old=>startAssistantLifecycle(old,frame.message_id!))
 		if(frame.type==='message'&&frame.message_id&&frame.content)setEntries(old=>appendAssistantDelta(old,frame.message_id!,frame.content!))
@@ -2713,7 +2708,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			setEntries(old=>[...updateTurnUserStatus(old.map(deactivateReasoning),'failed',frame.user_message_id,userEntryID),{id:clientId(),kind:'assistant',content:frame.content||t('chat.stopped'),lifecycle:'committed'}])
 		}
 		if(frame.type==='model_error'||frame.type==='error'){startedQueueMessageIDsRef.current.clear();setQueuedMessages([]);setEntries(old=>[...updateTurnUserStatus(old,'failed',frame.user_message_id,userEntryID),{id:clientId(),kind:'error',content:frame.error||t('chat.agentError')}])}
-	},[activeContextWindow,onWorkspaceShellStarted,refreshApprovals,refreshConnections,refreshSessions,t])
+	},[activeContextWindow,onWorkspaceShellStarted,refreshConnections,t])
 
 	useEffect(()=>{
 		if(!sessionId||running||!detachedRunning)return
@@ -2738,7 +2733,6 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 					if(!state.active){
 						setEntries(old=>settledTurnEntries(state.messages||[],sessionId,old,false))
 						setDetachedRunning(false);setStopping(false);setConnectionRetry(null);setHistoryError('')
-						void refreshSessions()
 						return
 					}
 					setEntries(old=>settledTurnEntries(state.messages||[],sessionId,old,true))
@@ -2759,7 +2753,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		}
 		void reconnect()
 		return()=>{active=false;controller.abort()}
-	},[activeContextWindow,detachedRunning,handleAgentFrame,refreshSessions,running,sessionId])
+	},[activeContextWindow,detachedRunning,handleAgentFrame,running,sessionId])
 
 	useEffect(()=>{
 		if(!visible||!sessionId||!toolsRunning||running)return
@@ -2829,10 +2823,9 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
       setRunning(false)
 		setStopping(false)
 		setCompressingContext(false)
-		if(querySessionID){try{const state=await api.chatState(querySessionID);if(!isAttached())return;setDetachedRunning(!!state.active);setQueuedMessages(state.queued_messages||[]);setTasks(state.tasks?.items?.length?state.tasks:null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setBoundWorkspaceID(state.workspace_id||'');setEntries(old=>settledTurnEntries(state.messages||[],querySessionID,old,!!state.active));for(const image of queryImages){URL.revokeObjectURL(image.url);imageURLsRef.current.delete(image.url)}}catch{/* polling or the next reload will recover state */}}
+		if(querySessionID){try{const state=await api.chatState(querySessionID);if(!isAttached())return;setDetachedRunning(!!state.active);setQueuedMessages(state.queued_messages||[]);setTasks(state.tasks?.items?.length?state.tasks:null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setBoundWorkspaceID(state.workspace_id||'');setEntries(old=>settledTurnEntries(state.messages||[],querySessionID,old,!!state.active));for(const image of queryImages){URL.revokeObjectURL(image.url);imageURLsRef.current.delete(image.url)}}catch{/* the next state event or reload will recover state */}}
       if(!isAttached())return
       activeStreamRef.current=null
-	  void refreshSessions()
     }
 	  }
 
@@ -2862,7 +2855,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			const result=await api.cancelChatSession(targetSessionID)
 			requested=result.cancelled
 			if(result.cancelled)setQueuedMessages([])
-			if(!result.cancelled){const state=await api.chatState(targetSessionID);setDetachedRunning(!!state.active);setQueuedMessages(state.queued_messages||[]);setTasks(state.tasks?.items?.length?state.tasks:null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setEntries(old=>settledTurnEntries(state.messages||[],targetSessionID,old,!!state.active));void refreshSessions()}
+			if(!result.cancelled){const state=await api.chatState(targetSessionID);setDetachedRunning(!!state.active);setQueuedMessages(state.queued_messages||[]);setTasks(state.tasks?.items?.length?state.tasks:null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setEntries(old=>settledTurnEntries(state.messages||[],targetSessionID,old,!!state.active))}
 		}catch(err){setEntries(old=>[...old,{id:clientId(),kind:'error',content:t('chat.stopFailed',{message:errorText(err)})}])}
 		finally{if(!requested)setStopping(false)}
   }
@@ -2896,7 +2889,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		<ChatWorkspacePanel key={selectedWorkspace?.id||''} active={visible} mode={fileBrowserMode} onModeChange={setFileBrowserMode} workspaces={capabilities.workspaces} workspaceID={selectedWorkspace?.id||''} hosts={hosts} sftpHostID={sftpHostID} onSFTPHostChange={setSFTPHostID} shells={workspaceShells} switching={workspaceSwitching} disabled={sessionBusy||!!loadingSession} bound={!!selectedWorkspace&&boundWorkspaceID===selectedWorkspace.id} onSelect={switchWorkspace} onCreateShell={onCreateWorkspaceShell} onOpenShell={onOpenWorkspaceShell} onCollapse={collapseWorkspacePanel}/>
 	  {workspacePanelCollapsed&&<button type="button" className="chat-panel-open-button" onClick={()=>setWorkspaceCollapsed(false)} title={t('workspace.expandPanel')} aria-label={t('workspace.expandPanel')}><PanelLeftOpen size={15}/></button>}
     <div className="chat-main panel">
-	  <div className="session-approval-slot">{currentApprovals.length>0&&<ApprovalDialog key={currentApprovals[0].id} approval={currentApprovals[0]} pendingCount={currentApprovals.length} hosts={hosts} running={sessionBusy||toolsRunning} stopping={stopping} onStop={()=>void stopAgent()} refreshApprovals={refreshApprovals} onApproved={result=>{if(result.status==='running')setEntries(old=>updateToolRunStatus(old,result.run_id,'in_progress'));if(result.shell?.kind==='workspace')onWorkspaceShellStarted(result.shell)}} onNotice={notify}/>}</div>
+	  <div className="session-approval-slot">{currentApprovals.length>0&&<ApprovalDialog key={currentApprovals[0].id} approval={currentApprovals[0]} pendingCount={currentApprovals.length} hosts={hosts} running={sessionBusy||toolsRunning} stopping={stopping} onStop={()=>void stopAgent()} dismissApproval={dismissApproval} onApproved={result=>{if(result.status==='running')setEntries(old=>updateToolRunStatus(old,result.run_id,'in_progress'));if(result.shell?.kind==='workspace')onWorkspaceShellStarted(result.shell)}} onNotice={notify}/>}</div>
 	      <div className="session-task-slot">{tasks&&<SessionTasks tasks={tasks} rows={taskRows} expanded={tasksExpanded} onExpanded={setTasksExpanded}/>}</div>
 		<div className="conversation-view">
 			<div className="messages" ref={messagesRef} onScroll={trackUserScroll} onWheel={pauseLatestOnWheel} onTouchMove={pauseLatestOnTouch}>
@@ -3784,7 +3777,7 @@ function ApprovalDialog({
   running,
   stopping,
   onStop,
-  refreshApprovals,
+  dismissApproval,
   onApproved,
   onNotice,
 }: {
@@ -3794,7 +3787,7 @@ function ApprovalDialog({
   running: boolean;
   stopping: boolean;
   onStop: () => void;
-  refreshApprovals: (decidedID?: string) => Promise<void>;
+  dismissApproval: (approvalID: string) => void;
   onApproved: (result: ApprovalExecutionResult) => void;
   onNotice: (message: string) => void;
 }) {
@@ -3976,7 +3969,7 @@ function ApprovalDialog({
           run: result.run_id,
         }),
       );
-      void refreshApprovals(approval.id);
+      dismissApproval(approval.id);
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -3994,7 +3987,7 @@ function ApprovalDialog({
     try {
       await api.reject(approval.id, instruction);
       onNotice(t("approval.rejected"));
-      void refreshApprovals(approval.id);
+      dismissApproval(approval.id);
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -4012,7 +4005,6 @@ function ApprovalDialog({
           ? t("approval.explanationReady")
           : t("approval.explanationDegraded"),
       );
-	  await refreshApprovals();
     } catch (err) {
       setError(errorText(err));
     } finally {
