@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -59,6 +60,182 @@ func TestApplicationControlTopicsAreEventDriven(t *testing.T) {
 		if _, eventDriven := applicationStateTopics[topic]; !eventDriven {
 			t.Errorf("control topic %q is not event driven", topic)
 		}
+	}
+}
+
+func openApplicationStateSocket(t *testing.T) (context.Context, *store.Store, *websocket.Conn) {
+	t.Helper()
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dataDir, "application-state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	cfg := config.Default()
+	svc := service.New(st, nil, nil, nil, cfg.Limits, cfg)
+	t.Cleanup(func() { _ = svc.Shutdown(context.Background()) })
+	server := &Server{service: svc, chatQueue: newChatMessageQueue(svc.PublishChatState)}
+	httpServer := httptest.NewServer(requestLogMiddleware(http.HandlerFunc(server.applicationWebSocket), nil))
+	t.Cleanup(httpServer.Close)
+	webSocketConfig, err := websocket.NewConfig("ws"+strings.TrimPrefix(httpServer.URL, "http"), httpServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := websocket.DialConfig(webSocketConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	if err := connection.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	return ctx, st, connection
+}
+
+func receiveApplicationEvent(t *testing.T, connection *websocket.Conn) applicationWebSocketEvent {
+	t.Helper()
+	var event applicationWebSocketEvent
+	if err := websocket.JSON.Receive(connection, &event); err != nil {
+		t.Fatal(err)
+	}
+	return event
+}
+
+func TestApplicationSessionsDeltaUsesExposedFields(t *testing.T) {
+	now := time.Now().UTC()
+	previous := []domain.ChatSession{
+		{ID: "session-one", Title: "One", UpdatedAt: now},
+		{ID: "session-two", Title: "Two", UpdatedAt: now.Add(-time.Minute)},
+	}
+	current := []domain.ChatSession{
+		{ID: "session-one", Title: "Renamed", TitleSet: true, UpdatedAt: now},
+		{ID: "session-three", Title: "Three", UpdatedAt: now.Add(-30 * time.Second)},
+	}
+	delta, changed := applicationSessionsDelta(previous, current)
+	if !changed || len(delta.Sessions) != 2 || delta.Sessions[0].ID != "session-one" || delta.Sessions[1].ID != "session-three" {
+		t.Fatalf("unexpected session upserts: %#v", delta)
+	}
+	if len(delta.RemovedIDs) != 1 || delta.RemovedIDs[0] != "session-two" {
+		t.Fatalf("unexpected removed sessions: %#v", delta.RemovedIDs)
+	}
+	current[0].Title = previous[0].Title
+	current[1] = previous[1]
+	if delta, changed := applicationSessionsDelta(previous, current); changed {
+		t.Fatalf("non-serialized TitleSet produced a delta: %#v", delta)
+	}
+}
+
+func TestApplicationObjectDeltaOnlyIncludesChangedFields(t *testing.T) {
+	previous := []byte(`{"active":true,"context_tokens":10,"context_summary":{"revision":1}}`)
+	current := []byte(`{"active":false,"context_tokens":10}`)
+	payload, changed, err := applicationObjectDelta(previous, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("expected object delta")
+	}
+	var delta map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &delta); err != nil {
+		t.Fatal(err)
+	}
+	if string(delta["active"]) != "false" || string(delta["context_summary"]) != "null" {
+		t.Fatalf("unexpected object delta: %s", payload)
+	}
+	if _, exists := delta["context_tokens"]; exists {
+		t.Fatalf("unchanged field included in object delta: %s", payload)
+	}
+}
+
+func TestApplicationWebSocketPushesSessionDelta(t *testing.T) {
+	ctx, st, connection := openApplicationStateSocket(t)
+	if err := websocket.JSON.Send(connection, applicationWebSocketCommand{Type: "subscribe", Topics: []string{"sessions"}}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := receiveApplicationEvent(t, connection)
+	if snapshot.Topic != "sessions" || snapshot.Mode != "snapshot" {
+		t.Fatalf("unexpected session snapshot: %#v", snapshot)
+	}
+	if _, err := st.CreateChatSession(ctx, "session-delta", ""); err != nil {
+		t.Fatal(err)
+	}
+	update := receiveApplicationEvent(t, connection)
+	var added applicationSessionDelta
+	if err := json.Unmarshal(update.Data, &added); err != nil {
+		t.Fatal(err)
+	}
+	if update.Topic != "sessions" || update.Mode != "delta" || len(added.Sessions) != 1 || added.Sessions[0].ID != "session-delta" || len(added.RemovedIDs) != 0 {
+		t.Fatalf("unexpected session create delta: event=%#v payload=%#v", update, added)
+	}
+	if err := st.DeleteChatSession(ctx, "session-delta"); err != nil {
+		t.Fatal(err)
+	}
+	update = receiveApplicationEvent(t, connection)
+	var removed applicationSessionDelta
+	if err := json.Unmarshal(update.Data, &removed); err != nil {
+		t.Fatal(err)
+	}
+	if update.Topic != "sessions" || update.Mode != "delta" || len(removed.Sessions) != 0 || len(removed.RemovedIDs) != 1 || removed.RemovedIDs[0] != "session-delta" {
+		t.Fatalf("unexpected session delete delta: event=%#v payload=%#v", update, removed)
+	}
+}
+
+func TestApplicationWebSocketPushesChatStateFieldDelta(t *testing.T) {
+	ctx, st, connection := openApplicationStateSocket(t)
+	const sessionID = "session-chat-state-delta"
+	if _, err := st.CreateChatSession(ctx, sessionID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := websocket.JSON.Send(connection, applicationWebSocketCommand{Type: "subscribe", Topics: []string{"chat_state"}, SessionID: sessionID}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := receiveApplicationEvent(t, connection)
+	if snapshot.Topic != "chat_state" || snapshot.Mode != "snapshot" {
+		t.Fatalf("unexpected chat state snapshot: %#v", snapshot)
+	}
+	if err := st.SetChatSessionContextUsage(ctx, sessionID, 2048, 8192); err != nil {
+		t.Fatal(err)
+	}
+	update := receiveApplicationEvent(t, connection)
+	var delta map[string]json.RawMessage
+	if err := json.Unmarshal(update.Data, &delta); err != nil {
+		t.Fatal(err)
+	}
+	if update.Topic != "chat_state" || update.Mode != "delta" || string(delta["context_tokens"]) != "2048" || string(delta["context_window"]) != "8192" {
+		t.Fatalf("unexpected chat state delta: event=%#v payload=%s", update, update.Data)
+	}
+	for _, field := range []string{"active", "tasks", "queued_messages", "running_tool_calls", "workspace_id"} {
+		if _, exists := delta[field]; exists {
+			t.Errorf("unchanged field %q included in chat state delta: %s", field, update.Data)
+		}
+	}
+}
+
+func TestApplicationWebSocketPreservesUnchangedTopicState(t *testing.T) {
+	_, _, connection := openApplicationStateSocket(t)
+	if err := websocket.JSON.Send(connection, applicationWebSocketCommand{Type: "subscribe", Topics: []string{"sessions"}}); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot := receiveApplicationEvent(t, connection); snapshot.Topic != "sessions" || snapshot.Mode != "snapshot" {
+		t.Fatalf("unexpected initial snapshot: %#v", snapshot)
+	}
+	if err := websocket.JSON.Send(connection, applicationWebSocketCommand{Type: "subscribe", Topics: []string{"sessions", "health"}}); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot := receiveApplicationEvent(t, connection); snapshot.Topic != "health" || snapshot.Mode != "snapshot" {
+		t.Fatalf("unexpected added-topic snapshot: %#v", snapshot)
+	}
+	if err := connection.SetReadDeadline(time.Now().Add(250 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	var repeated applicationWebSocketEvent
+	err := websocket.JSON.Receive(connection, &repeated)
+	if err == nil {
+		t.Fatalf("unchanged sessions topic was snapshotted again: %#v", repeated)
+	}
+	if networkError, ok := err.(net.Error); !ok || !networkError.Timeout() {
+		t.Fatalf("expected read timeout after changed-topic snapshot, got %v", err)
 	}
 }
 

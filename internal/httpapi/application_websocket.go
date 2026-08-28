@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
 	"github.com/Enterpr1se0/opsnerva/internal/observability"
 	"github.com/Enterpr1se0/opsnerva/internal/service"
+	"github.com/Enterpr1se0/opsnerva/internal/store"
 
 	"golang.org/x/net/websocket"
 )
@@ -24,6 +27,7 @@ const applicationSnapshotCacheTTL = 200 * time.Millisecond
 const applicationSnapshotCacheLimit = 256
 const applicationTaskOutputLimit = 64 << 10
 const applicationTaskSubscriptionLimit = 32
+const applicationSessionLimit = 50
 
 var applicationSampleIntervals = map[string]time.Duration{
 	"connections": 5 * time.Second,
@@ -97,6 +101,34 @@ type applicationLogResponse struct {
 type applicationConnectionResponse struct {
 	Tunnels []domain.SSHTunnel `json:"tunnels"`
 	Shells  []domain.SSHShell  `json:"shells"`
+}
+
+type applicationSessionDelta struct {
+	Sessions   []domain.ChatSession `json:"sessions,omitempty"`
+	RemovedIDs []string             `json:"removed_ids,omitempty"`
+}
+
+func applicationSubscriptionTopicChanged(previous, next applicationWebSocketSubscription, topic string) bool {
+	_, previouslySubscribed := previous.topics[topic]
+	_, subscribed := next.topics[topic]
+	if previouslySubscribed != subscribed {
+		return true
+	}
+	if !subscribed {
+		return false
+	}
+	switch topic {
+	case "logs":
+		return previous.logs != next.logs
+	case "chat_state":
+		return previous.sessionID != next.sessionID
+	case "mcp_activity":
+		return previous.mcpSessionID != next.mcpSessionID
+	case "tasks":
+		return previous.sessionID != next.sessionID || !slices.Equal(previous.taskIDs, next.taskIDs)
+	default:
+		return false
+	}
 }
 
 func (s *Server) applicationWebSocket(w http.ResponseWriter, r *http.Request) {
@@ -185,20 +217,30 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 		case <-readDone:
 			return
 		case next := <-updates:
-			if unsubscribeMCP != nil {
+			previous := subscription
+			mcpChanged := applicationSubscriptionTopicChanged(previous, next, "mcp_activity")
+			tasksChanged := applicationSubscriptionTopicChanged(previous, next, "tasks")
+			logsChanged := applicationSubscriptionTopicChanged(previous, next, "logs")
+			if mcpChanged && unsubscribeMCP != nil {
 				unsubscribeMCP()
 				unsubscribeMCP = nil
 				mcpEvents = nil
 			}
-			if unsubscribeTasks != nil {
+			if tasksChanged && unsubscribeTasks != nil {
 				unsubscribeTasks()
 				unsubscribeTasks = nil
 				taskEvents = nil
 			}
 			subscription = next
-			states = make(map[string]applicationTopicState)
-			previousLogs = nil
-			if _, subscribed := subscription.topics["mcp_activity"]; subscribed {
+			for topic := range states {
+				if _, subscribed := subscription.topics[topic]; !subscribed || applicationSubscriptionTopicChanged(previous, subscription, topic) {
+					delete(states, topic)
+				}
+			}
+			if logsChanged {
+				previousLogs = nil
+			}
+			if _, subscribed := subscription.topics["mcp_activity"]; subscribed && mcpChanged {
 				mcpEvents, unsubscribeMCP = s.service.SubscribeMCPActivity(subscription.mcpSessionID)
 				payload, err := s.applicationTopicSnapshot(ctx, "mcp_activity", subscription)
 				if err != nil {
@@ -207,7 +249,7 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 					return
 				}
 			}
-			if _, subscribed := subscription.topics["tasks"]; subscribed {
+			if _, subscribed := subscription.topics["tasks"]; subscribed && tasksChanged {
 				var snapshots map[string]domain.TaskSnapshot
 				snapshots, taskEvents, unsubscribeTasks = s.service.SubscribeTaskEvents(ctx, subscription.sessionID, subscription.taskIDs)
 				payload, err := json.Marshal(applicationTaskSnapshots(snapshots))
@@ -219,7 +261,7 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 			}
 			topics := make([]string, 0, len(subscription.topics))
 			for topic := range subscription.topics {
-				if _, pushed := applicationPushTopics[topic]; !pushed {
+				if _, pushed := applicationPushTopics[topic]; !pushed && applicationSubscriptionTopicChanged(previous, subscription, topic) {
 					topics = append(topics, topic)
 				}
 			}
@@ -268,12 +310,51 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 			if _, subscribed := subscription.topics[event.Topic]; !subscribed {
 				continue
 			}
-			if event.SessionID != "" && event.SessionID != subscription.sessionID {
+			if event.Topic == service.StateTopicChatState && event.SessionID != "" && event.SessionID != subscription.sessionID {
 				continue
 			}
 			if event.Connection != nil {
 				payload, err := json.Marshal(event.Connection)
 				if err == nil && send(event.Topic, "delta", payload) != nil {
+					return
+				}
+				continue
+			}
+			if event.Topic == service.StateTopicSessions {
+				state := states[event.Topic]
+				fullPayload, deltaPayload, changed, err := s.applicationSessionsUpdate(ctx, state.payload, event.SessionID)
+				if err != nil {
+					if websocket.JSON.Send(connection, applicationWebSocketEvent{Type: "error", Topic: event.Topic, Error: err.Error()}) != nil {
+						return
+					}
+					continue
+				}
+				state.payload = fullPayload
+				states[event.Topic] = state
+				if changed && send(event.Topic, "delta", deltaPayload) != nil {
+					return
+				}
+				continue
+			}
+			if event.Topic == service.StateTopicChatState {
+				fullPayload, err := s.applicationTopicSnapshot(ctx, event.Topic, subscription)
+				if err != nil {
+					if websocket.JSON.Send(connection, applicationWebSocketEvent{Type: "error", Topic: event.Topic, Error: err.Error()}) != nil {
+						return
+					}
+					continue
+				}
+				state := states[event.Topic]
+				deltaPayload, changed, deltaErr := applicationObjectDelta(state.payload, fullPayload)
+				if deltaErr != nil {
+					if websocket.JSON.Send(connection, applicationWebSocketEvent{Type: "error", Topic: event.Topic, Error: deltaErr.Error()}) != nil {
+						return
+					}
+					continue
+				}
+				state.payload = fullPayload
+				states[event.Topic] = state
+				if changed && send(event.Topic, "delta", deltaPayload) != nil {
 					return
 				}
 				continue
@@ -358,6 +439,136 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 			}
 		}
 	}
+}
+
+func (s *Server) applicationSessions(ctx context.Context) ([]domain.ChatSession, error) {
+	sessions, err := s.service.ListChatSessions(ctx, applicationSessionLimit)
+	if err != nil {
+		return nil, err
+	}
+	for index := range sessions {
+		sessions[index].Active = s.chatSessionActive(sessions[index].ID)
+	}
+	return sessions, nil
+}
+
+func applicationSessionBefore(left, right domain.ChatSession) bool {
+	if !left.UpdatedAt.Equal(right.UpdatedAt) {
+		return left.UpdatedAt.After(right.UpdatedAt)
+	}
+	return left.ID > right.ID
+}
+
+func applicationSessionEqual(left, right domain.ChatSession) bool {
+	return left.ID == right.ID &&
+		left.Title == right.Title &&
+		left.WorkspaceID == right.WorkspaceID &&
+		left.ContextTokens == right.ContextTokens &&
+		left.ContextWindow == right.ContextWindow &&
+		left.MessageCount == right.MessageCount &&
+		left.UpdatedAt.Equal(right.UpdatedAt) &&
+		left.Active == right.Active
+}
+
+func applicationSessionWindow(current []domain.ChatSession, session domain.ChatSession) []domain.ChatSession {
+	next := make([]domain.ChatSession, 0, min(applicationSessionLimit, len(current)+1))
+	for _, item := range current {
+		if item.ID != session.ID {
+			next = append(next, item)
+		}
+	}
+	next = append(next, session)
+	sort.Slice(next, func(left, right int) bool { return applicationSessionBefore(next[left], next[right]) })
+	if len(next) > applicationSessionLimit {
+		next = next[:applicationSessionLimit]
+	}
+	return next
+}
+
+func applicationSessionsDelta(previous, current []domain.ChatSession) (applicationSessionDelta, bool) {
+	previousByID := make(map[string]domain.ChatSession, len(previous))
+	currentIDs := make(map[string]struct{}, len(current))
+	for _, session := range previous {
+		previousByID[session.ID] = session
+	}
+	delta := applicationSessionDelta{}
+	for _, session := range current {
+		currentIDs[session.ID] = struct{}{}
+		if old, exists := previousByID[session.ID]; !exists || !applicationSessionEqual(old, session) {
+			delta.Sessions = append(delta.Sessions, session)
+		}
+	}
+	for _, session := range previous {
+		if _, exists := currentIDs[session.ID]; !exists {
+			delta.RemovedIDs = append(delta.RemovedIDs, session.ID)
+		}
+	}
+	return delta, len(delta.Sessions) > 0 || len(delta.RemovedIDs) > 0
+}
+
+func (s *Server) applicationSessionsUpdate(ctx context.Context, previousPayload []byte, sessionID string) ([]byte, []byte, bool, error) {
+	var previous []domain.ChatSession
+	if err := json.Unmarshal(previousPayload, &previous); err != nil {
+		return nil, nil, false, fmt.Errorf("decode previous sessions snapshot: %w", err)
+	}
+	var current []domain.ChatSession
+	if sessionID == "" {
+		var err error
+		current, err = s.applicationSessions(ctx)
+		if err != nil {
+			return nil, nil, false, err
+		}
+	} else {
+		session, err := s.service.GetChatSession(ctx, sessionID)
+		switch {
+		case err == nil:
+			session.Active = s.chatSessionActive(session.ID)
+			current = applicationSessionWindow(previous, session)
+		case errors.Is(err, store.ErrNotFound):
+			current, err = s.applicationSessions(ctx)
+			if err != nil {
+				return nil, nil, false, err
+			}
+		default:
+			return nil, nil, false, err
+		}
+	}
+	fullPayload, err := json.Marshal(current)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	delta, changed := applicationSessionsDelta(previous, current)
+	if !changed {
+		return fullPayload, nil, false, nil
+	}
+	deltaPayload, err := json.Marshal(delta)
+	return fullPayload, deltaPayload, err == nil, err
+}
+
+func applicationObjectDelta(previousPayload, currentPayload []byte) ([]byte, bool, error) {
+	var previous, current map[string]json.RawMessage
+	if err := json.Unmarshal(previousPayload, &previous); err != nil {
+		return nil, false, err
+	}
+	if err := json.Unmarshal(currentPayload, &current); err != nil {
+		return nil, false, err
+	}
+	delta := make(map[string]json.RawMessage)
+	for key, value := range current {
+		if !bytes.Equal(previous[key], value) {
+			delta[key] = value
+		}
+	}
+	for key := range previous {
+		if _, exists := current[key]; !exists {
+			delta[key] = json.RawMessage("null")
+		}
+	}
+	if len(delta) == 0 {
+		return nil, false, nil
+	}
+	payload, err := json.Marshal(delta)
+	return payload, err == nil, err
 }
 
 func (s *Server) applicationTopicSnapshotCached(ctx context.Context, topic string, subscription applicationWebSocketSubscription) ([]byte, error) {
@@ -496,14 +707,9 @@ func (s *Server) applicationTopicSnapshot(ctx context.Context, topic string, sub
 		}
 		value = approvals
 	case "sessions":
-		sessions, err := s.service.ListChatSessions(ctx, 50)
+		sessions, err := s.applicationSessions(ctx)
 		if err != nil {
 			return nil, err
-		}
-		if s.agent != nil {
-			for index := range sessions {
-				sessions[index].Active = s.chatSessionActive(sessions[index].ID)
-			}
 		}
 		value = sessions
 	case "health":
