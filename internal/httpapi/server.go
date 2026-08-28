@@ -69,7 +69,7 @@ func New(svc *service.Service, agentRuntime *agent.Runtime, options Options) *Se
 	}
 	s := &Server{
 		service: svc, agent: agentRuntime, mux: http.NewServeMux(),
-		mcpHTTP: mcpserver.New(svc, options.Version).HTTPHandler(), chatEvents: newChatEventHub(), chatQueue: newChatMessageQueue(), modelTests: newModelTestJobs(), auth: newAuthManager(options.Auth), options: options,
+		mcpHTTP: mcpserver.New(svc, options.Version).HTTPHandler(), chatEvents: newChatEventHub(), chatQueue: newChatMessageQueue(svc.PublishChatState), modelTests: newModelTestJobs(), auth: newAuthManager(options.Auth), options: options,
 		applicationSnapshots: make(map[string]applicationSnapshotCacheEntry),
 	}
 	s.routes()

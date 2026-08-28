@@ -686,6 +686,7 @@ func (s *Service) CloseSSHShell(ctx context.Context, id, expectedSessionID, reas
 	shell := state.shell
 	cancel := state.cancel
 	state.mu.Unlock()
+	s.publishShellState(shell, false)
 	history := s.historyForState(state)
 	_ = history.Update(context.WithoutCancel(ctx), shell)
 	cancel()
@@ -810,6 +811,7 @@ func (s *Service) openInteractiveShell(
 		s.shellMu.Unlock()
 		return domain.SSHShell{}, err
 	}
+	s.publishShellState(state.shell, false)
 
 	s.executionMu.Lock()
 	if s.executionClosed {
@@ -847,6 +849,7 @@ func (s *Service) openInteractiveShell(
 		return domain.SSHShell{}, err
 	}
 	s.appendSSHShellEvent(state, "status", "", "running")
+	s.publishShellState(shell, false)
 	workerStarted = true
 	go s.runSSHShell(shellCtx, state)
 	component := interactiveShellComponent(options.kind)
@@ -950,6 +953,7 @@ func (s *Service) runSSHShell(ctx context.Context, state *sshShellState) {
 		delete(s.shells, shell.ID)
 	}
 	s.shellMu.Unlock()
+	s.publishShellState(shell, true)
 	if history.Persistent() {
 		s.audit(context.Background(), shell.RunID, interactiveShellComponent(shell.Kind)+"_stopped", "control-plane", map[string]any{
 			"shell_id": shell.ID, "host_id": shell.HostID, "status": status,
@@ -976,6 +980,7 @@ func (s *Service) failSSHShellStart(state *sshShellState, cause error) {
 		delete(s.shells, shell.ID)
 	}
 	s.shellMu.Unlock()
+	s.publishShellState(shell, true)
 }
 
 func (s *Service) appendSSHShellOutput(state *sshShellState, stream string, data []byte) {
@@ -1191,8 +1196,10 @@ func (s *Service) abortSSHShellPersistence(state *sshShellState) {
 			state.closing = true
 			state.reason = "persistence_failed"
 			state.shell.Status = "stopping"
+			shell := state.shell
 			session, cancel := state.session, state.cancel
 			state.mu.Unlock()
+			s.publishShellState(shell, false)
 			if cancel != nil {
 				cancel()
 			}

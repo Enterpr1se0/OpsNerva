@@ -34,6 +34,7 @@ type queuedChatMessage struct {
 type chatMessageQueue struct {
 	mu       sync.Mutex
 	sessions map[string]*chatQueueSession
+	onChange func(string)
 }
 
 type chatQueueSession struct {
@@ -45,8 +46,14 @@ type chatQueueSession struct {
 	changed   chan struct{}
 }
 
-func newChatMessageQueue() *chatMessageQueue {
-	return &chatMessageQueue{sessions: make(map[string]*chatQueueSession)}
+func newChatMessageQueue(onChange func(string)) *chatMessageQueue {
+	return &chatMessageQueue{sessions: make(map[string]*chatQueueSession), onChange: onChange}
+}
+
+func (q *chatMessageQueue) notify(sessionID string) {
+	if q.onChange != nil {
+		q.onChange(sessionID)
+	}
 }
 
 func (q *chatMessageQueue) begin(sessionID string) (context.Context, bool) {
@@ -55,8 +62,8 @@ func (q *chatMessageQueue) begin(sessionID string) (context.Context, bool) {
 		return nil, false
 	}
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	if _, active := q.sessions[sessionID]; active {
+		q.mu.Unlock()
 		return nil, false
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -64,6 +71,8 @@ func (q *chatMessageQueue) begin(sessionID string) (context.Context, bool) {
 		ctx: ctx, cancel: cancel, accepting: true,
 		pausedFor: make(map[string]struct{}), changed: make(chan struct{}),
 	}
+	q.mu.Unlock()
+	q.notify(sessionID)
 	return ctx, true
 }
 
@@ -84,13 +93,16 @@ func (q *chatMessageQueue) pause(sessionID string, approvalIDs []string) (<-chan
 		return nil, errors.New("approval ids are required")
 	}
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	state := q.sessions[sessionID]
 	if state == nil || !state.accepting {
+		q.mu.Unlock()
 		return nil, errChatQueueInactive
 	}
 	state.pausedFor = approvalSet
-	return state.changed, nil
+	changed := state.changed
+	q.mu.Unlock()
+	q.notify(sessionID)
+	return changed, nil
 }
 
 func (q *chatMessageQueue) resume(sessionID, approvalID string) bool {
@@ -99,20 +111,25 @@ func (q *chatMessageQueue) resume(sessionID, approvalID string) bool {
 	}
 	sessionID, approvalID = strings.TrimSpace(sessionID), strings.TrimSpace(approvalID)
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	state := q.sessions[sessionID]
 	if state == nil {
+		q.mu.Unlock()
 		return false
 	}
 	if _, paused := state.pausedFor[approvalID]; !paused {
+		q.mu.Unlock()
 		return false
 	}
 	delete(state.pausedFor, approvalID)
 	if len(state.pausedFor) > 0 {
+		q.mu.Unlock()
+		q.notify(sessionID)
 		return true
 	}
 	close(state.changed)
 	state.changed = make(chan struct{})
+	q.mu.Unlock()
+	q.notify(sessionID)
 	return true
 }
 
@@ -146,12 +163,13 @@ func (q *chatMessageQueue) enqueue(sessionID, message, mode string, attachments 
 	}
 	sessionID = strings.TrimSpace(sessionID)
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	state, active := q.sessions[sessionID]
 	if !active || !state.accepting {
+		q.mu.Unlock()
 		return queuedChatMessage{}, 0, errChatQueueInactive
 	}
 	if len(state.items) >= maxQueuedChatMessages {
+		q.mu.Unlock()
 		return queuedChatMessage{}, 0, errChatQueueFull
 	}
 	mode = strings.TrimSpace(mode)
@@ -176,6 +194,8 @@ func (q *chatMessageQueue) enqueue(sessionID, message, mode string, attachments 
 	} else {
 		state.items = append(state.items, item)
 	}
+	q.mu.Unlock()
+	q.notify(sessionID)
 	return publicQueuedChatMessage(item), position, nil
 }
 
@@ -186,17 +206,22 @@ func (q *chatMessageQueue) nextAfterTurn(sessionID string) (queuedChatMessage, b
 		return queuedChatMessage{}, false
 	}
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	sessionID = strings.TrimSpace(sessionID)
 	state, active := q.sessions[sessionID]
 	if !active || len(state.items) == 0 {
 		if active {
 			state.accepting = false
 		}
+		q.mu.Unlock()
+		if active {
+			q.notify(sessionID)
+		}
 		return queuedChatMessage{}, false
 	}
 	item := state.items[0]
 	state.items = state.items[1:]
+	q.mu.Unlock()
+	q.notify(sessionID)
 	return item, true
 }
 
@@ -206,12 +231,16 @@ func (q *chatMessageQueue) finish(sessionID string) {
 	}
 	q.mu.Lock()
 	sessionID = strings.TrimSpace(sessionID)
-	if state := q.sessions[sessionID]; state != nil {
+	state := q.sessions[sessionID]
+	if state != nil {
 		state.cancel()
 		close(state.changed)
 	}
 	delete(q.sessions, sessionID)
 	q.mu.Unlock()
+	if state != nil {
+		q.notify(sessionID)
+	}
 }
 
 func (q *chatMessageQueue) clear(sessionID string) (int, bool) {
@@ -219,10 +248,10 @@ func (q *chatMessageQueue) clear(sessionID string) (int, bool) {
 		return 0, false
 	}
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	sessionID = strings.TrimSpace(sessionID)
 	state := q.sessions[sessionID]
 	if state == nil {
+		q.mu.Unlock()
 		return 0, false
 	}
 	count := len(state.items)
@@ -231,6 +260,8 @@ func (q *chatMessageQueue) clear(sessionID string) (int, bool) {
 	state.cancel()
 	close(state.changed)
 	state.changed = make(chan struct{})
+	q.mu.Unlock()
+	q.notify(sessionID)
 	return count, true
 }
 

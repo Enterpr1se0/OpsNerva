@@ -16,6 +16,8 @@ import (
 
 func TestSSHTunnelApprovalReusesResolvedProxyConnectionAndStops(t *testing.T) {
 	svc, transport, host := newTestService(t)
+	stateEvents, _, unsubscribeStateEvents := svc.SubscribeStateEvents()
+	defer unsubscribeStateEvents()
 	ctx := context.Background()
 	jump, err := svc.SaveHost(ctx, hostInputForTunnelTest("jump", ""), "test")
 	if err != nil {
@@ -80,6 +82,18 @@ func TestSSHTunnelApprovalReusesResolvedProxyConnectionAndStops(t *testing.T) {
 	}
 	if stopped.Status != "stopped" || svc.ListSSHTunnels().Count != 0 {
 		t.Fatalf("tunnel did not stop cleanly: stopped=%#v list=%#v", stopped, svc.ListSSHTunnels())
+	}
+	wantStatuses := map[string]bool{"running": false, "stopping": false, "stopped": false}
+	deadline := time.After(time.Second)
+	for !wantStatuses["running"] || !wantStatuses["stopping"] || !wantStatuses["stopped"] {
+		select {
+		case event := <-stateEvents:
+			if event.Topic == StateTopicConnections && event.Connection != nil && event.Connection.Tunnel != nil && event.Connection.Tunnel.ID == stopped.ID {
+				wantStatuses[event.Connection.Tunnel.Status] = true
+			}
+		case <-deadline:
+			t.Fatalf("tunnel lifecycle events were incomplete: %#v", wantStatuses)
+		}
 	}
 }
 
@@ -319,6 +333,8 @@ func TestOperatorCanStartTunnelWithoutAgentApproval(t *testing.T) {
 
 func TestOperatorTunnelReconnectsAutomatically(t *testing.T) {
 	svc, transport, host := newTestService(t)
+	stateEvents, _, unsubscribeStateEvents := svc.SubscribeStateEvents()
+	defer unsubscribeStateEvents()
 
 	started, err := svc.StartOperatorSSHTunnel(context.Background(), host.ID, domain.SSHTunnelConfig{RemotePort: 8080}, "admin-web")
 	if err != nil {
@@ -332,55 +348,46 @@ func TestOperatorTunnelReconnectsAutomatically(t *testing.T) {
 	if err := client.Close(); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(time.Second)
-	for {
-		list := svc.ListSSHTunnels()
-		if len(list.Tunnels) == 1 && list.Tunnels[0].Status == "retrying" && list.Tunnels[0].ReconnectAttempt == 1 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("tunnel did not enter reconnect wait: %#v", list)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitForTunnelStateEvent(t, stateEvents, started.ID, time.Second, func(tunnel domain.SSHTunnel) bool {
+		return tunnel.Status == "retrying" && tunnel.ReconnectAttempt == 1
+	})
 	renamedInput := hostInputForTunnelTest("renamed tunnel host", host.ID)
 	if _, err := svc.SaveHost(context.Background(), renamedInput, "test"); err != nil {
 		t.Fatal(err)
 	}
 
-	deadline = time.Now().Add(2 * time.Second)
-	for {
-		list := svc.ListSSHTunnels()
-		if len(list.Tunnels) == 1 && list.Tunnels[0].Status == "retrying" && list.Tunnels[0].ReconnectAttempt == 2 && strings.Contains(list.Tunnels[0].Error, "temporary network failure") {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("tunnel did not continue after a failed reconnect: %#v", list)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitForTunnelStateEvent(t, stateEvents, started.ID, 2*time.Second, func(tunnel domain.SSHTunnel) bool {
+		return tunnel.Status == "retrying" && tunnel.ReconnectAttempt == 2 && strings.Contains(tunnel.Error, "temporary network failure")
+	})
 
-	deadline = time.Now().Add(3 * time.Second)
-	for {
-		list := svc.ListSSHTunnels()
-		transport.mu.Lock()
-		connectAttempts := len(transport.tunnelClients)
-		transport.mu.Unlock()
-		if len(list.Tunnels) == 1 && list.Tunnels[0].Status == "running" && connectAttempts >= 2 {
-			current := list.Tunnels[0]
-			if current.ID != started.ID || current.HostName != renamedInput.Name || current.LocalPort != started.LocalPort || current.RemotePort != started.RemotePort {
-				t.Fatalf("automatic reconnect did not preserve the tunnel or reload its host: started=%#v current=%#v", started, current)
-			}
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("tunnel did not reconnect automatically: tunnels=%#v attempts=%d", list, connectAttempts)
-		}
-		time.Sleep(10 * time.Millisecond)
+	current := waitForTunnelStateEvent(t, stateEvents, started.ID, 4*time.Second, func(tunnel domain.SSHTunnel) bool {
+		return tunnel.Status == "running" && tunnel.ReconnectAttempt == 0 && tunnel.HostName == renamedInput.Name
+	})
+	if current.ID != started.ID || current.LocalPort != started.LocalPort || current.RemotePort != started.RemotePort {
+		t.Fatalf("automatic reconnect did not preserve the tunnel or reload its host: started=%#v current=%#v", started, current)
 	}
 	assertNoPendingApprovals(t, svc)
 	if _, err := svc.StopSSHTunnel(context.Background(), started.ID, "admin-web"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func waitForTunnelStateEvent(t *testing.T, events <-chan StateEvent, tunnelID string, timeout time.Duration, match func(domain.SSHTunnel) bool) domain.SSHTunnel {
+	t.Helper()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		select {
+		case event := <-events:
+			if event.Topic != StateTopicConnections || event.Connection == nil || event.Connection.Tunnel == nil || event.Connection.Tunnel.ID != tunnelID {
+				continue
+			}
+			if match(*event.Connection.Tunnel) {
+				return *event.Connection.Tunnel
+			}
+		case <-timer.C:
+			t.Fatalf("timed out waiting for tunnel %q state event", tunnelID)
+		}
 	}
 }
 

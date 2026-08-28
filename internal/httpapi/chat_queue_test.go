@@ -44,7 +44,7 @@ func TestChatRunContextHasNoAbsoluteDeadlineAndFollowsQueueCancellation(t *testi
 }
 
 func TestChatMessageQueueAdvancesAfterTurnsInOrder(t *testing.T) {
-	queue := newChatMessageQueue()
+	queue := newChatMessageQueue(nil)
 	queueCtx, started := queue.begin("session-test")
 	if !started {
 		t.Fatal("queue did not start")
@@ -84,7 +84,7 @@ func TestChatMessageQueueAdvancesAfterTurnsInOrder(t *testing.T) {
 }
 
 func TestChatMessageQueuePrioritizesSteeringWithoutReorderingItsMessages(t *testing.T) {
-	queue := newChatMessageQueue()
+	queue := newChatMessageQueue(nil)
 	if _, started := queue.begin("session-test"); !started {
 		t.Fatal("queue did not start")
 	}
@@ -107,7 +107,7 @@ func TestChatMessageQueuePrioritizesSteeringWithoutReorderingItsMessages(t *test
 }
 
 func TestChatMessageQueueIsBoundedAndCancelClearsIt(t *testing.T) {
-	queue := newChatMessageQueue()
+	queue := newChatMessageQueue(nil)
 	if _, _, err := queue.enqueue("missing", "message", chatQueueModeFollowup, nil); !errors.Is(err, errChatQueueInactive) {
 		t.Fatalf("inactive queue error = %v", err)
 	}
@@ -139,7 +139,7 @@ func TestChatMessageQueueIsBoundedAndCancelClearsIt(t *testing.T) {
 }
 
 func TestChatMessageQueuePauseRetainsFollowupsUntilExactApprovalResumes(t *testing.T) {
-	queue := newChatMessageQueue()
+	queue := newChatMessageQueue(nil)
 	if _, started := queue.begin("session-paused"); !started {
 		t.Fatal("queue did not start")
 	}
@@ -178,5 +178,26 @@ func TestChatMessageQueuePauseRetainsFollowupsUntilExactApprovalResumes(t *testi
 	}
 	if snapshot := queue.snapshot("session-paused"); len(snapshot) != 1 || snapshot[0].ID != queued.ID {
 		t.Fatalf("queued followup changed while paused: %#v", snapshot)
+	}
+}
+
+func TestChatMessageQueuePublishesChangesAfterUnlock(t *testing.T) {
+	var queue *chatMessageQueue
+	snapshots := make([]int, 0, 4)
+	queue = newChatMessageQueue(func(sessionID string) {
+		snapshots = append(snapshots, len(queue.snapshot(sessionID)))
+	})
+	if _, started := queue.begin("session-events"); !started {
+		t.Fatal("queue did not start")
+	}
+	if _, _, err := queue.enqueue("session-events", "follow up", chatQueueModeFollowup, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := queue.nextAfterTurn("session-events"); !ok {
+		t.Fatal("queued message was not returned")
+	}
+	queue.finish("session-events")
+	if got := fmt.Sprint(snapshots); got != "[0 1 0 0]" {
+		t.Fatalf("queue snapshots = %s", got)
 	}
 }

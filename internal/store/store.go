@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
@@ -33,6 +34,9 @@ type Store struct {
 	db                *sql.DB
 	shellEventEncoder *zstd.Encoder
 	shellEventDecoder *zstd.Decoder
+	changeMu          sync.RWMutex
+	changeListeners   map[uint64]func(Change)
+	changeListenerID  uint64
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -215,7 +219,12 @@ func (s *Store) DeleteWorkspace(ctx context.Context, id string) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE chat_sessions SET workspace_id='' WHERE workspace_id=?`, id); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.publishChange(Change{Topic: ChangeSessions})
+	s.publishChange(Change{Topic: ChangeChatState})
+	return nil
 }
 
 func scanWorkspace(row scanner) (domain.Workspace, error) {
@@ -777,7 +786,12 @@ func (s *Store) DeleteHost(ctx context.Context, id string) error {
 		tx.Rollback()
 		return ErrNotFound
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.publishChange(Change{Topic: ChangeApprovals})
+	s.publishChange(Change{Topic: ChangeAudit})
+	return nil
 }
 
 type scanner interface{ Scan(...any) error }
@@ -1186,6 +1200,9 @@ func (s *Store) AppendAudit(ctx context.Context, event domain.AuditEvent) error 
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO audit_events(id,run_id,event_type,actor,data_json,created_at)
 VALUES(?,?,?,?,?,?)`, event.ID, event.RunID, event.Type, event.Actor, string(data), formatTime(event.CreatedAt))
+	if err == nil {
+		s.publishChange(Change{Topic: ChangeAudit})
+	}
 	return err
 }
 
@@ -1317,6 +1334,7 @@ func (s *Store) deleteAuditRuns(ctx context.Context, where string, arguments []a
 	if err := tx.Commit(); err != nil {
 		return domain.AuditRunDeleteResult{}, total, err
 	}
+	s.publishChange(Change{Topic: ChangeAudit})
 	return result, total, nil
 }
 
@@ -1422,6 +1440,7 @@ VALUES(?,?,?,?,?,?,?)`, attachmentID, id, attachment.Name, attachment.MIMEType, 
 	if err := tx.Commit(); err != nil {
 		return err
 	}
+	s.publishSessionChange(sessionID, false)
 	return nil
 }
 
@@ -1504,6 +1523,13 @@ AND NOT EXISTS (
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
+	changedSessions := make(map[string]struct{}, len(turns))
+	for _, turn := range turns {
+		changedSessions[turn.sessionID] = struct{}{}
+	}
+	for changedSessionID := range changedSessions {
+		s.publishSessionChange(changedSessionID, false)
+	}
 	return len(turns), nil
 }
 
@@ -1553,6 +1579,9 @@ func (s *Store) WriteAgentTaskFile(ctx context.Context, sessionID, filePath, con
 	_, err := s.db.ExecContext(ctx, `INSERT INTO agent_task_files(session_id,file_path,content,created_at,updated_at) VALUES(?,?,?,?,?)
 ON CONFLICT(session_id,file_path) DO UPDATE SET content=excluded.content,updated_at=excluded.updated_at`,
 		sessionID, filePath, content, now, now)
+	if err == nil {
+		s.publishChange(Change{Topic: ChangeChatState, SessionID: sessionID})
+	}
 	return err
 }
 
@@ -1564,6 +1593,7 @@ func (s *Store) DeleteAgentTaskFile(ctx context.Context, sessionID, filePath str
 	if count, _ := result.RowsAffected(); count == 0 {
 		return ErrNotFound
 	}
+	s.publishChange(Change{Topic: ChangeChatState, SessionID: sessionID})
 	return nil
 }
 
@@ -1817,6 +1847,7 @@ summary_tokens=excluded.summary_tokens,model=excluded.model,updated_at=excluded.
 	if err != nil {
 		return domain.ChatContextSummary{}, err
 	}
+	s.publishChange(Change{Topic: ChangeChatState, SessionID: summary.SessionID})
 	return s.GetChatContextSummary(ctx, summary.SessionID)
 }
 
@@ -1828,6 +1859,7 @@ func (s *Store) DeleteChatContextSummary(ctx context.Context, sessionID string) 
 	if count, _ := result.RowsAffected(); count == 0 {
 		return ErrNotFound
 	}
+	s.publishChange(Change{Topic: ChangeChatState, SessionID: sessionID})
 	return nil
 }
 
@@ -1985,6 +2017,7 @@ func (s *Store) CreateChatSession(ctx context.Context, sessionID, workspaceID st
 	if created != 1 {
 		return domain.ChatSession{}, ErrAlreadyExists
 	}
+	s.publishSessionChange(sessionID, true)
 	return s.GetChatSession(ctx, sessionID)
 }
 
@@ -2019,6 +2052,7 @@ func (s *Store) SetChatSessionTitle(ctx context.Context, sessionID, title string
 	if count, _ := result.RowsAffected(); count == 0 {
 		return domain.ChatSession{}, ErrNotFound
 	}
+	s.publishSessionChange(sessionID, false)
 	return s.GetChatSession(ctx, sessionID)
 }
 
@@ -2030,6 +2064,9 @@ func (s *Store) SetChatSessionTitleIfEmpty(ctx context.Context, sessionID, title
 	changed, err := result.RowsAffected()
 	if err != nil {
 		return domain.ChatSession{}, false, err
+	}
+	if changed == 1 {
+		s.publishSessionChange(sessionID, false)
 	}
 	session, err := s.GetChatSession(ctx, sessionID)
 	if err != nil {
@@ -2046,6 +2083,7 @@ func (s *Store) SetChatSessionWorkspace(ctx context.Context, sessionID, workspac
 	if count, _ := result.RowsAffected(); count == 0 {
 		return domain.ChatSession{}, ErrNotFound
 	}
+	s.publishSessionChange(sessionID, true)
 	return s.GetChatSession(ctx, sessionID)
 }
 
@@ -2057,6 +2095,7 @@ func (s *Store) SetChatSessionContextUsage(ctx context.Context, sessionID string
 	if count, _ := result.RowsAffected(); count == 0 {
 		return ErrNotFound
 	}
+	s.publishSessionChange(sessionID, true)
 	return nil
 }
 
@@ -2138,7 +2177,12 @@ WHERE session_id=? OR run_id IN (SELECT id FROM runs WHERE session_id=?)`, sessi
 	if _, err := tx.ExecContext(ctx, `DELETE FROM agent_task_files WHERE session_id=?`, sessionID); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.publishChange(Change{Topic: ChangeSessions, SessionID: sessionID})
+	s.publishChange(Change{Topic: ChangeApprovals})
+	return nil
 }
 
 func (s *Store) Get(ctx context.Context, id string) ([]byte, bool, error) {

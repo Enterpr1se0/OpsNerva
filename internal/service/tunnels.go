@@ -309,7 +309,9 @@ func (s *Service) StopSSHTunnel(ctx context.Context, id, actor string) (domain.S
 		return domain.SSHTunnel{}, store.ErrNotFound
 	}
 	state.tunnel.Status = "stopping"
+	stopping := tunnelSnapshot(state)
 	s.tunnelMu.Unlock()
+	s.publishTunnelState(stopping, false)
 
 	state.stop()
 
@@ -318,6 +320,7 @@ func (s *Service) StopSSHTunnel(ctx context.Context, id, actor string) (domain.S
 	stopped := tunnelSnapshot(state)
 	delete(s.tunnels, id)
 	s.tunnelMu.Unlock()
+	s.publishTunnelState(stopped, true)
 	s.audit(context.WithoutCancel(ctx), "", "ssh_tunnel_stopped", actor, map[string]any{
 		"tunnel_id": id, "host_id": stopped.HostID, "direction": stopped.Direction,
 		"local_host": stopped.LocalHost, "local_port": stopped.LocalPort,
@@ -384,6 +387,7 @@ func (s *Service) openSSHTunnel(ctx context.Context, host domain.Host, connectio
 	s.tunnels[state.tunnel.ID] = state
 	startedTunnel := tunnelSnapshot(state)
 	s.tunnelMu.Unlock()
+	s.publishTunnelState(startedTunnel, false)
 	workerStarted = true
 	go s.runSSHTunnel(state)
 
@@ -469,10 +473,22 @@ func (s *Service) runSSHTunnel(state *sshTunnelState) {
 	defer func() {
 		state.stop()
 		s.tunnelMu.Lock()
+		removed := false
 		if current := s.tunnels[state.tunnel.ID]; current == state {
+			if state.tunnel.Status != "stopping" && state.tunnel.Status != "stopped" {
+				state.tunnel.Status = "failed"
+				if state.tunnel.Error == "" {
+					state.tunnel.Error = "SSH tunnel stopped unexpectedly"
+				}
+			}
+			removed = true
 			delete(s.tunnels, state.tunnel.ID)
 		}
+		terminal := tunnelSnapshot(state)
 		s.tunnelMu.Unlock()
+		if removed {
+			s.publishTunnelState(terminal, true)
+		}
 	}()
 	runtime := state.currentRuntime()
 	for runtime != nil {
@@ -497,7 +513,9 @@ func (s *Service) runSSHTunnel(state *sshTunnelState) {
 		state.tunnel.Status = "retrying"
 		state.tunnel.Error = failure
 		state.tunnel.ReconnectAttempt = 0
+		retrying := tunnelSnapshot(state)
 		s.tunnelMu.Unlock()
+		s.publishTunnelState(retrying, false)
 
 		observability.FromContext(context.Background()).WarnContext(context.Background(), "SSH tunnel disconnected; reconnecting",
 			"component", "ssh_tunnel", "tunnel_id", state.tunnel.ID, "host_id", state.tunnel.HostID, "error", failure)
@@ -539,8 +557,9 @@ func (s *Service) reconnectSSHTunnel(state *sshTunnelState) *sshTunnelRuntime {
 			return nil
 		}
 		state.tunnel.ReconnectAttempt = attempt
-		snapshot := state.tunnel
+		snapshot := tunnelSnapshot(state)
 		s.tunnelMu.Unlock()
+		s.publishTunnelState(snapshot, false)
 
 		timer := time.NewTimer(delay)
 		select {
@@ -587,7 +606,9 @@ func (s *Service) reconnectSSHTunnel(state *sshTunnelState) *sshTunnelRuntime {
 			if current := s.tunnels[state.tunnel.ID]; current == state && state.tunnel.Status == "retrying" {
 				state.tunnel.Error = failure
 			}
+			failedAttempt := tunnelSnapshot(state)
 			s.tunnelMu.Unlock()
+			s.publishTunnelState(failedAttempt, false)
 			observability.FromContext(context.Background()).WarnContext(context.Background(), "SSH tunnel reconnect failed",
 				"component", "ssh_tunnel", "tunnel_id", state.tunnel.ID, "host_id", state.tunnel.HostID,
 				"attempt", attempt, "attempt_delay", delay, "error", failure)
@@ -617,6 +638,7 @@ func (s *Service) reconnectSSHTunnel(state *sshTunnelState) *sshTunnelRuntime {
 			state.closeRuntime(runtime)
 			return nil
 		}
+		s.publishTunnelState(reconnected, false)
 
 		observability.FromContext(context.Background()).InfoContext(context.Background(), "SSH tunnel reconnected",
 			"component", "ssh_tunnel", "tunnel_id", reconnected.ID, "host_id", reconnected.HostID,
@@ -685,7 +707,9 @@ func (s *Service) forwardSSHTunnelConnection(ctx context.Context, state *sshTunn
 		if current := s.tunnels[state.tunnel.ID]; current == state && state.tunnel.Status == "running" {
 			state.tunnel.Error = s.redactor.Redact(fmt.Sprintf("connect %s endpoint %s: %v", endpointSide, targetAddress, err))
 		}
+		failedConnection := tunnelSnapshot(state)
 		s.tunnelMu.Unlock()
+		s.publishTunnelState(failedConnection, false)
 		return
 	}
 	if !state.trackConnection(runtime, target) {
@@ -696,7 +720,9 @@ func (s *Service) forwardSSHTunnelConnection(ctx context.Context, state *sshTunn
 	if current := s.tunnels[state.tunnel.ID]; current == state && state.tunnel.Status == "running" {
 		state.tunnel.Error = ""
 	}
+	connected := tunnelSnapshot(state)
 	s.tunnelMu.Unlock()
+	s.publishTunnelState(connected, false)
 	defer inbound.Close()
 	defer target.Close()
 

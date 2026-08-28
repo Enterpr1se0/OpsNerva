@@ -14,6 +14,7 @@ import (
 	"github.com/Enterpr1se0/opsnerva/internal/agent"
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
 	"github.com/Enterpr1se0/opsnerva/internal/observability"
+	"github.com/Enterpr1se0/opsnerva/internal/service"
 
 	"golang.org/x/net/websocket"
 )
@@ -24,14 +25,18 @@ const applicationSnapshotCacheLimit = 256
 const applicationTaskOutputLimit = 64 << 10
 const applicationTaskSubscriptionLimit = 32
 
-var applicationEventIntervals = map[string]time.Duration{
-	"connections": time.Second,
-	"approvals":   time.Second,
-	"sessions":    2 * time.Second,
-	"chat_state":  2 * time.Second,
-	"audit":       time.Second,
+var applicationSampleIntervals = map[string]time.Duration{
+	"connections": 5 * time.Second,
 	"health":      30 * time.Second,
 	"logs":        time.Second,
+}
+
+var applicationStateTopics = map[string]struct{}{
+	service.StateTopicConnections: {},
+	service.StateTopicApprovals:   {},
+	service.StateTopicSessions:    {},
+	service.StateTopicChatState:   {},
+	service.StateTopicAudit:       {},
 }
 
 var applicationPushTopics = map[string]struct{}{
@@ -123,7 +128,14 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 	var unsubscribeMCP func()
 	var taskEvents <-chan domain.TaskEvent
 	var unsubscribeTasks func()
+	var stateEvents <-chan service.StateEvent
+	var stateOverflow <-chan struct{}
+	unsubscribeStateEvents := func() {}
+	if s.service != nil {
+		stateEvents, stateOverflow, unsubscribeStateEvents = s.service.SubscribeStateEvents()
+	}
 	defer func() {
+		unsubscribeStateEvents()
 		if unsubscribeMCP != nil {
 			unsubscribeMCP()
 		}
@@ -140,6 +152,31 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 	send := func(topic, mode string, payload []byte) error {
 		sequence++
 		return websocket.JSON.Send(connection, applicationWebSocketEvent{Type: "event", Topic: topic, Mode: mode, Sequence: sequence, Data: payload})
+	}
+	sendSnapshot := func(topic string) error {
+		var payload []byte
+		if topic == "logs" {
+			current := recentApplicationLogs(subscription.logs)
+			encoded, err := json.Marshal(current)
+			if err != nil {
+				return websocket.JSON.Send(connection, applicationWebSocketEvent{Type: "error", Topic: topic, Error: err.Error()})
+			}
+			previousLogs = append([]observability.LogEntry(nil), current.Entries...)
+			payload = encoded
+		} else {
+			var err error
+			payload, err = s.applicationTopicSnapshot(ctx, topic, subscription)
+			if err != nil {
+				return websocket.JSON.Send(connection, applicationWebSocketEvent{Type: "error", Topic: topic, Error: err.Error()})
+			}
+		}
+		state := states[topic]
+		state.payload = payload
+		if interval, sampled := applicationSampleIntervals[topic]; sampled {
+			state.next = time.Now().Add(interval)
+		}
+		states[topic] = state
+		return send(topic, "snapshot", payload)
 	}
 	for {
 		select {
@@ -180,6 +217,18 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 					return
 				}
 			}
+			topics := make([]string, 0, len(subscription.topics))
+			for topic := range subscription.topics {
+				if _, pushed := applicationPushTopics[topic]; !pushed {
+					topics = append(topics, topic)
+				}
+			}
+			sort.Strings(topics)
+			for _, topic := range topics {
+				if sendSnapshot(topic) != nil {
+					return
+				}
+			}
 		case event, ok := <-mcpEvents:
 			if !ok {
 				return
@@ -215,6 +264,40 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 			if send("tasks", "delta", payload) != nil {
 				return
 			}
+		case event := <-stateEvents:
+			if _, subscribed := subscription.topics[event.Topic]; !subscribed {
+				continue
+			}
+			if event.SessionID != "" && event.SessionID != subscription.sessionID {
+				continue
+			}
+			if event.Connection != nil {
+				payload, err := json.Marshal(event.Connection)
+				if err == nil && send(event.Topic, "delta", payload) != nil {
+					return
+				}
+				continue
+			}
+			if sendSnapshot(event.Topic) != nil {
+				return
+			}
+		case <-stateOverflow:
+			draining := true
+			for draining {
+				select {
+				case <-stateEvents:
+				default:
+					draining = false
+				}
+			}
+			for topic := range subscription.topics {
+				if _, stateTopic := applicationStateTopics[topic]; !stateTopic {
+					continue
+				}
+				if sendSnapshot(topic) != nil {
+					return
+				}
+			}
 		case now := <-tick.C:
 			topics := make([]string, 0, len(subscription.topics))
 			for topic := range subscription.topics {
@@ -222,14 +305,15 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 			}
 			sort.Strings(topics)
 			for _, topic := range topics {
-				if _, pushed := applicationPushTopics[topic]; pushed {
+				interval, sampled := applicationSampleIntervals[topic]
+				if !sampled {
 					continue
 				}
 				state := states[topic]
 				if !state.next.IsZero() && now.Before(state.next) {
 					continue
 				}
-				state.next = now.Add(applicationEventIntervals[topic])
+				state.next = now.Add(interval)
 				if topic == "logs" {
 					current := recentApplicationLogs(subscription.logs)
 					fullPayload, marshalErr := json.Marshal(current)
@@ -332,9 +416,10 @@ func readApplicationWebSocket(ctx context.Context, connection *websocket.Conn, u
 		topics := make(map[string]struct{}, len(command.Topics))
 		for _, value := range command.Topics {
 			topic := strings.ToLower(strings.TrimSpace(value))
-			_, intervalTopic := applicationEventIntervals[topic]
+			_, intervalTopic := applicationSampleIntervals[topic]
+			_, stateTopic := applicationStateTopics[topic]
 			_, pushTopic := applicationPushTopics[topic]
-			if !intervalTopic && !pushTopic {
+			if !intervalTopic && !stateTopic && !pushTopic {
 				return fmt.Errorf("unsupported application event topic %q", value)
 			}
 			topics[topic] = struct{}{}

@@ -51,6 +51,69 @@ func TestApplicationWebSocketSubscribesThroughRequestLogger(t *testing.T) {
 	}
 }
 
+func TestApplicationControlTopicsAreEventDriven(t *testing.T) {
+	for _, topic := range []string{"approvals", "sessions", "chat_state", "audit"} {
+		if _, sampled := applicationSampleIntervals[topic]; sampled {
+			t.Errorf("control topic %q still has a polling interval", topic)
+		}
+		if _, eventDriven := applicationStateTopics[topic]; !eventDriven {
+			t.Errorf("control topic %q is not event driven", topic)
+		}
+	}
+}
+
+func TestApplicationWebSocketStreamsAuditAfterCommittedWrite(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dataDir, "audit-events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	cfg := config.Default()
+	svc := service.New(st, nil, nil, nil, cfg.Limits, cfg)
+	t.Cleanup(func() { _ = svc.Shutdown(context.Background()) })
+	server := &Server{service: svc}
+	httpServer := httptest.NewServer(requestLogMiddleware(http.HandlerFunc(server.applicationWebSocket), nil))
+	defer httpServer.Close()
+	webSocketConfig, err := websocket.NewConfig("ws"+strings.TrimPrefix(httpServer.URL, "http"), httpServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := websocket.DialConfig(webSocketConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if err := connection.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := websocket.JSON.Send(connection, applicationWebSocketCommand{Type: "subscribe", Topics: []string{"audit"}}); err != nil {
+		t.Fatal(err)
+	}
+	var snapshot applicationWebSocketEvent
+	if err := websocket.JSON.Receive(connection, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Topic != "audit" || snapshot.Mode != "snapshot" {
+		t.Fatalf("unexpected audit snapshot: %#v", snapshot)
+	}
+	if err := st.AppendAudit(ctx, domain.AuditEvent{ID: "event-websocket", Type: "test", Actor: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	var update applicationWebSocketEvent
+	if err := websocket.JSON.Receive(connection, &update); err != nil {
+		t.Fatal(err)
+	}
+	var audit map[string]any
+	if err := json.Unmarshal(update.Data, &audit); err != nil {
+		t.Fatal(err)
+	}
+	if update.Topic != "audit" || update.Mode != "snapshot" || audit["id"] != "event-websocket" {
+		t.Fatalf("unexpected audit update: %#v payload=%#v", update, audit)
+	}
+}
+
 func TestApplicationWebSocketStreamsMCPActivityAfterSnapshot(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()

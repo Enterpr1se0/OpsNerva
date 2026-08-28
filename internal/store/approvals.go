@@ -16,6 +16,9 @@ func (s *Store) CreateApproval(ctx context.Context, approval domain.Approval) er
 status,reason,continuation_kind,checkpoint_id,interrupt_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, approval.ID, approval.RunID,
 		approval.HostID, approval.RequestJSON, approval.RequestCipher, approval.RequestDigest, approval.Status,
 		approval.Reason, approval.ContinuationKind, approval.CheckpointID, approval.InterruptID, formatTime(approval.CreatedAt))
+	if err == nil {
+		s.publishChange(Change{Topic: ChangeApprovals, SessionID: approval.SessionID})
+	}
 	return err
 }
 
@@ -164,7 +167,11 @@ WHERE continuation_kind=? AND status=?`, domain.ApprovalStatusRejected, reason, 
 		domain.ApprovalContinuationAgent, domain.ApprovalStatusPreparing); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.publishChange(Change{Topic: ChangeApprovals})
+	return nil
 }
 
 // ActivateAgentApprovals atomically exposes a checkpoint's complete interrupt
@@ -197,7 +204,11 @@ WHERE id=? AND continuation_kind=? AND checkpoint_id=? AND status IN (?,?,?,?)`,
 			return fmt.Errorf("Agent approval %q changed or is no longer resumable", id)
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.publishChange(Change{Topic: ChangeApprovals})
+	return nil
 }
 
 // DecideAgentApproval records the operator decision without starting an
@@ -231,7 +242,11 @@ WHERE id=(SELECT run_id FROM approvals WHERE id=?) AND status='approval_required
 			return fmt.Errorf("Agent approval run changed or is no longer awaiting approval")
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.publishChange(Change{Topic: ChangeApprovals})
+	return nil
 }
 
 // ClaimAgentApprovalRun atomically transfers execution ownership to the
@@ -273,7 +288,11 @@ WHERE id=? AND run_id=? AND status=?`, domain.ApprovalStatusRejected, reason, no
 	if count, _ := result.RowsAffected(); count == 0 {
 		return fmt.Errorf("approval run changed or is no longer awaiting approval")
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.publishChange(Change{Topic: ChangeApprovals})
+	return nil
 }
 
 // AbortAgentApprovalsForSession atomically rejects every unclaimed approval in
@@ -340,6 +359,9 @@ WHERE id=? AND status='approval_required'`, reason, now, approval.RunID)
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	if len(approvals) > 0 {
+		s.publishChange(Change{Topic: ChangeApprovals, SessionID: sessionID})
+	}
 	return approvals, nil
 }
 
@@ -364,7 +386,11 @@ WHERE id=? AND run_id=? AND status='pending'`, reason, formatTime(time.Now().UTC
 	if count, _ := result.RowsAffected(); count == 0 {
 		return fmt.Errorf("approval run changed or is no longer awaiting approval")
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.publishChange(Change{Topic: ChangeApprovals})
+	return nil
 }
 
 func (s *Store) UpdatePendingApprovalExplanation(ctx context.Context, approvalID, runID, reviewJSON string) error {
@@ -378,6 +404,7 @@ WHERE id=? AND status='approval_required' AND EXISTS (
 	if count, _ := result.RowsAffected(); count == 0 {
 		return fmt.Errorf("approval is no longer pending")
 	}
+	s.publishChange(Change{Topic: ChangeApprovals})
 	return nil
 }
 
@@ -389,6 +416,7 @@ func (s *Store) UpdateRunAIReview(ctx context.Context, runID, reviewJSON string)
 	if count, _ := result.RowsAffected(); count == 0 {
 		return ErrNotFound
 	}
+	s.publishChange(Change{Topic: ChangeApprovals})
 	return nil
 }
 

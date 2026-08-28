@@ -68,6 +68,7 @@ WHERE session_id=? AND tool_call_id=? AND status IN (?,?)`, status, content, for
 	if err := tx.Commit(); err != nil {
 		return domain.ChatToolCall{}, err
 	}
+	s.publishChange(Change{Topic: ChangeChatState, SessionID: sessionID})
 	return s.GetChatToolCall(ctx, sessionID, toolCallID)
 }
 
@@ -194,6 +195,7 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, call.SessionID, call.UserMessageID, call.Messa
 	if err := tx.Commit(); err != nil {
 		return domain.ChatToolCall{}, err
 	}
+	s.publishSessionChange(call.SessionID, true)
 	return s.GetChatToolCall(ctx, call.SessionID, call.ToolCallID)
 }
 
@@ -280,6 +282,7 @@ WHERE session_id=? AND tool_call_id=? AND (run_id='' OR run_id=?)`, call.RunID, 
 	if err := tx.Commit(); err != nil {
 		return domain.ChatToolCall{}, err
 	}
+	s.publishSessionChange(sessionID, true)
 	return s.GetChatToolCall(ctx, sessionID, toolCallID)
 }
 
