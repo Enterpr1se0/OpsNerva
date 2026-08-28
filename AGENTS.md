@@ -17,6 +17,8 @@
 - Do not add defensive compatibility paths, fallback branches, adapters, or duplicate implementations without a demonstrated current requirement. Prefer removing obsolete behavior over preserving it speculatively.
 - Before accumulating localized patches, evaluate whether a focused simplification or refactor produces a smaller and clearer implementation. Update or remove superseded code, tests, documentation, locale keys, and styles as part of the same change.
 - Optimize selectively from collected evidence. Keep changes cohesive and maintainable instead of pursuing the requested outcome through layered special cases.
+- Organize code into cohesive files by module or feature responsibility. Do not accumulate unrelated components, handlers, state management, and protocol logic in one oversized, tightly coupled file.
+- When refactoring a touched area, split existing oversized or coupled files along clear responsibility boundaries when that improves cohesion; avoid arbitrary fragmentation into trivial files.
 
 ## Frontend copy
 

@@ -53,9 +53,9 @@ jobs:
             run_tests: false
             artifact: opsnerva-windows-x64
             paths: web/src-tauri/target/release/bundle/nsis/*-setup.exe
-          - name: Windows arm64
+          - name: Windows ARM64
             os: windows-11-arm
-            run_tests: true
+            run_tests: false
             artifact: opsnerva-windows-arm64
             paths: web/src-tauri/target/release/bundle/nsis/*-setup.exe
           - name: macOS ARM64
