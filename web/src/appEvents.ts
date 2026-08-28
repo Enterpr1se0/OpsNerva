@@ -2,7 +2,7 @@ import type { ServerLogResponse } from './types'
 
 export type ApplicationEventTopic='connections'|'approvals'|'sessions'|'chat_state'|'tasks'|'audit'|'mcp_activity'|'health'|'logs'
 export type ApplicationLogSubscription={level?:string;component?:string;q?:string;limit?:number}
-export type ApplicationEventSubscription={logs?:ApplicationLogSubscription;sessionId?:string;mcpSessionId?:string;taskId?:string}
+export type ApplicationEventSubscription={logs?:ApplicationLogSubscription;sessionId?:string;mcpSessionId?:string;taskIds?:readonly string[]}
 export type ApplicationEvent<T=unknown>={type:'event'|'error'|'heartbeat';topic?:ApplicationEventTopic;mode?:'snapshot'|'delta';sequence?:number;data?:T;error?:string}
 
 type ApplicationEventListener=(event:ApplicationEvent)=>void
@@ -14,6 +14,7 @@ class ApplicationEventClient{
 	private reconnectTimer:number|undefined
 	private reconnectDelay=1000
 	private lastSequence=0
+	private subscriptionUpdateQueued=false
 
 	subscribe<T>(topic:ApplicationEventTopic,listener:(event:ApplicationEvent<T>)=>void,options?:ApplicationEventSubscription){
 		const id=Symbol(topic)
@@ -21,14 +22,24 @@ class ApplicationEventClient{
 		registrations.set(id,{listener:listener as ApplicationEventListener,options})
 		this.listeners.set(topic,registrations)
 		this.ensureConnected()
-		this.sendSubscription()
+		this.scheduleSubscriptionUpdate()
 		return()=>{
 			const current=this.listeners.get(topic)
 			current?.delete(id)
 			if(!current?.size)this.listeners.delete(topic)
-			if(this.listeners.size)this.sendSubscription()
-			else this.disconnect()
+			this.scheduleSubscriptionUpdate()
 		}
+	}
+
+	private scheduleSubscriptionUpdate(){
+		if(this.subscriptionUpdateQueued)return
+		this.subscriptionUpdateQueued=true
+		queueMicrotask(()=>{
+			this.subscriptionUpdateQueued=false
+			if(!this.listeners.size){this.disconnect();return}
+			this.ensureConnected()
+			this.sendSubscription()
+		})
 	}
 
 	private ensureConnected(){
@@ -71,7 +82,7 @@ class ApplicationEventClient{
 		const taskSessionId=Array.from(this.listeners.get('tasks')?.values()||[]).find(registration=>registration.options?.sessionId)?.options?.sessionId
 		const sessionId=chatSessionId||taskSessionId
 		const mcpSessionId=Array.from(this.listeners.get('mcp_activity')?.values()||[]).at(-1)?.options?.mcpSessionId
-		const taskIds=[...new Set(Array.from(this.listeners.get('tasks')?.values()||[]).map(registration=>registration.options?.taskId).filter((value):value is string=>!!value))].sort()
+		const taskIds=[...new Set(Array.from(this.listeners.get('tasks')?.values()||[]).flatMap(registration=>registration.options?.taskIds||[]))].sort()
 		this.socket.send(JSON.stringify({type:'subscribe',topics,logs,session_id:sessionId,mcp_session_id:mcpSessionId,task_ids:taskIds}))
 	}
 

@@ -316,6 +316,11 @@ export interface ChatSession {
   active: boolean
 }
 
+export interface ChatSessionDelta {
+	sessions?: ChatSession[]
+	removed_ids?: string[]
+}
+
 export interface ChatMessage {
 	id: string
   role: 'user' | 'assistant' | 'assistant_progress' | 'tool' | 'reasoning'

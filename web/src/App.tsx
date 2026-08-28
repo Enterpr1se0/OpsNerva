@@ -1,4 +1,4 @@
-import { FormEvent, Suspense, createContext, lazy, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { FormEvent, Suspense, createContext, lazy, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { createPortal, flushSync } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
@@ -15,8 +15,10 @@ import { subscribeApplicationEvents } from './appEvents'
 import { CopyButton, CopyablePre, writeClipboard } from './CopyButton'
 import { AppSelect, ModelCombobox } from './Controls'
 import i18n, { localeFor, type SupportedLanguage } from './i18n'
+import { activeLiveTaskStatus, useLiveSSHTasks, type LiveSSHTaskSnapshot, type LiveSSHTaskTarget } from './liveTasks'
+import { appendStreamText, streamTextFrom, streamTextTail, streamTextValue, type StreamText } from './streamText'
 import { TextFileEditor } from './TextFileEditor'
-import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, AuthStatus, ChatMessage, ChatQueueMode, ChatSession, ChatState, ChatTokenUsage, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPActivityEvent, MCPActivitySnapshot, MCPClientSession, MCPServer, MCPServerInput, MCPToolCall, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, QueuedChatMessage, Run, ServerLogEntry, ServerLogResponse, SFTPFileEntry, SSHHostStatus, SSHShell, SSHShellEvent, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
+import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, AuthStatus, ChatMessage, ChatQueueMode, ChatSession, ChatSessionDelta, ChatState, ChatTokenUsage, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPActivityEvent, MCPActivitySnapshot, MCPClientSession, MCPServer, MCPServerInput, MCPToolCall, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, QueuedChatMessage, Run, ServerLogEntry, ServerLogResponse, SFTPFileEntry, SSHHostStatus, SSHShell, SSHShellEvent, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
 
 type Page = 'chat' | 'ssh' | 'config' | 'extensions' | 'audit' | 'logs'
 const pageVisualOrder:Page[]=['chat','ssh','extensions','audit','logs','config']
@@ -25,11 +27,12 @@ const liveToolOutputBufferChars=128<<10
 type ChatEntryImage = {id:string;name:string;mimeType:string;sizeBytes:number;url?:string}
 const workStatusKeys=['chat.cooking','chat.pondering','chat.brewing','chat.weaving','chat.polishing','chat.crunching'] as const
 type PendingChatImage = {id:string;file:File;url:string}
-type ChatEntry = { id: string; sourceMessageId?:string; persisted?:boolean; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; contentTruncated?:boolean; contentChars?:number; tool?: string; toolCallId?:string; runId?:string; transient?:boolean; progress?:boolean; startedAt?:number; liveStdout?:string; liveStderr?:string; liveOutput?:string; liveOutputStream?:'stdout'|'stderr'; transferredBytes?:number; transferTotalBytes?:number; images?:ChatEntryImage[]; tokenUsage?:ChatTokenUsage; active?: boolean; lifecycle?:'streaming'|'committed'; status?: 'pending' | 'waiting_for_approval' | 'completed' | 'failed' }
+type ChatEntry = { id: string; sourceMessageId?:string; persisted?:boolean; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; streamText?:StreamText; contentTruncated?:boolean; contentChars?:number; tool?: string; toolCallId?:string; runId?:string; transient?:boolean; progress?:boolean; startedAt?:number; liveStdout?:string; liveStderr?:string; liveOutput?:string; liveOutputStream?:'stdout'|'stderr'; transferredBytes?:number; transferTotalBytes?:number; images?:ChatEntryImage[]; tokenUsage?:ChatTokenUsage; active?: boolean; lifecycle?:'streaming'|'committed'; status?: 'pending' | 'waiting_for_approval' | 'completed' | 'failed' }
+const emptyChatEntries:ChatEntry[]=[]
+const emptyLiveSSHTaskTargets:readonly LiveSSHTaskTarget[]=[]
 type TaskToolEntryGroup={kind:'task_tool_group';id:string;tool:'TaskCreate'|'TaskUpdate';entries:ChatEntry[]}
 type ChatRenderItem={kind:'entry';entry:ChatEntry}|TaskToolEntryGroup
-type LiveSSHTaskSnapshot={id:string;revision:number;task?:JsonRecord;result?:JsonRecord;error?:string}
-type LiveSSHTaskEvent={type?:string;task_id?:string;revision?:number;snapshot?:{task?:JsonRecord;result?:JsonRecord;error?:string};stream?:string;offset_bytes?:number;total_bytes?:number;content?:string}
+const emptyChatRenderItems:ChatRenderItem[]=[]
 type ModelRetryState = {attempt:number;max:number}
 type ActiveChatStream = { id: string; sessionId: string; controller: AbortController }
 type ConnectionRetryState = {attempt:number;readyAt:number}
@@ -82,8 +85,15 @@ function waitForReconnect(delay:number,signal:AbortSignal){
 	})
 }
 
+function materializeStreamText(entry:ChatEntry):ChatEntry{
+	if(!entry.streamText)return entry
+	const{streamText,...rest}=entry
+	return{...rest,content:streamTextValue(streamText)}
+}
+
 function deactivateReasoning(entry:ChatEntry):ChatEntry{
-	return entry.kind==='reasoning'&&entry.active?{...entry,active:false}:entry
+	if(entry.kind!=='reasoning'||(!entry.active&&!entry.streamText))return entry
+	return{...materializeStreamText(entry),active:false}
 }
 
 function compactTokenCount(value:number){
@@ -117,13 +127,17 @@ function appendAssistantDelta(entries:ChatEntry[],messageID:string,content:strin
 	if(!messageID||!content)return entries
 	const existing=entries.find(item=>item.id===messageID)
 	if(existing?.lifecycle==='committed')return entries
-	if(existing)return entries.map(item=>item.id===messageID?{...item,content:item.content+content,lifecycle:'streaming' as const}:deactivateReasoning(item))
-	return[...entries.map(deactivateReasoning),{id:messageID,kind:'assistant' as const,content,lifecycle:'streaming' as const}]
+	if(existing)return entries.map(item=>item.id===messageID?{...item,content:'',streamText:appendStreamText(item.streamText||streamTextFrom(item.content),content),lifecycle:'streaming' as const}:deactivateReasoning(item))
+	return[...entries.map(deactivateReasoning),{id:messageID,kind:'assistant' as const,content:'',streamText:streamTextFrom(content),lifecycle:'streaming' as const}]
 }
 
 function commitAssistantLifecycle(entries:ChatEntry[],messageID:string,progress=false){
 	if(!messageID)return entries
-	return entries.flatMap(item=>item.id===messageID?(item.content.trim()?[{...item,progress,lifecycle:'committed' as const}]:[]):[item])
+	return entries.flatMap(item=>{
+		if(item.id!==messageID)return[item]
+		const committed=materializeStreamText(item)
+		return committed.content.trim()?[{...committed,progress,lifecycle:'committed' as const}]:[]
+	})
 }
 
 function bindTurnUser(entries:ChatEntry[],userMessageID:string,clientUserEntryID:string){
@@ -277,6 +291,122 @@ function appendBoundedOutput(current:string|undefined,chunk:string){
 	const existing=current||''
 	const keep=Math.max(0,liveToolOutputBufferChars-chunk.length)
 	return existing.slice(-keep)+chunk
+}
+
+function appendReasoningDelta(entries:ChatEntry[],frame:AgentEvent){
+	if(!frame.content)return entries
+	const reasoningID=`reasoning_${frame.segment_id||'current'}`
+	const existing=entries.find(item=>item.id===reasoningID)
+	if(existing)return entries.map(item=>item.id===reasoningID?{
+		...item,content:'',streamText:appendStreamText(item.streamText||streamTextFrom(item.content),frame.content!),active:true,
+	}:item)
+	const entry:ChatEntry={id:reasoningID,kind:'reasoning',content:'',streamText:streamTextFrom(frame.content),active:true}
+	return[...entries.map(deactivateReasoning),entry]
+}
+
+function upsertToolEntry(entries:ChatEntry[],frame:AgentEvent){
+	if(!frame.content)return entries
+	const callID=frame.tool_call_id||''
+	const runID=frame.run_id||toolContentRunID(frame.content)
+	let index=callID?entries.findIndex(item=>item.kind==='tool'&&item.toolCallId===callID):-1
+	if(index<0&&runID)index=entries.findIndex(item=>item.kind==='tool'&&toolEntryRunID(item)===runID)
+	const transient=frame.status==='in_progress'||frame.status==='approval_required'
+	if(index>=0){
+		const current=entries[index]
+		if(transient&&!current.transient&&settledToolStatus(toolContentStatus(current.content)))return entries
+		return entries.map((item,itemIndex)=>itemIndex===index?{
+			...item,content:frame.content!,tool:frame.tool_name||item.tool,toolCallId:callID||item.toolCallId,runId:runID||item.runId,
+			liveStdout:transient?item.liveStdout:undefined,liveStderr:transient?item.liveStderr:undefined,transient,
+		}:item)
+	}
+	const entry:ChatEntry={
+		id:callID?`tool_${callID}`:clientId(),kind:'tool',content:frame.content,tool:frame.tool_name,toolCallId:callID||undefined,
+		runId:runID||undefined,transient,startedAt:Date.now(),
+	}
+	return[...entries.map(deactivateReasoning),entry]
+}
+
+type AgentEntryFrameOptions={
+	userEntryID:string
+	queuedImages:(count:number)=>string
+	stopped:string
+	agentError:string
+}
+
+const agentEntryFrameTypes=new Set([
+		'queue_started','turn_done','turn_steered','approval','approval_paused','approval_resuming','tool_output','token_usage','reasoning',
+		'reasoning_reset','tool','message_start','message','message_commit','message_reset','done','interrupted','model_error','error',
+	])
+
+function agentFrameAffectsEntries(frame:AgentEvent){
+	return!!frame.user_message_id||agentEntryFrameTypes.has(frame.type)
+}
+
+function reduceAgentEntryFrames(entries:ChatEntry[],frames:readonly AgentEvent[],options:AgentEntryFrameOptions){
+	let next=entries
+	for(const frame of frames){
+		if(frame.user_message_id)next=bindTurnUser(next,frame.user_message_id,options.userEntryID)
+		switch(frame.type){
+			case'queue_started':
+				if(frame.message_id){
+					const entry:ChatEntry={id:`queued_${frame.message_id}`,kind:'user',content:frame.content||(frame.attachment_count?options.queuedImages(frame.attachment_count):''),status:'pending'}
+					next=[...next.map(deactivateReasoning),entry]
+				}
+				break
+			case'turn_done':
+			case'turn_steered':
+				next=updateTurnUserStatus(next.map(deactivateReasoning),'completed',frame.user_message_id,options.userEntryID)
+				break
+			case'approval':
+			case'approval_paused':
+				next=updateToolStatusByRunID(updateTurnUserStatus(next,'waiting_for_approval',frame.user_message_id,options.userEntryID),'approval_required',frame.run_id)
+				break
+			case'approval_resuming':
+				next=updateToolStatusByRunID(updateTurnUserStatus(next,'pending',frame.user_message_id,options.userEntryID),'in_progress',frame.run_id)
+				break
+			case'tool_output':
+				next=appendToolOutput(next,frame)
+				break
+			case'token_usage':
+				if(frame.message_id&&frame.total_tokens){
+					const usage:ChatTokenUsage={input_tokens:frame.input_tokens||0,output_tokens:frame.output_tokens||0,total_tokens:frame.total_tokens}
+					next=next.map(item=>item.id===frame.message_id?{...item,tokenUsage:usage}:item)
+				}
+				break
+			case'reasoning':
+				next=appendReasoningDelta(next,frame)
+				break
+			case'reasoning_reset':
+				if(frame.segment_id){const reasoningID=`reasoning_${frame.segment_id}`;next=next.filter(item=>item.id!==reasoningID)}
+				break
+			case'tool':
+				next=upsertToolEntry(next,frame)
+				break
+			case'message_start':
+				if(frame.message_id)next=startAssistantLifecycle(next,frame.message_id)
+				break
+			case'message':
+				if(frame.message_id&&frame.content)next=appendAssistantDelta(next,frame.message_id,frame.content)
+				break
+			case'message_commit':
+				if(frame.message_id)next=commitAssistantLifecycle(next,frame.message_id,frame.status==='progress')
+				break
+			case'message_reset':
+				if(frame.message_id)next=resetAssistantLifecycle(next,frame.message_id)
+				break
+			case'done':
+				next=updateTurnUserStatus(next,'completed',frame.user_message_id,options.userEntryID)
+				break
+			case'interrupted':
+				next=[...updateTurnUserStatus(next.map(deactivateReasoning),'failed',frame.user_message_id,options.userEntryID),{id:clientId(),kind:'assistant',content:frame.content||options.stopped,lifecycle:'committed'}]
+				break
+			case'model_error':
+			case'error':
+				next=[...updateTurnUserStatus(next,'failed',frame.user_message_id,options.userEntryID),{id:clientId(),kind:'error',content:frame.error||options.agentError}]
+				break
+		}
+	}
+	return next
 }
 
 function tasksFromToolContent(content:string):AgentTaskList|undefined{
@@ -1533,7 +1663,8 @@ type ActiveFileTransfer={operation:'upload'|'download';name:string;loaded:number
 type FileTransferRecord={active:ActiveFileTransfer|null;conflict:SFTPOverwriteCandidate|null;uploadVersion:number}
 type WorkspaceTransferItem={file:File;path:string}
 type FileTransferManager={
-	records:ReadonlyMap<string,FileTransferRecord>
+	record:(key:string)=>FileTransferRecord
+	subscribe:(key:string,listener:()=>void)=>(()=>void)
 	uploadSFTP:(hostID:string,directory:string,files:File[])=>void
 	downloadSFTP:(hostID:string,entry:SFTPFileEntry)=>void
 	uploadWorkspace:(workspaceID:string,items:WorkspaceTransferItem[])=>boolean
@@ -1544,18 +1675,30 @@ type FileTransferManager={
 const FileTransferContext=createContext<FileTransferManager|null>(null)
 const sftpTransferKey=(hostID:string)=>`sftp:${hostID}`
 const workspaceTransferKey=(workspaceID:string)=>`workspace:${workspaceID}`
+const emptyFileTransferRecord:FileTransferRecord={active:null,conflict:null,uploadVersion:0}
 
 function FileTransferProvider({children}:{children:React.ReactNode}){
 	const {t}=useTranslation()
 	const notify=useNotifier()
-	const [records,setRecords]=useState<Map<string,FileTransferRecord>>(()=>new Map())
+	const [,refreshDialogs]=useState(0)
+	const recordsRef=useRef<ReadonlyMap<string,FileTransferRecord>>(new Map())
+	const subscribersRef=useRef(new Map<string,Set<()=>void>>())
+	const record=useCallback((key:string)=>recordsRef.current.get(key)||emptyFileTransferRecord,[])
+	const subscribe=useCallback((key:string,listener:()=>void)=>{
+		let subscribers=subscribersRef.current.get(key)
+		if(!subscribers){subscribers=new Set();subscribersRef.current.set(key,subscribers)}
+		subscribers.add(listener)
+		return()=>{subscribers!.delete(listener);if(!subscribers!.size)subscribersRef.current.delete(key)}
+	},[])
 	const controllers=useRef(new Map<string,AbortController>())
 	const updateRecord=useCallback((key:string,update:(current:FileTransferRecord)=>FileTransferRecord)=>{
-		setRecords(current=>{
-			const next=new Map(current)
-			next.set(key,update(current.get(key)||{active:null,conflict:null,uploadVersion:0}))
-			return next
-		})
+		const next=new Map(recordsRef.current)
+		const current=next.get(key)||emptyFileTransferRecord
+		const updated=update(current)
+		next.set(key,updated)
+		recordsRef.current=next
+		if(current.conflict!==updated.conflict)refreshDialogs(version=>version+1)
+		for(const listener of subscribersRef.current.get(key)||[])listener()
 	},[])
 	const begin=useCallback((key:string,transfer:ActiveFileTransfer)=>{
 		if(controllers.current.has(key))return null
@@ -1612,9 +1755,9 @@ function FileTransferProvider({children}:{children:React.ReactNode}){
 		finally{finish(key,controller)}
 	},[begin,finish,notify,updateRecord])
 	const overwrite=useCallback((hostID:string)=>{
-		const conflict=records.get(sftpTransferKey(hostID))?.conflict
+		const conflict=recordsRef.current.get(sftpTransferKey(hostID))?.conflict
 		if(conflict)void runSFTPUpload(hostID,conflict.directory,[{file:conflict.file,path:conflict.path}],true)
-	},[records,runSFTPUpload])
+	},[runSFTPUpload])
 	const dismissConflict=useCallback((hostID:string)=>updateRecord(sftpTransferKey(hostID),current=>({...current,conflict:null})),[updateRecord])
 	const uploadWorkspace=useCallback((workspaceID:string,items:WorkspaceTransferItem[])=>{
 		const key=workspaceTransferKey(workspaceID)
@@ -1656,24 +1799,37 @@ function FileTransferProvider({children}:{children:React.ReactNode}){
 		finally{finish(key,controller)}
 	},[begin,finish,notify,updateRecord])
 	const cancel=useCallback((key:string)=>controllers.current.get(key)?.abort(),[])
-	useEffect(()=>()=>{for(const controller of controllers.current.values())controller.abort();controllers.current.clear()},[])
-	const value=useMemo<FileTransferManager>(()=>({records,uploadSFTP,downloadSFTP,uploadWorkspace,downloadWorkspace,cancel}),[cancel,downloadSFTP,downloadWorkspace,records,uploadSFTP,uploadWorkspace])
-	return <FileTransferContext.Provider value={value}><>{children}{[...records].map(([key,record])=>record.conflict&&<SFTPOverwriteDialog key={key} path={record.conflict.path} busy={!!record.active} onCancel={()=>dismissConflict(key.slice(5))} onConfirm={()=>overwrite(key.slice(5))}/>)}</></FileTransferContext.Provider>
+	useEffect(()=>()=>{for(const controller of controllers.current.values())controller.abort();controllers.current.clear();subscribersRef.current.clear()},[])
+	const value=useMemo<FileTransferManager>(()=>({record,subscribe,uploadSFTP,downloadSFTP,uploadWorkspace,downloadWorkspace,cancel}),[cancel,downloadSFTP,downloadWorkspace,record,subscribe,uploadSFTP,uploadWorkspace])
+	return <FileTransferContext.Provider value={value}><>{children}{[...recordsRef.current].map(([key,record])=>record.conflict&&<SFTPOverwriteDialog key={key} path={record.conflict.path} busy={!!record.active} onCancel={()=>dismissConflict(key.slice(5))} onConfirm={()=>overwrite(key.slice(5))}/>)}</></FileTransferContext.Provider>
+}
+function applyChatSessionDelta(current:ChatSession[],delta:ChatSessionDelta){
+	const removed=new Set(delta.removed_ids||[])
+	const sessions=new Map(current.filter(session=>!removed.has(session.id)).map(session=>[session.id,session]))
+	for(const session of delta.sessions||[])sessions.set(session.id,session)
+	const next=[...sessions.values()].sort((left,right)=>right.updated_at.localeCompare(left.updated_at)||right.id.localeCompare(left.id)).slice(0,50)
+	return keepEquivalent(current,next)
 }
 
-function useSFTPTransfer(hostID:string){
+function useFileTransferRecord(manager:FileTransferManager|null,key:string,enabled:boolean){
+	const subscribe=useCallback((listener:()=>void)=>enabled&&key&&manager?manager.subscribe(key,listener):()=>{},[enabled,key,manager])
+	const snapshot=useCallback(()=>enabled&&key&&manager?manager.record(key):emptyFileTransferRecord,[enabled,key,manager])
+	return useSyncExternalStore(subscribe,snapshot,snapshot)
+}
+
+function useSFTPTransfer(hostID:string,active=true){
 	const manager=useContext(FileTransferContext)
-	if(!manager)throw new Error('FileTransferProvider is missing')
 	const key=sftpTransferKey(hostID)
-	const record=manager.records.get(key)||{active:null,conflict:null,uploadVersion:0}
+	const record=useFileTransferRecord(manager,key,active)
+	if(!manager)throw new Error('FileTransferProvider is missing')
 	return{...record,upload:(directory:string,files:File[])=>manager.uploadSFTP(hostID,directory,files),download:(entry:SFTPFileEntry)=>manager.downloadSFTP(hostID,entry),cancel:()=>manager.cancel(key)}
 }
 
-function useWorkspaceTransfer(workspaceID:string){
+function useWorkspaceTransfer(workspaceID:string,active=true){
 	const manager=useContext(FileTransferContext)
-	if(!manager)throw new Error('FileTransferProvider is missing')
 	const key=workspaceTransferKey(workspaceID)
-	const record=manager.records.get(key)||{active:null,conflict:null,uploadVersion:0}
+	const record=useFileTransferRecord(manager,key,active)
+	if(!manager)throw new Error('FileTransferProvider is missing')
 	return{...record,upload:(items:WorkspaceTransferItem[])=>manager.uploadWorkspace(workspaceID,items),download:(path:string,name:string,size:number)=>manager.downloadWorkspace(workspaceID,path,name,size),cancel:()=>manager.cancel(key)}
 }
 
@@ -1710,7 +1866,7 @@ function decodeTextFile(buffer:ArrayBuffer,name:string){
 	}
 }
 
-function SFTPBrowser({host,embedded=false,hosts=[],onHostSelect,onWorkspaceMode,onCollapse}:{host?:Host;embedded?:boolean;hosts?:Host[];onHostSelect?:(id:string)=>void;onWorkspaceMode?:()=>void;onCollapse?:()=>void}){
+function SFTPBrowser({host,active=true,embedded=false,hosts=[],onHostSelect,onWorkspaceMode,onCollapse}:{host?:Host;active?:boolean;embedded?:boolean;hosts?:Host[];onHostSelect?:(id:string)=>void;onWorkspaceMode?:()=>void;onCollapse?:()=>void}){
 	const {t,i18n:instance}=useTranslation()
 	const hostID=host?.id||''
 	const [path,setPath]=useState('')
@@ -1727,7 +1883,7 @@ function SFTPBrowser({host,embedded=false,hosts=[],onHostSelect,onWorkspaceMode,
 	const [deleteCandidate,setDeleteCandidate]=useState<SFTPDeleteCandidate|null>(null)
 	const [textFile,setTextFile]=useState<SFTPTextFile|null>(null)
 	const [openingFile,setOpeningFile]=useState('')
-	const {active:transfer,uploadVersion,upload:uploadTransfer,download,cancel}=useSFTPTransfer(hostID)
+	const {active:transfer,uploadVersion,upload:uploadTransfer,download,cancel}=useSFTPTransfer(hostID,active)
 	const loadRequest=useRef(0)
 	const observedUploadVersion=useRef(uploadVersion)
 	const load=useCallback(async(target='')=>{
@@ -1743,12 +1899,13 @@ function SFTPBrowser({host,embedded=false,hosts=[],onHostSelect,onWorkspaceMode,
 			setEntries([]);setListError(errorText(err))
 		}finally{if(request===loadRequest.current)setLoading(false)}
 	},[hostID])
-	useEffect(()=>{void load('')},[load])
+	useEffect(()=>{if(!active)return;observedUploadVersion.current=uploadVersion;void load('')},[active,load])
 	useEffect(()=>{
+		if(!active)return
 		if(observedUploadVersion.current===uploadVersion)return
 		observedUploadVersion.current=uploadVersion
 		void load(path)
-	},[load,path,uploadVersion])
+	},[active,load,path,uploadVersion])
 	const openTextFile=async(entry:SFTPFileEntry)=>{
 		if(openingFile)return
 		setOpeningFile(entry.path);setNotice('');setNoticeError(false)
@@ -2369,6 +2526,10 @@ const ChatSessionSidebar=memo(function ChatSessionSidebar({sessions,historyError
 	</>
 })
 
+const PersistentPageBoundary=memo(function PersistentPageBoundary({visible,children}:{visible:boolean;children:(visible:boolean)=>React.ReactNode}){
+	return children(visible)
+},(previous,next)=>!previous.visible&&!next.visible)
+
 function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, workspaceShells, capabilities, settings, imageTypes, agentAvailable, modelName, contextWindow, refreshConnections, dismissApproval, onCreateWorkspaceShell, onOpenWorkspaceShell, onWorkspaceShellStarted, onSettingsChanged, onHostChanged, onModelChanged, sidebarTarget, onSessionDeleted, onError }: {visible:boolean;onActivate:()=>void;hosts:Host[];providers:ModelProvider[];approvals:Approval[];runs:Run[];workspaceShells:SSHShell[];capabilities:ToolCapabilities;settings:SystemSettings|null;imageTypes:string[];agentAvailable:boolean;modelName?:string;contextWindow:number;refreshConnections:()=>Promise<void>;dismissApproval:(approvalID:string)=>void;onCreateWorkspaceShell:(workspaceID:string)=>Promise<void>;onOpenWorkspaceShell:(shell:SSHShell)=>void;onWorkspaceShellStarted:(shell:SSHShell)=>void;onSettingsChanged:(settings:SystemSettings)=>void;onHostChanged:(host:Host)=>void;onModelChanged:(provider:ModelProvider)=>void;sidebarTarget:HTMLDivElement|null;onSessionDeleted:(sessionID:string)=>void;onError:(message:string)=>void}) {
 		const {t,i18n:instance}=useTranslation()
 		const notify=useNotifier()
@@ -2428,18 +2589,22 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	const approvalCountsBySession=useMemo(()=>{const counts=new Map<string,number>();for(const approval of approvals){if(!approval.session_id)continue;counts.set(approval.session_id,(counts.get(approval.session_id)||0)+1)}return counts},[approvals])
 	const sessionBusy=running||detachedRunning
 	const queueingMessage=queueingMode!==null
-	const toolsRunning=useMemo(()=>entries.some(item=>item.kind==='tool'&&item.transient),[entries])
-	const conversationEntries=useMemo(()=>[...entries,...queuedMessageEntries(queuedMessages,count=>t('chat.queuedImages',{count}))],[entries,queuedMessages,t])
-	const renderEntries=useMemo(()=>groupedTaskToolEntries(conversationEntries),[conversationEntries])
+	const toolsRunning=useMemo(()=>running?false:entries.some(item=>item.kind==='tool'&&item.transient),[entries,running])
+	const liveSSHTaskTargets=useMemo(()=>visible?latestLiveSSHTaskTargets(entries):emptyLiveSSHTaskTargets,[entries,visible])
+	const liveSSHTasks=useLiveSSHTasks(visible,sessionId,liveSSHTaskTargets)
+	const liveSSHTaskOwnerByEntryID=useMemo(()=>new Map(liveSSHTaskTargets.map(target=>[target.entryID,target.taskID])),[liveSSHTaskTargets])
+	const conversationEntries=useMemo(()=>visible?[...entries,...queuedMessageEntries(queuedMessages,count=>t('chat.queuedImages',{count}))]:emptyChatEntries,[entries,queuedMessages,t,visible])
+	const renderEntries=useMemo(()=>visible?groupedTaskToolEntries(conversationEntries):emptyChatRenderItems,[conversationEntries,visible])
+	const latestConversationEntryID=conversationEntries.at(-1)?.id||''
 	const taskRows=useMemo(()=>tasks?buildSessionTaskRows(tasks):[],[tasks])
 	const latestCompletedAssistantEntryID=useMemo(()=>{
-		if(sessionBusy)return ''
+		if(!visible||sessionBusy)return ''
 		for(let index=entries.length-1;index>=0;index--){
 			const entry=entries[index]
 			if(entry.kind==='assistant'&&!entry.progress&&entry.lifecycle==='committed'&&entry.content)return entry.id
 		}
 		return ''
-	},[entries,sessionBusy])
+	},[entries,sessionBusy,visible])
 	const selectedWorkspace=capabilities.workspaces.find(workspace=>workspace.id===workspaceID)||capabilities.workspaces[0]
 	useEffect(()=>{sessionIDRef.current=sessionId},[sessionId])
 	useEffect(()=>{
@@ -2488,10 +2653,14 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	} catch (err) { if(sessionLoadRef.current===requestID)setHistoryError(errorText(err)) }
 	finally { if(sessionLoadRef.current===requestID)setLoadingSession('') }
 	}, [activeContextWindow])
-	useEffect(()=>subscribeApplicationEvents<ChatSession[]>('sessions',event=>{
+	useEffect(()=>subscribeApplicationEvents<ChatSession[]|ChatSessionDelta>('sessions',event=>{
 		if(event.type==='error'){setHistoryError(event.error||'');return}
 		if(event.type!=='event'||!event.data)return
-		const items=event.data
+		if(event.mode==='delta'){
+			setSessions(current=>applyChatSessionDelta(current,event.data as ChatSessionDelta));setHistoryError('')
+			return
+		}
+		const items=event.data as ChatSession[]
 		setSessions(current=>keepEquivalent(current,items));setHistoryError('')
 		if(initialSessionRestoredRef.current)return
 		initialSessionRestoredRef.current=true
@@ -2527,7 +2696,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			if(container&&stickToLatest.current){container.scrollTop=container.scrollHeight;lastMessagesScrollTop.current=container.scrollTop}
 		})
 		return()=>window.cancelAnimationFrame(autoScrollFrame.current)
-	},[entries,loadingSession,queuedMessages,visible])
+	},[latestConversationEntryID,loadingSession,sessionId,visible])
 
 	const trackUserScroll=useCallback(()=>{
 		const container=messagesRef.current
@@ -2616,98 +2785,55 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		finally{setRenamingSession(false)}
 	}
 
-	const handleAgentFrame=useCallback((frame:AgentEvent,userEntryID='',workspace='')=>{
-		const eventSessionID=frame.session_id||sessionIDRef.current
-		if(eventSessionID&&lastAgentEventSessionRef.current!==eventSessionID){lastAgentEventSessionRef.current=eventSessionID;lastAgentEventIDRef.current=0}
-		if(frame.event_id&&frame.event_id>lastAgentEventIDRef.current)lastAgentEventIDRef.current=frame.event_id
-		if(frame.session_id&&frame.session_id!==sessionIDRef.current){
-			sessionIDRef.current=frame.session_id
-			if(activeStreamRef.current)activeStreamRef.current.sessionId=frame.session_id
-			setSessionId(frame.session_id)
-			if(workspace)setBoundWorkspaceID(workspace)
-			rememberSession(frame.session_id)
-		}
-		if(frame.user_message_id)setEntries(old=>bindTurnUser(old,frame.user_message_id!,userEntryID))
-		if(frame.type==='retry'){
-			setModelRetry({attempt:frame.retry_attempt||1,max:frame.retry_max||1})
-		}else if(['approval','approval_paused','approval_resuming','reasoning','reasoning_reset','tool','tool_output','message_start','message','message_commit','message_reset','queued','queue_started','turn_done','turn_steered','done','interrupted','model_error','error'].includes(frame.type))setModelRetry(null)
-		if(frame.type==='queued'&&frame.message_id){
-			if(!startedQueueMessageIDsRef.current.has(frame.message_id))setQueuedMessages(current=>insertQueuedMessage(current,{id:frame.message_id!,message:frame.content||'',mode:frame.queue_mode||'followup',attachment_count:frame.attachment_count||0,created_at:new Date().toISOString()},frame.queue_position))
-		}
-		if(frame.type==='queue_started'&&frame.message_id){
-			startedQueueMessageIDsRef.current.add(frame.message_id)
-			setQueuedMessages(current=>current.filter(item=>item.id!==frame.message_id))
-			setEntries(old=>[...old.map(deactivateReasoning),{id:`queued_${frame.message_id}`,kind:'user',content:frame.content||(frame.attachment_count?t('chat.queuedImages',{count:frame.attachment_count}):''),status:'pending'}])
-		}
-		if(frame.type==='turn_done')setEntries(old=>updateTurnUserStatus(old.map(deactivateReasoning),'completed',frame.user_message_id,userEntryID))
-		if(frame.type==='turn_steered')setEntries(old=>updateTurnUserStatus(old.map(deactivateReasoning),'completed',frame.user_message_id,userEntryID))
-		if(frame.type==='approval'||frame.type==='approval_paused'){
-			setEntries(old=>updateToolStatusByRunID(updateTurnUserStatus(old,'waiting_for_approval',frame.user_message_id,userEntryID),'approval_required',frame.run_id))
-		}
-		if(frame.type==='approval_resuming'){
-			setEntries(old=>updateToolStatusByRunID(updateTurnUserStatus(old,'pending',frame.user_message_id,userEntryID),'in_progress',frame.run_id))
-		}
-		if(frame.type==='tool_output')setEntries(old=>appendToolOutput(old,frame))
-		if(frame.type==='context_usage'&&frame.context_tokens!==undefined)setContextUsage({tokens:frame.context_tokens,window:frame.context_window||activeContextWindow})
-		if(frame.type==='context_compression'){
-			setCompressingContext(frame.status==='in_progress')
-			if(frame.status==='completed'&&frame.output_tokens!==undefined)setContextUsage(current=>({tokens:frame.output_tokens!,window:current.window}))
-		}
-		if(frame.type==='token_usage'&&frame.message_id&&frame.total_tokens){
-			const usage:ChatTokenUsage={input_tokens:frame.input_tokens||0,output_tokens:frame.output_tokens||0,total_tokens:frame.total_tokens}
-			setEntries(old=>old.map(item=>item.id===frame.message_id?{...item,tokenUsage:usage}:item))
-		}
-		if(frame.type==='reasoning'&&frame.content){
-			const reasoningID=`reasoning_${frame.segment_id||'current'}`
-			setEntries(old=>{
-				const existing=old.find(item=>item.id===reasoningID)
-				if(existing)return old.map(item=>item.id===reasoningID?{...item,content:item.content+frame.content,active:true}:item)
-				return[...old.map(deactivateReasoning),{id:reasoningID,kind:'reasoning',content:frame.content!,active:true}]
-			})
-		}
-		if(frame.type==='reasoning_reset'&&frame.segment_id){
-			const reasoningID=`reasoning_${frame.segment_id}`
-			setEntries(old=>old.filter(item=>item.id!==reasoningID))
-		}
-		if(frame.type==='tool'&&frame.content){
-			if(frame.status!=='in_progress'&&['ssh_shell','workspace_shell','ssh_tunnel'].includes(frame.tool_name||''))void refreshConnections()
-			if(frame.tool_name==='workspace_shell'){
-				const shell=workspaceShellStartedByTool(frame.content)
-				if(shell)onWorkspaceShellStarted(shell)
+	const handleAgentFrames=useCallback((frames:readonly AgentEvent[],userEntryID='',workspace='')=>{
+		if(!frames.length)return
+		for(const frame of frames){
+			const eventSessionID=frame.session_id||sessionIDRef.current
+			if(eventSessionID&&lastAgentEventSessionRef.current!==eventSessionID){lastAgentEventSessionRef.current=eventSessionID;lastAgentEventIDRef.current=0}
+			if(frame.event_id&&frame.event_id>lastAgentEventIDRef.current)lastAgentEventIDRef.current=frame.event_id
+			if(frame.session_id&&frame.session_id!==sessionIDRef.current){
+				sessionIDRef.current=frame.session_id
+				if(activeStreamRef.current)activeStreamRef.current.sessionId=frame.session_id
+				setSessionId(frame.session_id)
+				if(workspace)setBoundWorkspaceID(workspace)
+				rememberSession(frame.session_id)
 			}
-			setEntries(old=>{
-				const callID=frame.tool_call_id||''
-				const runID=frame.run_id||toolContentRunID(frame.content!)
-				let index=callID?old.findIndex(item=>item.kind==='tool'&&item.toolCallId===callID):-1
-				if(index<0&&runID)index=old.findIndex(item=>item.kind==='tool'&&toolEntryRunID(item)===runID)
-				const transient=frame.status==='in_progress'||frame.status==='approval_required'
-				if(index>=0){
-					const current=old[index]
-					if(transient&&!current.transient&&settledToolStatus(toolContentStatus(current.content)))return old
-					return old.map((item,itemIndex)=>itemIndex===index?{...item,content:frame.content!,tool:frame.tool_name||item.tool,toolCallId:callID||item.toolCallId,runId:runID||item.runId,liveStdout:transient?item.liveStdout:undefined,liveStderr:transient?item.liveStderr:undefined,transient}:item)
+			if(frame.type==='retry'){
+				setModelRetry({attempt:frame.retry_attempt||1,max:frame.retry_max||1})
+			}else if(['approval','approval_paused','approval_resuming','reasoning','reasoning_reset','tool','tool_output','message_start','message','message_commit','message_reset','queued','queue_started','turn_done','turn_steered','done','interrupted','model_error','error'].includes(frame.type))setModelRetry(null)
+			if(frame.type==='queued'&&frame.message_id&&!startedQueueMessageIDsRef.current.has(frame.message_id)){
+				setQueuedMessages(current=>insertQueuedMessage(current,{id:frame.message_id!,message:frame.content||'',mode:frame.queue_mode||'followup',attachment_count:frame.attachment_count||0,created_at:new Date().toISOString()},frame.queue_position))
+			}
+			if(frame.type==='queue_started'&&frame.message_id){
+				startedQueueMessageIDsRef.current.add(frame.message_id)
+				setQueuedMessages(current=>current.filter(item=>item.id!==frame.message_id))
+			}
+			if(frame.type==='context_usage'&&frame.context_tokens!==undefined)setContextUsage({tokens:frame.context_tokens,window:frame.context_window||activeContextWindow})
+			if(frame.type==='context_compression'){
+				setCompressingContext(frame.status==='in_progress')
+				if(frame.status==='completed'&&frame.output_tokens!==undefined)setContextUsage(current=>({tokens:frame.output_tokens!,window:current.window}))
+			}
+			if(frame.type==='tool'&&frame.content){
+				if(frame.status!=='in_progress'&&['ssh_shell','workspace_shell','ssh_tunnel'].includes(frame.tool_name||''))void refreshConnections()
+				if(frame.tool_name==='workspace_shell'){
+					const shell=workspaceShellStartedByTool(frame.content)
+					if(shell)onWorkspaceShellStarted(shell)
 				}
-				const entry:ChatEntry={id:callID?`tool_${callID}`:clientId(),kind:'tool',content:frame.content!,tool:frame.tool_name,toolCallId:callID||undefined,runId:runID||undefined,transient,startedAt:Date.now()}
-				return[...old.map(deactivateReasoning),entry]
-			})
-			if(/^Task(Create|Get|Update|List)$/.test(frame.tool_name||'')){const nextTasks=tasksFromToolContent(frame.content);if(nextTasks)setTasks(nextTasks.items.length?nextTasks:null)}
+				if(/^Task(Create|Get|Update|List)$/.test(frame.tool_name||'')){const nextTasks=tasksFromToolContent(frame.content);if(nextTasks)setTasks(nextTasks.items.length?nextTasks:null)}
+			}
+			if(frame.type==='done'||frame.type==='interrupted'){
+				startedQueueMessageIDsRef.current.clear()
+				setStopping(false)
+				setQueuedMessages([])
+			}
+			if(frame.type==='model_error'||frame.type==='error'){
+				startedQueueMessageIDsRef.current.clear()
+				setQueuedMessages([])
+			}
 		}
-		if(frame.type==='message_start'&&frame.message_id)setEntries(old=>startAssistantLifecycle(old,frame.message_id!))
-		if(frame.type==='message'&&frame.message_id&&frame.content)setEntries(old=>appendAssistantDelta(old,frame.message_id!,frame.content!))
-		if(frame.type==='message_commit'&&frame.message_id)setEntries(old=>commitAssistantLifecycle(old,frame.message_id!,frame.status==='progress'))
-		if(frame.type==='message_reset'&&frame.message_id)setEntries(old=>resetAssistantLifecycle(old,frame.message_id!))
-		if(frame.type==='done'){
-			startedQueueMessageIDsRef.current.clear()
-			setStopping(false)
-			setQueuedMessages([])
-			setEntries(old=>updateTurnUserStatus(old,'completed',frame.user_message_id,userEntryID))
-		}
-		if(frame.type==='interrupted'){
-			startedQueueMessageIDsRef.current.clear()
-			setStopping(false)
-			setQueuedMessages([])
-			setEntries(old=>[...updateTurnUserStatus(old.map(deactivateReasoning),'failed',frame.user_message_id,userEntryID),{id:clientId(),kind:'assistant',content:frame.content||t('chat.stopped'),lifecycle:'committed'}])
-		}
-		if(frame.type==='model_error'||frame.type==='error'){startedQueueMessageIDsRef.current.clear();setQueuedMessages([]);setEntries(old=>[...updateTurnUserStatus(old,'failed',frame.user_message_id,userEntryID),{id:clientId(),kind:'error',content:frame.error||t('chat.agentError')}])}
+		if(frames.some(agentFrameAffectsEntries))setEntries(old=>reduceAgentEntryFrames(old,frames,{
+			userEntryID,queuedImages:count=>t('chat.queuedImages',{count}),stopped:t('chat.stopped'),agentError:t('chat.agentError'),
+		}))
 	},[activeContextWindow,onWorkspaceShellStarted,refreshConnections,t])
 
 	useEffect(()=>{
@@ -2738,7 +2864,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 					setEntries(old=>settledTurnEntries(state.messages||[],sessionId,old,true))
 					setConnectionRetry(null)
 					setHistoryError('')
-					await reconnectChatStream(sessionId,lastAgentEventSessionRef.current===sessionId?lastAgentEventIDRef.current:0,frame=>{if(active)handleAgentFrame(frame)},controller.signal)
+					await reconnectChatStream(sessionId,lastAgentEventSessionRef.current===sessionId?lastAgentEventIDRef.current:0,frames=>{if(active)handleAgentFrames(frames)},controller.signal)
 					attempt=0
 				}catch(err){
 					if(!active||controller.signal.aborted)return
@@ -2753,7 +2879,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		}
 		void reconnect()
 		return()=>{active=false;controller.abort()}
-	},[activeContextWindow,detachedRunning,handleAgentFrame,running,sessionId])
+	},[activeContextWindow,detachedRunning,handleAgentFrames,running,sessionId])
 
 	useEffect(()=>{
 		if(!visible||!sessionId||!toolsRunning||running)return
@@ -2767,16 +2893,28 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 				if(!disposed)setEntries(old=>mergePersistedToolEntries(page.messages||[],sessionId,old))
 			}).catch(()=>{/* the next state transition retries */}).finally(()=>{refreshInFlight=false})
 		}
-		const unsubscribe=subscribeApplicationEvents<ChatState>('chat_state',event=>{
+		const unsubscribe=subscribeApplicationEvents<Partial<ChatState>>('chat_state',event=>{
 			if(event.type!=='event'||!event.data)return
 			const state=event.data
+			const has=<Key extends keyof ChatState>(key:Key)=>Object.prototype.hasOwnProperty.call(state,key)
 			const messages=state.messages
 			if(messages?.length)setEntries(old=>mergePersistedToolEntries(messages,sessionId,old))
-			else if(state.running_tool_calls!==lastRunningToolCount){lastRunningToolCount=state.running_tool_calls;refreshPersistedTools()}
-			setQueuedMessages(current=>keepEquivalent(current,state.queued_messages||[]))
-			setContextUsage(current=>keepEquivalent(current,{tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)}))
-			if(state.active&&!running)setDetachedRunning(true)
-			if(!state.active&&!(state.running_tool_calls>0))setStopping(false)
+			if(has('running_tool_calls')){
+				const count=state.running_tool_calls||0
+				if(count!==lastRunningToolCount){lastRunningToolCount=count;if(!messages?.length)refreshPersistedTools()}
+			}
+			if(has('queued_messages'))setQueuedMessages(current=>keepEquivalent(current,state.queued_messages||[]))
+			if(has('tasks'))setTasks(state.tasks?.items?.length?state.tasks:null)
+			if(has('workspace_id')&&state.workspace_id!==undefined){setWorkspaceID(state.workspace_id);setBoundWorkspaceID(state.workspace_id)}
+			if(has('context_tokens')||has('context_window'))setContextUsage(current=>{
+				const tokens=state.context_tokens??current.tokens
+				const window=state.context_window??current.window
+				return keepEquivalent(current,{tokens,window:contextWindowForSession(tokens,window,activeContextWindow)})
+			})
+			if(has('active')){
+				setDetachedRunning(!!state.active)
+				if(!state.active&&(state.running_tool_calls??lastRunningToolCount)<=0)setStopping(false)
+			}
 		},{sessionId})
 		return()=>{disposed=true;unsubscribe()}
 	},[activeContextWindow,running,sessionId,toolsRunning,visible])
@@ -2798,10 +2936,10 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	    const entryImages=queryImages.map(image=>({id:image.id,name:image.file.name,mimeType:image.file.type,sizeBytes:image.file.size,url:image.url}))
 	    setEntries((old) => [...old.filter(item=>item.kind!=='error'), { id: userEntryID, kind: 'user', content: query, images:entryImages, status:'pending' }])
 	    try {
-			await streamChat(querySessionID,workspace,query,queryImages.map(image=>image.file),(frame:AgentEvent)=>{
+			await streamChat(querySessionID,workspace,query,queryImages.map(image=>image.file),(frames:readonly AgentEvent[])=>{
 				if(!isAttached())return
-				if(frame.session_id)querySessionID=frame.session_id
-				handleAgentFrame(frame,userEntryID,workspace)
+				for(const frame of frames)if(frame.session_id)querySessionID=frame.session_id
+				handleAgentFrames(frames,userEntryID,workspace)
 			},controller.signal)
 		}catch(err){
 			if(isAttached()&&!controller.signal.aborted){
@@ -2885,8 +3023,8 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	const collapseWorkspacePanel=useCallback(()=>setWorkspaceCollapsed(true),[setWorkspaceCollapsed])
 	const sessionSidebar=sidebarTarget&&createPortal(<ChatSessionSidebar sessions={sessions} historyError={historyError} approvalCounts={approvalCountsBySession} activeSessionID={sessionId} activeCurrentSession={sessionBusy||toolsRunning} workspaceSwitching={workspaceSwitching} loadingSession={loadingSession} onNew={newChat} onOpen={switchSession} onRename={openSessionRename} onDelete={openSessionDelete}/>,sidebarTarget)
 
-	return <>{sessionSidebar}<ChatVisibilityContext.Provider value={visible}><div className={`chat-layout ${workspacePanelCollapsed?'workspace-panel-collapsed ':''}${visible?'':'page-hidden'}`}>
-		<ChatWorkspacePanel key={selectedWorkspace?.id||''} active={visible} mode={fileBrowserMode} onModeChange={setFileBrowserMode} workspaces={capabilities.workspaces} workspaceID={selectedWorkspace?.id||''} hosts={hosts} sftpHostID={sftpHostID} onSFTPHostChange={setSFTPHostID} shells={workspaceShells} switching={workspaceSwitching} disabled={sessionBusy||!!loadingSession} bound={!!selectedWorkspace&&boundWorkspaceID===selectedWorkspace.id} onSelect={switchWorkspace} onCreateShell={onCreateWorkspaceShell} onOpenShell={onOpenWorkspaceShell} onCollapse={collapseWorkspacePanel}/>
+	return <>{sessionSidebar}<PersistentPageBoundary visible={visible}>{pageVisible=><ChatVisibilityContext.Provider value={pageVisible}><div className={`chat-layout ${workspacePanelCollapsed?'workspace-panel-collapsed ':''}${pageVisible?'':'page-hidden'}`}>
+		<ChatWorkspacePanel key={selectedWorkspace?.id||''} active={pageVisible} mode={fileBrowserMode} onModeChange={setFileBrowserMode} workspaces={capabilities.workspaces} workspaceID={selectedWorkspace?.id||''} hosts={hosts} sftpHostID={sftpHostID} onSFTPHostChange={setSFTPHostID} shells={workspaceShells} switching={workspaceSwitching} disabled={sessionBusy||!!loadingSession} bound={!!selectedWorkspace&&boundWorkspaceID===selectedWorkspace.id} onSelect={switchWorkspace} onCreateShell={onCreateWorkspaceShell} onOpenShell={onOpenWorkspaceShell} onCollapse={collapseWorkspacePanel}/>
 	  {workspacePanelCollapsed&&<button type="button" className="chat-panel-open-button" onClick={()=>setWorkspaceCollapsed(false)} title={t('workspace.expandPanel')} aria-label={t('workspace.expandPanel')}><PanelLeftOpen size={15}/></button>}
     <div className="chat-main panel">
 	  <div className="session-approval-slot">{currentApprovals.length>0&&<ApprovalDialog key={currentApprovals[0].id} approval={currentApprovals[0]} pendingCount={currentApprovals.length} hosts={hosts} running={sessionBusy||toolsRunning} stopping={stopping} onStop={()=>void stopAgent()} dismissApproval={dismissApproval} onApproved={result=>{if(result.status==='running')setEntries(old=>updateToolRunStatus(old,result.run_id,'in_progress'));if(result.shell?.kind==='workspace')onWorkspaceShellStarted(result.shell)}} onNotice={notify}/>}</div>
@@ -2895,8 +3033,13 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			<div className="messages" ref={messagesRef} onScroll={trackUserScroll} onWheel={pauseLatestOnWheel} onTouchMove={pauseLatestOnTouch}>
 				{historyHasMore&&<button type="button" className="chat-history-more" disabled={loadingOlderMessages} onClick={()=>void loadOlderMessages()}>{loadingOlderMessages?<LoaderCircle className="spin" size={13}/>:<History size={13}/>} {t('chat.loadEarlier')}</button>}
 				{conversationEntries.length === 0 && <div className="empty-chat"><div className="radar"><Activity size={35}/></div><h2>{t('chat.emptyTitle')}</h2></div>}
-				{renderEntries.map(item=>item.kind==='task_tool_group'?<TaskToolGroupCard key={item.id} group={item} onDisclosure={preserveToolDisclosurePosition}/>:<ChatBubble key={item.entry.id} sessionID={sessionId} entry={item.entry} showActions={item.entry.id===latestCompletedAssistantEntryID} runs={runs} hosts={hosts} onToolDisclosure={preserveToolDisclosurePosition}/>) }
+				{renderEntries.map(item=>{
+					if(item.kind==='task_tool_group')return <TaskToolGroupCard key={item.id} group={item} onDisclosure={preserveToolDisclosurePosition}/>
+					const liveTaskID=liveSSHTaskOwnerByEntryID.get(item.entry.id)
+					return <ChatBubble key={item.entry.id} sessionID={sessionId} entry={item.entry} showActions={item.entry.id===latestCompletedAssistantEntryID} runs={runs} hosts={hosts} liveSSHTaskOwner={!!liveTaskID} liveSSHTask={liveTaskID?liveSSHTasks.get(liveTaskID):undefined} onToolDisclosure={preserveToolDisclosurePosition}/>
+				})}
 				{(sessionBusy||toolsRunning)&&<div className={`model-activity ${stopping?'stopping':''}`} role="status" aria-live="polite"><span className="model-activity-mark" aria-hidden="true">✻</span><b key={stopping||connectionRetry||modelRetry?'priority':workStatusIndex}>{workStatusLabel}</b></div>}
+				{conversationEntries.length>0&&<div className="chat-scroll-anchor" aria-hidden="true"/>}
 			</div>
 			{tasks&&tasksExpanded&&<SessionTaskItems rows={taskRows}/>}
 		</div>
@@ -2909,7 +3052,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
     </div>
 	{sessionDeleteCandidate&&<DestructiveConfirmDialog title={t('chat.deleteTitle',{title:sessionDeleteCandidate.title})} busy={deletingSession} onCancel={()=>setSessionDeleteCandidate(null)} onConfirm={()=>void removeSession()}/>}
 	{sessionRenameCandidate&&<SessionRenameDialog key={sessionRenameCandidate.id} session={sessionRenameCandidate} busy={renamingSession} error={sessionRenameError} onCancel={()=>{if(!renamingSession)setSessionRenameCandidate(null)}} onConfirm={title=>void renameSession(title)}/>}
-	</div></ChatVisibilityContext.Provider></>
+	</div></ChatVisibilityContext.Provider>}</PersistentPageBoundary></>
 }
 
 function formatFileSize(size:number){if(size<1024)return `${size} B`;if(size<1024**2)return `${(size/1024).toFixed(1)} KiB`;if(size<1024**3)return `${(size/1024**2).toFixed(1)} MiB`;return `${(size/1024**3).toFixed(1)} GiB`}
@@ -2949,7 +3092,7 @@ const ChatWorkspacePanel=memo(function ChatWorkspacePanel({active,mode,onModeCha
 	const [preview,setPreview]=useState<WorkspaceFilePreview|null>(null),[previewLoading,setPreviewLoading]=useState(''),[deleting,setDeleting]=useState('')
 	const [deleteCandidate,setDeleteCandidate]=useState<WorkspaceDeleteCandidate|null>(null)
 	const [startingShell,setStartingShell]=useState(false)
-	const {active:transfer,uploadVersion,upload:startUpload,download:startDownload,cancel}=useWorkspaceTransfer(activeWorkspaceID)
+	const {active:transfer,uploadVersion,upload:startUpload,download:startDownload,cancel}=useWorkspaceTransfer(activeWorkspaceID,active&&mode==='workspace')
 	const uploading=transfer?.operation==='upload'
 	const observedUploadVersion=useRef(uploadVersion)
 	const loadRequestRef=useRef(0),previewPathRef=useRef('')
@@ -3057,7 +3200,7 @@ const ChatWorkspacePanel=memo(function ChatWorkspacePanel({active,mode,onModeCha
 		try{await onCreateShell(workspace.id)}finally{setStartingShell(false)}
 	}
 
-	if(mode==='sftp')return <SFTPBrowser key={sftpHost?.id||'no-host'} host={sftpHost} embedded hosts={hosts} onHostSelect={onSFTPHostChange} onWorkspaceMode={()=>onModeChange('workspace')} onCollapse={onCollapse}/>
+	if(mode==='sftp')return <SFTPBrowser key={sftpHost?.id||'no-host'} host={sftpHost} active={active} embedded hosts={hosts} onHostSelect={onSFTPHostChange} onWorkspaceMode={()=>onModeChange('workspace')} onCollapse={onCollapse}/>
 	if(!workspace)return <aside className="workspace-browser-panel panel empty"><div className="panel-header"><FileBrowserTabs mode={mode} onChange={onModeChange}/><div className="workspace-panel-actions"><button type="button" onClick={onCollapse} title={t('workspace.collapsePanel')} aria-label={t('workspace.collapsePanel')}><PanelLeftClose size={14}/></button></div></div><div className="workspace-empty"><FolderOpen size={23}/><span>{t('workspace.noConfigured')}</span></div></aside>
 	return <>
 		<aside className={`workspace-browser-panel panel ${dragging?'dragging':''}`} onDragEnter={dragEnter} onDragOver={dragOver} onDragLeave={dragLeave} onDrop={drop}>
@@ -3098,12 +3241,17 @@ const SessionTaskItems=memo(function SessionTaskItems({rows}:{rows:SessionTaskRo
 	return <section className={`session-task-view ${blocked?'blocked':'active'}`}><ul className="session-task-items">{rows.map(({task,blockers,status})=><li className={status} key={task.id}><span className="task-item-marker">{status==='completed'?<Check size={12}/>:status==='in_progress'?<LoaderCircle size={12}/>:status==='blocked'?<ShieldAlert size={12}/>:<CircleDot size={10}/>}</span><div title={task.description}><b>{task.subject}</b>{status==='blocked'&&<small>{t('agentTasks.blocked',{count:blockers.length})}</small>}</div><em>{task.owner||t(`statusLabels.${status}`,{defaultValue:status.replace('_',' ')})}</em></li>)}</ul></section>
 })
 
-const ChatBubble=memo(function ChatBubble({ sessionID, entry, showActions, runs, hosts, onToolDisclosure }: {sessionID:string;entry:ChatEntry;showActions:boolean;runs:Run[];hosts:Host[];onToolDisclosure:(summary:HTMLElement)=>void}) {
+const StreamingTextNodes=memo(function StreamingTextNodes({value}:{value:StreamText}){
+	return <>{value.blocks.map((block,index)=><span key={index}>{block}</span>)}{value.tail&&<span key="tail">{value.tail}</span>}</>
+})
+
+const ChatBubble=memo(function ChatBubble({ sessionID, entry, showActions, runs, hosts, liveSSHTaskOwner, liveSSHTask, onToolDisclosure }: {sessionID:string;entry:ChatEntry;showActions:boolean;runs:Run[];hosts:Host[];liveSSHTaskOwner:boolean;liveSSHTask?:LiveSSHTaskSnapshot;onToolDisclosure:(summary:HTMLElement)=>void}) {
 	const {t}=useTranslation()
-  if (entry.kind === 'tool') return <ToolEventCard sessionID={sessionID} entry={entry} runs={runs} hosts={hosts} onDisclosure={onToolDisclosure}/>
-  if (entry.kind === 'reasoning') return <ReasoningCard content={entry.content} active={!!entry.active}/>
-  if (entry.kind === 'assistant' && !entry.content) return null
-	return <div className={`bubble ${entry.kind} ${entry.status||''} ${entry.progress?'progress':''}`}><div className="avatar">{entry.kind === 'user' ? <UserRound size={17}/> : entry.kind === 'error' ? '!' : <Bot size={17}/>}</div><div><span className="bubble-label">{entry.kind === 'user' ? <>{t('chat.operator')}{entry.status==='failed'&&<em>{t('chat.turnIncomplete')}</em>}{entry.status==='pending'&&<em>{t('chat.processing')}</em>}{entry.status==='waiting_for_approval'&&<em>{t('statusLabels.approval_required')}</em>}</> : entry.kind === 'error' ? t('common.error') : 'OpsNerva'}</span>{entry.images&&entry.images.length>0&&<div className="message-images">{entry.images.map(image=>image.url?<a href={image.url} target="_blank" rel="noopener noreferrer" title={`${image.name} · ${formatFileSize(image.sizeBytes)}`} key={image.id}><img src={image.url} alt={image.name}/><span>{image.name}</span></a>:<span className="message-image-placeholder" title={`${image.name} · ${formatFileSize(image.sizeBytes)}`} key={image.id}><ImagePlus size={18}/><span>{image.name}</span></span>)}</div>}{entry.content&&<div className={`bubble-copy ${entry.kind==='assistant'&&entry.lifecycle!=='streaming'?'markdown-body':''}`}>{entry.kind==='assistant'&&entry.lifecycle!=='streaming'?<Suspense fallback={entry.content}><MarkdownMessage content={entry.content}/></Suspense>:entry.content}</div>}{showActions&&<div className="assistant-message-footer"><CopyButton value={entry.content} className="message-copy-button"/>{entry.tokenUsage&&<TokenUsageLine usage={entry.tokenUsage}/>}</div>}</div></div>
+  if (entry.kind === 'tool') return <ToolEventCard sessionID={sessionID} entry={entry} runs={runs} hosts={hosts} liveSSHTaskOwner={liveSSHTaskOwner} currentLiveSSHTask={liveSSHTask} onDisclosure={onToolDisclosure}/>
+  if (entry.kind === 'reasoning') return <ReasoningCard content={entry.content} streamText={entry.streamText} active={!!entry.active}/>
+	const hasContent=!!entry.content||!!entry.streamText?.length
+  if (entry.kind === 'assistant' && !hasContent) return null
+	return <div className={`bubble ${entry.kind} ${entry.status||''} ${entry.progress?'progress':''}`}><div className="avatar">{entry.kind === 'user' ? <UserRound size={17}/> : entry.kind === 'error' ? '!' : <Bot size={17}/>}</div><div><span className="bubble-label">{entry.kind === 'user' ? <>{t('chat.operator')}{entry.status==='failed'&&<em>{t('chat.turnIncomplete')}</em>}{entry.status==='pending'&&<em>{t('chat.processing')}</em>}{entry.status==='waiting_for_approval'&&<em>{t('statusLabels.approval_required')}</em>}</> : entry.kind === 'error' ? t('common.error') : 'OpsNerva'}</span>{entry.images&&entry.images.length>0&&<div className="message-images">{entry.images.map(image=>image.url?<a href={image.url} target="_blank" rel="noopener noreferrer" title={`${image.name} · ${formatFileSize(image.sizeBytes)}`} key={image.id}><img src={image.url} alt={image.name}/><span>{image.name}</span></a>:<span className="message-image-placeholder" title={`${image.name} · ${formatFileSize(image.sizeBytes)}`} key={image.id}><ImagePlus size={18}/><span>{image.name}</span></span>)}</div>}{hasContent&&<div className={`bubble-copy ${entry.kind==='assistant'&&entry.lifecycle!=='streaming'?'markdown-body':''}`}>{entry.kind==='assistant'&&entry.lifecycle!=='streaming'?<Suspense fallback={entry.content}><MarkdownMessage content={entry.content}/></Suspense>:entry.streamText?<StreamingTextNodes value={entry.streamText}/>:entry.content}</div>}{showActions&&<div className="assistant-message-footer"><CopyButton value={entry.content} className="message-copy-button"/>{entry.tokenUsage&&<TokenUsageLine usage={entry.tokenUsage}/>}</div>}</div></div>
 })
 
 function TokenUsageLine({usage}:{usage:ChatTokenUsage}){
@@ -3120,13 +3268,13 @@ function latestReasoningLine(content:string){
 	return characters.length>72?`…${characters.slice(-72).join('')}`:line
 }
 
-function ReasoningCard({content,active}:{content:string;active:boolean}){
+function ReasoningCard({content,streamText,active}:{content:string;streamText?:StreamText;active:boolean}){
 	const {t}=useTranslation()
 	const [expanded,setExpanded]=useState(false)
-  const latest=latestReasoningLine(content)
+	const latest=latestReasoningLine(streamText?streamTextTail(streamText,2048):content)
 	return <details className={`reasoning-card ${active?'active':''}`} open={expanded} onToggle={event=>setExpanded(event.currentTarget.open)}>
 	  <summary><span className="reasoning-icon"><BrainCircuit size={15}/></span><span className="reasoning-title">{active?t('chat.reasoningActive'):t('chat.reasoning')}</span><span className="reasoning-latest" title={latest}>{latest}</span><ChevronRight className="reasoning-chevron" size={14}/></summary>
-	  {expanded&&<div className="reasoning-content"><pre>{content}</pre></div>}
+	  {expanded&&<div className="reasoning-content"><pre>{streamText?<StreamingTextNodes value={streamText}/>:content}</pre></div>}
   </details>
 }
 
@@ -3165,60 +3313,24 @@ function limitedRecordEntries(value:JsonRecord,limit=toolCollectionPreviewItems)
 	return{entries,truncated}
 }
 function hasRecordEntries(value:JsonRecord){for(const key in value)if(Object.prototype.hasOwnProperty.call(value,key))return true;return false}
-function activeSSHTaskStatus(status:string){return['in_progress','running','approval_required','waiting_for_approval'].includes(status)}
-function liveSSHTaskSnapshot(taskID:string,value:JsonRecord|undefined):LiveSSHTaskSnapshot|undefined{
-	if(!value)return undefined
-	const task=jsonRecord(value.task)
-	return{id:taskID,revision:numberValue(task?.revision),task,result:jsonRecord(value.result),error:textValue(value.error)}
+const liveSSHTaskTargetCache=new WeakMap<ChatEntry,LiveSSHTaskTarget|null>()
+function liveSSHTaskTarget(entry:ChatEntry){
+	if(liveSSHTaskTargetCache.has(entry))return liveSSHTaskTargetCache.get(entry)||undefined
+	let target:LiveSSHTaskTarget|undefined
+	if(entry.kind==='tool'&&entry.tool==='ssh_task'){
+		const payload=parseRecord(entry.content),result=jsonRecord(payload.result),display=jsonRecord(payload._display),argumentsValue=jsonRecord(display?.arguments)
+		if(textValue(argumentsValue?.action)==='status'){
+			const taskID=textValue(payload.task_id)||textValue(result?.task_id)||textValue(argumentsValue?.task_id)
+			if(taskID)target={entryID:entry.id,taskID,status:textValue(payload.status)||textValue(result?.status)}
+		}
+	}
+	liveSSHTaskTargetCache.set(entry,target||null)
+	return target
 }
-function appendLiveTaskOutput(snapshot:LiveSSHTaskSnapshot,event:LiveSSHTaskEvent){
-	const stream=event.stream==='stderr'?'stderr':'stdout'
-	const result={...(snapshot.result||{})}
-	const totalKey=stream==='stderr'?'stderr_total_bytes':'stdout_total_bytes'
-	const offsetKey=stream==='stderr'?'stderr_offset_bytes':'stdout_offset_bytes'
-	const omittedKey=stream==='stderr'?'stderr_omitted_bytes':'stdout_omitted_bytes'
-	const currentTotal=numberValue(result[totalKey])
-	if(numberValue(event.offset_bytes)!==currentTotal)return snapshot
-	let content=`${textValue(result[stream])}${event.content||''}`
-	if(content.length>liveToolOutputBufferChars){content=content.slice(-liveToolOutputBufferChars);if(content.length&&/^[\uDC00-\uDFFF]/.test(content))content=content.slice(1)}
-	const total=numberValue(event.total_bytes)
-	const retainedBytes=new TextEncoder().encode(content).byteLength
-	const offset=Math.max(0,total-retainedBytes)
-	result[stream]=content;result[totalKey]=total;result[offsetKey]=offset;result[omittedKey]=offset
-	if(offset>0){result.output_limited=true;result.output_view='tail'}
-	return{...snapshot,revision:numberValue(event.revision),task:{...(snapshot.task||{}),revision:numberValue(event.revision)},result}
-}
-function useLiveSSHTaskSnapshot(visible:boolean,enabled:boolean,sessionID:string,taskID:string,storedStatus:string){
-	const [snapshot,setSnapshot]=useState<LiveSSHTaskSnapshot>()
-	const current=snapshot?.id===taskID?snapshot:undefined
-	const unavailable=!!current?.error&&!textValue(current.task?.id)
-	const liveStatus=unavailable?'failed':textValue(current?.task?.status)||textValue(current?.result?.status)
-	const watching=enabled&&!!taskID&&activeSSHTaskStatus(liveStatus||storedStatus)
-	useEffect(()=>{setSnapshot(undefined)},[taskID])
-	useEffect(()=>{
-		if(!visible||!watching||!sessionID)return
-		return subscribeApplicationEvents<JsonRecord|LiveSSHTaskEvent>('tasks',event=>{
-			if(event.type!=='event'||!event.data)return
-			if(event.mode==='snapshot'){
-				const next=liveSSHTaskSnapshot(taskID,jsonRecord(jsonRecord(event.data)?.[taskID]))
-				if(next)setSnapshot(next)
-				return
-			}
-			const update=event.data as LiveSSHTaskEvent
-			if(update.task_id!==taskID)return
-			if(update.type==='status'){
-				const next=liveSSHTaskSnapshot(taskID,jsonRecord(update.snapshot))
-				if(next)setSnapshot(next)
-				return
-			}
-			if(update.type==='output')setSnapshot(current=>{
-				if(!current||numberValue(update.revision)<=current.revision)return current
-				if(numberValue(update.revision)!==current.revision+1)return current
-				return appendLiveTaskOutput(current,update)
-			})
-		},{taskId:taskID,sessionId:sessionID})
-	},[sessionID,taskID,visible,watching])
-	return current
+function latestLiveSSHTaskTargets(entries:ChatEntry[]){
+	const latest=new Map<string,LiveSSHTaskTarget>()
+	for(const entry of entries){const target=liveSSHTaskTarget(entry);if(target)latest.set(target.taskID,target)}
+	return[...latest.values()]
 }
 function previewStructuredValue(value:unknown,depth=0):unknown{
 	if(typeof value==='string')return previewText(value)
@@ -3377,7 +3489,7 @@ const TaskToolGroupCard=memo(function TaskToolGroupCard({group,onDisclosure}:{gr
 	</details>
 },(previous,next)=>previous.onDisclosure===next.onDisclosure&&previous.group.tool===next.group.tool&&previous.group.entries.length===next.group.entries.length&&previous.group.entries.every((entry,index)=>entry===next.group.entries[index]))
 
-function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,onDisclosure}:{sessionID:string;entry:ChatEntry;runs:Run[];hosts:Host[];onDisclosure:(summary:HTMLElement)=>void}){
+function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,liveSSHTaskOwner,currentLiveSSHTask,onDisclosure}:{sessionID:string;entry:ChatEntry;runs:Run[];hosts:Host[];liveSSHTaskOwner:boolean;currentLiveSSHTask?:LiveSSHTaskSnapshot;onDisclosure:(summary:HTMLElement)=>void}){
 	const {t}=useTranslation()
 	const chatVisible=useContext(ChatVisibilityContext)
 	const [expanded,setExpanded]=useState(false)
@@ -3393,10 +3505,9 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,onDisclosure}:{s
 	const sshTaskAction=textValue(storedToolArguments?.action)
 	const sshTaskID=sshTaskOperation?(textValue(storedPayload.task_id)||textValue(jsonRecord(storedPayload.result)?.task_id)||textValue(storedToolArguments?.task_id)):''
 	const storedSSHTaskStatus=textValue(storedPayload.status)||textValue(jsonRecord(storedPayload.result)?.status)
-	const currentLiveSSHTask=useLiveSSHTaskSnapshot(chatVisible,sshTaskOperation&&sshTaskAction==='status',sessionID,sshTaskID,storedSSHTaskStatus)
 	const liveSSHTaskUnavailable=!!currentLiveSSHTask?.error&&!textValue(currentLiveSSHTask.task?.id)
 	const liveSSHTaskStatus=liveSSHTaskUnavailable?'failed':textValue(currentLiveSSHTask?.task?.status)||textValue(currentLiveSSHTask?.result?.status)
-	const useLiveSSHTask=!!currentLiveSSHTask&&activeSSHTaskStatus(storedSSHTaskStatus)
+	const useLiveSSHTask=liveSSHTaskOwner&&!!currentLiveSSHTask&&activeLiveTaskStatus(storedSSHTaskStatus)
 	const payload=useLiveSSHTask?{
 		...storedPayload,
 		...currentLiveSSHTask.result,
@@ -3425,6 +3536,7 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,onDisclosure}:{s
 	const payloadStatus=sshTaskOperation?(rawPayloadStatus==='running'?'in_progress':rawPayloadStatus==='waiting_for_approval'?'approval_required':rawPayloadStatus):rawPayloadStatus
   const runStatus=run?.status==='running'?'in_progress':run?.status
   const status=sshTaskOperation?payloadStatus||runStatus||'completed':payloadStatus==='approval_required'&&runStatus&&runStatus!=='approval_required'?runStatus:payloadStatus||runStatus||'completed'
+	const toolLive=status==='in_progress'&&(!sshTaskOperation||liveSSHTaskOwner)
 	const program=request?fullProgram(request):''
 	const script=request?textValue(request.script):''
 	const change=jsonRecord(request?.change)||jsonRecord(payload.change)||jsonRecord(resultPayload?.change)
@@ -3551,11 +3663,11 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,onDisclosure}:{s
 		const startedAt=Number.isFinite(persistedStartedAt)?persistedStartedAt!:firstSeenAt.current
 		const [now,setNow]=useState(Date.now())
 		useEffect(()=>{
-		if(!chatVisible||status!=='in_progress')return
-			setNow(Date.now())
-			const timer=window.setInterval(()=>setNow(Date.now()),1000)
-			return()=>window.clearInterval(timer)
-		},[chatVisible,status])
+		if(!chatVisible||!toolLive)return
+		setNow(Date.now())
+		const timer=window.setInterval(()=>setNow(Date.now()),1000)
+		return()=>window.clearInterval(timer)
+		},[chatVisible,toolLive])
 		const elapsed=formatLiveDuration(Math.max(0,Math.floor((now-startedAt)/1000)))
 		const resultExitCode=resultPayload?.exit_code
 	const exitCode=typeof payload.exit_code==='number'?payload.exit_code:typeof resultExitCode==='number'?resultExitCode:run?.exit_code??'—'
@@ -3572,7 +3684,7 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,onDisclosure}:{s
 		void api.chatMessage(sessionID,initialEntry.sourceMessageId).then(message=>setFullContent(message.content)).catch(error=>setDetailError(errorText(error))).finally(()=>setLoadingDetail(false))
 	}
 		  return <details className={`tool-event tool-event-rich ${sshTaskOperation?'ssh-task-tool ':''}${status}`} open={expanded}>
-			<summary onClick={event=>{event.preventDefault();toggleExpanded(event.currentTarget)}}><div className="tool-summary-icon">{toolSummaryIcon(entry.tool)}</div><div className="tool-summary-copy"><div className="tool-summary-heading"><b>{summaryLabel}</b>{sshTransfer?<ToolTransferRoute sourceHost={sourceHostName} sourcePath={sourcePath} destinationHost={hostName} destinationPath={remotePath}/>:workspaceTransferRoute?<WorkspaceTransferRoute {...workspaceTransferRoute}/>:<>{targets.length>0&&<div className="tool-summary-targets">{targets.map((target,index)=><span className={`tool-target-chip tool-target-${target.kind}`} title={`${target.label}: ${[target.name,target.id].filter(Boolean).join(' · ')}`} key={`${target.kind}_${target.id||target.name}_${index}`}>{target.kind==='host'?<Server size={11}/>:target.kind==='workspace'?<FolderOpen size={11}/>:<ListChecks size={11}/>} {(targets.length>1||target.kind==='scope')&&<em>{target.label}</em>}<b>{target.name||target.id}</b></span>)}</div>}{commandSummary!==summaryLabel&&<code className={sshTaskOperation?'tool-task-id':undefined} title={previewText(commandSummary)}>{previewText(commandSummary)}</code>}</>}</div></div><div className="tool-summary-statuses">{loadingDetail&&<LoaderCircle className="spin" size={12}/>} {autoApproved&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}<span className={`tool-status ${status}`} key={status}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight className="tool-summary-chevron" size={14}/>{request&&<div className="tool-summary-meta"><span className={`tool-summary-permission ${permission}`}><em>{t('tool.permission')}</em><b>{permission}</b></span>{purpose&&<span className="tool-summary-purpose" title={purpose}><em>{t('tool.reason')}</em><b>{purpose}</b></span>}</div>}{status==='in_progress'&&<div className={`tool-live-progress ${transferTotal>0?'determinate':''}`} role="progressbar" aria-valuemin={transferTotal>0?0:undefined} aria-valuemax={transferTotal>0?transferTotal:undefined} aria-valuenow={transferTotal>0?transferred:undefined}><i><em style={transferTotal>0?{width:`${transferPercent}%`}:undefined}/></i><span>{transferTotal>0?`${formatFileSize(transferred)} / ${formatFileSize(transferTotal)}`:sshTaskOperation?t('tool.liveTask'):entry.liveOutputStream?.toUpperCase()||''}</span><time>{elapsed}</time></div>}{outputPreview&&<div className={`tool-summary-preview ${previewStream==='stderr'?'stderr':''}`}><span>{shellAction==='output'?shellActionLabel:(previewStream||'stdout').toUpperCase()}</span><pre>{outputPreview}</pre></div>}</summary>
+			<summary onClick={event=>{event.preventDefault();toggleExpanded(event.currentTarget)}}><div className="tool-summary-icon">{toolSummaryIcon(entry.tool)}</div><div className="tool-summary-copy"><div className="tool-summary-heading"><b>{summaryLabel}</b>{sshTransfer?<ToolTransferRoute sourceHost={sourceHostName} sourcePath={sourcePath} destinationHost={hostName} destinationPath={remotePath}/>:workspaceTransferRoute?<WorkspaceTransferRoute {...workspaceTransferRoute}/>:<>{targets.length>0&&<div className="tool-summary-targets">{targets.map((target,index)=><span className={`tool-target-chip tool-target-${target.kind}`} title={`${target.label}: ${[target.name,target.id].filter(Boolean).join(' · ')}`} key={`${target.kind}_${target.id||target.name}_${index}`}>{target.kind==='host'?<Server size={11}/>:target.kind==='workspace'?<FolderOpen size={11}/>:<ListChecks size={11}/>} {(targets.length>1||target.kind==='scope')&&<em>{target.label}</em>}<b>{target.name||target.id}</b></span>)}</div>}{commandSummary!==summaryLabel&&<code className={sshTaskOperation?'tool-task-id':undefined} title={previewText(commandSummary)}>{previewText(commandSummary)}</code>}</>}</div></div><div className="tool-summary-statuses">{loadingDetail&&<LoaderCircle className="spin" size={12}/>} {autoApproved&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}<span className={`tool-status ${status}`} key={status}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight className="tool-summary-chevron" size={14}/>{request&&<div className="tool-summary-meta"><span className={`tool-summary-permission ${permission}`}><em>{t('tool.permission')}</em><b>{permission}</b></span>{purpose&&<span className="tool-summary-purpose" title={purpose}><em>{t('tool.reason')}</em><b>{purpose}</b></span>}</div>}{toolLive&&<div className={`tool-live-progress ${transferTotal>0?'determinate':''}`} role="progressbar" aria-valuemin={transferTotal>0?0:undefined} aria-valuemax={transferTotal>0?transferTotal:undefined} aria-valuenow={transferTotal>0?transferred:undefined}><i><em style={transferTotal>0?{width:`${transferPercent}%`}:undefined}/></i><span>{transferTotal>0?`${formatFileSize(transferred)} / ${formatFileSize(transferTotal)}`:sshTaskOperation?t('tool.liveTask'):entry.liveOutputStream?.toUpperCase()||''}</span><time>{elapsed}</time></div>}{outputPreview&&<div className={`tool-summary-preview ${previewStream==='stderr'?'stderr':''}`}><span>{shellAction==='output'?shellActionLabel:(previewStream||'stdout').toUpperCase()}</span><pre>{outputPreview}</pre></div>}</summary>
 		{expanded&&<div className="tool-event-body">
 		  {detailError&&<div className="tool-detail-error">{detailError}</div>}
 		  {shellPrimaryAction&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellPrimaryContent||'—'}/><pre>{previewText(shellPrimaryContent||'—',toolOutputPreviewChars)}</pre></div></section>}
@@ -3588,7 +3700,7 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,onDisclosure}:{s
 	  {(textValue(payload.message)||textValue(payload.next_action))&&<div className={`tool-guidance ${payload.ok===false||['failed','denied','interrupted'].includes(status)?'error':''}`}><ShieldAlert size={15}/><div><b>{textValue(payload.code)||t('tool.result')}</b>{textValue(payload.message)&&<p>{textValue(payload.message)}</p>}{textValue(payload.next_action)&&<small>{t('common.next')} · {textValue(payload.next_action)}</small>}</div></div>}
 	  {instruction&&<div className="tool-instruction"><ShieldAlert size={15}/><div><b>{t('tool.operatorInstruction')}</b><p>{instruction}</p></div></div>}
 	  {fileTransfer&&transferTotal>0&&<div className="file-transfer-progress" role="progressbar" aria-valuemin={0} aria-valuemax={transferTotal} aria-valuenow={transferred}><div><span>{t('tool.transferProgress')}</span><b>{formatFileSize(transferred)} / {formatFileSize(transferTotal)}</b></div><i><em style={{width:`${transferPercent}%`}}/></i></div>}
-	  {workspaceDirectoryEntries!==undefined?<div className="tool-output-grid"><WorkspaceDirectoryOutput entries={workspaceDirectoryEntries} content={stdout}/>{stderr&&<ToolOutputPanel kind="stderr" label={outputLabel(t('tool.stderrResult'),stderrOmitted)} content={stderr} live={status==='in_progress'}/>}</div>:shellOperation&&shellChunks.length>0?<ShellOutputChunks chunks={shellChunks} live={status==='in_progress'}/>:((stdout&&(!shellOutputAction||shellChunks.length>0))||stderr)&&<div className="tool-output-grid">{stdout&&(!shellOutputAction||shellChunks.length>0)&&<ToolOutputPanel kind="stdout" label={outputLabel('STDOUT',stdoutOmitted)} content={stdout} live={status==='in_progress'}/>} {stderr&&<ToolOutputPanel kind="stderr" label={outputLabel(t('tool.stderrResult'),stderrOmitted)} content={stderr} live={status==='in_progress'}/>}</div>}
+	  {workspaceDirectoryEntries!==undefined?<div className="tool-output-grid"><WorkspaceDirectoryOutput entries={workspaceDirectoryEntries} content={stdout}/>{stderr&&<ToolOutputPanel kind="stderr" label={outputLabel(t('tool.stderrResult'),stderrOmitted)} content={stderr} live={toolLive}/>}</div>:shellOperation&&shellChunks.length>0?<ShellOutputChunks chunks={shellChunks} live={toolLive}/>:((stdout&&(!shellOutputAction||shellChunks.length>0))||stderr)&&<div className="tool-output-grid">{stdout&&(!shellOutputAction||shellChunks.length>0)&&<ToolOutputPanel kind="stdout" label={outputLabel('STDOUT',stdoutOmitted)} content={stdout} live={toolLive}/>} {stderr&&<ToolOutputPanel kind="stderr" label={outputLabel(t('tool.stderrResult'),stderrOmitted)} content={stderr} live={toolLive}/>}</div>}
 	  {(request||sshTaskOperation)&&(exitCode!=='—'||duration!=='—'||waitDeadlineReached||shellHasMore||sshTaskOperation&&(!!runID||numberValue(payload.stdout_total_bytes)>0||numberValue(payload.stderr_total_bytes)>0))&&<aside className="tool-context-pane"><dl className="tool-context-grid">{sshTaskOperation&&runID&&<div><dt>{t('tool.runId')}</dt><dd>{runID}</dd></div>}{exitCode!=='—'&&<div><dt>{t('tool.exitCode')}</dt><dd>{exitCode}</dd></div>}{duration!=='—'&&<div><dt>{t('tool.duration')}</dt><dd>{duration}</dd></div>}{sshTaskOperation&&numberValue(payload.stdout_total_bytes)>0&&<div><dt>STDOUT</dt><dd>{formatFileSize(numberValue(payload.stdout_total_bytes))}</dd></div>}{sshTaskOperation&&numberValue(payload.stderr_total_bytes)>0&&<div><dt>STDERR</dt><dd>{formatFileSize(numberValue(payload.stderr_total_bytes))}</dd></div>}{(waitDeadlineReached||shellHasMore)&&<div><dt>{t('common.status')}</dt><dd>{waitDeadlineReached?t('tool.waitDeadline'):t('tool.moreOutput')}</dd></div>}</dl></aside>}
 	  <LazyJSONDetails value={rawPayload}/>
     </div>}

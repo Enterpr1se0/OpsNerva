@@ -288,7 +288,7 @@ async function responseError(response:Response){
 	return error
 }
 
-async function consumeAgentEventStream(response:Response,onEvent:(event:AgentEvent)=>void){
+async function consumeAgentEventStream(response:Response,onEvents:(events:readonly AgentEvent[])=>void){
 	if(!response.ok||!response.body)throw await responseError(response)
 	const reader=response.body.getReader()
 	const decoder=new TextDecoder()
@@ -303,7 +303,7 @@ async function consumeAgentEventStream(response:Response,onEvent:(event:AgentEve
 		flushTimer=undefined
 		const events=pending
 		pending=[]
-		for(const event of events)onEvent(event)
+		if(events.length)onEvents(events)
 	}
 	const isContentDelta=(event:AgentEvent)=>
 		!!event.content&&(event.type==='reasoning'||event.type==='tool_output'||(event.type==='message'&&event.role!=='tool'))
@@ -316,8 +316,8 @@ async function consumeAgentEventStream(response:Response,onEvent:(event:AgentEve
 	const dispatch=(event:AgentEvent)=>{
 		if(event.type==='done'||event.type==='error'||event.type==='model_error'||event.type==='interrupted')terminalEventReceived=true
 		if(!isContentDelta(event)&&!isProgressUpdate(event)){
+			pending.push(event)
 			flushPending()
-			onEvent(event)
 			return
 		}
 		const previous=pending.at(-1)
@@ -350,7 +350,7 @@ async function consumeAgentEventStream(response:Response,onEvent:(event:AgentEve
 	if(!terminalEventReceived)throw new Error('SSE stream ended before the Agent sent a terminal event')
 }
 
-export async function streamChat(sessionId: string, workspaceId:string, message: string, images:File[], onEvent: (event: AgentEvent) => void, signal?: AbortSignal) {
+export async function streamChat(sessionId: string, workspaceId:string, message: string, images:File[], onEvents: (events:readonly AgentEvent[]) => void, signal?: AbortSignal) {
 	const body=new FormData()
 	body.set('session_id',sessionId)
 	body.set('workspace_id',workspaceId)
@@ -362,12 +362,12 @@ export async function streamChat(sessionId: string, workspaceId:string, message:
 	body,
     signal,
   })
-	return consumeAgentEventStream(response,onEvent)
+	return consumeAgentEventStream(response,onEvents)
 }
 
-export async function reconnectChatStream(sessionId:string,after:number,onEvent:(event:AgentEvent)=>void,signal?:AbortSignal){
+export async function reconnectChatStream(sessionId:string,after:number,onEvents:(events:readonly AgentEvent[])=>void,signal?:AbortSignal){
 	const response=await fetch(`/api/v1/chat/${encodeURIComponent(sessionId)}/events?after=${Math.max(0,after)}`,{
 		credentials:'same-origin',headers:{Accept:'text/event-stream'},signal,
 	})
-	return consumeAgentEventStream(response,onEvent)
+	return consumeAgentEventStream(response,onEvents)
 }
