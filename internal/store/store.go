@@ -1739,6 +1739,16 @@ func projectedChatToolContent(message domain.ChatMessage) string {
 	if message.RunID != "" {
 		value["run_id"] = message.RunID
 	}
+	if message.ToolName == "ssh_task" {
+		var arguments struct {
+			Action string `json:"action"`
+			TaskID string `json:"task_id"`
+		}
+		if json.Unmarshal([]byte(message.ToolArguments), &arguments) == nil && arguments.Action == "status" && arguments.TaskID != "" {
+			value["task_id"] = arguments.TaskID
+			value["_display"] = map[string]any{"arguments": map[string]string{"action": arguments.Action, "task_id": arguments.TaskID}}
+		}
+	}
 	encoded, _ := json.Marshal(value)
 	return string(encoded)
 }
@@ -2115,7 +2125,7 @@ SELECT sessions.session_id,
   (SELECT count(*) FROM chat_messages AS messages WHERE messages.session_id=sessions.session_id),
   sessions.updated_at
 FROM chat_sessions AS sessions
-ORDER BY sessions.updated_at DESC
+ORDER BY sessions.updated_at DESC,sessions.session_id DESC
 LIMIT ?`, limit)
 	if err != nil {
 		return nil, err

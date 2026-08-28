@@ -77,6 +77,51 @@ func TestChatMessagePageUsesStableCursorAndProjectsLargeToolResults(t *testing.T
 	}
 }
 
+func TestProjectedSSHTaskStatusKeepsLiveSubscriptionIdentity(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, t.TempDir()+"/task-projection.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := st.CreateChatSession(ctx, "task-projection", ""); err != nil {
+		t.Fatal(err)
+	}
+	userMessageID, err := st.AppendPendingChatMessage(ctx, "task-projection", "user", "wait for the task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.StartChatToolCall(ctx, domain.ChatToolCall{
+		SessionID: "task-projection", UserMessageID: userMessageID, ToolCallID: "call-task-status", ToolName: "ssh_task",
+		ArgumentsJSON: `{"action":"status","task_id":"task-live"}`,
+		ResultJSON:    `{"status":"in_progress","task_id":"task-live","stdout":"` + strings.Repeat("x", maxChatToolMessagePreviewChars+1024) + `"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := st.ListChatMessagesPage(ctx, "task-projection", 10, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Messages) != 2 || !page.Messages[1].ContentTruncated {
+		t.Fatalf("projected messages = %#v", page.Messages)
+	}
+	var content struct {
+		TaskID  string `json:"task_id"`
+		Display struct {
+			Arguments struct {
+				Action string `json:"action"`
+				TaskID string `json:"task_id"`
+			} `json:"arguments"`
+		} `json:"_display"`
+	}
+	if err := json.Unmarshal([]byte(page.Messages[1].Content), &content); err != nil {
+		t.Fatal(err)
+	}
+	if content.TaskID != "task-live" || content.Display.Arguments.Action != "status" || content.Display.Arguments.TaskID != "task-live" {
+		t.Fatalf("projected task identity = %#v", content)
+	}
+}
+
 func TestChatHistoryHasNoImplicitLimit(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(ctx, t.TempDir()+"/chat-history.db")
