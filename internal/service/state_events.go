@@ -100,7 +100,7 @@ func (s *Service) PublishChatState(sessionID string) {
 		return
 	}
 	s.publishStateEvent(StateEvent{Topic: StateTopicChatState, SessionID: sessionID})
-	s.publishStateEvent(StateEvent{Topic: StateTopicSessions})
+	s.publishStateEvent(StateEvent{Topic: StateTopicSessions, SessionID: sessionID})
 }
 
 func (s *Service) publishStoreChange(change store.Change) {
@@ -110,7 +110,7 @@ func (s *Service) publishStoreChange(change store.Change) {
 	case store.ChangeAudit:
 		s.publishStateEvent(StateEvent{Topic: StateTopicAudit})
 	case store.ChangeSessions:
-		s.publishStateEvent(StateEvent{Topic: StateTopicSessions})
+		s.publishStateEvent(StateEvent{Topic: StateTopicSessions, SessionID: change.SessionID})
 	case store.ChangeChatState:
 		s.publishStateEvent(StateEvent{Topic: StateTopicChatState, SessionID: change.SessionID})
 	}

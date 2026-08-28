@@ -32,7 +32,7 @@ func TestCommittedStoreChangesReachStateSubscribers(t *testing.T) {
 	if _, err := st.CreateChatSession(ctx, "session-state", ""); err != nil {
 		t.Fatal(err)
 	}
-	assertStateTopic(t, events, StateTopicSessions, "")
+	assertStateTopic(t, events, StateTopicSessions, "session-state")
 	assertStateTopic(t, events, StateTopicChatState, "session-state")
 
 	now := time.Now().UTC()
