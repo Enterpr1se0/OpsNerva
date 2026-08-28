@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/transfer"
 
 	"github.com/pkg/sftp"
 )
@@ -33,7 +34,7 @@ type transferSummary struct {
 	Overwritten       bool   `json:"overwritten"`
 }
 
-func (t *NativeSSHTransport) TransferFile(ctx context.Context, source, destination ConnectionSpec, req domain.ExecRequest, progress func(transferredBytes, totalBytes int64)) (RawResult, error) {
+func (t *NativeSSHTransport) TransferFile(ctx context.Context, source, destination ConnectionSpec, req domain.ExecRequest, progress transfer.Reporter) (RawResult, error) {
 	if err := validateNativeConnection(source); err != nil {
 		return RawResult{}, fmt.Errorf("invalid source SSH connection: %w", err)
 	}
@@ -109,7 +110,7 @@ func (t *NativeSSHTransport) TransferFile(ctx context.Context, source, destinati
 	}()
 
 	digest := sha256.New()
-	progressWriter := newTransferProgressWriter(io.MultiWriter(destinationFile, digest), sourceInfo.Size(), progress)
+	progressWriter := transfer.NewWriter(io.MultiWriter(destinationFile, digest), sourceInfo.Size(), progress)
 	written, copyErr := io.Copy(progressWriter, sourceFile)
 	progressWriter.Finish()
 	sourceCloseErr := sourceFile.Close()
@@ -152,48 +153,6 @@ func (t *NativeSSHTransport) TransferFile(ctx context.Context, source, destinati
 		Bytes: written, SHA256: actualDigest, Mode: sourceInfo.Mode().Perm().String(), Overwritten: replaceDestination,
 	})
 	return RawResult{ExitCode: 0, Stdout: append(encoded, '\n'), Duration: time.Since(started)}, nil
-}
-
-type transferProgressWriter struct {
-	writer      io.Writer
-	total       int64
-	written     int64
-	next        int64
-	step        int64
-	lastEmitted int64
-	progress    func(int64, int64)
-}
-
-func newTransferProgressWriter(writer io.Writer, total int64, progress func(int64, int64)) *transferProgressWriter {
-	step := total / 100
-	if step < 256*1024 {
-		step = 256 * 1024
-	}
-	reporter := &transferProgressWriter{writer: writer, total: total, next: step, step: step, progress: progress}
-	if progress != nil {
-		progress(0, total)
-	}
-	return reporter
-}
-
-func (w *transferProgressWriter) Write(data []byte) (int, error) {
-	n, err := w.writer.Write(data)
-	w.written += int64(n)
-	if w.progress != nil && (w.written >= w.next || w.written == w.total) {
-		w.progress(w.written, w.total)
-		w.lastEmitted = w.written
-		for w.next <= w.written {
-			w.next += w.step
-		}
-	}
-	return n, err
-}
-
-func (w *transferProgressWriter) Finish() {
-	if w.progress != nil && w.lastEmitted != w.written {
-		w.progress(w.written, w.total)
-		w.lastEmitted = w.written
-	}
 }
 
 func validateHostTransferRequest(req domain.ExecRequest) error {

@@ -23,6 +23,7 @@ import (
 	"github.com/Enterpr1se0/opsnerva/internal/security"
 	"github.com/Enterpr1se0/opsnerva/internal/sshx"
 	"github.com/Enterpr1se0/opsnerva/internal/store"
+	"github.com/Enterpr1se0/opsnerva/internal/transfer"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -291,15 +292,22 @@ func TestExecutionWithNonzeroExitAndNoOutputRemainsFailed(t *testing.T) {
 	}
 }
 
-func (f *fakeTransport) TransferFile(_ context.Context, source, destination sshx.ConnectionSpec, req domain.ExecRequest, progress func(int64, int64)) (sshx.RawResult, error) {
+func (f *fakeTransport) TransferFile(_ context.Context, source, destination sshx.ConnectionSpec, req domain.ExecRequest, progress transfer.Reporter) (sshx.RawResult, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, req)
 	f.hosts = append(f.hosts, source.Target, destination.Target)
 	f.mu.Unlock()
 	if progress != nil {
-		progress(12, 12)
+		progress(transfer.Progress{Transferred: 12, Total: 12})
 	}
 	return sshx.RawResult{ExitCode: 0, Stdout: []byte(`{"bytes":12,"sha256":"transfer-digest"}` + "\n"), Duration: time.Millisecond}, nil
+}
+
+func (f *fakeTransport) UploadWorkspaceFile(ctx context.Context, connection sshx.ConnectionSpec, req domain.ExecRequest, progress transfer.Reporter) (sshx.RawResult, error) {
+	if progress != nil {
+		progress(transfer.Progress{Transferred: 12, Total: 12})
+	}
+	return f.Exec(ctx, connection, req)
 }
 
 func TestHostCredentialsAreEncryptedPreservedAndNeverSerialized(t *testing.T) {

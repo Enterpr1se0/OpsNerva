@@ -86,6 +86,10 @@ type Service struct {
 	executionOwners         map[string]executionOwner
 	executionSubscriberID   uint64
 	executionEventSequence  atomic.Uint64
+	stateEventMu            sync.RWMutex
+	stateSubscribers        map[uint64]*stateSubscriber
+	stateSubscriberID       uint64
+	unsubscribeStoreChanges func()
 	tunnelMu                sync.RWMutex
 	tunnels                 map[string]*sshTunnelState
 	shellMu                 sync.RWMutex
@@ -130,6 +134,7 @@ func New(st *store.Store, transport sshx.Transport, encryptor *security.Encrypto
 			result.validators[validator.ID] = validator
 		}
 	}
+	result.unsubscribeStoreChanges = st.SubscribeChanges(result.publishStoreChange)
 	return result
 }
 
@@ -195,6 +200,10 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	if !s.executionClosed {
 		s.executionClosed = true
 		s.executionCancel()
+		if s.unsubscribeStoreChanges != nil {
+			s.unsubscribeStoreChanges()
+			s.unsubscribeStoreChanges = nil
+		}
 	}
 	s.executionMu.Unlock()
 
@@ -1504,8 +1513,16 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 		}
 	} else if req.Mode == domain.ExecSSHFileTransfer {
 		raw, execErr = s.executeSSHFileTransfer(ctx, run, req)
+	} else if req.Mode == domain.ExecWorkspaceUpload {
+		transport, ok := s.transport.(sshx.WorkspaceFileUploadTransport)
+		if !ok {
+			execErr = fmt.Errorf("configured SSH transport does not support Workspace file upload")
+			raw.ExitCode = -1
+		} else {
+			raw, execErr = transport.UploadWorkspaceFile(ctx, connection, req, s.executionTransferReporter(run))
+		}
 	} else if req.Mode == domain.ExecWorkspaceDownload {
-		raw, execErr = s.executeWorkspaceDownload(ctx, connection, req, actor)
+		raw, execErr = s.executeWorkspaceDownload(ctx, connection, req, run, actor)
 	} else if isWorkspaceMode(req.Mode) {
 		var workspaceStream func(string, []byte)
 		if outputSink != nil {

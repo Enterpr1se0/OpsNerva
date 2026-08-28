@@ -843,6 +843,10 @@ func TestAgentWorkspaceDeleteRequiresApprovalAndRecursiveIntent(t *testing.T) {
 
 func TestWorkspaceDownloadUsesVersionBoundAtomicDestination(t *testing.T) {
 	svc, root := newWorkspaceService(t, "read_write")
+	const sessionID = "workspace-download-progress"
+	events, unsubscribe := svc.SubscribeExecutionEvents(sessionID)
+	defer unsubscribe()
+	executionCtx := WithExecutionOwner(WithSessionID(context.Background(), sessionID), "call-workspace-download", "workspace_file_download", `{}`)
 	content := []byte("downloaded over SFTP\n")
 	remotePath := "/tmp/report.txt"
 	transport := &workspaceDownloadTransport{fakeTransport: &fakeTransport{}, content: content, remotePath: remotePath}
@@ -861,7 +865,7 @@ func TestWorkspaceDownloadUsesVersionBoundAtomicDestination(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(root, "downloads"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	pending, err = svc.DownloadHostFileToWorkspace(context.Background(), host.ID, remotePath, digest, "project", "downloads/report.txt", 30, "download the reviewed report", "eino-agent")
+	pending, err = svc.DownloadHostFileToWorkspace(executionCtx, host.ID, remotePath, digest, "project", "downloads/report.txt", 30, "download the reviewed report", "eino-agent")
 	if err != nil || pending.Status != "approval_required" {
 		t.Fatalf("Workspace download did not require approval: result=%#v err=%v", pending, err)
 	}
@@ -876,6 +880,7 @@ func TestWorkspaceDownloadUsesVersionBoundAtomicDestination(t *testing.T) {
 	if err != nil || approved.Status != "completed" || approved.File == nil || approved.File.SHA256 != digest {
 		t.Fatalf("approved Workspace download failed: result=%#v err=%v", approved, err)
 	}
+	expectWorkspaceTransferProgress(t, events, pending.RunID, int64(len(content)))
 	stored, err := os.ReadFile(filepath.Join(root, "downloads", "report.txt"))
 	if err != nil || !bytes.Equal(stored, content) {
 		t.Fatalf("downloaded content=%q err=%v", stored, err)
@@ -897,6 +902,10 @@ func TestWorkspaceUploadRejectsReadOnlyWorkspace(t *testing.T) {
 
 func TestWorkspaceDirectUploadUsesOneVersionBoundApproval(t *testing.T) {
 	svc, root := newWorkspaceService(t, "read_only")
+	const sessionID = "workspace-upload-progress"
+	events, unsubscribe := svc.SubscribeExecutionEvents(sessionID)
+	defer unsubscribe()
+	executionCtx := WithExecutionOwner(WithSessionID(context.Background(), sessionID), "call-workspace-upload", "workspace_file_upload", `{}`)
 	transport := &fakeTransport{}
 	svc.transport = transport
 	host, err := svc.SaveHost(context.Background(), domain.HostInput{
@@ -911,7 +920,7 @@ func TestWorkspaceDirectUploadUsesOneVersionBoundApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := fmt.Sprintf("%x", sha256.Sum256(content))
-	pending, err := svc.UploadWorkspaceFileToHost(context.Background(), host.ID, "project", "deploy.yaml", digest, "/tmp/deploy.yaml", "deploy exact fixture", "eino-agent")
+	pending, err := svc.UploadWorkspaceFileToHost(executionCtx, host.ID, "project", "deploy.yaml", digest, "/tmp/deploy.yaml", "deploy exact fixture", "eino-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -929,6 +938,7 @@ func TestWorkspaceDirectUploadUsesOneVersionBoundApproval(t *testing.T) {
 	if err != nil || approved.Status != "completed" {
 		t.Fatalf("approved direct upload failed: result=%#v err=%v", approved, err)
 	}
+	expectWorkspaceTransferProgress(t, events, pending.RunID, 12)
 	if len(transport.calls) != 1 || transport.calls[0].Mode != domain.ExecWorkspaceUpload || transport.calls[0].LocalPath != localPath || transport.calls[0].ExpectedSHA256 != digest {
 		t.Fatalf("transport did not receive the resolved version-bound source: %#v", transport.calls)
 	}
@@ -945,6 +955,21 @@ func TestWorkspaceDirectUploadUsesOneVersionBoundApproval(t *testing.T) {
 	}
 	if len(transport.calls) != 1 {
 		t.Fatalf("version-conflicted source reached transport: %#v", transport.calls)
+	}
+}
+
+func expectWorkspaceTransferProgress(t *testing.T, events <-chan ExecutionEvent, runID string, total int64) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case event := <-events:
+			if event.RunID == runID && event.Stream == "progress" && event.TransferredBytes == total && event.TotalBytes == total {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("Workspace transfer %q did not publish completed byte progress", runID)
+		}
 	}
 }
 

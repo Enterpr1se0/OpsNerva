@@ -9,6 +9,7 @@ import (
 
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
 	"github.com/Enterpr1se0/opsnerva/internal/sshx"
+	"github.com/Enterpr1se0/opsnerva/internal/transfer"
 )
 
 var transferSHA256Pattern = regexp.MustCompile(`^[a-fA-F0-9]{64}$`)
@@ -131,10 +132,14 @@ func (s *Service) executeSSHFileTransfer(ctx context.Context, run domain.Run, re
 	if !ok {
 		return sshx.RawResult{}, fmt.Errorf("configured SSH transport does not support host-to-host file transfer")
 	}
-	return transport.TransferFile(ctx, source, destination, req, func(transferredBytes, totalBytes int64) {
+	return transport.TransferFile(ctx, source, destination, req, s.executionTransferReporter(run))
+}
+
+func (s *Service) executionTransferReporter(run domain.Run) transfer.Reporter {
+	return func(progress transfer.Progress) {
 		s.publishExecutionEvent(ExecutionEvent{
 			SessionID: run.SessionID, RunID: run.ID, Stream: "progress", Status: "running",
-			TransferredBytes: transferredBytes, TotalBytes: totalBytes,
+			TransferredBytes: progress.Transferred, TotalBytes: progress.Total,
 		})
-	})
+	}
 }

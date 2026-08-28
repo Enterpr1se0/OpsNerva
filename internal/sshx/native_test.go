@@ -22,6 +22,7 @@ import (
 
 	"github.com/Enterpr1se0/opsnerva/internal/config"
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/transfer"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
@@ -372,14 +373,18 @@ func TestNativeSFTPUpload(t *testing.T) {
 		t.Fatal(err)
 	}
 	remotePath := filepath.Join(server.root, "uploaded.txt")
-	result, err := transport.Exec(context.Background(), connection, domain.ExecRequest{
+	var progress []transfer.Progress
+	result, err := transport.UploadWorkspaceFile(context.Background(), connection, domain.ExecRequest{
 		Mode: domain.ExecWorkspaceUpload, LocalPath: localPath, RemotePath: testSFTPPath(remotePath), TimeoutSeconds: 5,
-	})
+	}, func(update transfer.Progress) { progress = append(progress, update) })
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.ExitCode != 0 {
 		t.Fatalf("unexpected SFTP result: %#v", result)
+	}
+	if len(progress) < 2 || progress[0] != (transfer.Progress{Total: int64(len("native sftp payload"))}) || progress[len(progress)-1] != (transfer.Progress{Transferred: int64(len("native sftp payload")), Total: int64(len("native sftp payload"))}) {
+		t.Fatalf("unexpected Workspace upload progress: %#v", progress)
 	}
 	data, err := os.ReadFile(remotePath)
 	if err != nil {
@@ -605,7 +610,9 @@ func TestNativeSFTPTransfersFileBetweenHostsAtomically(t *testing.T) {
 	result, err := transport.TransferFile(context.Background(), source, destination, domain.ExecRequest{
 		Mode: domain.ExecSSHFileTransfer, SourceHostID: source.Target.ID, SourcePath: testSFTPPath(sourcePath),
 		HostID: destination.Target.ID, RemotePath: testSFTPPath(destinationPath), ExpectedSHA256: digest, TimeoutSeconds: 5,
-	}, func(transferred, total int64) { progress = append(progress, [2]int64{transferred, total}) })
+	}, func(update transfer.Progress) {
+		progress = append(progress, [2]int64{update.Transferred, update.Total})
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

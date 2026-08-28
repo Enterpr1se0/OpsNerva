@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/transfer"
 )
 
 type RawResult struct {
@@ -83,7 +84,11 @@ type InteractiveTransport interface {
 }
 
 type HostFileTransferTransport interface {
-	TransferFile(context.Context, ConnectionSpec, ConnectionSpec, domain.ExecRequest, func(transferredBytes, totalBytes int64)) (RawResult, error)
+	TransferFile(context.Context, ConnectionSpec, ConnectionSpec, domain.ExecRequest, transfer.Reporter) (RawResult, error)
+}
+
+type WorkspaceFileUploadTransport interface {
+	UploadWorkspaceFile(context.Context, ConnectionSpec, domain.ExecRequest, transfer.Reporter) (RawResult, error)
 }
 
 // TunnelClient is one authenticated SSH connection that can open direct TCP

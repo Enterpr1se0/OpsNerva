@@ -28,6 +28,7 @@ import (
 	"github.com/Enterpr1se0/opsnerva/internal/ids"
 	"github.com/Enterpr1se0/opsnerva/internal/sshx"
 	"github.com/Enterpr1se0/opsnerva/internal/store"
+	"github.com/Enterpr1se0/opsnerva/internal/transfer"
 )
 
 type WorkspaceCapability struct {
@@ -783,7 +784,7 @@ func (s *Service) UploadWorkspaceFile(ctx context.Context, workspaceID, targetPa
 	if !ok {
 		return WorkspaceUploadResult{}, fmt.Errorf("workspace %q not found", workspaceID)
 	}
-	return s.storeWorkspaceFile(ctx, workspace, targetPath, originalFilename, source, "", "workspace_file_uploaded", actor)
+	return s.storeWorkspaceFile(ctx, workspace, targetPath, originalFilename, source, "", "workspace_file_uploaded", actor, 0, nil)
 }
 
 func (s *Service) validateWorkspaceFileDestination(workspace config.Workspace, targetPath, originalFilename string) (string, string, error) {
@@ -817,7 +818,7 @@ func (s *Service) validateWorkspaceFileDestination(workspace config.Workspace, t
 	return targetPath, target, nil
 }
 
-func (s *Service) storeWorkspaceFile(ctx context.Context, workspace config.Workspace, targetPath, originalFilename string, source io.Reader, expectedSHA256, eventType, actor string) (WorkspaceUploadResult, error) {
+func (s *Service) storeWorkspaceFile(ctx context.Context, workspace config.Workspace, targetPath, originalFilename string, source io.Reader, expectedSHA256, eventType, actor string, total int64, progress transfer.Reporter) (WorkspaceUploadResult, error) {
 	targetPath, target, err := s.validateWorkspaceFileDestination(workspace, targetPath, originalFilename)
 	if err != nil {
 		return WorkspaceUploadResult{}, err
@@ -830,7 +831,9 @@ func (s *Service) storeWorkspaceFile(ctx context.Context, workspace config.Works
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
 	digest := sha256.New()
-	written, copyErr := io.Copy(io.MultiWriter(temporary, digest), source)
+	progressWriter := transfer.NewWriter(io.MultiWriter(temporary, digest), total, progress)
+	written, copyErr := io.Copy(progressWriter, source)
+	progressWriter.Finish()
 	if copyErr != nil {
 		temporary.Close()
 		return WorkspaceUploadResult{}, copyErr
@@ -1021,7 +1024,7 @@ func (s *Service) DownloadHostFileToWorkspace(ctx context.Context, hostID, remot
 	}, actor)
 }
 
-func (s *Service) executeWorkspaceDownload(ctx context.Context, connection sshx.ConnectionSpec, req domain.ExecRequest, actor string) (sshx.RawResult, error) {
+func (s *Service) executeWorkspaceDownload(ctx context.Context, connection sshx.ConnectionSpec, req domain.ExecRequest, run domain.Run, actor string) (sshx.RawResult, error) {
 	started := time.Now()
 	transport, ok := s.transport.(sshx.SFTPTransport)
 	if !ok {
@@ -1051,7 +1054,7 @@ func (s *Service) executeWorkspaceDownload(ctx context.Context, connection sshx.
 	if download.Entry.Type != "file" {
 		return sshx.RawResult{ExitCode: -1, Duration: time.Since(started)}, fmt.Errorf("remote download source is not a regular file")
 	}
-	stored, err := s.storeWorkspaceFile(downloadCtx, workspace, req.RelativePath, filepath.Base(req.RemotePath), download.Reader, req.ExpectedSHA256, "workspace_file_downloaded", actor)
+	stored, err := s.storeWorkspaceFile(downloadCtx, workspace, req.RelativePath, filepath.Base(req.RemotePath), download.Reader, req.ExpectedSHA256, "workspace_file_downloaded", actor, download.Entry.Size, s.executionTransferReporter(run))
 	if err != nil {
 		return sshx.RawResult{ExitCode: -1, Duration: time.Since(started)}, err
 	}

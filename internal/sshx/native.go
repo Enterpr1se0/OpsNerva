@@ -16,6 +16,7 @@ import (
 
 	"github.com/Enterpr1se0/opsnerva/internal/config"
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/transfer"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
@@ -255,9 +256,6 @@ func (t *NativeSSHTransport) execWithCallback(ctx context.Context, connection Co
 	if err := validateNativeConnection(connection); err != nil {
 		return RawResult{}, err
 	}
-	if req.Mode == domain.ExecWorkspaceUpload {
-		return t.transfer(ctx, connection, req)
-	}
 	command, stdin, err := buildRemoteCommand(req, connection.ShellPath)
 	if err != nil {
 		return RawResult{}, err
@@ -339,7 +337,7 @@ func (t *NativeSSHTransport) execWithCallback(ctx context.Context, connection Co
 	return result, nil
 }
 
-func (t *NativeSSHTransport) transfer(ctx context.Context, connection ConnectionSpec, req domain.ExecRequest) (RawResult, error) {
+func (t *NativeSSHTransport) UploadWorkspaceFile(ctx context.Context, connection ConnectionSpec, req domain.ExecRequest, progress transfer.Reporter) (RawResult, error) {
 	if !path.IsAbs(req.RemotePath) || strings.ContainsAny(req.RemotePath, "\r\n\x00") {
 		return RawResult{}, fmt.Errorf("remote transfer path must be absolute and contain no control characters")
 	}
@@ -381,7 +379,9 @@ func (t *NativeSSHTransport) transfer(ctx context.Context, connection Connection
 	}
 	done := make(chan copyResult, 1)
 	go func() {
-		written, copyErr := io.Copy(remote, local)
+		progressWriter := transfer.NewWriter(remote, info.Size(), progress)
+		written, copyErr := io.Copy(progressWriter, local)
+		progressWriter.Finish()
 		if closeErr := remote.Close(); copyErr == nil {
 			copyErr = closeErr
 		}
