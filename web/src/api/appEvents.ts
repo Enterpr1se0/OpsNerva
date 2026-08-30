@@ -1,4 +1,4 @@
-import type { ServerLogResponse } from './types'
+import type { ServerLogResponse } from '../types'
 
 export type ApplicationEventTopic='connections'|'approvals'|'sessions'|'chat_state'|'tasks'|'audit'|'mcp_activity'|'health'|'logs'|'model_tests'
 export type ApplicationLogSubscription={level?:string;component?:string;q?:string;limit?:number}

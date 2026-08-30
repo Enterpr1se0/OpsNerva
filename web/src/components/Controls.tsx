@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, ChevronDown } from 'lucide-react'
-import type { ModelMetadata } from './types'
+import type { ModelMetadata } from '../types'
 
 export type SelectOption = {
 	value: string

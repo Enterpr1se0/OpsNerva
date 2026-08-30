@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { subscribeApplicationEvents } from './appEvents'
+import { subscribeApplicationEvents } from '../api/appEvents'
 
 type JsonRecord=Record<string,unknown>
 

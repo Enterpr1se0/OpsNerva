@@ -10,14 +10,14 @@ import {
   Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronLeft, ChevronRight, CircleDot, Clock3, Copy, Cpu, Edit3, ExternalLink, Eye, EyeOff, FileText, FolderOpen, FolderOutput, FunctionSquare, HardDrive, History, Home, ImagePlus, KeyRound, LockKeyhole, Maximize2, MemoryStick, Minimize2, Minus, Monitor, Moon, Network, PanelLeftClose, PanelLeftOpen, Sun,
   Cable, Download, ListChecks, ListPlus, LoaderCircle, LogOut, Plus, Power, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, Square, TerminalSquare, Trash2, UploadCloud, UserRound, X, Zap,
 } from 'lucide-react'
-import { api, chatAttachmentURL, downloadFile, reconnectChatStream, sftpDownloadURL, sshShellWebSocketURL, streamChat, workspaceDownloadURL, workspaceFileEventsURL } from './api'
-import { subscribeApplicationEvents, type ApplicationLogPayload } from './appEvents'
-import { CopyButton, CopyablePre, writeClipboard } from './CopyButton'
-import { AppSelect, ModelCombobox } from './Controls'
-import i18n, { localeFor, type SupportedLanguage } from './i18n'
-import { activeLiveTaskStatus, useLiveSSHTasks, type LiveSSHTaskSnapshot, type LiveSSHTaskTarget } from './liveTasks'
-import { appendStreamText, streamTextFrom, streamTextTail, streamTextValue, type StreamText } from './streamText'
-import { TextFileEditor } from './TextFileEditor'
+import { api, chatAttachmentURL, downloadFile, reconnectChatStream, sftpDownloadURL, sshShellWebSocketURL, streamChat, workspaceDownloadURL, workspaceFileEventsURL } from './api/api'
+import { subscribeApplicationEvents, type ApplicationLogPayload } from './api/appEvents'
+import { CopyButton, CopyablePre, writeClipboard } from './components/CopyButton'
+import { AppSelect, ModelCombobox } from './components/Controls'
+import i18n, { localeFor, type SupportedLanguage } from './lib/i18n'
+import { activeLiveTaskStatus, useLiveSSHTasks, type LiveSSHTaskSnapshot, type LiveSSHTaskTarget } from './lib/liveTasks'
+import { appendStreamText, streamTextFrom, streamTextTail, streamTextValue, type StreamText } from './api/streamText'
+import { TextFileEditor } from './components/TextFileEditor'
 import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, AuthStatus, ChatMessage, ChatQueueMode, ChatSession, ChatSessionDelta, ChatState, ChatTokenUsage, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPActivityEvent, MCPActivitySnapshot, MCPClientSession, MCPServer, MCPServerInput, MCPToolCall, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, QueuedChatMessage, Run, ServerLogEntry, SFTPFileEntry, SSHHostStatus, SSHShell, SSHShellEvent, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
 
 type Page = 'chat' | 'ssh' | 'config' | 'extensions' | 'audit' | 'logs'
@@ -38,7 +38,7 @@ type ActiveChatStream = { id: string; sessionId: string; controller: AbortContro
 type ConnectionRetryState = {attempt:number;readyAt:number}
 type ContextUsage = {tokens:number;window:number}
 type ChatHistoryCursor = {createdAt:string;id:string}
-const MarkdownMessage=lazy(()=>import('./MarkdownMessage').then(module=>({default:module.MarkdownMessage})))
+const MarkdownMessage=lazy(()=>import('./components/MarkdownMessage').then(module=>({default:module.MarkdownMessage})))
 
 function insertQueuedMessage(current:QueuedChatMessage[],item:QueuedChatMessage,position=0){
 	const existingIndex=current.findIndex(existing=>existing.id===item.id)
