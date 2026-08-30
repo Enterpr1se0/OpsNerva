@@ -63,7 +63,7 @@ FROM hosts WHERE auth_type<>'workspace' ORDER BY name`)
 		return ConfigurationSnapshot{}, err
 	}
 	providerRows, err := tx.QueryContext(ctx, `SELECT id,name,kind,base_url,model,context_window,api_key_cipher,proxy_id,user_agent,reasoning_effort,active,created_at,updated_at
-FROM model_providers ORDER BY created_at,id`)
+FROM model_providers ORDER BY created_at,rowid`)
 	if err != nil {
 		return ConfigurationSnapshot{}, err
 	}
