@@ -1878,12 +1878,12 @@ func (s *Store) listChatMessages(ctx context.Context, sessionID string, limit in
 	if modelOnly {
 		filter = " AND role IN ('user','assistant') AND status='completed'"
 	}
-	query := `SELECT id,role,content,model_extra_json,tool_name,status,created_at FROM chat_messages WHERE session_id=?` + filter + ` ORDER BY created_at,rowid`
+	query := `SELECT id,role,content,model_extra_json,tool_name,status,created_at FROM chat_messages WHERE session_id=?` + filter + ` ORDER BY rowid`
 	args := []any{sessionID}
 	if limit > 0 {
 		query = `SELECT id,role,content,model_extra_json,tool_name,status,created_at FROM (
-SELECT id,role,content,model_extra_json,tool_name,status,created_at,rowid AS message_sequence FROM chat_messages WHERE session_id=?` + filter + ` ORDER BY created_at DESC,rowid DESC LIMIT ?)
-ORDER BY created_at,message_sequence`
+SELECT id,role,content,model_extra_json,tool_name,status,created_at,rowid AS message_sequence FROM chat_messages WHERE session_id=?` + filter + ` ORDER BY rowid DESC LIMIT ?)
+ORDER BY message_sequence`
 		args = append(args, limit)
 	}
 	rows, err := s.db.QueryContext(ctx, query, args...)
