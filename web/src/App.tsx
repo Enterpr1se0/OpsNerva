@@ -2,23 +2,26 @@ import { FormEvent, Suspense, createContext, lazy, memo, useCallback, useContext
 import { createPortal, flushSync } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
-import type { Terminal as XTermInstance } from '@xterm/xterm'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import '@xterm/xterm/css/xterm.css'
 import {
-  Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronLeft, ChevronRight, CircleDot, Clock3, Copy, Cpu, Edit3, ExternalLink, Eye, EyeOff, FileText, FolderOpen, FolderOutput, FunctionSquare, HardDrive, History, Home, ImagePlus, KeyRound, LockKeyhole, Maximize2, MemoryStick, Minimize2, Minus, Monitor, Moon, Network, PanelLeftClose, PanelLeftOpen, Sun,
+  Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronLeft, ChevronRight, CircleDot, Copy, Cpu, Edit3, ExternalLink, Eye, EyeOff, FileText, FolderOpen, FolderOutput, FunctionSquare, History, Home, ImagePlus, KeyRound, Maximize2, Minimize2, Minus, Monitor, Moon, PanelLeftClose, PanelLeftOpen, Sun,
   Cable, Download, ListChecks, ListPlus, LoaderCircle, LogOut, Plus, Power, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, Square, TerminalSquare, Trash2, UploadCloud, UserRound, X, Zap,
 } from 'lucide-react'
-import { api, chatAttachmentURL, downloadFile, reconnectChatStream, sftpDownloadURL, sshShellWebSocketURL, streamChat, workspaceDownloadURL, workspaceFileEventsURL } from './api/api'
+import { api, chatAttachmentURL, downloadFile, reconnectChatStream, sftpDownloadURL, streamChat, workspaceDownloadURL, workspaceFileEventsURL } from './api/api'
 import { subscribeApplicationEvents, type ApplicationLogPayload } from './api/appEvents'
-import { CopyButton, CopyablePre, writeClipboard } from './components/CopyButton'
+import { CopyButton, CopyablePre } from './components/CopyButton'
 import { AppSelect, ModelCombobox } from './components/Controls'
 import i18n, { localeFor, type SupportedLanguage } from './lib/i18n'
 import { activeLiveTaskStatus, useLiveSSHTasks, type LiveSSHTaskSnapshot, type LiveSSHTaskTarget } from './lib/liveTasks'
 import { appendStreamText, streamTextFrom, streamTextTail, streamTextValue, type StreamText } from './api/streamText'
 import { TextFileEditor } from './components/TextFileEditor'
-import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, AuthStatus, ChatMessage, ChatQueueMode, ChatSession, ChatSessionDelta, ChatState, ChatTokenUsage, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPActivityEvent, MCPActivitySnapshot, MCPClientSession, MCPServer, MCPServerInput, MCPToolCall, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, QueuedChatMessage, Run, ServerLogEntry, SFTPFileEntry, SSHHostStatus, SSHShell, SSHShellEvent, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
+import { PasswordInput } from './components/PasswordInput'
+import { SSHHostHome, SSHShellCreateDialog, SSHShellStatus, SSHShellTerminal, SSHTunnelStatus, sshShellActive } from './features/ssh'
+import { useAutoCollapseDetails } from './lib/hooks'
+import { errorStatus, errorText, formatFileSize, sshTunnelRoute } from './lib/utils'
+import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, AuthStatus, ChatMessage, ChatQueueMode, ChatSession, ChatSessionDelta, ChatState, ChatTokenUsage, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPActivityEvent, MCPActivitySnapshot, MCPClientSession, MCPServer, MCPServerInput, MCPToolCall, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, QueuedChatMessage, Run, ServerLogEntry, SFTPFileEntry, SSHShell, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
 
 type Page = 'chat' | 'ssh' | 'config' | 'extensions' | 'audit' | 'logs'
 const pageVisualOrder:Page[]=['chat','ssh','extensions','audit','logs','config']
@@ -74,7 +77,6 @@ function historyEntries(messages:ChatMessage[],sessionID:string):ChatEntry[]{
 
 function newChatSessionID(){return `session_${clientId().replace(/[^A-Za-z0-9]/g,'')}`}
 function reconnectDelay(attempt:number){return attempt<=1?0:Math.min(10_000,500*2**Math.min(attempt-2,5))}
-function errorStatus(error:unknown){const status=(error as{status?:unknown})?.status;return typeof status==='number'?status:0}
 function waitForReconnect(delay:number,signal:AbortSignal){
 	if(delay<=0)return Promise.resolve()
 	return new Promise<void>((resolve,reject)=>{
@@ -456,16 +458,6 @@ function clientId() {
   return `client_${Date.now().toString(36)}_${clientIdCounter.toString(36)}_${Math.random().toString(36).slice(2)}`
 }
 
-function errorText(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error)
-  if (/failed to fetch|networkerror|load failed/i.test(message)) {
-    return i18n.t('errors.apiUnavailable')
-  }
-  if (message.includes('model provider request failed')) {
-    return i18n.t('errors.providerUnavailable',{message})
-  }
-  return message
-}
 
 function isAbortError(error:unknown){return error instanceof DOMException&&error.name==='AbortError'}
 
@@ -1008,33 +1000,6 @@ function ThemeSwitch({preference,onChange}:{preference:ThemePreference;onChange:
 	</div>
 }
 
-function useAutoCollapseDetails(open:boolean,onClose:()=>void){
-	const detailsRef=useRef<HTMLDetailsElement>(null)
-	const closeRef=useRef(onClose)
-	closeRef.current=onClose
-	useEffect(()=>{
-		if(!open)return
-		const outside=(event:Event)=>{
-			const target=event.target
-			if(target instanceof Node&&!detailsRef.current?.contains(target))closeRef.current()
-		}
-		const escape=(event:KeyboardEvent)=>{
-			if(event.key!=='Escape')return
-			event.preventDefault()
-			closeRef.current()
-			detailsRef.current?.querySelector<HTMLElement>('summary')?.focus()
-		}
-		document.addEventListener('pointerdown',outside,true)
-		document.addEventListener('focusin',outside,true)
-		document.addEventListener('keydown',escape,true)
-		return()=>{
-			document.removeEventListener('pointerdown',outside,true)
-			document.removeEventListener('focusin',outside,true)
-			document.removeEventListener('keydown',escape,true)
-		}
-	},[open])
-	return detailsRef
-}
 
 function ApprovalModeStatus({settings,onChanged,onError}:{settings:SystemSettings|null;onChanged:(settings:SystemSettings)=>void;onError:(message:string)=>void}){
 	const {t}=useTranslation()
@@ -1161,423 +1126,6 @@ function ComposerReasoningSelector({providers,disabled,onChanged,onError}:{provi
 	</details>
 }
 
-function SSHTunnelStatus({tunnels,hosts,open,onOpenChange,onStop,onCreated,onUpdated,onRefresh}:{tunnels:SSHTunnel[];hosts:Host[];open:boolean;onOpenChange:(open:boolean)=>void;onStop:(id:string)=>Promise<void>;onCreated:(tunnel:SSHTunnel)=>void;onUpdated:(previousID:string,tunnel:SSHTunnel)=>void;onRefresh:()=>void}){
-	const {t,i18n:instance}=useTranslation()
-	const [stopping,setStopping]=useState('')
-	const [creating,setCreating]=useState(false)
-	const [editing,setEditing]=useState<SSHTunnel|null>(null)
-	const detailsRef=useAutoCollapseDetails(open,()=>onOpenChange(false))
-	return <>
-		<details ref={detailsRef} className="ssh-tunnel-status" open={open} onToggle={event=>onOpenChange(event.currentTarget.open)}>
-			<summary title={t('tunnels.title')}><Cable size={14}/><span>{t('tunnels.short')}</span><em>{tunnels.length}</em></summary>
-			<div className="ssh-tunnel-popover">
-				<header><span><Cable size={15}/><b>{t('tunnels.title')}</b></span><button type="button" disabled={!hosts.length} onClick={()=>{onOpenChange(false);setCreating(true)}}><Plus size={13}/>{t('tunnels.create')}</button></header>
-				<div>
-					{tunnels.map(tunnel=><section className={`${tunnel.status} ${stopping===tunnel.id?'closing':''}`} key={tunnel.id}>
-						<div className="ssh-tunnel-route"><i/><code>{sshTunnelRoute(tunnel.host_name||tunnel.host_id,tunnel.direction,tunnel.local_host,tunnel.local_port,tunnel.remote_host,tunnel.remote_port)}</code></div>
-						<dl><div><dt>{t('common.status')}</dt><dd>{tunnel.status==='retrying'&&tunnel.reconnect_attempt?t('tunnels.reconnecting',{attempt:tunnel.reconnect_attempt}):t(`statusLabels.${tunnel.status}`,{defaultValue:tunnel.status})}</dd></div><div><dt>{t('tunnels.connections')}</dt><dd>{tunnel.active_connections} / {tunnel.total_connections}</dd></div><div><dt>{t('tunnels.traffic')}</dt><dd>↑ {formatFileSize(tunnel.bytes_sent)} · ↓ {formatFileSize(tunnel.bytes_received)}</dd></div><div><dt>{t('tunnels.started')}</dt><dd>{new Date(tunnel.started_at).toLocaleTimeString(localeFor(instance.language))}</dd></div></dl>
-						<div className="ssh-tunnel-meta"><span>{tunnel.direction==='reverse'?'-R':'-L'} · {tunnel.proxy_used?t('tunnels.viaProxy'):t('tunnels.direct')}</span><code>{tunnel.id}</code><button className="edit" type="button" disabled={stopping===tunnel.id||tunnel.status==='retrying'} onClick={()=>{onOpenChange(false);setEditing(tunnel)}}><Edit3 size={12}/>{t('common.edit')}</button><button type="button" disabled={stopping===tunnel.id} onClick={async()=>{setStopping(tunnel.id);try{await onStop(tunnel.id)}finally{setStopping('')}}}>{stopping===tunnel.id?<LoaderCircle className="spin" size={12}/>:<Square size={10} fill="currentColor"/>}{t('tunnels.stop')}</button></div>
-						{tunnel.error&&<p><ShieldAlert size={12}/>{tunnel.error}</p>}
-					</section>)}
-					{!tunnels.length&&<div className="ssh-tunnel-empty">{hosts.length?t('tunnels.empty'):t('connections.noHosts')}</div>}
-				</div>
-			</div>
-		</details>
-		{creating&&<SSHTunnelEditorDialog hosts={hosts} onCancel={()=>setCreating(false)} onSaved={tunnel=>{onCreated(tunnel);setCreating(false)}}/>}
-		{editing&&<SSHTunnelEditorDialog hosts={hosts} tunnel={editing} onCancel={()=>setEditing(null)} onSaved={tunnel=>{onUpdated(editing.id,tunnel);setEditing(null)}} onFailed={onRefresh}/>}
-	</>
-}
-
-function SSHTunnelEditorDialog({hosts,tunnel,onCancel,onSaved,onFailed}:{hosts:Host[];tunnel?:SSHTunnel;onCancel:()=>void;onSaved:(tunnel:SSHTunnel)=>void;onFailed?:()=>void}){
-	const {t}=useTranslation()
-	const [hostID,setHostID]=useState(tunnel?.host_id||hosts[0]?.id||'')
-	const [direction,setDirection]=useState<'local'|'reverse'>(tunnel?.direction||'local')
-	const [localHost,setLocalHost]=useState(tunnel?.local_host||'127.0.0.1')
-	const [localPort,setLocalPort]=useState(tunnel?String(tunnel.local_port):'')
-	const [remoteHost,setRemoteHost]=useState(tunnel?.remote_host||'127.0.0.1')
-	const [remotePort,setRemotePort]=useState(tunnel?String(tunnel.remote_port):'')
-	const [busy,setBusy]=useState(false)
-	const [error,setError]=useState('')
-	const submit=async(event:FormEvent)=>{
-		event.preventDefault()
-		const remote=remotePort===''?0:Number(remotePort),local=localPort===''?0:Number(localPort)
-		if(!hostID||!localHost.trim()||!remoteHost.trim()){setError(t('common.required'));return}
-		const localInvalid=!Number.isInteger(local)||local<0||local>65535||(direction==='reverse'&&local===0)
-		const remoteInvalid=!Number.isInteger(remote)||remote<0||remote>65535||(direction==='local'&&remote===0)
-		if(localInvalid||remoteInvalid){setError(t('tunnels.portRange'));return}
-		setBusy(true);setError('')
-		try{
-			const config={direction,local_host:localHost.trim(),local_port:local,remote_host:remoteHost.trim(),remote_port:remote}
-			const saved=tunnel?await api.updateSSHTunnel(tunnel.id,{host_id:hostID,...config}):await api.startSSHTunnel({host_id:hostID,...config})
-			onSaved(saved)
-		}catch(err){setError(errorText(err));onFailed?.()}
-		finally{setBusy(false)}
-	}
-	return createPortal(<div className="connection-dialog-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget&&!busy)onCancel()}}>
-		<form className="connection-dialog panel" role="dialog" aria-modal="true" aria-labelledby="tunnel-editor-title" noValidate onSubmit={submit}>
-			<header><span><Cable size={20}/><span><small>{t('tunnels.title')}</small><h2 id="tunnel-editor-title">{t(tunnel?'tunnels.edit':'tunnels.create')}</h2></span></span><button type="button" disabled={busy} onClick={onCancel}><X size={16}/></button></header>
-			<div className="connection-dialog-fields">
-				<label><span>{t('common.host')}</span><AppSelect portal value={hostID} ariaLabel={t('common.host')} onChange={setHostID} options={hosts.map(host=>({value:host.id,label:`${host.name} · ${host.user}@${host.address}:${host.port}`}))}/></label>
-				<label><span>{t('tunnels.direction')}</span><AppSelect portal value={direction} ariaLabel={t('tunnels.direction')} onChange={value=>setDirection(value as 'local'|'reverse')} options={[{value:'local',label:t('tunnels.localForward')},{value:'reverse',label:t('tunnels.reverseForward')}]}/></label>
-				<label><span>{t(direction==='local'?'tunnels.localListenHost':'tunnels.localTargetHost')}</span><input value={localHost} onChange={event=>setLocalHost(event.target.value)}/></label>
-				<label><span>{t(direction==='local'?'tunnels.localListenPort':'tunnels.localTargetPort')}</span><input inputMode="numeric" value={localPort} onChange={event=>setLocalPort(event.target.value.replace(/\D/g,'').slice(0,5))} placeholder={direction==='local'?t('tunnels.automaticPort'):undefined} autoFocus={direction==='reverse'}/></label>
-				<label><span>{t(direction==='local'?'tunnels.remoteTargetHost':'tunnels.remoteListenHost')}</span><input value={remoteHost} onChange={event=>setRemoteHost(event.target.value)}/></label>
-				<label><span>{t(direction==='local'?'tunnels.remoteTargetPort':'tunnels.remoteListenPort')}</span><input inputMode="numeric" value={remotePort} onChange={event=>setRemotePort(event.target.value.replace(/\D/g,'').slice(0,5))} placeholder={direction==='reverse'?t('tunnels.automaticPort'):undefined} autoFocus={direction==='local'}/></label>
-			</div>
-			{error&&<p className="connection-dialog-error"><ShieldAlert size={14}/>{error}</p>}
-			<footer><button type="button" disabled={busy} onClick={onCancel}>{t('common.cancel')}</button><button className="primary" disabled={busy||!hostID}>{busy?<LoaderCircle className="spin" size={14}/>:tunnel?<Save size={14}/>:<Plus size={14}/>} {busy?t(tunnel?'common.saving':'tunnels.starting'):t(tunnel?'common.save':'tunnels.start')}</button></footer>
-		</form>
-	</div>,document.body)
-}
-
-function SSHShellStatus({shells,hosts,open,onOpenChange,onOpen,onClose,onCreated}:{shells:SSHShell[];hosts:Host[];open:boolean;onOpenChange:(open:boolean)=>void;onOpen:(shell:SSHShell)=>void;onClose:(id:string)=>Promise<void>;onCreated:(shell:SSHShell)=>void}){
-	const {t}=useTranslation()
-	const [creating,setCreating]=useState(false)
-	const closingShellIDsRef=useRef(new Set<string>())
-	const [closingShellIDs,setClosingShellIDs]=useState<Set<string>>(new Set())
-	const detailsRef=useAutoCollapseDetails(open,()=>onOpenChange(false))
-	const close=async(id:string)=>{
-		if(closingShellIDsRef.current.has(id))return
-		closingShellIDsRef.current.add(id)
-		setClosingShellIDs(new Set(closingShellIDsRef.current))
-		try{await onClose(id)}
-		finally{
-			closingShellIDsRef.current.delete(id)
-			setClosingShellIDs(new Set(closingShellIDsRef.current))
-		}
-	}
-	return <>
-		<details ref={detailsRef} className="ssh-shell-status" open={open} onToggle={event=>onOpenChange(event.currentTarget.open)}>
-			<summary title={t('sshShell.title')}><TerminalSquare size={14}/><span>{t('sshShell.short')}</span><em>{shells.length}</em></summary>
-			<div className="ssh-shell-popover">
-				<header><span><TerminalSquare size={15}/><b>{t('sshShell.title')}</b></span><button type="button" disabled={!hosts.length} onClick={()=>{onOpenChange(false);setCreating(true)}}><Plus size={13}/>{t('sshShell.create')}</button></header>
-				<div>
-					{shells.map(shell=>{const closing=closingShellIDs.has(shell.id);return <section className={`ssh-shell-entry ${shell.status} ${closing?'closing':''}`} key={shell.id}>
-						<button type="button" className="ssh-shell-open" disabled={closing} onClick={()=>onOpen(shell)}>
-							<span><i/><b>{shell.kind==='workspace'?`${t('common.workspace')} · ${shell.workspace_id}`:shell.host_name||shell.host_id}</b><code>{shell.kind==='workspace'?t('workspace.agent'):shell.elevated?'root':shell.user}</code></span>
-							<small>{shell.cwd||(shell.kind==='workspace'?'.':'~')}</small>
-							<ChevronRight size={14}/>
-						</button>
-						<button type="button" className="ssh-shell-quick-close" disabled={closing} onClick={()=>void close(shell.id)} title={t('sshShell.closeSession')} aria-label={t('sshShell.closeSession')}>{closing?<LoaderCircle className="spin" size={12}/>:<Power size={13}/>}</button>
-					</section>})}
-					{!shells.length&&<div className="ssh-shell-empty">{hosts.length?t('sshShell.empty'):t('connections.noHosts')}</div>}
-				</div>
-			</div>
-		</details>
-		{creating&&<SSHShellCreateDialog hosts={hosts} onCancel={()=>setCreating(false)} onCreated={shell=>{onCreated(shell);setCreating(false)}}/>}
-	</>
-}
-
-function SSHShellCreateDialog({hosts,surface,onCancel,onCreated}:{hosts:Host[];surface?:'quick'|'workspace';onCancel:()=>void;onCreated:(shell:SSHShell)=>void}){
-	const {t}=useTranslation()
-	const [hostID,setHostID]=useState(hosts[0]?.id||'')
-	const [busy,setBusy]=useState(false)
-	const [error,setError]=useState('')
-	const submit=async(event:FormEvent)=>{
-		event.preventDefault()
-		setBusy(true);setError('')
-		try{
-			const shell=await api.startSSHShell({host_id:hostID,...(surface?{surface}:{})})
-			onCreated(shell)
-		}catch(err){setError(errorText(err))}
-		finally{setBusy(false)}
-	}
-	return createPortal(<div className="connection-dialog-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget&&!busy)onCancel()}}>
-		<form className="connection-dialog compact panel" role="dialog" aria-modal="true" aria-labelledby="new-shell-title" noValidate onSubmit={submit}>
-			<header><span><TerminalSquare size={20}/><span><small>{t('sshShell.title')}</small><h2 id="new-shell-title">{t('sshShell.create')}</h2></span></span><button type="button" disabled={busy} onClick={onCancel}><X size={16}/></button></header>
-			<div className="connection-dialog-fields single">
-				<label><span>{t('common.host')}</span><AppSelect value={hostID} ariaLabel={t('common.host')} onChange={setHostID} options={hosts.map(host=>({value:host.id,label:`${host.name} · ${host.user}@${host.address}:${host.port}`}))}/></label>
-			</div>
-			{error&&<p className="connection-dialog-error"><ShieldAlert size={14}/>{error}</p>}
-			<footer><button type="button" disabled={busy} onClick={onCancel}>{t('common.cancel')}</button><button className="primary" disabled={busy||!hostID}>{busy?<LoaderCircle className="spin" size={14}/>:<TerminalSquare size={14}/>} {busy?t('sshShell.starting'):t('sshShell.start')}</button></footer>
-		</form>
-	</div>,document.body)
-}
-
-function sshShellActive(status:string){return ['starting','running','stopping'].includes(status)}
-
-type SSHHostStatusView={sample:SSHHostStatus;cpuPercent:number|null;receivedPerSecond:number|null;sentPerSecond:number|null}
-
-function statusByteUnit(value:number){
-	if(value>=1024**4)return{size:1024**4,label:'TiB'}
-	if(value>=1024**3)return{size:1024**3,label:'GiB'}
-	if(value>=1024**2)return{size:1024**2,label:'MiB'}
-	if(value>=1024)return{size:1024,label:'KiB'}
-	return{size:1,label:'B'}
-}
-
-function formatStatusBytes(value:number){
-	const unit=statusByteUnit(value)
-	const scaled=value/unit.size
-	return `${scaled>=100?scaled.toFixed(0):scaled>=10?scaled.toFixed(1):scaled.toFixed(2)} ${unit.label}`
-}
-
-function formatStatusPair(used:number,total:number){
-	const unit=statusByteUnit(total)
-	const digits=total/unit.size>=100?0:1
-	return `${(used/unit.size).toFixed(digits)} / ${(total/unit.size).toFixed(digits)} ${unit.label}`
-}
-
-function formatHostUptime(seconds:number){
-	const days=Math.floor(seconds/86400)
-	const hours=Math.floor(seconds%86400/3600)
-	const minutes=Math.floor(seconds%3600/60)
-	return days>0?`${days}d ${hours}h`:hours>0?`${hours}h ${minutes}m`:`${minutes}m`
-}
-
-function SSHHostStatusBar({shell}:{shell:SSHShell}){
-	const {t}=useTranslation()
-	const [view,setView]=useState<SSHHostStatusView|null>(null)
-	const [unavailable,setUnavailable]=useState(false)
-	const previousRef=useRef<SSHHostStatus|null>(null)
-	useEffect(()=>{
-		let disposed=false
-		let monitoringEnded=false
-		let timer:number|undefined
-		previousRef.current=null
-		setView(null)
-		setUnavailable(false)
-		const sample=async()=>{
-			let nextDelay=3000
-			try{
-				const next=await api.sshShellHostStatus(shell.id)
-				if(disposed)return
-				const previous=previousRef.current
-				let cpuPercent:number|null=null
-				let receivedPerSecond:number|null=null
-				let sentPerSecond:number|null=null
-				if(previous){
-					const totalDelta=next.cpu_total-previous.cpu_total
-					const idleDelta=next.cpu_idle-previous.cpu_idle
-					if(totalDelta>0&&idleDelta>=0)cpuPercent=Math.max(0,Math.min(100,(totalDelta-idleDelta)/totalDelta*100))
-					const elapsed=(Date.parse(next.sampled_at)-Date.parse(previous.sampled_at))/1000
-					if(elapsed>0&&next.network_received_bytes>=previous.network_received_bytes&&next.network_sent_bytes>=previous.network_sent_bytes){
-						receivedPerSecond=(next.network_received_bytes-previous.network_received_bytes)/elapsed
-						sentPerSecond=(next.network_sent_bytes-previous.network_sent_bytes)/elapsed
-					}
-				}else nextDelay=1000
-				previousRef.current=next
-				setView({sample:next,cpuPercent,receivedPerSecond,sentPerSecond})
-				setUnavailable(false)
-			}catch(err){
-				if(errorStatus(err)===404||errorStatus(err)===409)monitoringEnded=true
-				if(!disposed)setUnavailable(true)
-			}finally{
-				if(!disposed&&!monitoringEnded&&sshShellActive(shell.status))timer=window.setTimeout(()=>void sample(),nextDelay)
-			}
-		}
-		if(sshShellActive(shell.status))void sample()
-		return()=>{disposed=true;if(timer!==undefined)window.clearTimeout(timer)}
-	},[shell.id,shell.status])
-	const sample=view?.sample
-	const memoryPercent=sample?.memory_total_bytes?sample.memory_used_bytes/sample.memory_total_bytes*100:0
-	const diskPercent=sample?.disk_total_bytes?sample.disk_used_bytes/sample.disk_total_bytes*100:0
-	const stateLabel=unavailable?t('common.unavailable'):view?t('common.status'):t('common.loading')
-	return <div className={`ssh-host-status ${unavailable?'unavailable':''}`} role="status" aria-label={stateLabel}>
-		<span aria-label={t('sshWorkspace.cpu')} title={`${t('sshWorkspace.cpu')} · ${view?.cpuPercent==null?'—':`${view.cpuPercent.toFixed(1)}%`}`}><Cpu size={13}/><b>{view?.cpuPercent==null?'—':`${view.cpuPercent.toFixed(1)}%`}</b></span>
-		<span aria-label={t('sshWorkspace.memory')} title={`${t('sshWorkspace.memory')} · ${sample?`${memoryPercent.toFixed(1)}%`:'—'}`}><MemoryStick size={13}/><b>{sample?formatStatusPair(sample.memory_used_bytes,sample.memory_total_bytes):'—'}</b></span>
-		<span aria-label={t('sshWorkspace.network')} title={`${t('sshWorkspace.network')} · ${view?.receivedPerSecond==null?'—':`↓ ${formatStatusBytes(view.receivedPerSecond)}/s · ↑ ${formatStatusBytes(view.sentPerSecond||0)}/s`}`}><Network size={13}/><b>{view?.receivedPerSecond==null?'—':`↓ ${formatStatusBytes(view.receivedPerSecond)}/s · ↑ ${formatStatusBytes(view.sentPerSecond||0)}/s`}</b></span>
-		<span aria-label={t('sshWorkspace.disk')} title={`${t('sshWorkspace.disk')} · ${sample?`${diskPercent.toFixed(1)}%`:'—'}`}><HardDrive size={13}/><b>{sample?formatStatusPair(sample.disk_used_bytes,sample.disk_total_bytes):'—'}</b></span>
-		<span aria-label={t('sshWorkspace.uptime')} title={`${t('sshWorkspace.uptime')} · ${sample?formatHostUptime(sample.uptime_seconds):'—'}`}><Clock3 size={13}/><b>{sample?formatHostUptime(sample.uptime_seconds):'—'}</b></span>
-	</div>
-}
-
-function SSHShellTerminal({initialShell,relatedShells=[],onSelect,onClose,onChanged,onError,embedded=false}:{initialShell:SSHShell;relatedShells?:SSHShell[];onSelect?:(shell:SSHShell)=>void;onClose:()=>void;onChanged:()=>void;onError:(message:string)=>void;embedded?:boolean}){
-	const {t}=useTranslation()
-	const [shell,setShell]=useState(initialShell)
-	const [secret,setSecret]=useState('')
-	const [sendingSecret,setSendingSecret]=useState(false)
-	const [closing,setClosing]=useState(false)
-	const terminalElement=useRef<HTMLDivElement>(null)
-	const terminalRef=useRef<XTermInstance|null>(null)
-	const socketRef=useRef<WebSocket|null>(null)
-	const lastSequence=useRef(0)
-	const onChangedRef=useRef(onChanged)
-	const onErrorRef=useRef(onError)
-	onChangedRef.current=onChanged
-	onErrorRef.current=onError
-	const active=sshShellActive(shell.status)
-
-	useEffect(()=>{
-		const container=terminalElement.current
-		if(!container)return
-		let disposed=false
-		let cleanup=()=>{}
-		void Promise.all([import('@xterm/xterm'),import('@xterm/addon-fit')]).then(([xtermModule,fitModule])=>{
-			if(disposed)return
-			const terminal=new xtermModule.Terminal({
-				cursorBlink:true,
-				convertEol:false,
-				fontFamily:"'JetBrains Mono','Cascadia Code','SFMono-Regular',Consolas,monospace",
-				fontSize:13,
-				theme:{background:'#071019',foreground:'#d8e3ea',cursor:'#55d6be',selectionBackground:'#31546a'},
-				scrollback:10_000,
-			})
-			const fit=new fitModule.FitAddon()
-			terminal.loadAddon(fit)
-			terminal.open(container)
-			terminalRef.current=terminal
-			terminal.attachCustomKeyEventHandler(event=>{
-				if(event.type!=='keydown'||event.key.toLowerCase()!=='c'||!terminal.hasSelection())return true
-				const copyShortcut=(event.metaKey||event.ctrlKey)&&!event.altKey
-				if(!copyShortcut)return true
-				event.preventDefault()
-				void writeClipboard(terminal.getSelection()).catch(err=>onErrorRef.current(errorText(err))).finally(()=>terminal.focus())
-				return false
-			})
-			let inputBuffer=''
-			let inputTimer:number|undefined
-			let reconnectTimer:number|undefined
-			let terminalEnded=false
-			let socket:WebSocket|null=null
-			let outputFrame:number|undefined
-			let outputBytes=0
-			let outputChunks:Uint8Array[]=[]
-			const outputEncoder=new TextEncoder()
-			const flushOutput=()=>{
-				outputFrame=undefined
-				if(!outputBytes)return
-				const combined=new Uint8Array(outputBytes)
-				let offset=0
-				for(const chunk of outputChunks){combined.set(chunk,offset);offset+=chunk.byteLength}
-				outputChunks=[];outputBytes=0
-				terminal.write(combined)
-			}
-			const queueOutput=(content:string|Uint8Array)=>{
-				const chunk=typeof content==='string'?outputEncoder.encode(content):content
-				if(!chunk.byteLength)return
-				outputChunks.push(chunk);outputBytes+=chunk.byteLength
-				if(outputFrame===undefined)outputFrame=requestAnimationFrame(flushOutput)
-			}
-			const sendCommand=(command:Record<string,unknown>)=>{
-				if(socket?.readyState!==WebSocket.OPEN)return false
-				socket.send(JSON.stringify(command))
-				return true
-			}
-			const flushInput=()=>{
-				if(inputTimer!==undefined)window.clearTimeout(inputTimer)
-				inputTimer=undefined
-				if(!inputBuffer)return
-				const input=inputBuffer.slice(0,64<<10)
-				if(!sendCommand({type:'input',content:input}))return
-				inputBuffer=inputBuffer.slice(input.length)
-				if(inputBuffer)inputTimer=window.setTimeout(flushInput,0)
-			}
-			const inputDisposable=terminal.onData(data=>{
-				inputBuffer+=data
-				if(data.includes('\r')||data.includes('\n')||data.includes('\x03'))flushInput()
-				else if(inputTimer===undefined)inputTimer=window.setTimeout(flushInput,24)
-			})
-			let resizeTimer:number|undefined
-			const resizeDisposable=terminal.onResize(({cols,rows})=>{
-				if(resizeTimer!==undefined)window.clearTimeout(resizeTimer)
-				resizeTimer=window.setTimeout(()=>{sendCommand({type:'resize',cols,rows})},80)
-			})
-			const observer=new ResizeObserver(()=>fit.fit())
-			observer.observe(container)
-			fit.fit()
-			terminal.focus()
-
-			const applyEvent=(event:SSHShellEvent)=>{
-				if(event.sequence<=lastSequence.current)return
-				lastSequence.current=event.sequence
-				if(event.content&&(event.stream==='stdout'||event.stream==='stderr'))queueOutput(event.content)
-				if(event.status&&event.stream==='status'){
-					setShell(current=>({...current,status:event.status as SSHShell['status'],last_sequence:event.sequence}))
-					if(!sshShellActive(event.status)){
-						terminalEnded=true
-						socket?.close()
-						void api.sshShell(initialShell.id,event.sequence).then(snapshot=>setShell(snapshot.shell)).catch(()=>{/* final state is already visible */})
-						onChangedRef.current()
-					}
-				}
-			}
-			const connect=()=>{
-				if(disposed||terminalEnded)return
-				socket=new WebSocket(sshShellWebSocketURL(initialShell.id,lastSequence.current))
-				socket.binaryType='arraybuffer'
-				socketRef.current=socket
-				socket.onopen=()=>{
-					sendCommand({type:'resize',cols:terminal.cols,rows:terminal.rows})
-					flushInput()
-				}
-				socket.onmessage=message=>{
-					try{
-						if(message.data instanceof ArrayBuffer){
-							if(message.data.byteLength<10)return
-							const view=new DataView(message.data)
-							if(view.getUint8(0)!==1)return
-							const sequence=Number(view.getBigUint64(2))
-							if(sequence<=lastSequence.current)return
-							lastSequence.current=sequence
-							queueOutput(new Uint8Array(message.data,10))
-							return
-						}
-						const payload=JSON.parse(String(message.data)) as {type:string;event?:SSHShellEvent;error?:string}
-						if(payload.type==='event'&&payload.event)applyEvent(payload.event)
-						else if(payload.type==='error'&&payload.error)onErrorRef.current(payload.error)
-					}catch{/* malformed frames are ignored; reconnect resumes from the last valid sequence */}
-				}
-				socket.onclose=()=>{
-					if(socketRef.current===socket)socketRef.current=null
-					if(!disposed&&!terminalEnded)reconnectTimer=window.setTimeout(connect,1000)
-				}
-			}
-			connect()
-			cleanup=()=>{
-				flushInput()
-				if(outputFrame!==undefined)cancelAnimationFrame(outputFrame)
-				flushOutput()
-				terminalEnded=true
-				if(reconnectTimer!==undefined)window.clearTimeout(reconnectTimer)
-				socket?.close()
-				if(socketRef.current===socket)socketRef.current=null
-				observer.disconnect()
-				inputDisposable.dispose()
-				resizeDisposable.dispose()
-				if(inputTimer!==undefined)window.clearTimeout(inputTimer)
-				if(resizeTimer!==undefined)window.clearTimeout(resizeTimer)
-				terminal.dispose()
-				terminalRef.current=null
-			}
-			if(disposed)cleanup()
-		}).catch(err=>onErrorRef.current(errorText(err)))
-		return()=>{disposed=true;cleanup()}
-	},[initialShell.id,t])
-
-	const sendSecret=async(event:FormEvent)=>{
-		event.preventDefault()
-		if(!secret||!active||sendingSecret)return
-		setSendingSecret(true)
-		try{
-			const socket=socketRef.current
-			if(!socket||socket.readyState!==WebSocket.OPEN)throw new Error(t('sshShell.streamEnded'))
-			socket.send(JSON.stringify({type:'input',content:`${secret}\r`,sensitive:true}));setSecret('');terminalRef.current?.focus()
-		}
-		catch(err){onError(errorText(err))}
-		finally{setSendingSecret(false)}
-	}
-	const interrupt=async()=>{try{const socket=socketRef.current;if(!socket||socket.readyState!==WebSocket.OPEN)throw new Error(t('sshShell.streamEnded'));socket.send(JSON.stringify({type:'interrupt'}))}catch(err){onError(errorText(err))}finally{terminalRef.current?.focus()}}
-	const stop=async()=>{setClosing(true);try{setShell(await api.closeSSHShell(shell.id));onChanged();onClose()}catch(err){onError(errorText(err))}finally{setClosing(false)}}
-	const titleID=`ssh-shell-terminal-title-${shell.id}`
-	const workspaceShell=shell.kind==='workspace'
-	const managedShell=['agent','mcp','workspace_agent'].includes(shell.surface)
-		const terminal=<section className={`ssh-shell-terminal-dialog ${embedded?'embedded':''} ${workspaceShell?'':'monitored'}`} role={embedded?undefined:'dialog'} aria-modal={embedded?undefined:true} aria-labelledby={embedded?undefined:titleID}>
-			{!embedded&&<header>
-				<div><TerminalSquare size={20}/><span>{workspaceShell&&<small>{t('workspace.terminal')}</small>}<h2 id={titleID}>{workspaceShell?shell.workspace_id:shell.host_name||shell.host_id}</h2></span></div>
-				<div className="ssh-shell-terminal-state">{workspaceShell&&relatedShells.length>1&&<AppSelect className="terminal-session-select" value={shell.id} ariaLabel={t('workspace.switchTerminal')} onChange={value=>{const selected=relatedShells.find(item=>item.id===value);if(selected)onSelect?.(selected)}} options={relatedShells.map(item=>({value:item.id,label:`${t(item.surface==='workspace_agent'?'workspace.agent':'workspace.operator')} · ${item.cwd||'.'}`}))}/>}<em className={shell.status}>{t(`statusLabels.${shell.status}`,{defaultValue:shell.status})}</em><code>{shell.elevated?'root':shell.user}</code>{!embedded&&<button type="button" onClick={onClose} title={t('common.close')}><X size={16}/></button>}</div>
-			</header>}
-			<div className="ssh-shell-terminal-screen" ref={terminalElement}/>
-			{!workspaceShell&&<SSHHostStatusBar shell={shell}/>}
-			<footer>
-				{managedShell&&<form onSubmit={sendSecret}><LockKeyhole size={14}/><PasswordInput value={secret} onChange={event=>setSecret(event.target.value)} disabled={!active||sendingSecret} placeholder={t('sshShell.sensitivePlaceholder')} autoComplete="off"/><button className="primary" disabled={!secret||!active||sendingSecret}>{sendingSecret?<LoaderCircle className="spin" size={13}/>:<Send size={13}/>} {t('sshShell.sendSensitive')}</button></form>}
-				<div><button type="button" disabled={!active} onClick={()=>void interrupt()}><Square size={10}/>{t('sshShell.interrupt')}</button><button type="button" className="danger" disabled={!active||closing} onClick={()=>void stop()}>{closing?<LoaderCircle className="spin" size={13}/>:<Power size={13}/>} {t('sshShell.closeSession')}</button></div>
-			</footer>
-			{shell.error&&<p className="ssh-shell-terminal-error"><ShieldAlert size={13}/>{shell.error}</p>}
-		</section>
-	return embedded?terminal:<div className="ssh-shell-terminal-backdrop">{terminal}</div>
-}
-
 function SSHWorkspacePage({hosts,shells,onCreated,refresh,onError}:{hosts:Host[];shells:SSHShell[];onCreated:(shell:SSHShell)=>void;refresh:()=>Promise<void>;onError:(message:string)=>void}){
 	const {t}=useTranslation()
 	const [selectedShellID,setSelectedShellID]=useState(shells[0]?.id||'')
@@ -1641,17 +1189,6 @@ function SSHWorkspacePage({hosts,shells,onCreated,refresh,onError}:{hosts:Host[]
 		</section>
 		{creating&&<SSHShellCreateDialog hosts={hosts} surface="workspace" onCancel={()=>setCreating(false)} onCreated={created}/>}
 	</div>
-}
-
-function SSHHostHome({hosts,connectingHostID,onConnect}:{hosts:Host[];connectingHostID:string;onConnect:(host:Host)=>void}){
-	const {t}=useTranslation()
-	return <aside className="sftp-browser ssh-host-home panel">
-		<header><div><Server size={17}/><b>{t('config.tabs.hosts')}</b></div><span className="sftp-host">{t('sshWorkspace.hostCount',{count:hosts.length})}</span></header>
-		<div className="ssh-host-home-list">{hosts.map(host=>{
-			const connecting=connectingHostID===host.id
-			return <button type="button" disabled={!!connectingHostID} onClick={()=>onConnect(host)} key={host.id}><span className="ssh-host-home-icon">{connecting?<LoaderCircle className="spin" size={16}/>:<Server size={16}/>}</span><span><b>{host.name}</b><small>{host.user}@{host.address}:{host.port}</small></span><ChevronRight size={15}/></button>
-		})}</div>
-	</aside>
 }
 
 type SFTPNameEditor={mode:'create'}|{mode:'rename';entry:SFTPFileEntry}
@@ -1989,14 +1526,6 @@ function SFTPOverwriteDialog({path,busy,onCancel,onConfirm}:{path:string;busy:bo
 	return createPortal(<div className="connection-dialog-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget&&!busy)onCancel()}}><section className="sftp-overwrite-dialog panel"><header><FileText size={19}/><h2>{t('sshWorkspace.overwriteTitle')}</h2></header><code>{path}</code><footer><button type="button" disabled={busy} onClick={onCancel}>{t('common.cancel')}</button><button type="button" className="primary" disabled={busy} onClick={onConfirm}>{busy?<LoaderCircle className="spin" size={13}/>:<UploadCloud size={13}/>} {t('sshWorkspace.overwrite')}</button></footer></section></div>,document.body)
 }
 
-type PasswordInputProps=Omit<React.InputHTMLAttributes<HTMLInputElement>,'type'>
-
-function PasswordInput(props:PasswordInputProps){
-	const {t}=useTranslation()
-	const [visible,setVisible]=useState(false)
-	const label=t(visible?'common.hidePassword':'common.showPassword')
-	return <div className="password-input"><input {...props} type={visible?'text':'password'}/><button type="button" aria-label={label} aria-pressed={visible} title={label} onClick={()=>setVisible(value=>!value)}>{visible?<EyeOff size={16}/>:<Eye size={16}/>}</button></div>
-}
 
 
 function DestructiveConfirmDialog({title,busy,onCancel,onConfirm}:{title:string;busy:boolean;onCancel:()=>void;onConfirm:()=>void}){
@@ -3055,7 +2584,6 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	</div></ChatVisibilityContext.Provider>}</PersistentPageBoundary></>
 }
 
-function formatFileSize(size:number){if(size<1024)return `${size} B`;if(size<1024**2)return `${(size/1024).toFixed(1)} KiB`;if(size<1024**3)return `${(size/1024**2).toFixed(1)} MiB`;return `${(size/1024**3).toFixed(1)} GiB`}
 
 function FileTransferProgress({transfer,onCancel}:{transfer:ActiveFileTransfer;onCancel:()=>void}){
 	const {t}=useTranslation()
@@ -3372,11 +2900,6 @@ function compactScript(script:string){const source=script.length>toolOutputPrevi
 function latestOutput(value:string,limit=3){const tail=value.length>toolOutputPreviewChars?value.slice(-toolOutputPreviewChars):value;return tail.trimEnd().split(/\r?\n/).filter(line=>line.trim()!=='').slice(-limit).map(line=>previewText(line,180)).join('\n')}
 function formatDuration(value:unknown,run?:Run){if(typeof value==='number'&&Number.isFinite(value))return value>=1e9?`${(value/1e9).toFixed(2)} s`:`${(value/1e6).toFixed(1)} ms`;if(run?.completed_at){const ms=Date.parse(run.completed_at)-Date.parse(run.started_at);if(Number.isFinite(ms))return ms>=1000?`${(ms/1000).toFixed(2)} s`:`${ms} ms`}return'—'}
 function numberValue(value:unknown){return typeof value==='number'&&Number.isFinite(value)?value:0}
-function sshTunnelRoute(host:string,direction:string,localHost:string,localPort:number,remoteHost:string,remotePort:number,automatic='auto'){
-	const local=`${localHost||'127.0.0.1'}:${localPort||automatic}`
-	const remote=`${host}:${remoteHost||'127.0.0.1'}:${remotePort||automatic}`
-	return direction==='reverse'?`${local} → ${remote}`:`${local} ← ${remote}`
-}
 function cleanFileChangeOutput(value:string){const lines=value.split(/\r?\n/),result:string[]=[];for(let index=0;index<lines.length;index++){if(lines[index]==='__OPS_FILE_VALIDATION_OK__')continue;if(lines[index]==='__OPS_FILE_AFTER__'){index++;continue}result.push(lines[index])}return result.join('\n').trim()}
 
 type ToolTarget={kind:'host'|'workspace'|'scope';label:string;name:string;id?:string}
