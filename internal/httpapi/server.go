@@ -1224,24 +1224,6 @@ func (s *Server) discoverModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-func (s *Server) testModelConfiguration(w http.ResponseWriter, r *http.Request) {
-	if s.agent == nil {
-		writeErrorStatus(w, agent.ErrUnavailable, http.StatusServiceUnavailable)
-		return
-	}
-	var input domain.ModelTestInput
-	if !decode(w, r, &input) {
-		return
-	}
-	cfg, err := s.service.ModelTestConfig(r.Context(), input)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	job := s.modelTests.start(context.WithoutCancel(r.Context()), cfg, modelTestIdentity{}, s.agent.TestProvider)
-	writeJSON(w, http.StatusAccepted, job)
-}
-
 func (s *Server) activateModelProvider(w http.ResponseWriter, r *http.Request) {
 	result, err := s.service.ActivateModelProvider(r.Context(), r.PathValue("id"), actor(r))
 	if err != nil {
@@ -1276,33 +1258,6 @@ func (s *Server) deleteModelProvider(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Server) testModelProvider(w http.ResponseWriter, r *http.Request) {
-	if s.agent == nil {
-		writeErrorStatus(w, agent.ErrUnavailable, http.StatusServiceUnavailable)
-		return
-	}
-	cfg, provider, err := s.service.ModelProviderConfig(r.Context(), r.PathValue("id"))
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	job := s.modelTests.start(context.WithoutCancel(r.Context()), cfg, modelTestIdentity{ProviderID: provider.ID, Name: provider.Name}, s.agent.TestProvider)
-	writeJSON(w, http.StatusAccepted, job)
-}
-
-func (s *Server) getModelTest(w http.ResponseWriter, r *http.Request) {
-	if s.modelTests == nil {
-		writeErrorStatus(w, store.ErrNotFound, http.StatusNotFound)
-		return
-	}
-	job, ok := s.modelTests.get(r.PathValue("id"))
-	if !ok {
-		writeErrorStatus(w, store.ErrNotFound, http.StatusNotFound)
-		return
-	}
-	writeJSON(w, http.StatusOK, job)
 }
 
 func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) {

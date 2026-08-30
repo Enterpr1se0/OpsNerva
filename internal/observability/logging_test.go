@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBufferFiltersAndRedactsSensitiveFields(t *testing.T) {
@@ -47,6 +48,41 @@ func TestBufferUsesRingOrderAfterCapacity(t *testing.T) {
 	entries := buffer.recent(LogFilter{Limit: 10})
 	if len(entries) != 3 || entries[0].Message != "five" || entries[1].Message != "four" || entries[2].Message != "three" {
 		t.Fatalf("ring entries = %#v", entries)
+	}
+}
+
+func TestBufferSubscriptionStartsWithSnapshotAndPushesMatchingEntries(t *testing.T) {
+	buffer := &Buffer{limit: 10}
+	buffer.add(LogEntry{Level: "info", Message: "existing", Component: "ssh"})
+	subscription := buffer.subscribe(LogFilter{Level: "warn", Component: "ssh", Limit: 5})
+	defer subscription.Unsubscribe()
+	if len(subscription.Entries) != 0 {
+		t.Fatalf("unexpected subscription snapshot: %#v", subscription.Entries)
+	}
+
+	buffer.add(LogEntry{Level: "info", Message: "ignored", Component: "ssh"})
+	buffer.add(LogEntry{Level: "error", Message: "pushed", Component: "ssh"})
+	select {
+	case entry := <-subscription.Events:
+		if entry.Message != "pushed" {
+			t.Fatalf("subscription event = %#v", entry)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("matching log entry was not pushed")
+	}
+}
+
+func TestBufferSubscriptionSignalsOverflow(t *testing.T) {
+	buffer := &Buffer{limit: 200}
+	subscription := buffer.subscribe(LogFilter{Limit: 200})
+	defer subscription.Unsubscribe()
+	for index := 0; index < 130; index++ {
+		buffer.add(LogEntry{Level: "info", Message: "event"})
+	}
+	select {
+	case <-subscription.Overflow:
+	case <-time.After(time.Second):
+		t.Fatal("subscription overflow was not signaled")
 	}
 }
 
@@ -99,7 +135,7 @@ func TestRotatingWriterKeepsBoundedBackups(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer writer.file.Close()
+	defer func() { _ = writer.file.Close() }()
 	if _, err := writer.Write([]byte("first\n")); err != nil {
 		t.Fatal(err)
 	}

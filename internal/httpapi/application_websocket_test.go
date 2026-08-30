@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Enterpr1se0/opsnerva/internal/agent"
 	"github.com/Enterpr1se0/opsnerva/internal/config"
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
 	"github.com/Enterpr1se0/opsnerva/internal/observability"
@@ -25,14 +27,17 @@ import (
 )
 
 func TestApplicationWebSocketSubscribesThroughRequestLogger(t *testing.T) {
+	if err := observability.Configure(config.Logging{Level: "debug", Format: "text", File: "-", RecentLimit: 100}); err != nil {
+		t.Fatal(err)
+	}
 	server := &Server{}
 	httpServer := httptest.NewServer(requestLogMiddleware(http.HandlerFunc(server.applicationWebSocket), nil))
 	defer httpServer.Close()
-	config, err := websocket.NewConfig("ws"+strings.TrimPrefix(httpServer.URL, "http"), httpServer.URL)
+	webSocketConfig, err := websocket.NewConfig("ws"+strings.TrimPrefix(httpServer.URL, "http"), httpServer.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	connection, err := websocket.DialConfig(config)
+	connection, err := websocket.DialConfig(webSocketConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,6 +55,17 @@ func TestApplicationWebSocketSubscribesThroughRequestLogger(t *testing.T) {
 	if event.Type != "event" || event.Topic != "logs" || event.Mode != "snapshot" || event.Sequence != 1 {
 		t.Fatalf("unexpected subscription event: %#v", event)
 	}
+	slog.Info("live websocket log", "component", "test")
+	if err := websocket.JSON.Receive(connection, &event); err != nil {
+		t.Fatal(err)
+	}
+	var update applicationLogResponse
+	if err := json.Unmarshal(event.Data, &update); err != nil {
+		t.Fatal(err)
+	}
+	if event.Topic != "logs" || event.Mode != "delta" || len(update.Entries) != 1 || update.Entries[0].Message != "live websocket log" {
+		t.Fatalf("unexpected live log event: event=%#v payload=%#v", event, update)
+	}
 }
 
 func TestApplicationControlTopicsAreEventDriven(t *testing.T) {
@@ -60,6 +76,61 @@ func TestApplicationControlTopicsAreEventDriven(t *testing.T) {
 		if _, eventDriven := applicationStateTopics[topic]; !eventDriven {
 			t.Errorf("control topic %q is not event driven", topic)
 		}
+	}
+}
+
+func TestApplicationLongRunningTopicsAreEventDriven(t *testing.T) {
+	for _, topic := range []string{"logs", "model_tests"} {
+		if _, sampled := applicationSampleIntervals[topic]; sampled {
+			t.Errorf("push topic %q still has a polling interval", topic)
+		}
+		if _, eventDriven := applicationPushTopics[topic]; !eventDriven {
+			t.Errorf("push topic %q is not event driven", topic)
+		}
+	}
+}
+
+func TestApplicationWebSocketPushesModelTestCompletion(t *testing.T) {
+	jobs := newModelTestJobs()
+	release := make(chan struct{})
+	job := jobs.start(context.Background(), config.Model{}, modelTestIdentity{}, func(context.Context, config.Model) (agent.TestResult, error) {
+		<-release
+		return agent.TestResult{Model: "test-model", Response: "Hello", LatencyMS: 12}, nil
+	})
+	server := &Server{modelTests: jobs}
+	httpServer := httptest.NewServer(http.HandlerFunc(server.applicationWebSocket))
+	defer httpServer.Close()
+	webSocketConfig, err := websocket.NewConfig("ws"+strings.TrimPrefix(httpServer.URL, "http"), httpServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := websocket.DialConfig(webSocketConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if err := connection.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := websocket.JSON.Send(connection, applicationWebSocketCommand{Type: "subscribe", Topics: []string{"model_tests"}, ModelTestIDs: []string{job.ID}}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := receiveApplicationEvent(t, connection)
+	var jobsByID map[string]modelTestJob
+	if err := json.Unmarshal(snapshot.Data, &jobsByID); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Topic != "model_tests" || snapshot.Mode != "snapshot" || jobsByID[job.ID].Status != "running" {
+		t.Fatalf("unexpected model test snapshot: event=%#v payload=%#v", snapshot, jobsByID)
+	}
+	close(release)
+	delta := receiveApplicationEvent(t, connection)
+	var completed modelTestJob
+	if err := json.Unmarshal(delta.Data, &completed); err != nil {
+		t.Fatal(err)
+	}
+	if delta.Topic != "model_tests" || delta.Mode != "delta" || completed.ID != job.ID || completed.Status != "completed" || completed.Result == nil {
+		t.Fatalf("unexpected model test delta: event=%#v payload=%#v", delta, completed)
 	}
 }
 
@@ -505,54 +576,5 @@ func TestApplicationWebSocketPushesTaskOutputDelta(t *testing.T) {
 	}
 	if delta.Topic != "tasks" || delta.Mode != "delta" || taskEvent.Type != "output" || taskEvent.TaskID != task.ID || taskEvent.Stream != "stdout" || taskEvent.OffsetBytes != 0 || taskEvent.Content != "live output" {
 		t.Fatalf("unexpected task delta: event=%#v payload=%#v", delta, taskEvent)
-	}
-}
-
-func TestApplicationLogUpdateUsesSnapshotThenDelta(t *testing.T) {
-	now := time.Now().UTC()
-	older := observability.LogEntry{Time: now.Add(-time.Second), Level: "info", Message: "older"}
-	newer := observability.LogEntry{Time: now, Level: "warn", Message: "newer"}
-	initial := applicationLogResponse{Entries: []observability.LogEntry{older}, Components: []string{"http"}, MinimumLevel: "debug"}
-	mode, payload, changed, previous, err := applicationLogUpdate(nil, initial)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !changed || mode != "snapshot" || len(previous) != 1 {
-		t.Fatalf("initial update = mode %q, changed %t, previous %d", mode, changed, len(previous))
-	}
-	var snapshot applicationLogResponse
-	if err := json.Unmarshal(payload, &snapshot); err != nil || len(snapshot.Entries) != 1 {
-		t.Fatalf("snapshot payload = %#v, error %v", snapshot, err)
-	}
-
-	current := applicationLogResponse{Entries: []observability.LogEntry{newer, older}, Components: []string{"http"}, MinimumLevel: "debug"}
-	mode, payload, changed, previous, err = applicationLogUpdate(previous, current)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !changed || mode != "delta" || len(previous) != 2 {
-		t.Fatalf("incremental update = mode %q, changed %t, previous %d", mode, changed, len(previous))
-	}
-	var delta applicationLogResponse
-	if err := json.Unmarshal(payload, &delta); err != nil || len(delta.Entries) != 1 || delta.Entries[0].Message != "newer" {
-		t.Fatalf("delta payload = %#v, error %v", delta, err)
-	}
-
-	mode, payload, changed, _, err = applicationLogUpdate(previous, current)
-	if err != nil || changed || mode != "" || payload != nil {
-		t.Fatalf("unchanged update = mode %q, changed %t, payload %q, error %v", mode, changed, payload, err)
-	}
-}
-
-func TestApplicationLogUpdateFallsBackToSnapshotAfterCursorLoss(t *testing.T) {
-	now := time.Now().UTC()
-	previous := []observability.LogEntry{{Time: now.Add(-time.Minute), Level: "info", Message: "expired"}}
-	current := applicationLogResponse{Entries: []observability.LogEntry{{Time: now, Level: "info", Message: "current"}}}
-	mode, _, changed, next, err := applicationLogUpdate(previous, current)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !changed || mode != "snapshot" || len(next) != 1 || next[0].Message != "current" {
-		t.Fatalf("cursor-loss update = mode %q, changed %t, next %#v", mode, changed, next)
 	}
 }

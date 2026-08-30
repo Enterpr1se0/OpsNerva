@@ -1,9 +1,10 @@
 import type { ServerLogResponse } from './types'
 
-export type ApplicationEventTopic='connections'|'approvals'|'sessions'|'chat_state'|'tasks'|'audit'|'mcp_activity'|'health'|'logs'
+export type ApplicationEventTopic='connections'|'approvals'|'sessions'|'chat_state'|'tasks'|'audit'|'mcp_activity'|'health'|'logs'|'model_tests'
 export type ApplicationLogSubscription={level?:string;component?:string;q?:string;limit?:number}
-export type ApplicationEventSubscription={logs?:ApplicationLogSubscription;sessionId?:string;mcpSessionId?:string;taskIds?:readonly string[]}
+export type ApplicationEventSubscription={logs?:ApplicationLogSubscription;sessionId?:string;mcpSessionId?:string;taskIds?:readonly string[];modelTestIds?:readonly string[]}
 export type ApplicationEvent<T=unknown>={type:'event'|'error'|'heartbeat';topic?:ApplicationEventTopic;mode?:'snapshot'|'delta';sequence?:number;data?:T;error?:string}
+export type ApplicationLogPayload={entries:ServerLogResponse['entries'];components?:ServerLogResponse['components'];minimum_level?:string;file?:string}
 
 type ApplicationEventListener=(event:ApplicationEvent)=>void
 type ListenerRegistration={listener:ApplicationEventListener;options?:ApplicationEventSubscription}
@@ -83,7 +84,8 @@ class ApplicationEventClient{
 		const sessionId=chatSessionId||taskSessionId
 		const mcpSessionId=Array.from(this.listeners.get('mcp_activity')?.values()||[]).at(-1)?.options?.mcpSessionId
 		const taskIds=[...new Set(Array.from(this.listeners.get('tasks')?.values()||[]).flatMap(registration=>registration.options?.taskIds||[]))].sort()
-		this.socket.send(JSON.stringify({type:'subscribe',topics,logs,session_id:sessionId,mcp_session_id:mcpSessionId,task_ids:taskIds}))
+		const modelTestIds=[...new Set(Array.from(this.listeners.get('model_tests')?.values()||[]).flatMap(registration=>registration.options?.modelTestIds||[]))].sort()
+		this.socket.send(JSON.stringify({type:'subscribe',topics,logs,session_id:sessionId,mcp_session_id:mcpSessionId,task_ids:taskIds,model_test_ids:modelTestIds}))
 	}
 
 	private disconnect(){
@@ -101,4 +103,4 @@ export function subscribeApplicationEvents<T>(topic:ApplicationEventTopic,listen
 	return applicationEventClient.subscribe(topic,listener,options)
 }
 
-export type ApplicationLogEvent=ApplicationEvent<ServerLogResponse>
+export type ApplicationLogEvent=ApplicationEvent<ApplicationLogPayload>

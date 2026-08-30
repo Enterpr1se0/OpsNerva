@@ -1,4 +1,5 @@
 import type { AgentEvent, Approval, ApprovalExecutionResult, AuditRunDeleteResult, AuthStatus, ChatContextCompressionResult, ChatMessage, ChatMessagePage, ChatQueueMode, ChatSession, ChatState, ConfigurationImportResult, Health, Host, HostInput, LLMToolCatalog, ManagedSkill, MCPActivitySnapshot, MCPOAuthStart, MCPServer, MCPServerInput, MCPTestResult, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestJob, ModelTestResult, Proxy, ProxyInput, ProxyTestResult, QueuedChatMessage, Run, RunDetail, RunSearchPage, ServerLogResponse, SFTPFileList, SFTPMutationResult, SSHHostStatus, SSHShell, SSHShellList, SSHShellSnapshot, SSHShellStartInput, SSHTunnel, SSHTunnelList, SSHTunnelStartInput, SSHTunnelUpdateInput, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchResponse, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceInput, WorkspaceUploadResult } from './types'
+import {subscribeApplicationEvents} from './appEvents'
 
 export type TransferProgress={loaded:number;total:number}
 export type TransferOptions={signal?:AbortSignal;onProgress?:(progress:TransferProgress)=>void;totalBytes?:number}
@@ -111,14 +112,37 @@ async function requestList<T>(path: string): Promise<T[]> {
 }
 
 async function waitForModelTest(job:ModelTestJob):Promise<ModelTestResult>{
-	let current=job
-	while(current.status==='running'){
-		await new Promise(resolve=>window.setTimeout(resolve,500))
-		current=await request<ModelTestJob>(`/api/v1/model-tests/${encodeURIComponent(current.id)}`)
-	}
-	if(current.status==='failed')throw new Error(current.error||'Model test failed')
-	if(!current.result)throw new Error('Model test returned no result')
-	return current.result
+	const result=modelTestResult(job)
+	if(result)return result
+	return new Promise<ModelTestResult>((resolve,reject)=>{
+		let unsubscribe=()=>{}
+		unsubscribe=subscribeApplicationEvents<ModelTestJob|Record<string,ModelTestJob>>('model_tests',event=>{
+			if(event.type==='error'){
+				unsubscribe()
+				reject(new Error(event.error||'Model test stream failed'))
+				return
+			}
+			if(event.type!=='event'||!event.data)return
+			const current=event.mode==='snapshot'?(event.data as Record<string,ModelTestJob>)[job.id]:event.data as ModelTestJob
+			if(!current||current.id!==job.id)return
+			try{
+				const completed=modelTestResult(current)
+				if(!completed)return
+				unsubscribe()
+				resolve(completed)
+			}catch(error){
+				unsubscribe()
+				reject(error)
+			}
+		},{modelTestIds:[job.id]})
+	})
+}
+
+function modelTestResult(job:ModelTestJob):ModelTestResult|null{
+	if(job.status==='running')return null
+	if(job.status==='failed')throw new Error(job.error||'Model test failed')
+	if(!job.result)throw new Error('Model test returned no result')
+	return job.result
 }
 
 async function startModelTest(path:string,body:string):Promise<ModelTestResult>{

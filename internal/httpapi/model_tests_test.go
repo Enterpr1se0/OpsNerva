@@ -30,9 +30,14 @@ func TestModelTestJobRunsWithoutHoldingStartRequest(t *testing.T) {
 	if !ok || current.Status != "running" {
 		t.Fatalf("model test was not queryable while running: %#v", current)
 	}
+	subscription := jobs.subscribe([]string{job.ID})
+	defer subscription.Unsubscribe()
+	if snapshot := subscription.Jobs[job.ID]; snapshot.Status != "running" {
+		t.Fatalf("model test subscription snapshot = %#v", snapshot)
+	}
 
 	close(release)
-	current = waitForModelTestJob(t, jobs, job.ID)
+	current = receiveModelTestJob(t, subscription.Events)
 	if current.Status != "completed" || current.Result == nil {
 		t.Fatalf("model test did not complete: %#v", current)
 	}
@@ -43,29 +48,27 @@ func TestModelTestJobRunsWithoutHoldingStartRequest(t *testing.T) {
 
 func TestModelTestJobPreservesFailure(t *testing.T) {
 	jobs := newModelTestJobs()
+	release := make(chan struct{})
 	job := jobs.start(context.Background(), config.Model{}, modelTestIdentity{}, func(context.Context, config.Model) (agent.TestResult, error) {
+		<-release
 		return agent.TestResult{}, errors.New("upstream unavailable")
 	})
-
-	current := waitForModelTestJob(t, jobs, job.ID)
+	subscription := jobs.subscribe([]string{job.ID})
+	defer subscription.Unsubscribe()
+	close(release)
+	current := receiveModelTestJob(t, subscription.Events)
 	if current.Status != "failed" || current.Error != "upstream unavailable" || current.Result != nil {
 		t.Fatalf("model test failure was not preserved: %#v", current)
 	}
 }
 
-func waitForModelTestJob(t *testing.T, jobs *modelTestJobs, id string) modelTestJob {
+func receiveModelTestJob(t *testing.T, events <-chan modelTestJob) modelTestJob {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		job, ok := jobs.get(id)
-		if !ok {
-			t.Fatalf("model test job %q disappeared", id)
-		}
-		if job.Status != "running" {
-			return job
-		}
-		time.Sleep(time.Millisecond)
+	select {
+	case job := <-events:
+		return job
+	case <-time.After(time.Second):
+		t.Fatal("model test completion event was not published")
 	}
-	t.Fatalf("model test job %q did not finish", id)
 	return modelTestJob{}
 }

@@ -11,14 +11,14 @@ import {
   Cable, Download, ListChecks, ListPlus, LoaderCircle, LogOut, Plus, Power, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, Square, TerminalSquare, Trash2, UploadCloud, UserRound, X, Zap,
 } from 'lucide-react'
 import { api, chatAttachmentURL, downloadFile, reconnectChatStream, sftpDownloadURL, sshShellWebSocketURL, streamChat, workspaceDownloadURL, workspaceFileEventsURL } from './api'
-import { subscribeApplicationEvents } from './appEvents'
+import { subscribeApplicationEvents, type ApplicationLogPayload } from './appEvents'
 import { CopyButton, CopyablePre, writeClipboard } from './CopyButton'
 import { AppSelect, ModelCombobox } from './Controls'
 import i18n, { localeFor, type SupportedLanguage } from './i18n'
 import { activeLiveTaskStatus, useLiveSSHTasks, type LiveSSHTaskSnapshot, type LiveSSHTaskTarget } from './liveTasks'
 import { appendStreamText, streamTextFrom, streamTextTail, streamTextValue, type StreamText } from './streamText'
 import { TextFileEditor } from './TextFileEditor'
-import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, AuthStatus, ChatMessage, ChatQueueMode, ChatSession, ChatSessionDelta, ChatState, ChatTokenUsage, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPActivityEvent, MCPActivitySnapshot, MCPClientSession, MCPServer, MCPServerInput, MCPToolCall, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, QueuedChatMessage, Run, ServerLogEntry, ServerLogResponse, SFTPFileEntry, SSHHostStatus, SSHShell, SSHShellEvent, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
+import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, AuthStatus, ChatMessage, ChatQueueMode, ChatSession, ChatSessionDelta, ChatState, ChatTokenUsage, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPActivityEvent, MCPActivitySnapshot, MCPClientSession, MCPServer, MCPServerInput, MCPToolCall, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, QueuedChatMessage, Run, ServerLogEntry, SFTPFileEntry, SSHHostStatus, SSHShell, SSHShellEvent, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
 
 type Page = 'chat' | 'ssh' | 'config' | 'extensions' | 'audit' | 'logs'
 const pageVisualOrder:Page[]=['chat','ssh','extensions','audit','logs','config']
@@ -4846,14 +4846,19 @@ function LogsPage(){
     finally{if(!silent)setLoading(false)}
   },[level,component,query])
   useEffect(()=>{
-	void refreshLogs()
-	if(!live)return
-	return subscribeApplicationEvents<ServerLogResponse>('logs',event=>{
-		if(event.type==='error'){setLogError(event.error||'Live log stream failed');return}
+	if(!live){void refreshLogs();return}
+	setLoading(true)
+	return subscribeApplicationEvents<ApplicationLogPayload>('logs',event=>{
+		if(event.type==='error'){setLogError(event.error||'Live log stream failed');setLoading(false);return}
 		if(event.type!=='event'||!event.data)return
 		const result=event.data
 		setEntries(current=>event.mode==='delta'?[...(result.entries||[]),...current].slice(0,500):result.entries||[])
-		setComponents(result.components||[]);setMinimumLevel(result.minimum_level||'debug');setLogFile(result.file||'');setLogError('')
+		if(event.mode==='snapshot'){
+			setComponents(result.components||[]);setMinimumLevel(result.minimum_level||'debug');setLogFile(result.file||'')
+		}else{
+			setComponents(current=>{const added=(result.entries||[]).map(entry=>entry.component).filter((value):value is string=>!!value&&!current.includes(value));return added.length?[...current,...new Set(added)].sort():current})
+		}
+		setLogError('');setLoading(false)
 	},{logs:{level,component,q:query,limit:500}})
   },[component,level,live,query,refreshLogs])
   return <div className="logs-page page-stack">

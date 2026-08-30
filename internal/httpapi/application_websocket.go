@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"slices"
 	"sort"
-	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -22,64 +21,10 @@ import (
 	"golang.org/x/net/websocket"
 )
 
-const applicationWebSocketMaxMessage = 16 << 10
 const applicationSnapshotCacheTTL = 200 * time.Millisecond
 const applicationSnapshotCacheLimit = 256
 const applicationTaskOutputLimit = 64 << 10
-const applicationTaskSubscriptionLimit = 32
 const applicationSessionLimit = 50
-
-var applicationSampleIntervals = map[string]time.Duration{
-	"connections": 5 * time.Second,
-	"health":      30 * time.Second,
-	"logs":        time.Second,
-}
-
-var applicationStateTopics = map[string]struct{}{
-	service.StateTopicConnections: {},
-	service.StateTopicApprovals:   {},
-	service.StateTopicSessions:    {},
-	service.StateTopicChatState:   {},
-	service.StateTopicAudit:       {},
-}
-
-var applicationPushTopics = map[string]struct{}{
-	"mcp_activity": {},
-	"tasks":        {},
-}
-
-type applicationWebSocketLogFilter struct {
-	Level     string `json:"level,omitempty"`
-	Component string `json:"component,omitempty"`
-	Query     string `json:"q,omitempty"`
-	Limit     int    `json:"limit,omitempty"`
-}
-
-type applicationWebSocketCommand struct {
-	Type         string                        `json:"type"`
-	Topics       []string                      `json:"topics,omitempty"`
-	Logs         applicationWebSocketLogFilter `json:"logs,omitempty"`
-	SessionID    string                        `json:"session_id,omitempty"`
-	MCPSessionID string                        `json:"mcp_session_id,omitempty"`
-	TaskIDs      []string                      `json:"task_ids,omitempty"`
-}
-
-type applicationWebSocketEvent struct {
-	Type     string          `json:"type"`
-	Topic    string          `json:"topic,omitempty"`
-	Mode     string          `json:"mode,omitempty"`
-	Sequence uint64          `json:"sequence,omitempty"`
-	Data     json.RawMessage `json:"data,omitempty"`
-	Error    string          `json:"error,omitempty"`
-}
-
-type applicationWebSocketSubscription struct {
-	topics       map[string]struct{}
-	logs         applicationWebSocketLogFilter
-	sessionID    string
-	mcpSessionID string
-	taskIDs      []string
-}
 
 type applicationTopicState struct {
 	payload []byte
@@ -91,13 +36,6 @@ type applicationSnapshotCacheEntry struct {
 	expires time.Time
 }
 
-type applicationLogResponse struct {
-	Entries      []observability.LogEntry `json:"entries"`
-	Components   []string                 `json:"components"`
-	MinimumLevel string                   `json:"minimum_level"`
-	File         string                   `json:"file"`
-}
-
 type applicationConnectionResponse struct {
 	Tunnels []domain.SSHTunnel `json:"tunnels"`
 	Shells  []domain.SSHShell  `json:"shells"`
@@ -106,29 +44,6 @@ type applicationConnectionResponse struct {
 type applicationSessionDelta struct {
 	Sessions   []domain.ChatSession `json:"sessions,omitempty"`
 	RemovedIDs []string             `json:"removed_ids,omitempty"`
-}
-
-func applicationSubscriptionTopicChanged(previous, next applicationWebSocketSubscription, topic string) bool {
-	_, previouslySubscribed := previous.topics[topic]
-	_, subscribed := next.topics[topic]
-	if previouslySubscribed != subscribed {
-		return true
-	}
-	if !subscribed {
-		return false
-	}
-	switch topic {
-	case "logs":
-		return previous.logs != next.logs
-	case "chat_state":
-		return previous.sessionID != next.sessionID
-	case "mcp_activity":
-		return previous.mcpSessionID != next.mcpSessionID
-	case "tasks":
-		return previous.sessionID != next.sessionID || !slices.Equal(previous.taskIDs, next.taskIDs)
-	default:
-		return false
-	}
 }
 
 func (s *Server) applicationWebSocket(w http.ResponseWriter, r *http.Request) {
@@ -155,11 +70,16 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 
 	subscription := applicationWebSocketSubscription{topics: map[string]struct{}{}}
 	states := make(map[string]applicationTopicState)
-	var previousLogs []observability.LogEntry
 	var mcpEvents <-chan domain.MCPActivityEvent
 	var unsubscribeMCP func()
 	var taskEvents <-chan domain.TaskEvent
 	var unsubscribeTasks func()
+	var logEvents <-chan observability.LogEntry
+	var logOverflow <-chan struct{}
+	unsubscribeLogs := func() {}
+	var modelTestEvents <-chan modelTestJob
+	var modelTestOverflow <-chan struct{}
+	unsubscribeModelTests := func() {}
 	var stateEvents <-chan service.StateEvent
 	var stateOverflow <-chan struct{}
 	unsubscribeStateEvents := func() {}
@@ -174,6 +94,8 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 		if unsubscribeTasks != nil {
 			unsubscribeTasks()
 		}
+		unsubscribeLogs()
+		unsubscribeModelTests()
 	}()
 	var sequence uint64
 	tick := time.NewTicker(250 * time.Millisecond)
@@ -186,21 +108,9 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 		return websocket.JSON.Send(connection, applicationWebSocketEvent{Type: "event", Topic: topic, Mode: mode, Sequence: sequence, Data: payload})
 	}
 	sendSnapshot := func(topic string) error {
-		var payload []byte
-		if topic == "logs" {
-			current := recentApplicationLogs(subscription.logs)
-			encoded, err := json.Marshal(current)
-			if err != nil {
-				return websocket.JSON.Send(connection, applicationWebSocketEvent{Type: "error", Topic: topic, Error: err.Error()})
-			}
-			previousLogs = append([]observability.LogEntry(nil), current.Entries...)
-			payload = encoded
-		} else {
-			var err error
-			payload, err = s.applicationTopicSnapshot(ctx, topic, subscription)
-			if err != nil {
-				return websocket.JSON.Send(connection, applicationWebSocketEvent{Type: "error", Topic: topic, Error: err.Error()})
-			}
+		payload, err := s.applicationTopicSnapshot(ctx, topic, subscription)
+		if err != nil {
+			return websocket.JSON.Send(connection, applicationWebSocketEvent{Type: "error", Topic: topic, Error: err.Error()})
 		}
 		state := states[topic]
 		state.payload = payload
@@ -221,6 +131,7 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 			mcpChanged := applicationSubscriptionTopicChanged(previous, next, "mcp_activity")
 			tasksChanged := applicationSubscriptionTopicChanged(previous, next, "tasks")
 			logsChanged := applicationSubscriptionTopicChanged(previous, next, "logs")
+			modelTestsChanged := applicationSubscriptionTopicChanged(previous, next, "model_tests")
 			if mcpChanged && unsubscribeMCP != nil {
 				unsubscribeMCP()
 				unsubscribeMCP = nil
@@ -231,14 +142,23 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 				unsubscribeTasks = nil
 				taskEvents = nil
 			}
+			if logsChanged {
+				unsubscribeLogs()
+				unsubscribeLogs = func() {}
+				logEvents = nil
+				logOverflow = nil
+			}
+			if modelTestsChanged {
+				unsubscribeModelTests()
+				unsubscribeModelTests = func() {}
+				modelTestEvents = nil
+				modelTestOverflow = nil
+			}
 			subscription = next
 			for topic := range states {
 				if _, subscribed := subscription.topics[topic]; !subscribed || applicationSubscriptionTopicChanged(previous, subscription, topic) {
 					delete(states, topic)
 				}
-			}
-			if logsChanged {
-				previousLogs = nil
 			}
 			if _, subscribed := subscription.topics["mcp_activity"]; subscribed && mcpChanged {
 				mcpEvents, unsubscribeMCP = s.service.SubscribeMCPActivity(subscription.mcpSessionID)
@@ -257,6 +177,30 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 					_ = websocket.JSON.Send(connection, applicationWebSocketEvent{Type: "error", Topic: "tasks", Error: err.Error()})
 				} else if send("tasks", "snapshot", payload) != nil {
 					return
+				}
+			}
+			if _, subscribed := subscription.topics["logs"]; subscribed && logsChanged {
+				logSubscription := observability.Subscribe(applicationLogFilter(subscription.logs))
+				logEvents, logOverflow, unsubscribeLogs = logSubscription.Events, logSubscription.Overflow, logSubscription.Unsubscribe
+				payload, err := json.Marshal(applicationLogSnapshot(logSubscription.Entries))
+				if err != nil {
+					_ = websocket.JSON.Send(connection, applicationWebSocketEvent{Type: "error", Topic: "logs", Error: err.Error()})
+				} else if send("logs", "snapshot", payload) != nil {
+					return
+				}
+			}
+			if _, subscribed := subscription.topics["model_tests"]; subscribed && modelTestsChanged {
+				if s.modelTests == nil {
+					_ = websocket.JSON.Send(connection, applicationWebSocketEvent{Type: "error", Topic: "model_tests", Error: "model tests are unavailable"})
+				} else {
+					modelTestSubscription := s.modelTests.subscribe(subscription.modelTestIDs)
+					modelTestEvents, modelTestOverflow, unsubscribeModelTests = modelTestSubscription.Events, modelTestSubscription.Overflow, modelTestSubscription.Unsubscribe
+					payload, err := json.Marshal(modelTestSubscription.Jobs)
+					if err != nil {
+						_ = websocket.JSON.Send(connection, applicationWebSocketEvent{Type: "error", Topic: "model_tests", Error: err.Error()})
+					} else if send("model_tests", "snapshot", payload) != nil {
+						return
+					}
 				}
 			}
 			topics := make([]string, 0, len(subscription.topics))
@@ -304,6 +248,43 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 				continue
 			}
 			if send("tasks", "delta", payload) != nil {
+				return
+			}
+		case entry := <-logEvents:
+			entries := []observability.LogEntry{entry}
+			draining := true
+			for draining && len(entries) < 128 {
+				select {
+				case entry = <-logEvents:
+					entries = append(entries, entry)
+				default:
+					draining = false
+				}
+			}
+			slices.Reverse(entries)
+			payload, err := json.Marshal(applicationLogResponse{Entries: entries})
+			if err == nil && send("logs", "delta", payload) != nil {
+				return
+			}
+		case <-logOverflow:
+			unsubscribeLogs()
+			logSubscription := observability.Subscribe(applicationLogFilter(subscription.logs))
+			logEvents, logOverflow, unsubscribeLogs = logSubscription.Events, logSubscription.Overflow, logSubscription.Unsubscribe
+			payload, err := json.Marshal(applicationLogSnapshot(logSubscription.Entries))
+			if err == nil && send("logs", "snapshot", payload) != nil {
+				return
+			}
+		case job := <-modelTestEvents:
+			payload, err := json.Marshal(job)
+			if err == nil && send("model_tests", "delta", payload) != nil {
+				return
+			}
+		case <-modelTestOverflow:
+			unsubscribeModelTests()
+			modelTestSubscription := s.modelTests.subscribe(subscription.modelTestIDs)
+			modelTestEvents, modelTestOverflow, unsubscribeModelTests = modelTestSubscription.Events, modelTestSubscription.Overflow, modelTestSubscription.Unsubscribe
+			payload, err := json.Marshal(modelTestSubscription.Jobs)
+			if err == nil && send("model_tests", "snapshot", payload) != nil {
 				return
 			}
 		case event := <-stateEvents:
@@ -395,31 +376,6 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 					continue
 				}
 				state.next = now.Add(interval)
-				if topic == "logs" {
-					current := recentApplicationLogs(subscription.logs)
-					fullPayload, marshalErr := json.Marshal(current)
-					if marshalErr != nil {
-						_ = websocket.JSON.Send(connection, applicationWebSocketEvent{Type: "error", Topic: topic, Error: marshalErr.Error()})
-						states[topic] = state
-						continue
-					}
-					mode, payload, changed, nextPrevious, err := applicationLogUpdate(previousLogs, current)
-					if err != nil {
-						_ = websocket.JSON.Send(connection, applicationWebSocketEvent{Type: "error", Topic: topic, Error: err.Error()})
-						states[topic] = state
-						continue
-					}
-					previousLogs = nextPrevious
-					if !changed && !bytes.Equal(state.payload, fullPayload) {
-						mode, payload, changed = "snapshot", fullPayload, true
-					}
-					state.payload = fullPayload
-					states[topic] = state
-					if changed && send(topic, mode, payload) != nil {
-						return
-					}
-					continue
-				}
 				payload, err := s.applicationTopicSnapshotCached(ctx, topic, subscription)
 				if err != nil {
 					_ = websocket.JSON.Send(connection, applicationWebSocketEvent{Type: "error", Topic: topic, Error: err.Error()})
@@ -612,84 +568,6 @@ func (s *Server) applicationTopicSnapshotCached(ctx context.Context, topic strin
 	return payload, nil
 }
 
-func readApplicationWebSocket(ctx context.Context, connection *websocket.Conn, updates chan applicationWebSocketSubscription) error {
-	for {
-		var command applicationWebSocketCommand
-		if err := websocket.JSON.Receive(connection, &command); err != nil {
-			return err
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if command.Type != "subscribe" {
-			return fmt.Errorf("unsupported application WebSocket command %q", command.Type)
-		}
-		topics := make(map[string]struct{}, len(command.Topics))
-		for _, value := range command.Topics {
-			topic := strings.ToLower(strings.TrimSpace(value))
-			_, intervalTopic := applicationSampleIntervals[topic]
-			_, stateTopic := applicationStateTopics[topic]
-			_, pushTopic := applicationPushTopics[topic]
-			if !intervalTopic && !stateTopic && !pushTopic {
-				return fmt.Errorf("unsupported application event topic %q", value)
-			}
-			topics[topic] = struct{}{}
-		}
-		if command.Logs.Limit <= 0 {
-			command.Logs.Limit = 500
-		} else if command.Logs.Limit > 1000 {
-			command.Logs.Limit = 1000
-		}
-		command.SessionID = strings.TrimSpace(command.SessionID)
-		command.MCPSessionID = strings.TrimSpace(command.MCPSessionID)
-		taskIDs := make([]string, 0, len(command.TaskIDs))
-		seenTaskIDs := make(map[string]struct{}, len(command.TaskIDs))
-		for _, value := range command.TaskIDs {
-			taskID := strings.TrimSpace(value)
-			if taskID == "" {
-				continue
-			}
-			if len(taskID) > 256 {
-				return fmt.Errorf("task_id must not exceed 256 bytes")
-			}
-			if _, exists := seenTaskIDs[taskID]; exists {
-				continue
-			}
-			seenTaskIDs[taskID] = struct{}{}
-			taskIDs = append(taskIDs, taskID)
-		}
-		if len(taskIDs) > applicationTaskSubscriptionLimit {
-			return fmt.Errorf("task_ids must not contain more than %d entries", applicationTaskSubscriptionLimit)
-		}
-		sort.Strings(taskIDs)
-		if _, subscribed := topics["chat_state"]; subscribed && command.SessionID == "" {
-			return fmt.Errorf("session_id is required for application event topic chat_state")
-		}
-		if _, subscribed := topics["tasks"]; subscribed && len(taskIDs) == 0 {
-			return fmt.Errorf("task_ids is required for application event topic tasks")
-		}
-		if _, subscribed := topics["tasks"]; subscribed && command.SessionID == "" {
-			return fmt.Errorf("session_id is required for application event topic tasks")
-		}
-		if len(command.SessionID) > 256 {
-			return fmt.Errorf("session_id must not exceed 256 bytes")
-		}
-		if len(command.MCPSessionID) > 256 {
-			return fmt.Errorf("mcp_session_id must not exceed 256 bytes")
-		}
-		next := applicationWebSocketSubscription{topics: topics, logs: command.Logs, sessionID: command.SessionID, mcpSessionID: command.MCPSessionID, taskIDs: taskIDs}
-		select {
-		case updates <- next:
-		default:
-			select {
-			case <-updates:
-			default:
-			}
-			updates <- next
-		}
-	}
-}
-
 func (s *Server) applicationTopicSnapshot(ctx context.Context, topic string, subscription applicationWebSocketSubscription) ([]byte, error) {
 	var value any
 	switch topic {
@@ -792,45 +670,4 @@ func (s *Server) applicationHealth() map[string]any {
 		model = s.agent.Status()
 	}
 	return map[string]any{"status": "ok", "agent_available": model.Available, "model": model, "time": time.Now().UTC()}
-}
-
-func recentApplicationLogs(filter applicationWebSocketLogFilter) applicationLogResponse {
-	return applicationLogResponse{
-		Entries:    observability.Recent(observability.LogFilter{Level: filter.Level, Component: filter.Component, Query: filter.Query, Limit: filter.Limit}),
-		Components: observability.Components(), MinimumLevel: observability.MinimumLevel(), File: observability.File(),
-	}
-}
-
-func applicationLogUpdate(previous []observability.LogEntry, current applicationLogResponse) (string, []byte, bool, []observability.LogEntry, error) {
-	mode := "snapshot"
-	nextPrevious := append([]observability.LogEntry(nil), current.Entries...)
-	entries := current.Entries
-	if previous != nil {
-		if len(previous) == 0 && len(current.Entries) == 0 {
-			return "", nil, false, nextPrevious, nil
-		}
-		if len(previous) > 0 {
-			previousHead, err := json.Marshal(previous[0])
-			if err != nil {
-				return "", nil, false, previous, err
-			}
-			for index, entry := range current.Entries {
-				encoded, marshalErr := json.Marshal(entry)
-				if marshalErr != nil {
-					return "", nil, false, previous, marshalErr
-				}
-				if bytes.Equal(encoded, previousHead) {
-					if index == 0 {
-						return "", nil, false, nextPrevious, nil
-					}
-					mode = "delta"
-					entries = current.Entries[:index]
-					break
-				}
-			}
-		}
-	}
-	current.Entries = entries
-	payload, err := json.Marshal(current)
-	return mode, payload, err == nil, nextPrevious, err
 }
