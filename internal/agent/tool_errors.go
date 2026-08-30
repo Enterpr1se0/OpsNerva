@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Enterpr1se0/opsnerva/internal/agenttool"
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
 	"github.com/Enterpr1se0/opsnerva/internal/observability"
 	"github.com/Enterpr1se0/opsnerva/internal/service"
@@ -37,23 +38,6 @@ type approvalInterrupt struct {
 
 type approvalResumeDecision struct {
 	ApprovalID string
-}
-
-type toolInputValidationError struct {
-	message    string
-	validation *domain.ToolValidationDetails
-}
-
-func (err *toolInputValidationError) Error() string {
-	return err.message
-}
-
-func invalidToolInput(format string, arguments ...any) error {
-	return &toolInputValidationError{message: fmt.Sprintf(format, arguments...)}
-}
-
-func invalidStructuredToolInput(message string, validation domain.ToolValidationDetails) error {
-	return &toolInputValidationError{message: message, validation: &validation}
 }
 
 func withToolActivityNotifier(ctx context.Context, notify func(toolCallActivity)) context.Context {
@@ -129,9 +113,9 @@ func toolFailureFromError(toolName string, err error) domain.ToolFailure {
 		},
 		Status: "failed",
 	}
-	var inputValidation *toolInputValidationError
+	var inputValidation *agenttool.InputError
 	if errors.As(err, &inputValidation) {
-		failure.Validation = inputValidation.validation
+		failure.Validation = inputValidation.Validation()
 	}
 	return failure
 }
@@ -139,7 +123,7 @@ func toolFailureFromError(toolName string, err error) domain.ToolFailure {
 func classifyAgentToolError(toolName string, err error) (code, message string, retryable bool, nextAction string) {
 	messageLower := strings.ToLower(err.Error())
 	rootMessage := rootToolError(err).Error()
-	var inputValidation *toolInputValidationError
+	var inputValidation *agenttool.InputError
 	var serviceValidation *service.InputValidationError
 	var selectionErr *service.ExecutionToolSelectionError
 	switch {

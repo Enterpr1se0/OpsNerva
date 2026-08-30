@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Enterpr1se0/opsnerva/internal/agenttool"
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
 	"github.com/Enterpr1se0/opsnerva/internal/service"
 
@@ -34,7 +35,7 @@ func TestNormalizeEmptyToolArguments(t *testing.T) {
 }
 
 func TestTypedToolInputErrorIsReportedAsValidationFailure(t *testing.T) {
-	failure := toolFailureFromError("ssh_tunnel", invalidToolInput("action=list does not accept host_id"))
+	failure := toolFailureFromError("ssh_tunnel", agenttool.InvalidInput("action=list does not accept host_id"))
 	if failure.OK || failure.Code != "validation_failed" || failure.Retryable || !strings.Contains(failure.Message, "host_id") {
 		t.Fatalf("unexpected typed input failure: %#v", failure)
 	}
@@ -48,7 +49,7 @@ func TestAgentHostAccessErrorIsReportedAsDenial(t *testing.T) {
 }
 
 func TestStructuredToolInputErrorPreservesCorrectionDetails(t *testing.T) {
-	failure := toolFailureFromError("ssh_shell", invalidStructuredToolInput(
+	failure := toolFailureFromError("ssh_shell", agenttool.StructuredInputError(
 		"action=input received unsupported fields: host_id",
 		domain.ToolValidationDetails{
 			Action: "input", AllowedFields: []string{"action", "shell_id", "input", "submit", "reason"},

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Enterpr1se0/opsnerva/internal/agenttool"
+
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
 )
@@ -19,7 +21,7 @@ func TestToolPayloadReductionBoundsCurrentModelRequestAndPreservesOriginalEvents
 	toolResult := schema.ToolMessage(result, "call-large", schema.WithToolName("workspace_file_edit"))
 	state := &adk.ChatModelAgentState{Messages: []*schema.Message{assistant, toolResult}}
 
-	middleware, err := newToolReductionMiddleware(context.Background(), []ToolDescriptor{{Name: "workspace_file_edit"}})
+	middleware, err := newToolReductionMiddleware(context.Background(), []agenttool.Descriptor{{Name: "workspace_file_edit"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +60,7 @@ func TestToolPayloadReductionBoundsAggregateToolContext(t *testing.T) {
 		)
 	}
 	state := &adk.ChatModelAgentState{Messages: messages}
-	middleware, err := newToolReductionMiddleware(context.Background(), []ToolDescriptor{{Name: "tool"}})
+	middleware, err := newToolReductionMiddleware(context.Background(), []agenttool.Descriptor{{Name: "tool"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +78,7 @@ func TestToolPayloadReductionLeavesSmallContextUntouched(t *testing.T) {
 		schema.AssistantMessage("", []schema.ToolCall{{ID: "small", Function: schema.FunctionCall{Name: "tool", Arguments: `{}`}}}),
 		schema.ToolMessage(`{"ok":true}`, "small", schema.WithToolName("tool")),
 	}}
-	middleware, err := newToolReductionMiddleware(context.Background(), []ToolDescriptor{{Name: "tool"}})
+	middleware, err := newToolReductionMiddleware(context.Background(), []agenttool.Descriptor{{Name: "tool"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +100,7 @@ func TestWebToolPayloadReductionPreservesStructuredSources(t *testing.T) {
 	}})
 	toolResult := schema.ToolMessage(searchResult, "web-search", schema.WithToolName("web_search"))
 	state := &adk.ChatModelAgentState{Messages: []*schema.Message{assistant, toolResult}}
-	middleware, err := newToolReductionMiddleware(context.Background(), []ToolDescriptor{{Name: "web_search"}})
+	middleware, err := newToolReductionMiddleware(context.Background(), []agenttool.Descriptor{{Name: "web_search"}})
 	if err != nil {
 		t.Fatal(err)
 	}

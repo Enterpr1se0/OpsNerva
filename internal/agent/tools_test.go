@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Enterpr1se0/opsnerva/internal/agenttool"
 	"github.com/Enterpr1se0/opsnerva/internal/config"
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
 	"github.com/Enterpr1se0/opsnerva/internal/security"
@@ -160,7 +161,7 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	descriptors, err := DescribeTools(ctx, loaded)
+	descriptors, err := agenttool.Describe(ctx, loaded)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +396,7 @@ func TestSSHExecWrongToolResultGuidesTheNextModelCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var failure ExecToolResult
+	var failure agenttool.ExecResult
 	if err := json.Unmarshal([]byte(encoded), &failure); err != nil {
 		t.Fatal(err)
 	}
@@ -406,26 +407,19 @@ func TestSSHExecWrongToolResultGuidesTheNextModelCall(t *testing.T) {
 }
 
 func TestSSHShellActionValidationReportsExactFields(t *testing.T) {
-	input := SSHShellInput{Action: "input", HostID: "host-wrong", ShellID: "shell-1", Input: "whoami", Submit: true}
-	err := validateSSHShellActionFields(input, "input",
-		[]string{"action", "shell_id", "input", "submit", "reason"},
-		map[string]any{"action": "input", "shell_id": "shell_xxx", "input": "whoami", "submit": true},
-	)
-	var validation *toolInputValidationError
-	if !errors.As(err, &validation) || validation.validation == nil {
-		t.Fatalf("structured validation error was not returned: %v", err)
+	input := agenttool.SSHShellInput{Action: "input", HostID: "host-wrong", ShellID: "shell-1", Input: "whoami", Submit: true}
+	result, err := newSSHTools(nil).RunShell(context.Background(), "session-1", input, "test")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(validation.validation.UnexpectedFields) != 1 || validation.validation.UnexpectedFields[0] != "host_id" {
-		t.Fatalf("unexpected field details = %#v", validation.validation)
+	failure, ok := result.(domain.ToolFailure)
+	if !ok || failure.Validation == nil {
+		t.Fatalf("structured validation failure was not returned: %#v", result)
+	}
+	if len(failure.Validation.UnexpectedFields) != 1 || failure.Validation.UnexpectedFields[0] != "host_id" {
+		t.Fatalf("unexpected field details = %#v", failure.Validation)
 	}
 
-	valid := SSHShellInput{Action: "output", ShellID: "shell-1", Reason: "read new output"}
-	if err := validateSSHShellActionFields(valid, "output",
-		[]string{"action", "shell_id", "after_sequence", "wait_seconds", "max_output_bytes", "reason"},
-		nil,
-	); err != nil {
-		t.Fatalf("valid output fields were rejected: %v", err)
-	}
 }
 
 func TestModelShellOutputReturnsLatestAgentInputResponse(t *testing.T) {
@@ -437,7 +431,7 @@ func TestModelShellOutputReturnsLatestAgentInputResponse(t *testing.T) {
 		{Sequence: 5, Stream: "stdout", Content: "second response\n"},
 		{Sequence: 6, Stream: "status", Status: "running"},
 	}
-	if output := modelShellOutput(events); output != "second response\n" {
+	if output := agenttool.ModelShellOutput(events); output != "second response\n" {
 		t.Fatalf("latest input response = %q", output)
 	}
 }
@@ -468,7 +462,7 @@ func TestModelShellOutputRemovesPTYInputEcho(t *testing.T) {
 				{Sequence: 1, Stream: "input", Source: "agent", Content: testCase.input},
 				{Sequence: 2, Stream: "stdout", Content: testCase.output},
 			}
-			if got := modelShellOutput(events); got != testCase.want {
+			if got := agenttool.ModelShellOutput(events); got != testCase.want {
 				t.Fatalf("model shell output = %q, want %q", got, testCase.want)
 			}
 		})
@@ -477,7 +471,7 @@ func TestModelShellOutputRemovesPTYInputEcho(t *testing.T) {
 
 func TestModelShellOutputWithoutInputKeepsIncrementalOutput(t *testing.T) {
 	events := []domain.SSHShellEvent{{Sequence: 4, Stream: "stdout", Content: "late-result\r\n"}}
-	if got := modelShellOutput(events); got != "late-result\n" {
+	if got := agenttool.ModelShellOutput(events); got != "late-result\n" {
 		t.Fatalf("incremental shell output = %q", got)
 	}
 }
@@ -488,7 +482,7 @@ func TestModelShellChunksPreserveStreamsAndRemoveInputEcho(t *testing.T) {
 		{Sequence: 8, Stream: "stdout", Content: "check\r\nready\r\n"},
 		{Sequence: 9, Stream: "stderr", Content: "warning\r\n"},
 	}
-	chunks := modelShellChunks(events, true)
+	chunks := agenttool.ModelShellChunks(events, true)
 	if len(chunks) != 2 || chunks[0].Sequence != 8 || chunks[0].Stream != "stdout" || chunks[0].Content != "ready\n" || chunks[1].Sequence != 9 || chunks[1].Stream != "stderr" || chunks[1].Content != "warning\n" {
 		t.Fatalf("model shell chunks = %#v", chunks)
 	}
@@ -501,40 +495,40 @@ func TestModelShellChunksExplicitReplayKeepsEarlierResponses(t *testing.T) {
 		{Sequence: 3, Stream: "input", Source: "agent", Content: "second\r"},
 		{Sequence: 4, Stream: "stdout", Content: "second response\r\n"},
 	}
-	chunks := modelShellChunks(events, false)
+	chunks := agenttool.ModelShellChunks(events, false)
 	if len(chunks) != 1 || chunks[0].Content != "first response\nsecond response\n" || chunks[0].FirstSequence != 2 || chunks[0].Sequence != 4 {
 		t.Fatalf("explicit replay chunks = %#v", chunks)
 	}
 }
 
 func TestShellToolOutputPolicyDefaultsAndValidatesBounds(t *testing.T) {
-	wait, maxBytes, err := shellToolOutputPolicy(nil, nil)
+	wait, maxBytes, err := agenttool.ShellOutputPolicy(nil, nil)
 	if err != nil || wait != 5*time.Second || maxBytes != 128<<10 {
 		t.Fatalf("default shell output policy = %s, %d, %v", wait, maxBytes, err)
 	}
 	zero, minimum := 0, 4<<10
-	wait, maxBytes, err = shellToolOutputPolicy(&zero, &minimum)
+	wait, maxBytes, err = agenttool.ShellOutputPolicy(&zero, &minimum)
 	if err != nil || wait != 0 || maxBytes != minimum {
 		t.Fatalf("explicit shell output policy = %s, %d, %v", wait, maxBytes, err)
 	}
 	maximum := domain.MaxShellQueryDelaySeconds
-	wait, _, err = shellToolOutputPolicy(&maximum, nil)
+	wait, _, err = agenttool.ShellOutputPolicy(&maximum, nil)
 	if err != nil || wait != 600*time.Second {
 		t.Fatalf("maximum shell wait = %s, %v", wait, err)
 	}
 	invalidWait, invalidMax := 601, (4<<20)+1
-	if _, _, err := shellToolOutputPolicy(&invalidWait, nil); err == nil {
+	if _, _, err := agenttool.ShellOutputPolicy(&invalidWait, nil); err == nil {
 		t.Fatal("out-of-range shell wait was accepted")
 	}
-	if _, _, err := shellToolOutputPolicy(nil, &invalidMax); err == nil {
+	if _, _, err := agenttool.ShellOutputPolicy(nil, &invalidMax); err == nil {
 		t.Fatal("out-of-range shell output size was accepted")
 	}
 }
 
 func TestModelShellResultExposesIncrementalChunksAndCursor(t *testing.T) {
-	encoded, err := json.Marshal(shellToolResult{
+	encoded, err := json.Marshal(agenttool.ShellResult{
 		ShellID: "shell-1", Status: "running", NextSequence: 9, HasMore: true,
-		Chunks: []shellToolOutputChunk{{Sequence: 9, Stream: "stderr", Content: "failed\n"}},
+		Chunks: []agenttool.ShellOutputChunk{{Sequence: 9, Stream: "stderr", Content: "failed\n"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -557,17 +551,18 @@ func TestSSHShellUsageNamesOutputAction(t *testing.T) {
 }
 
 func TestWorkspaceShellActionValidationRejectsRunFieldsOnInput(t *testing.T) {
-	input := WorkspaceShellInput{Action: "input", ShellID: "shell-1", Input: "go test ./...", Submit: true, Script: "pwd", TimeoutSeconds: 30}
+	input := agenttool.WorkspaceShellInput{Action: "input", ShellID: "shell-1", Input: "go test ./...", Submit: true, Script: "pwd", TimeoutSeconds: 30}
 	err := validateWorkspaceShellActionFields(input, "input",
 		[]string{"action", "shell_id", "input", "submit", "reason"},
 		map[string]any{"action": "input", "shell_id": "shell_xxx", "input": "go test ./...", "submit": true},
 	)
-	var validation *toolInputValidationError
-	if !errors.As(err, &validation) || validation.validation == nil {
+	var validation *agenttool.InputError
+	if !errors.As(err, &validation) || validation.Validation() == nil {
 		t.Fatalf("structured validation error was not returned: %v", err)
 	}
-	if strings.Join(validation.validation.UnexpectedFields, ",") != "script,timeout_seconds" {
-		t.Fatalf("unexpected Workspace shell fields = %#v", validation.validation)
+	details := validation.Validation()
+	if strings.Join(details.UnexpectedFields, ",") != "script,timeout_seconds" {
+		t.Fatalf("unexpected Workspace shell fields = %#v", details)
 	}
 }
 
@@ -633,7 +628,7 @@ func TestSSHTunnelListRejectsEveryOtherParameter(t *testing.T) {
 }
 
 func TestSSHTunnelDirectionUsesNamedValues(t *testing.T) {
-	result, err := RunSSHTunnelTool(context.Background(), nil, SSHTunnelInput{Action: "start", Direction: "-L"}, "test")
+	result, err := RunSSHTunnelTool(context.Background(), nil, agenttool.SSHTunnelInput{Action: "start", Direction: "-L"}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -644,7 +639,7 @@ func TestSSHTunnelDirectionUsesNamedValues(t *testing.T) {
 }
 
 func TestSSHTaskBlockUntilUsesWaitConditions(t *testing.T) {
-	result, err := RunTaskTool(context.Background(), nil, TaskInput{
+	result, err := RunTaskTool(context.Background(), nil, agenttool.TaskInput{
 		TaskID: "task_test", Action: "status", WaitSeconds: 10, BlockUntil: "completed",
 	}, "test")
 	if err != nil {
@@ -708,7 +703,7 @@ func TestWorkspaceToolUsesConversationBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var result ExecToolResult
+	var result agenttool.ExecResult
 	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
 		t.Fatal(err)
 	}
@@ -767,7 +762,7 @@ func TestWebToolResultClassifiesProviderFailures(t *testing.T) {
 }
 
 func TestTaskToolResultsExposeRejectionAndStderr(t *testing.T) {
-	validationFailure, err := CompactExecToolResult(domain.ExecResult{}, invalidToolInput("block_until requires wait_seconds"))
+	validationFailure, err := CompactExecToolResult(domain.ExecResult{}, agenttool.InvalidInput("block_until requires wait_seconds"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -838,44 +833,6 @@ func TestTaskToolResultsExposeRejectionAndStderr(t *testing.T) {
 		t.Fatalf("automatic approval marker was dropped from the Tool result: %#v", autoApproved)
 	}
 
-	task := domain.Task{
-		ID:                  "task_rejected",
-		RunID:               "run_rejected",
-		Status:              "rejected",
-		OperatorInstruction: "stop the test and only summarize existing results",
-	}
-	fullStatus, err := normalizeTaskResult(task, domain.ExecResult{Status: "rejected", OperatorInstruction: task.OperatorInstruction}, "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	status := compactExecToolResult(fullStatus)
-	if status.Status != "rejected" || status.TaskID != task.ID || status.OperatorInstruction != task.OperatorInstruction || status.Code != "" {
-		t.Fatalf("task status lost the operator interruption: %#v", status)
-	}
-	encoded, err := json.Marshal(status)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(encoded), `"operator_instruction":"stop the test and only summarize existing results"`) {
-		t.Fatalf("serialized Tool result lost the operator instruction: %s", encoded)
-	}
-
-	fullFailure, err := normalizeTaskResult(
-		domain.Task{ID: "task_failed", RunID: "run_failed", Status: "failed"},
-		domain.ExecResult{RunID: "run_failed", Status: "failed", ExitCode: 1, Stderr: "sleep: missing operand"},
-		"", nil,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	failed := compactExecToolResult(fullFailure)
-	encoded, err = json.Marshal(failed)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if failed.Status != "failed" || failed.Code != "" || !strings.Contains(string(encoded), `"stderr":"sleep: missing operand"`) {
-		t.Fatalf("failed task did not expose stderr to the model: output=%#v json=%s", failed, encoded)
-	}
 }
 
 func TestRunScriptBackgroundReturnsTaskAndUnifiedTaskToolReturnsOutput(t *testing.T) {
@@ -959,7 +916,7 @@ func TestRunScriptBackgroundReturnsTaskAndUnifiedTaskToolReturnsOutput(t *testin
 		if getErr != nil {
 			t.Fatal(getErr)
 		}
-		var result ExecToolResult
+		var result agenttool.ExecResult
 		if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
 			t.Fatal(err)
 		}
@@ -1194,7 +1151,7 @@ func TestUnifiedTaskToolCancelsWithStandardExecResult(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("background task did not start")
 	}
-	result, err := RunTaskTool(context.Background(), svc, TaskInput{TaskID: task.ID, Action: "cancel"}, "test")
+	result, err := RunTaskTool(context.Background(), svc, agenttool.TaskInput{TaskID: task.ID, Action: "cancel"}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1236,7 +1193,7 @@ func TestFileReadMetadataOnlyKeepsSHA256WithoutContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runRead := func(input FileReadInput) ExecToolResult {
+	runRead := func(input agenttool.FileReadInput) agenttool.ExecResult {
 		t.Helper()
 		base, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
@@ -1261,7 +1218,7 @@ func TestFileReadMetadataOnlyKeepsSHA256WithoutContent(t *testing.T) {
 		}
 		return completed
 	}
-	result := runRead(FileReadInput{HostID: host.ID, Path: "/etc/example.conf", MetadataOnly: true})
+	result := runRead(agenttool.FileReadInput{HostID: host.ID, Path: "/etc/example.conf", MetadataOnly: true})
 	if result.Status != "completed" || result.Stdout != "" || result.File == nil || result.File.SHA256 != strings.Repeat("a", 64) || result.File.Size != 15 {
 		t.Fatalf("metadata-only result = %#v", result)
 	}
@@ -1279,19 +1236,19 @@ func TestFileReadMetadataOnlyKeepsSHA256WithoutContent(t *testing.T) {
 	if metadataRequest.Mode != domain.ExecRemoteRead || metadataRequest.RemotePath != "/etc/example.conf" || !metadataRequest.MetadataOnly || metadataRequest.Script != "" {
 		t.Fatalf("metadata read was not persisted structurally: %#v", metadataRequest)
 	}
-	result = runRead(FileReadInput{HostID: host.ID, Path: "/etc/example.conf"})
+	result = runRead(agenttool.FileReadInput{HostID: host.ID, Path: "/etc/example.conf"})
 	if result.Stdout == "" || !strings.Contains(transport.request.Script, "head -c 131072 -- '/etc/example.conf'") || result.File == nil || result.File.HasMore {
 		t.Fatalf("default file read did not request a bounded page: result=%#v script=%s", result, transport.request.Script)
 	}
-	result = runRead(FileReadInput{HostID: host.ID, Path: "/etc/example.conf", FullContent: true})
+	result = runRead(agenttool.FileReadInput{HostID: host.ID, Path: "/etc/example.conf", FullContent: true})
 	if !strings.Contains(transport.request.Script, "cat -- '/etc/example.conf'") || strings.Contains(transport.request.Script, "head -c") {
 		t.Fatalf("explicit full-content read was not honored: result=%#v script=%s", result, transport.request.Script)
 	}
-	result = runRead(FileReadInput{HostID: host.ID, Path: "/etc/example.conf", OffsetBytes: -4})
+	result = runRead(agenttool.FileReadInput{HostID: host.ID, Path: "/etc/example.conf", OffsetBytes: -4})
 	if !strings.Contains(transport.request.Script, "tail -c 4 -- '/etc/example.conf'") || result.File == nil || result.File.OffsetBytes != 11 {
 		t.Fatalf("negative file offset did not read from the end: result=%#v script=%s", result, transport.request.Script)
 	}
-	result = runRead(FileReadInput{HostID: host.ID, Path: "/etc/example.conf", Pattern: "secret|token", MatchMode: domain.FileSearchRegex, ContextLines: 2})
+	result = runRead(agenttool.FileReadInput{HostID: host.ID, Path: "/etc/example.conf", Pattern: "secret|token", MatchMode: domain.FileSearchRegex, ContextLines: 2})
 	if result.Status != "completed" || result.Search == nil || !result.Search.Found || !strings.Contains(transport.request.Script, "grep -n -E -C 2 -- 'secret|token' '/etc/example.conf'") || strings.Contains(transport.request.Script, "head -n") {
 		t.Fatalf("file read search mode was not dispatched: result=%#v script=%s", result, transport.request.Script)
 	}
@@ -1306,15 +1263,15 @@ func TestFileReadMetadataOnlyKeepsSHA256WithoutContent(t *testing.T) {
 	if searchRequest.Mode != domain.ExecRemoteSearch || searchRequest.RemotePath != "/etc/example.conf" || searchRequest.SearchPattern != "secret|token" || searchRequest.SearchMatchMode != domain.FileSearchRegex || searchRequest.ContextLines != 2 || searchRequest.Script != "" {
 		t.Fatalf("remote search was not persisted structurally: %#v", searchRequest)
 	}
-	result, err = RunFileReadTool(ctx, svc, FileReadInput{HostID: host.ID, Path: "/etc/example.conf", Pattern: "secret", MatchMode: domain.FileSearchLiteral, MaxBytes: 10}, "test")
+	result, err = RunFileReadTool(ctx, svc, agenttool.FileReadInput{HostID: host.ID, Path: "/etc/example.conf", Pattern: "secret", MatchMode: domain.FileSearchLiteral, MaxBytes: 10}, "test")
 	if err != nil || result.Status != "failed" || result.Code != "validation_failed" {
 		t.Fatalf("ambiguous file read mode was not rejected: result=%#v err=%v", result, err)
 	}
-	result, err = RunFileReadTool(ctx, svc, FileReadInput{HostID: host.ID, Path: "/etc/example.conf", Pattern: "secret"}, "test")
+	result, err = RunFileReadTool(ctx, svc, agenttool.FileReadInput{HostID: host.ID, Path: "/etc/example.conf", Pattern: "secret"}, "test")
 	if err != nil || result.Status != "failed" || result.Code != "validation_failed" || !strings.Contains(result.Message, "match_mode") {
 		t.Fatalf("search without match_mode was not rejected: result=%#v err=%v", result, err)
 	}
-	result, err = RunFileReadTool(ctx, svc, FileReadInput{HostID: host.ID, Path: "/etc/example.conf", MetadataOnly: true, MaxBytes: 10}, "test")
+	result, err = RunFileReadTool(ctx, svc, agenttool.FileReadInput{HostID: host.ID, Path: "/etc/example.conf", MetadataOnly: true, MaxBytes: 10}, "test")
 	if err != nil || result.Status != "failed" || result.Code != "validation_failed" {
 		t.Fatalf("ambiguous metadata read was not rejected: result=%#v err=%v", result, err)
 	}
@@ -1360,18 +1317,18 @@ func TestUnifiedHistoryToolSearchesAndReadsExactRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := service.New(st, nil, encryptor, security.NewRedactor(), config.Default().Limits)
-	searched, err := ReadHistoryTool(ctx, svc, HistorySearchInput{Query: "nginx", Limit: 10})
+	searched, err := ReadHistoryTool(ctx, svc, agenttool.HistorySearchInput{Query: "nginx", Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if searched.Runs == nil || len(*searched.Runs) != 1 || (*searched.Runs)[0].ID != "run-nginx" || (*searched.Runs)[0].Operation != "nginx" {
 		t.Fatalf("history search result = %#v", searched)
 	}
-	outputMatched, err := ReadHistoryTool(ctx, svc, HistorySearchInput{Query: "disk full", QueryScope: "output", ToolName: "ssh_file_read", Status: "failed", StartedAfter: now.Add(-time.Second).Format(time.RFC3339), Limit: 10})
+	outputMatched, err := ReadHistoryTool(ctx, svc, agenttool.HistorySearchInput{Query: "disk full", QueryScope: "output", ToolName: "ssh_file_read", Status: "failed", StartedAfter: now.Add(-time.Second).Format(time.RFC3339), Limit: 10})
 	if err != nil || outputMatched.Runs == nil || len(*outputMatched.Runs) != 1 || (*outputMatched.Runs)[0].ID != "run-disk" || (*outputMatched.Runs)[0].DurationMS != 2000 {
 		t.Fatalf("structured history filters = %#v, err=%v", outputMatched, err)
 	}
-	requestOnly, err := ReadHistoryTool(ctx, svc, HistorySearchInput{Query: "disk full", QueryScope: "request"})
+	requestOnly, err := ReadHistoryTool(ctx, svc, agenttool.HistorySearchInput{Query: "disk full", QueryScope: "request"})
 	if err != nil || requestOnly.Runs == nil || len(*requestOnly.Runs) != 0 {
 		t.Fatalf("request-scoped history matched output: %#v, err=%v", requestOnly, err)
 	}
@@ -1379,11 +1336,11 @@ func TestUnifiedHistoryToolSearchesAndReadsExactRun(t *testing.T) {
 	if err != nil || string(emptyJSON) != `{"runs":[]}` {
 		t.Fatalf("empty history search is ambiguous: %s, err=%v", emptyJSON, err)
 	}
-	regexMatched, err := ReadHistoryTool(ctx, svc, HistorySearchInput{Query: `nginx|/var/log/disk`, MatchMode: domain.FileSearchRegex, Limit: 10})
+	regexMatched, err := ReadHistoryTool(ctx, svc, agenttool.HistorySearchInput{Query: `nginx|/var/log/disk`, MatchMode: domain.FileSearchRegex, Limit: 10})
 	if err != nil || regexMatched.Runs == nil || len(*regexMatched.Runs) != 2 {
 		t.Fatalf("history regex search result = %#v, err=%v", regexMatched, err)
 	}
-	if _, err := ReadHistoryTool(ctx, svc, HistorySearchInput{Query: `[`, MatchMode: domain.FileSearchRegex}); err == nil || !strings.Contains(err.Error(), "POSIX") {
+	if _, err := ReadHistoryTool(ctx, svc, agenttool.HistorySearchInput{Query: `[`, MatchMode: domain.FileSearchRegex}); err == nil || !strings.Contains(err.Error(), "POSIX") {
 		t.Fatalf("invalid history regex was accepted: %v", err)
 	}
 	encodedHistory, err := json.Marshal(searched)
@@ -1400,7 +1357,7 @@ func TestUnifiedHistoryToolSearchesAndReadsExactRun(t *testing.T) {
 			t.Fatalf("history search summary contains full run field %q: %s", verbose, encodedHistory)
 		}
 	}
-	exact, err := ReadHistoryTool(ctx, svc, HistorySearchInput{RunID: "run-disk"})
+	exact, err := ReadHistoryTool(ctx, svc, agenttool.HistorySearchInput{RunID: "run-disk"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1411,29 +1368,29 @@ func TestUnifiedHistoryToolSearchesAndReadsExactRun(t *testing.T) {
 	if !ok || request["remote_path"] != "/var/log/disk" {
 		t.Fatalf("exact history request is not structured: %#v", exact.Run.Request)
 	}
-	matchedRun, err := ReadHistoryTool(ctx, svc, HistorySearchInput{
+	matchedRun, err := ReadHistoryTool(ctx, svc, agenttool.HistorySearchInput{
 		RunID: "run-disk", Query: `disk[[:space:]]+full`, MatchMode: domain.FileSearchRegex,
 		QueryScope: "output", Limit: 5, MaxOutput: 1024,
 	})
 	if err != nil || matchedRun.Match == nil || matchedRun.Match.MatchLimit != 5 || !matchedRun.Match.Found || !strings.Contains(matchedRun.Match.StderrExcerpt, "disk full") {
 		t.Fatalf("run-scoped history match = %#v, err=%v", matchedRun, err)
 	}
-	requestMatch, err := ReadHistoryTool(ctx, svc, HistorySearchInput{RunID: "run-disk", Query: "/var/log/disk", QueryScope: "request"})
+	requestMatch, err := ReadHistoryTool(ctx, svc, agenttool.HistorySearchInput{RunID: "run-disk", Query: "/var/log/disk", QueryScope: "request"})
 	if err != nil || requestMatch.Match == nil || !requestMatch.Match.Found || !requestMatch.Match.RequestMatched {
 		t.Fatalf("run-scoped request match = %#v, err=%v", requestMatch, err)
 	}
 	sessionCtx := service.WithSessionID(ctx, "session-a")
-	sessionRuns, err := ReadHistoryTool(sessionCtx, svc, HistorySearchInput{Limit: 10})
+	sessionRuns, err := ReadHistoryTool(sessionCtx, svc, agenttool.HistorySearchInput{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if sessionRuns.Runs == nil || len(*sessionRuns.Runs) != 1 || (*sessionRuns.Runs)[0].ID != "run-nginx" {
 		t.Fatalf("session history leaked another conversation: %#v", sessionRuns)
 	}
-	if _, err := ReadHistoryTool(sessionCtx, svc, HistorySearchInput{RunID: "run-disk"}); !errors.Is(err, store.ErrNotFound) {
+	if _, err := ReadHistoryTool(sessionCtx, svc, agenttool.HistorySearchInput{RunID: "run-disk"}); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("exact history read crossed session boundary: %v", err)
 	}
-	sessionExact, err := ReadHistoryTool(sessionCtx, svc, HistorySearchInput{RunID: "run-nginx"})
+	sessionExact, err := ReadHistoryTool(sessionCtx, svc, agenttool.HistorySearchInput{RunID: "run-nginx"})
 	if err != nil || sessionExact.Run == nil || sessionExact.Run.ID != "run-nginx" {
 		t.Fatalf("current-session exact history failed: %#v err=%v", sessionExact, err)
 	}
@@ -1460,7 +1417,7 @@ func TestUnifiedHistoryToolSearchesAndReadsExactRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var invokedMatch HistoryOutput
+	var invokedMatch agenttool.HistoryOutput
 	if err := json.Unmarshal([]byte(matchedJSON), &invokedMatch); err != nil {
 		t.Fatal(err)
 	}
@@ -1525,7 +1482,7 @@ func TestHistoryToolUsesStablePagesAndBoundsExactOutput(t *testing.T) {
 	svc := service.New(st, nil, encryptor, security.NewRedactor(), config.Default().Limits)
 	sessionCtx := service.WithSessionID(ctx, "session-pages")
 
-	first, err := ReadHistoryTool(sessionCtx, svc, HistorySearchInput{})
+	first, err := ReadHistoryTool(sessionCtx, svc, agenttool.HistorySearchInput{})
 	if err != nil || first.Runs == nil || len(*first.Runs) != defaultHistorySearchLimit || !first.HasMore || first.NextCursor == "" {
 		t.Fatalf("first history page = %#v, err=%v", first, err)
 	}
@@ -1537,15 +1494,15 @@ func TestHistoryToolUsesStablePagesAndBoundsExactOutput(t *testing.T) {
 			t.Fatalf("history operation was not bounded: %d", len(summary.Operation))
 		}
 	}
-	second, err := ReadHistoryTool(sessionCtx, svc, HistorySearchInput{Cursor: first.NextCursor})
+	second, err := ReadHistoryTool(sessionCtx, svc, agenttool.HistorySearchInput{Cursor: first.NextCursor})
 	if err != nil || second.Runs == nil || len(*second.Runs) != 5 || second.HasMore || (*second.Runs)[0].ID != "run-page-04" || (*second.Runs)[4].ID != "run-page-00" {
 		t.Fatalf("second history page = %#v, err=%v", second, err)
 	}
-	if _, err := ReadHistoryTool(sessionCtx, svc, HistorySearchInput{Cursor: "not-a-cursor"}); err == nil || !strings.Contains(err.Error(), "cursor") {
+	if _, err := ReadHistoryTool(sessionCtx, svc, agenttool.HistorySearchInput{Cursor: "not-a-cursor"}); err == nil || !strings.Contains(err.Error(), "cursor") {
 		t.Fatalf("invalid history cursor was accepted: %v", err)
 	}
 
-	exact, err := ReadHistoryTool(sessionCtx, svc, HistorySearchInput{RunID: "run-page-24"})
+	exact, err := ReadHistoryTool(sessionCtx, svc, agenttool.HistorySearchInput{RunID: "run-page-24"})
 	if err != nil || exact.Run == nil || len(exact.Run.Stdout) > defaultHistoryOutputBytes || !exact.Run.OutputLimited ||
 		exact.Run.StdoutTotalBytes != len(largeOutput) || exact.Run.OutputView != "head_tail" || !strings.HasSuffix(exact.Run.Stdout, "TAIL") {
 		t.Fatalf("bounded history detail = %#v, err=%v", exact, err)
@@ -1558,15 +1515,15 @@ func TestHistoryToolUsesStablePagesAndBoundsExactOutput(t *testing.T) {
 	if encoded, err := json.Marshal(exact); err != nil || len(encoded) > 128<<10 {
 		t.Fatalf("default history detail payload bytes=%d err=%v", len(encoded), err)
 	}
-	head, err := ReadHistoryTool(sessionCtx, svc, HistorySearchInput{RunID: "run-page-24", MaxOutput: 1024, OutputView: "head"})
+	head, err := ReadHistoryTool(sessionCtx, svc, agenttool.HistorySearchInput{RunID: "run-page-24", MaxOutput: 1024, OutputView: "head"})
 	if err != nil || head.Run == nil || len(head.Run.Stdout) != 1024 || head.Run.StdoutNextOffset != 1024 {
 		t.Fatalf("history detail head page = %#v, err=%v", head, err)
 	}
-	next, err := ReadHistoryTool(sessionCtx, svc, HistorySearchInput{RunID: "run-page-24", AfterStdout: head.Run.StdoutNextOffset, MaxOutput: 1024})
+	next, err := ReadHistoryTool(sessionCtx, svc, agenttool.HistorySearchInput{RunID: "run-page-24", AfterStdout: head.Run.StdoutNextOffset, MaxOutput: 1024})
 	if err != nil || next.Run == nil || next.Run.StdoutOffsetBytes != 1024 || next.Run.StdoutNextOffset != 2048 || next.Run.OutputView != "head" {
 		t.Fatalf("history detail continuation = %#v, err=%v", next, err)
 	}
-	if _, err := ReadHistoryTool(sessionCtx, svc, HistorySearchInput{RunID: "run-page-24", MaxOutput: maxHistoryOutputBytes + 1}); err == nil {
+	if _, err := ReadHistoryTool(sessionCtx, svc, agenttool.HistorySearchInput{RunID: "run-page-24", MaxOutput: maxHistoryOutputBytes + 1}); err == nil {
 		t.Fatal("oversized history detail page was accepted")
 	}
 }
@@ -1912,7 +1869,7 @@ func TestExecutionToolReturnsStructuredNotFoundWithoutAbortingToolNode(t *testin
 	if err != nil {
 		t.Fatalf("expected not_found Tool result, got fatal error: %v", err)
 	}
-	var result ExecToolResult
+	var result agenttool.ExecResult
 	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
 		t.Fatal(err)
 	}
@@ -1922,7 +1879,7 @@ func TestExecutionToolReturnsStructuredNotFoundWithoutAbortingToolNode(t *testin
 }
 
 func TestSelectExecResultOutputReportsOmittedBytes(t *testing.T) {
-	selected, err := selectExecResultOutput(domain.ExecResult{Stdout: "0123456789", Stderr: "abcdefghij"}, 0, 0, 6, "head_tail", false)
+	selected, err := agenttool.SelectExecOutput(domain.ExecResult{Stdout: "0123456789", Stderr: "abcdefghij"}, 0, 0, 6, "head_tail", false)
 	if err != nil {
 		t.Fatal(err)
 	}

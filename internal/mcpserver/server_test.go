@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Enterpr1se0/opsnerva/internal/agent"
+	"github.com/Enterpr1se0/opsnerva/internal/agenttool"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -15,7 +15,7 @@ import (
 
 func mustAgentInputSchema[T any](t *testing.T) json.RawMessage {
 	t.Helper()
-	schema, err := agent.InputSchemaJSON[T]()
+	schema, err := agenttool.InputSchemaJSON[T]()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func assertSchemaValidation(t *testing.T, schema *jsonschema.Schema, arguments s
 }
 
 func TestMergedToolSchemasExpressTheirModes(t *testing.T) {
-	tunnel := inputSchema[agent.SSHTunnelInput]()
+	tunnel := inputSchema[agenttool.SSHTunnelInput]()
 	assertSchemaValidation(t, tunnel, `{"action":"list"}`, true)
 	assertSchemaValidation(t, tunnel, `{"action":"list","reason":"unused"}`, false)
 	assertSchemaValidation(t, tunnel, `{"action":"start","host_id":"host_x","direction":"-L","remote_port":22,"reason":"test"}`, false)
@@ -63,7 +63,7 @@ func TestMergedToolSchemasExpressTheirModes(t *testing.T) {
 	assertSchemaValidation(t, tunnel, `{"action":"start","host_id":"host_x","direction":"reverse","local_port":8080,"reason":"test"}`, true)
 	assertSchemaValidation(t, tunnel, `{"action":"stop","tunnel_id":"tunnel_x"}`, true)
 
-	task := inputSchema[agent.TaskInput]()
+	task := inputSchema[agenttool.TaskInput]()
 	assertSchemaValidation(t, task, `{"action":"status","task_id":"task_x","wait_seconds":10,"block_until":"terminal"}`, true)
 	assertSchemaValidation(t, task, `{"action":"status","task_id":"task_x","wait_seconds":10,"block_until":"completed"}`, false)
 	assertSchemaValidation(t, task, `{"action":"status","task_id":"task_x","block_until":"output"}`, false)
@@ -71,16 +71,16 @@ func TestMergedToolSchemasExpressTheirModes(t *testing.T) {
 	assertSchemaValidation(t, task, `{"action":"status","task_id":"task_x","max_output_bytes":0,"output_view":"tail"}`, false)
 	assertSchemaValidation(t, task, `{"action":"cancel","task_id":"task_x","wait_seconds":10}`, false)
 
-	sshShell := inputSchema[agent.SSHShellInput]()
+	sshShell := inputSchema[agenttool.SSHShellInput]()
 	assertSchemaValidation(t, sshShell, `{"action":"list"}`, true)
 	assertSchemaValidation(t, sshShell, `{"action":"list","host_id":"host_x"}`, false)
 	assertSchemaValidation(t, sshShell, `{"action":"input","shell_id":"shell_x","input":"top","submit":true}`, true)
 
-	workspaceShell := inputSchema[agent.WorkspaceShellInput]()
+	workspaceShell := inputSchema[agenttool.WorkspaceShellInput]()
 	assertSchemaValidation(t, workspaceShell, `{"action":"run","script":"go test ./...","reason":"test"}`, true)
 	assertSchemaValidation(t, workspaceShell, `{"action":"completed"}`, false)
 
-	fileRead := inputSchema[agent.FileReadInput]()
+	fileRead := inputSchema[agenttool.FileReadInput]()
 	assertSchemaValidation(t, fileRead, `{"host_id":"host_x","path":"/tmp/a","pattern":"needle"}`, false)
 	assertSchemaValidation(t, fileRead, `{"host_id":"host_x","path":"/tmp/a","pattern":"needle","match_mode":"literal"}`, true)
 	assertSchemaValidation(t, fileRead, `{"host_id":"host_x","path":"/tmp/a","pattern":"needle","match_mode":"literal","metadata_only":false}`, true)
@@ -88,19 +88,19 @@ func TestMergedToolSchemasExpressTheirModes(t *testing.T) {
 	assertSchemaValidation(t, fileRead, `{"host_id":"host_x","path":"/tmp/a","pattern":"needle","match_mode":"literal","tail_lines":10}`, false)
 	assertSchemaValidation(t, fileRead, `{"host_id":"host_x","path":"/tmp/a","tail_lines":10,"offset_bytes":2}`, false)
 
-	history := inputSchema[agent.HistorySearchInput]()
+	history := inputSchema[agenttool.HistorySearchInput]()
 	assertSchemaValidation(t, history, `{"output_view":"head"}`, false)
 	assertSchemaValidation(t, history, `{"run_id":"run_x","output_view":"head"}`, true)
 	assertSchemaValidation(t, history, `{"run_id":"run_x","limit":5}`, false)
 	assertSchemaValidation(t, history, `{"run_id":"run_x","query":"error","limit":5}`, true)
 	assertSchemaValidation(t, history, `{"run_id":"run_x","after_stdout_bytes":-1}`, false)
 
-	webSearch := inputSchema[agent.WebSearchInput]()
+	webSearch := inputSchema[agenttool.WebSearchInput]()
 	assertSchemaValidation(t, webSearch, `{"query":"release","time_range":"week","start_date":"2026-08-01"}`, false)
 	assertSchemaValidation(t, webSearch, `{"query":"release","search_depth":"basic","chunks_per_source":1}`, false)
 	assertSchemaValidation(t, webSearch, `{"query":"release","search_depth":"advanced","chunks_per_source":1}`, true)
 
-	webExtract := inputSchema[agent.WebExtractInput]()
+	webExtract := inputSchema[agenttool.WebExtractInput]()
 	assertSchemaValidation(t, webExtract, `{"urls":["https://example.com"],"chunks_per_source":1}`, false)
 	assertSchemaValidation(t, webExtract, `{"urls":["https://example.com"],"query":"install","chunks_per_source":1}`, true)
 }
@@ -136,18 +136,18 @@ func TestServerExposesMergedBackgroundTaskTools(t *testing.T) {
 	historyFound := false
 	backgroundInputs := map[string]bool{"ssh_exec": false, "ssh_run_script": false}
 	expectedSchemas := map[string]json.RawMessage{
-		"ssh_host_inspect":  mustAgentInputSchema[agent.HostInput](t),
+		"ssh_host_inspect":  mustAgentInputSchema[agenttool.HostInput](t),
 		"ssh_host_list":     mustAgentInputSchema[struct{}](t),
-		"ssh_exec":          mustAgentInputSchema[agent.ExecInput](t),
-		"ssh_run_script":    mustAgentInputSchema[agent.ScriptInput](t),
-		"ssh_task":          mustAgentInputSchema[agent.TaskInput](t),
-		"ssh_file_read":     mustAgentInputSchema[agent.FileReadInput](t),
-		"ssh_file_list":     mustAgentInputSchema[agent.FileListInput](t),
-		"ssh_file_edit":     mustAgentInputSchema[agent.FileEditInput](t),
-		"ssh_file_transfer": mustAgentInputSchema[agent.SSHFileTransferInput](t),
-		"ssh_tunnel":        mustAgentInputSchema[agent.SSHTunnelInput](t),
-		"ssh_shell":         mustAgentInputSchema[agent.SSHShellInput](t),
-		"ssh_history":       mustAgentInputSchema[agent.HistorySearchInput](t),
+		"ssh_exec":          mustAgentInputSchema[agenttool.ExecInput](t),
+		"ssh_run_script":    mustAgentInputSchema[agenttool.ScriptInput](t),
+		"ssh_task":          mustAgentInputSchema[agenttool.TaskInput](t),
+		"ssh_file_read":     mustAgentInputSchema[agenttool.FileReadInput](t),
+		"ssh_file_list":     mustAgentInputSchema[agenttool.FileListInput](t),
+		"ssh_file_edit":     mustAgentInputSchema[agenttool.FileEditInput](t),
+		"ssh_file_transfer": mustAgentInputSchema[agenttool.SSHFileTransferInput](t),
+		"ssh_tunnel":        mustAgentInputSchema[agenttool.SSHTunnelInput](t),
+		"ssh_shell":         mustAgentInputSchema[agenttool.SSHShellInput](t),
+		"ssh_history":       mustAgentInputSchema[agenttool.HistorySearchInput](t),
 	}
 	for _, registered := range result.Tools {
 		if expected, ok := expectedSchemas[registered.Name]; ok && !reflect.DeepEqual(normalizedSchema(t, registered.InputSchema), normalizedSchema(t, expected)) {

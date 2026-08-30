@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Enterpr1se0/opsnerva/internal/agenttool"
 	"github.com/Enterpr1se0/opsnerva/internal/config"
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
 	"github.com/Enterpr1se0/opsnerva/internal/security"
@@ -247,7 +248,7 @@ func TestApprovalToolStatefulInterruptResumesExactRunOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixtureTool, err := toolutils.InferTool("approval_fixture", "approval fixture", func(toolCtx context.Context, _ struct{}) (ExecToolResult, error) {
+	fixtureTool, err := toolutils.InferTool("approval_fixture", "approval fixture", func(toolCtx context.Context, _ struct{}) (agenttool.ExecResult, error) {
 		return RunExecutionTool(toolCtx, svc, domain.ExecRequest{
 			HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"}, Reason: "test approval resume",
 		}, "eino-agent")
@@ -365,7 +366,7 @@ func TestParallelApprovalInterruptsResumeAfterEveryDecision(t *testing.T) {
 	type approvalInput struct {
 		Unit string `json:"unit"`
 	}
-	fixtureTool, err := toolutils.InferTool("parallel_approval_fixture", "parallel approval fixture", func(toolCtx context.Context, input approvalInput) (ExecToolResult, error) {
+	fixtureTool, err := toolutils.InferTool("parallel_approval_fixture", "parallel approval fixture", func(toolCtx context.Context, input approvalInput) (agenttool.ExecResult, error) {
 		return RunExecutionTool(toolCtx, svc, domain.ExecRequest{
 			HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", input.Unit}, Reason: "test parallel approval resume",
 		}, "eino-agent")

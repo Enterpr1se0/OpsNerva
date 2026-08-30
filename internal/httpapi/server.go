@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/Enterpr1se0/opsnerva/internal/agent"
+	"github.com/Enterpr1se0/opsnerva/internal/agenttool"
 	"github.com/Enterpr1se0/opsnerva/internal/config"
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
 	"github.com/Enterpr1se0/opsnerva/internal/ids"
@@ -271,7 +272,7 @@ func (s *Server) deleteWorkspace(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) agentTools(w http.ResponseWriter, _ *http.Request) {
 	if s.agent == nil {
-		writeJSON(w, http.StatusOK, agent.ToolCatalog{Agent: "ops-nerva", Framework: "Eino InferTool", ExecutionMode: "sequential", Tools: []agent.ToolDescriptor{}})
+		writeJSON(w, http.StatusOK, agenttool.Catalog{Agent: "ops-nerva", Framework: "Eino InferTool", ExecutionMode: "sequential", Tools: []agenttool.Descriptor{}})
 		return
 	}
 	writeJSON(w, http.StatusOK, s.agent.ToolCatalog())

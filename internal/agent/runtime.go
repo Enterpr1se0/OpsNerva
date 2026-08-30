@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Enterpr1se0/opsnerva/internal/agenttool"
 	"github.com/Enterpr1se0/opsnerva/internal/config"
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
 	"github.com/Enterpr1se0/opsnerva/internal/ids"
@@ -232,7 +233,7 @@ type Runtime struct {
 	contextSummarizer         *contextSummarizationMiddleware
 	contextCompressionEnabled bool
 	modelName                 string
-	tools                     []ToolDescriptor
+	tools                     []agenttool.Descriptor
 	toolsAt                   string
 	active                    map[string]*activeAgentSession
 	toolScopes                map[string]map[*toolExecutionScope]struct{}
@@ -283,7 +284,7 @@ func New(ctx context.Context, cfg config.Model, svc *service.Service, st *store.
 	return runtime, nil
 }
 
-func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st *store.Store, settings domain.SystemSettings) (*adk.Runner, []ToolDescriptor, *contextSummarizationMiddleware, error) {
+func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st *store.Store, settings domain.SystemSettings) (*adk.Runner, []agenttool.Descriptor, *contextSummarizationMiddleware, error) {
 	chatModel, err := newChatModel(ctx, cfg, 0)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("create chat model: %w", err)
@@ -305,7 +306,7 @@ func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st
 		return nil, nil, nil, fmt.Errorf("build Eino skill middleware: %w", err)
 	}
 	hostCatalogMiddleware := newHostCatalogMiddleware(svc)
-	plantaskDescriptors, err := DescribeTools(ctx, plantaskTools)
+	plantaskDescriptors, err := agenttool.Describe(ctx, plantaskTools)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("describe Eino plantask tools: %w", err)
 	}
@@ -315,7 +316,7 @@ func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st
 			plantaskDescriptors[index].Enabled = enabled
 		}
 	}
-	skillDescriptors, err := DescribeTools(ctx, skillTools)
+	skillDescriptors, err := agenttool.Describe(ctx, skillTools)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("describe Eino skill tools: %w", err)
 	}
@@ -324,7 +325,7 @@ func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st
 			skillDescriptors[index].Enabled = enabled
 		}
 	}
-	allDescriptors := make([]ToolDescriptor, 0, len(plantaskDescriptors)+len(skillDescriptors)+len(descriptors))
+	allDescriptors := make([]agenttool.Descriptor, 0, len(plantaskDescriptors)+len(skillDescriptors)+len(descriptors))
 	allDescriptors = append(allDescriptors, plantaskDescriptors...)
 	allDescriptors = append(allDescriptors, skillDescriptors...)
 	allDescriptors = append(allDescriptors, descriptors...)
@@ -679,8 +680,8 @@ func (r *Runtime) Status() Status {
 	return r.status
 }
 
-func (r *Runtime) ToolCatalog() ToolCatalog {
-	catalog := ToolCatalog{Agent: "ops-nerva", Framework: "Eino InferTool", ExecutionMode: "sequential", Tools: []ToolDescriptor{}}
+func (r *Runtime) ToolCatalog() agenttool.Catalog {
+	catalog := agenttool.Catalog{Agent: "ops-nerva", Framework: "Eino InferTool", ExecutionMode: "sequential", Tools: []agenttool.Descriptor{}}
 	if r == nil {
 		return catalog
 	}
@@ -690,7 +691,7 @@ func (r *Runtime) ToolCatalog() ToolCatalog {
 	catalog.ProviderID = r.status.ProviderID
 	catalog.Model = r.status.Model
 	catalog.LoadedAt = r.toolsAt
-	catalog.Tools = make([]ToolDescriptor, len(r.tools))
+	catalog.Tools = make([]agenttool.Descriptor, len(r.tools))
 	for index, descriptor := range r.tools {
 		catalog.Tools[index] = descriptor
 		catalog.Tools[index].InputSchema = append(json.RawMessage(nil), descriptor.InputSchema...)

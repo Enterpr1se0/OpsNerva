@@ -6,6 +6,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/Enterpr1se0/opsnerva/internal/agenttool"
 	"github.com/Enterpr1se0/opsnerva/internal/observability"
 
 	"github.com/cloudwego/eino/adk"
@@ -26,7 +27,7 @@ const (
 // tool events can still be persisted for audit and UI use while only the state
 // sent to the next ChatModel call is compacted. ClearAtLeastTokens makes Eino
 // edit a copy of the messages instead of mutating already-published events.
-func newToolReductionMiddleware(ctx context.Context, descriptors []ToolDescriptor) (adk.ChatModelAgentMiddleware, error) {
+func newToolReductionMiddleware(ctx context.Context, descriptors []agenttool.Descriptor) (adk.ChatModelAgentMiddleware, error) {
 	toolConfig := make(map[string]*reduction.ToolReductionConfig, len(descriptors))
 	for _, descriptor := range descriptors {
 		clearHandler := reduceToolPayload
