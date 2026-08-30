@@ -1,4 +1,4 @@
-import { FormEvent, Suspense, createContext, lazy, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { FormEvent, Suspense, createContext, lazy, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal, flushSync } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
@@ -9,9 +9,10 @@ import {
   Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronLeft, ChevronRight, CircleDot, Copy, Cpu, Edit3, ExternalLink, Eye, EyeOff, FileText, FolderOpen, FolderOutput, FunctionSquare, History, Home, ImagePlus, KeyRound, Maximize2, Minimize2, Minus, Monitor, Moon, PanelLeftClose, PanelLeftOpen, Sun,
   Cable, Download, ListChecks, ListPlus, LoaderCircle, LogOut, Plus, Power, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, Square, TerminalSquare, Trash2, UploadCloud, UserRound, X, Zap,
 } from 'lucide-react'
-import { api, chatAttachmentURL, downloadFile, reconnectChatStream, sftpDownloadURL, streamChat, workspaceDownloadURL, workspaceFileEventsURL } from './api/api'
+import { api, chatAttachmentURL, reconnectChatStream, streamChat, workspaceFileEventsURL } from './api/api'
 import { subscribeApplicationEvents, type ApplicationLogPayload } from './api/appEvents'
 import { CopyButton, CopyablePre } from './components/CopyButton'
+import { HighlightedCode, inferScriptLanguage, languageFromPath } from './components/HighlightedCode'
 import { AppSelect, ModelCombobox } from './components/Controls'
 import i18n, { localeFor, type SupportedLanguage } from './lib/i18n'
 import { activeLiveTaskStatus, useLiveSSHTasks, type LiveSSHTaskSnapshot, type LiveSSHTaskTarget } from './lib/liveTasks'
@@ -19,13 +20,15 @@ import { appendStreamText, streamTextFrom, streamTextTail, streamTextValue, type
 import { TextFileEditor } from './components/TextFileEditor'
 import { PasswordInput } from './components/PasswordInput'
 import { SSHHostHome, SSHShellCreateDialog, SSHShellStatus, SSHShellTerminal, SSHTunnelStatus, sshShellActive } from './features/ssh'
+import { useNotifier, NotificationContext, type NotificationSink, type AppNotification } from './lib/notifications'
+import { DestructiveConfirmDialog } from './components/DestructiveConfirmDialog'
+import { FileTransferProvider, SFTPBrowser, useWorkspaceTransfer, FileTransferProgress, FileBrowserTabs, type FileBrowserMode } from './features/sftp'
 import { useAutoCollapseDetails } from './lib/hooks'
 import { errorStatus, errorText, formatFileSize, sshTunnelRoute } from './lib/utils'
-import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, AuthStatus, ChatMessage, ChatQueueMode, ChatSession, ChatSessionDelta, ChatState, ChatTokenUsage, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPActivityEvent, MCPActivitySnapshot, MCPClientSession, MCPServer, MCPServerInput, MCPToolCall, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, QueuedChatMessage, Run, ServerLogEntry, SFTPFileEntry, SSHShell, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
+import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, AuthStatus, ChatMessage, ChatQueueMode, ChatSession, ChatSessionDelta, ChatState, ChatTokenUsage, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPActivityEvent, MCPActivitySnapshot, MCPClientSession, MCPServer, MCPServerInput, MCPToolCall, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, QueuedChatMessage, Run, ServerLogEntry, SSHShell, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
 
 type Page = 'chat' | 'ssh' | 'config' | 'extensions' | 'audit' | 'logs'
 const pageVisualOrder:Page[]=['chat','ssh','extensions','audit','logs','config']
-const maxFilePreviewBytes=1<<20
 const liveToolOutputBufferChars=128<<10
 type ChatEntryImage = {id:string;name:string;mimeType:string;sizeBytes:number;url?:string}
 const workStatusKeys=['chat.cooking','chat.pondering','chat.brewing','chat.weaving','chat.polishing','chat.crunching'] as const
@@ -459,8 +462,6 @@ function clientId() {
 }
 
 
-function isAbortError(error:unknown){return error instanceof DOMException&&error.name==='AbortError'}
-
 function keepEquivalent<T>(current:T,next:T){return JSON.stringify(current)===JSON.stringify(next)?current:next}
 function applyLifecycleDelta<T extends{id:string}>(current:T[],value:T,removed=false){
 	const index=current.findIndex(item=>item.id===value.id)
@@ -533,12 +534,7 @@ function AppFrame({children}:{children:React.ReactNode}){
 	return <div className={`app-frame ${desktopRuntime?'desktop-app-frame':'web-app-frame'}`}><DesktopTitlebar/>{children}</div>
 }
 
-type NotificationTone='success'|'error'
-type AppNotification={id:string;message:string;tone:NotificationTone}
-type NotificationSink=(message:string,tone?:NotificationTone)=>void
-const NotificationContext=createContext<NotificationSink>(()=>{})
 const ChatVisibilityContext=createContext(true)
-function useNotifier(){return useContext(NotificationContext)}
 
 function NotificationItem({notification,onDismiss}:{notification:AppNotification;onDismiss:(id:string)=>void}){
 	const {t}=useTranslation()
@@ -1191,326 +1187,12 @@ function SSHWorkspacePage({hosts,shells,onCreated,refresh,onError}:{hosts:Host[]
 	</div>
 }
 
-type SFTPNameEditor={mode:'create'}|{mode:'rename';entry:SFTPFileEntry}
-type SFTPDeleteCandidate={entry:SFTPFileEntry}
-type SFTPOverwriteCandidate={file:File;path:string;directory:string}
-type SFTPTextEncoding='utf-8'|'utf-16le'|'utf-16be'|'gb18030'
-type SFTPTextFile={entry:SFTPFileEntry;content:string;binary:boolean;encoding:SFTPTextEncoding}
-type ActiveFileTransfer={operation:'upload'|'download';name:string;loaded:number;total:number;index?:number;count?:number}
-type FileTransferRecord={active:ActiveFileTransfer|null;conflict:SFTPOverwriteCandidate|null;uploadVersion:number}
-type WorkspaceTransferItem={file:File;path:string}
-type FileTransferManager={
-	record:(key:string)=>FileTransferRecord
-	subscribe:(key:string,listener:()=>void)=>(()=>void)
-	uploadSFTP:(hostID:string,directory:string,files:File[])=>void
-	downloadSFTP:(hostID:string,entry:SFTPFileEntry)=>void
-	uploadWorkspace:(workspaceID:string,items:WorkspaceTransferItem[])=>boolean
-	downloadWorkspace:(workspaceID:string,path:string,name:string,size:number)=>void
-	cancel:(key:string)=>void
-}
-
-const FileTransferContext=createContext<FileTransferManager|null>(null)
-const sftpTransferKey=(hostID:string)=>`sftp:${hostID}`
-const workspaceTransferKey=(workspaceID:string)=>`workspace:${workspaceID}`
-const emptyFileTransferRecord:FileTransferRecord={active:null,conflict:null,uploadVersion:0}
-
-function FileTransferProvider({children}:{children:React.ReactNode}){
-	const {t}=useTranslation()
-	const notify=useNotifier()
-	const [,refreshDialogs]=useState(0)
-	const recordsRef=useRef<ReadonlyMap<string,FileTransferRecord>>(new Map())
-	const subscribersRef=useRef(new Map<string,Set<()=>void>>())
-	const record=useCallback((key:string)=>recordsRef.current.get(key)||emptyFileTransferRecord,[])
-	const subscribe=useCallback((key:string,listener:()=>void)=>{
-		let subscribers=subscribersRef.current.get(key)
-		if(!subscribers){subscribers=new Set();subscribersRef.current.set(key,subscribers)}
-		subscribers.add(listener)
-		return()=>{subscribers!.delete(listener);if(!subscribers!.size)subscribersRef.current.delete(key)}
-	},[])
-	const controllers=useRef(new Map<string,AbortController>())
-	const updateRecord=useCallback((key:string,update:(current:FileTransferRecord)=>FileTransferRecord)=>{
-		const next=new Map(recordsRef.current)
-		const current=next.get(key)||emptyFileTransferRecord
-		const updated=update(current)
-		next.set(key,updated)
-		recordsRef.current=next
-		if(current.conflict!==updated.conflict)refreshDialogs(version=>version+1)
-		for(const listener of subscribersRef.current.get(key)||[])listener()
-	},[])
-	const begin=useCallback((key:string,transfer:ActiveFileTransfer)=>{
-		if(controllers.current.has(key))return null
-		const controller=new AbortController()
-		controllers.current.set(key,controller)
-		updateRecord(key,current=>({...current,active:transfer,conflict:null}))
-		return controller
-	},[updateRecord])
-	const finish=useCallback((key:string,controller:AbortController,uploaded=false)=>{
-		if(controllers.current.get(key)!==controller)return
-		controllers.current.delete(key)
-		updateRecord(key,current=>({...current,active:null,uploadVersion:current.uploadVersion+(uploaded?1:0)}))
-	},[updateRecord])
-	const runSFTPUpload=useCallback(async(hostID:string,directory:string,items:Array<{file:File;path:string}>,overwrite:boolean)=>{
-		const key=sftpTransferKey(hostID)
-		const total=items.reduce((sum,item)=>sum+item.file.size,0)
-		const controller=begin(key,{operation:'upload',name:items[0]?.file.name||'',loaded:0,total,index:1,count:items.length})
-		if(!controller)return
-		let completedBytes=0
-		let uploaded=0
-		let failure=''
-		let conflict:SFTPOverwriteCandidate|null=null
-		for(let index=0;index<items.length;index++){
-			const {file,path}=items[index]
-			updateRecord(key,current=>({...current,active:{operation:'upload',name:file.name,loaded:completedBytes,total,index:index+1,count:items.length}}))
-			try{
-				await api.uploadSFTPFile(hostID,path,file,overwrite,{signal:controller.signal,onProgress:progress=>updateRecord(key,current=>({...current,active:current.active?{...current.active,loaded:completedBytes+progress.loaded,total}:null}))})
-				uploaded+=1;completedBytes+=file.size
-			}catch(err){
-				if(!isAbortError(err)){
-					const message=errorText(err)
-					if(items.length===1&&!overwrite&&message.includes('already exists'))conflict={file,path,directory}
-					else failure=message
-				}
-				break
-			}
-		}
-		if(controllers.current.get(key)===controller&&conflict)updateRecord(key,current=>({...current,conflict}))
-		finish(key,controller,uploaded>0)
-		if(failure)notify(failure,'error')
-		else if(!controller.signal.aborted&&!conflict&&uploaded===items.length)notify(t('sshWorkspace.uploaded',{count:uploaded}))
-	},[begin,finish,notify,t,updateRecord])
-	const uploadSFTP=useCallback((hostID:string,directory:string,files:File[])=>{
-		if(!files.length)return
-		void runSFTPUpload(hostID,directory,files.map(file=>({file,path:remoteChildPath(directory,file.name)})),false)
-	},[runSFTPUpload])
-	const downloadSFTP=useCallback(async(hostID:string,entry:SFTPFileEntry)=>{
-		const key=sftpTransferKey(hostID)
-		const controller=begin(key,{operation:'download',name:entry.name,loaded:0,total:entry.size||0})
-		if(!controller)return
-		try{
-			await downloadFile(sftpDownloadURL(hostID,entry.path),entry.name,{signal:controller.signal,totalBytes:entry.size||0,onProgress:progress=>updateRecord(key,current=>({...current,active:current.active?{...current.active,...progress}:null}))})
-		}catch(err){if(!isAbortError(err))notify(errorText(err),'error')}
-		finally{finish(key,controller)}
-	},[begin,finish,notify,updateRecord])
-	const overwrite=useCallback((hostID:string)=>{
-		const conflict=recordsRef.current.get(sftpTransferKey(hostID))?.conflict
-		if(conflict)void runSFTPUpload(hostID,conflict.directory,[{file:conflict.file,path:conflict.path}],true)
-	},[runSFTPUpload])
-	const dismissConflict=useCallback((hostID:string)=>updateRecord(sftpTransferKey(hostID),current=>({...current,conflict:null})),[updateRecord])
-	const uploadWorkspace=useCallback((workspaceID:string,items:WorkspaceTransferItem[])=>{
-		const key=workspaceTransferKey(workspaceID)
-		if(!workspaceID||!items.length||controllers.current.has(key))return false
-		void (async()=>{
-			const total=items.reduce((sum,item)=>sum+item.file.size,0)
-			const controller=begin(key,{operation:'upload',name:items[0].file.name,loaded:0,total,index:1,count:items.length})
-			if(!controller)return
-			let completedBytes=0
-			let uploaded=0
-			const failures:Array<{name:string;message:string}>=[]
-			for(let index=0;index<items.length;index++){
-				const item=items[index]
-				updateRecord(key,current=>({...current,active:{operation:'upload',name:item.file.name,loaded:completedBytes,total,index:index+1,count:items.length}}))
-				try{
-					await api.uploadWorkspaceFile(workspaceID,item.file,item.path,{signal:controller.signal,onProgress:progress=>updateRecord(key,current=>({...current,active:current.active?{...current.active,loaded:completedBytes+progress.loaded,total}:null}))})
-					uploaded+=1;completedBytes+=item.file.size
-				}catch(err){
-					if(isAbortError(err))break
-					failures.push({name:item.file.name,message:errorText(err)})
-				}
-			}
-			finish(key,controller,uploaded>0)
-			if(controller.signal.aborted)return
-			if(failures.length===1&&items.length===1)notify(failures[0].message,'error')
-			else if(failures.length)notify(t('workspace.uploadPartial',{uploaded,failed:failures.length,message:`${failures[0].name}: ${failures[0].message}`}),'error')
-			else if(items.length===1)notify(t('workspace.uploaded',{path:items[0].path}))
-			else notify(t('workspace.uploadedFiles',{count:uploaded}))
-		})()
-		return true
-	},[begin,finish,notify,t,updateRecord])
-	const downloadWorkspace=useCallback(async(workspaceID:string,path:string,name:string,size:number)=>{
-		const key=workspaceTransferKey(workspaceID)
-		const controller=begin(key,{operation:'download',name,loaded:0,total:size})
-		if(!controller)return
-		try{
-			await downloadFile(workspaceDownloadURL(workspaceID,path),name,{signal:controller.signal,totalBytes:size,onProgress:progress=>updateRecord(key,current=>({...current,active:current.active?{...current.active,...progress}:null}))})
-		}catch(err){if(!isAbortError(err))notify(errorText(err),'error')}
-		finally{finish(key,controller)}
-	},[begin,finish,notify,updateRecord])
-	const cancel=useCallback((key:string)=>controllers.current.get(key)?.abort(),[])
-	useEffect(()=>()=>{for(const controller of controllers.current.values())controller.abort();controllers.current.clear();subscribersRef.current.clear()},[])
-	const value=useMemo<FileTransferManager>(()=>({record,subscribe,uploadSFTP,downloadSFTP,uploadWorkspace,downloadWorkspace,cancel}),[cancel,downloadSFTP,downloadWorkspace,record,subscribe,uploadSFTP,uploadWorkspace])
-	return <FileTransferContext.Provider value={value}><>{children}{[...recordsRef.current].map(([key,record])=>record.conflict&&<SFTPOverwriteDialog key={key} path={record.conflict.path} busy={!!record.active} onCancel={()=>dismissConflict(key.slice(5))} onConfirm={()=>overwrite(key.slice(5))}/>)}</></FileTransferContext.Provider>
-}
 function applyChatSessionDelta(current:ChatSession[],delta:ChatSessionDelta){
 	const removed=new Set(delta.removed_ids||[])
 	const sessions=new Map(current.filter(session=>!removed.has(session.id)).map(session=>[session.id,session]))
 	for(const session of delta.sessions||[])sessions.set(session.id,session)
 	const next=[...sessions.values()].sort((left,right)=>right.updated_at.localeCompare(left.updated_at)||right.id.localeCompare(left.id)).slice(0,50)
 	return keepEquivalent(current,next)
-}
-
-function useFileTransferRecord(manager:FileTransferManager|null,key:string,enabled:boolean){
-	const subscribe=useCallback((listener:()=>void)=>enabled&&key&&manager?manager.subscribe(key,listener):()=>{},[enabled,key,manager])
-	const snapshot=useCallback(()=>enabled&&key&&manager?manager.record(key):emptyFileTransferRecord,[enabled,key,manager])
-	return useSyncExternalStore(subscribe,snapshot,snapshot)
-}
-
-function useSFTPTransfer(hostID:string,active=true){
-	const manager=useContext(FileTransferContext)
-	const key=sftpTransferKey(hostID)
-	const record=useFileTransferRecord(manager,key,active)
-	if(!manager)throw new Error('FileTransferProvider is missing')
-	return{...record,upload:(directory:string,files:File[])=>manager.uploadSFTP(hostID,directory,files),download:(entry:SFTPFileEntry)=>manager.downloadSFTP(hostID,entry),cancel:()=>manager.cancel(key)}
-}
-
-function useWorkspaceTransfer(workspaceID:string,active=true){
-	const manager=useContext(FileTransferContext)
-	const key=workspaceTransferKey(workspaceID)
-	const record=useFileTransferRecord(manager,key,active)
-	if(!manager)throw new Error('FileTransferProvider is missing')
-	return{...record,upload:(items:WorkspaceTransferItem[])=>manager.uploadWorkspace(workspaceID,items),download:(path:string,name:string,size:number)=>manager.downloadWorkspace(workspaceID,path,name,size),cancel:()=>manager.cancel(key)}
-}
-
-function remoteChildPath(parent:string,name:string){return parent==='/'?`/${name}`:`${parent}/${name}`}
-function remoteParentPath(value:string){if(!value||value==='/')return '/';const parts=value.split('/').filter(Boolean);parts.pop();return `/${parts.join('/')}`||'/'}
-function textFileName(name:string){
-	const extension=name.toLowerCase().match(/(?:^|\.)([^./]+)$/)?.[1]||''
-	return new Set(['txt','md','markdown','json','jsonl','yaml','yml','toml','ini','conf','config','env','properties','xml','html','htm','css','scss','less','js','jsx','ts','tsx','mjs','cjs','go','rs','py','rb','php','java','kt','kts','c','h','cc','cpp','hpp','cs','swift','sh','bash','zsh','fish','ps1','bat','cmd','sql','csv','tsv','log','service','socket','timer']).has(extension)
-}
-function utf16Encoding(bytes:Uint8Array,name:string):SFTPTextEncoding|''{
-	if(bytes.length>=2&&bytes[0]===0xff&&bytes[1]===0xfe)return'utf-16le'
-	if(bytes.length>=2&&bytes[0]===0xfe&&bytes[1]===0xff)return'utf-16be'
-	if(!textFileName(name)||bytes.length<4)return''
-	const sample=Math.min(bytes.length,4096)
-	let evenZeros=0,oddZeros=0,pairs=0
-	for(let index=0;index+1<sample;index+=2){if(bytes[index]===0)evenZeros+=1;if(bytes[index+1]===0)oddZeros+=1;pairs+=1}
-	if(!pairs)return''
-	if(oddZeros/pairs>.3&&evenZeros/pairs<.1)return'utf-16le'
-	if(evenZeros/pairs>.3&&oddZeros/pairs<.1)return'utf-16be'
-	return''
-}
-function decodeTextFile(buffer:ArrayBuffer,name:string){
-	const bytes=new Uint8Array(buffer)
-	const utf16=utf16Encoding(bytes,name)
-	if(utf16)return{content:new TextDecoder(utf16,{fatal:true}).decode(bytes),binary:false,encoding:utf16}
-	if(bytes.includes(0))return{content:'',binary:true,encoding:'utf-8' as const}
-	try{return{content:new TextDecoder('utf-8',{fatal:true}).decode(bytes),binary:false,encoding:'utf-8' as const}}
-	catch{
-		if(textFileName(name)){
-			try{return{content:new TextDecoder('gb18030',{fatal:true}).decode(bytes),binary:false,encoding:'gb18030' as const}}
-			catch{/* invalid text remains binary */}
-		}
-		return{content:'',binary:true,encoding:'utf-8' as const}
-	}
-}
-
-function SFTPBrowser({host,active=true,embedded=false,hosts=[],onHostSelect,onWorkspaceMode,onCollapse}:{host?:Host;active?:boolean;embedded?:boolean;hosts?:Host[];onHostSelect?:(id:string)=>void;onWorkspaceMode?:()=>void;onCollapse?:()=>void}){
-	const {t,i18n:instance}=useTranslation()
-	const hostID=host?.id||''
-	const [path,setPath]=useState('')
-	const [pathInput,setPathInput]=useState('')
-	const [entries,setEntries]=useState<SFTPFileEntry[]>([])
-	const [loading,setLoading]=useState(false)
-	const [busy,setBusy]=useState(false)
-	const [listError,setListError]=useState('')
-	const [notice,setNotice]=useState('')
-	const [noticeError,setNoticeError]=useState(false)
-	const [dragging,setDragging]=useState(false)
-	const [inputKey,setInputKey]=useState(0)
-	const [nameEditor,setNameEditor]=useState<SFTPNameEditor|null>(null)
-	const [deleteCandidate,setDeleteCandidate]=useState<SFTPDeleteCandidate|null>(null)
-	const [textFile,setTextFile]=useState<SFTPTextFile|null>(null)
-	const [openingFile,setOpeningFile]=useState('')
-	const {active:transfer,uploadVersion,upload:uploadTransfer,download,cancel}=useSFTPTransfer(hostID,active)
-	const loadRequest=useRef(0)
-	const observedUploadVersion=useRef(uploadVersion)
-	const load=useCallback(async(target='')=>{
-		if(!hostID)return
-		const request=++loadRequest.current
-		setLoading(true);setListError('')
-		try{
-			const result=await api.sftpEntries(hostID,target)
-			if(request!==loadRequest.current)return
-			setPath(result.path);setPathInput(result.path);setEntries(result.entries||[])
-		}catch(err){
-			if(request!==loadRequest.current)return
-			setEntries([]);setListError(errorText(err))
-		}finally{if(request===loadRequest.current)setLoading(false)}
-	},[hostID])
-	useEffect(()=>{if(!active)return;observedUploadVersion.current=uploadVersion;void load('')},[active,load])
-	useEffect(()=>{
-		if(!active)return
-		if(observedUploadVersion.current===uploadVersion)return
-		observedUploadVersion.current=uploadVersion
-		void load(path)
-	},[active,load,path,uploadVersion])
-	const openTextFile=async(entry:SFTPFileEntry)=>{
-		if(openingFile)return
-		setOpeningFile(entry.path);setNotice('');setNoticeError(false)
-		try{
-			if((entry.size||0)>maxFilePreviewBytes)throw new Error(t('workspace.previewTooLarge'))
-			const decoded=decodeTextFile(await api.sftpFile(hostID,entry.path),entry.name)
-			setTextFile({entry,...decoded})
-		}catch(err){setNotice(errorText(err));setNoticeError(true)}
-		finally{setOpeningFile('')}
-	}
-	const uploadFiles=(files:File[])=>{
-		if(!files.length||busy||transfer)return
-		setNotice('');setNoticeError(false);setInputKey(value=>value+1)
-		uploadTransfer(path,files)
-	}
-	const saveName=async(name:string)=>{
-		if(!name.trim()||name==='.'||name==='..'||name.includes('/'))return
-		setBusy(true);setNotice('');setNoticeError(false)
-		try{
-			if(nameEditor?.mode==='create'){
-				await api.createSFTPDirectory(hostID,remoteChildPath(path,name))
-				setNotice(t('sshWorkspace.directoryCreated'))
-			}else if(nameEditor?.mode==='rename'){
-				await api.renameSFTPEntry(hostID,nameEditor.entry.path,remoteChildPath(path,name))
-				setNotice(t('sshWorkspace.renamed'))
-			}
-			setNameEditor(null);await load(path)
-		}catch(err){setNotice(errorText(err));setNoticeError(true)}
-		finally{setBusy(false)}
-	}
-	const remove=async()=>{
-		if(!deleteCandidate)return
-		setBusy(true);setNotice('');setNoticeError(false)
-		try{
-			await api.deleteSFTPEntry(hostID,deleteCandidate.entry.path,deleteCandidate.entry.type==='directory')
-			setNotice(t('sshWorkspace.deleted'));setDeleteCandidate(null);await load(path)
-		}catch(err){setNotice(errorText(err));setNoticeError(true)}
-		finally{setBusy(false)}
-	}
-	const saveTextFile=async(content:string)=>{
-		if(!textFile)return
-		const result=await api.uploadSFTPTextFile(hostID,textFile.entry.path,content,textFile.encoding)
-		setTextFile({entry:result.entry,content,binary:false,encoding:textFile.encoding})
-		setNotice(t('sshWorkspace.saved',{path:textFile.entry.path}));setNoticeError(false)
-		await load(path)
-	}
-	const acceptsFiles=(event:React.DragEvent<HTMLElement>)=>Array.from(event.dataTransfer.types).includes('Files')
-	return <>
-		<aside className={`sftp-browser panel ${embedded?'workspace-browser-panel chat-sftp-browser ':''}${dragging?'dragging':''}`} onDragEnter={event=>{if(hostID&&acceptsFiles(event)){event.preventDefault();setDragging(true)}}} onDragOver={event=>{if(hostID&&acceptsFiles(event)){event.preventDefault();event.dataTransfer.dropEffect=busy||transfer?'none':'copy'}}} onDragLeave={event=>{event.preventDefault();if(!(event.relatedTarget instanceof Node&&event.currentTarget.contains(event.relatedTarget)))setDragging(false)}} onDrop={event=>{if(!hostID||!acceptsFiles(event))return;event.preventDefault();setDragging(false);if(!busy&&!transfer)void uploadFiles(Array.from(event.dataTransfer.files))}}>
-			{embedded?<><header className="panel-header"><FileBrowserTabs mode="sftp" onChange={mode=>{if(mode==='workspace')onWorkspaceMode?.()}}/><div className="workspace-panel-actions"><button type="button" onClick={onCollapse} title={t('workspace.collapsePanel')} aria-label={t('workspace.collapsePanel')}><PanelLeftClose size={14}/></button></div></header><div className="workspace-summary"><div className="chat-workspace-head sftp-workspace-head">{hosts.length>0?<AppSelect className="workspace-switch-select" value={host?.id||''} disabled={hosts.length<2} ariaLabel={t('config.tabs.hosts')} onChange={value=>onHostSelect?.(value)} options={hosts.map(item=>({value:item.id,label:item.name}))}/>:<span><b>{t('connections.noHosts')}</b></span>}{host&&<em>{host.auth_type.toUpperCase()}</em>}</div></div></>:<header><div><FolderOpen size={17}/><b>SFTP</b></div><span className="sftp-host">{host?`${host.name} · ${host.user}@${host.address}`:'—'}</span></header>}
-			<form className="sftp-path" onSubmit={event=>{event.preventDefault();void load(pathInput)}}><button type="button" disabled={!path||path==='/'} onClick={()=>void load(remoteParentPath(path))} title={t('workspace.parent')}>‹</button><input value={pathInput} disabled={!hostID} onChange={event=>setPathInput(event.target.value)} aria-label={t('sshWorkspace.remotePath')}/><button type="submit" disabled={!hostID||loading}><ChevronRight size={13}/></button><button type="button" disabled={!hostID||loading} onClick={()=>void load(path)} title={t('common.refresh')}><RefreshCw className={loading?'spin':''} size={13}/></button></form>
-			<div className="sftp-actions"><button type="button" disabled={busy||!!transfer||!path} onClick={()=>setNameEditor({mode:'create'})}><Plus size={13}/>{t('sshWorkspace.newDirectory')}</button><label className={busy||transfer||!path?'disabled':''}><UploadCloud size={13}/>{t('common.upload')}<input key={inputKey} type="file" multiple disabled={busy||!!transfer||!path} onChange={event=>void uploadFiles(Array.from(event.target.files||[]))}/></label></div>
-			<div className="sftp-list">{!hostID?<span className="sftp-state">{t('connections.noHosts')}</span>:loading?<span className="sftp-state"><LoaderCircle className="spin" size={14}/>{t('common.loading')}</span>:listError?<span className="sftp-state error">{listError}</span>:entries.length?entries.map(entry=><div className="sftp-row" key={`${entry.type}:${entry.path}`}><button type="button" className="sftp-entry" onClick={()=>entry.type==='directory'?void load(entry.path):void openTextFile(entry)} title={entry.path}>{openingFile===entry.path?<LoaderCircle className="spin" size={14}/>:entry.type==='directory'?<FolderOpen size={14}/>:<FileText size={14}/>}<span><b>{entry.name}</b><small>{entry.mode} · {entry.type==='directory'?'—':formatFileSize(entry.size||0)} · {new Date(entry.modified_at).toLocaleString(localeFor(instance.language))}</small></span></button>{entry.type!=='directory'&&<button type="button" disabled={!!transfer} onClick={()=>void download(entry)} title={t('common.download')}><Download size={12}/></button>}<button type="button" disabled={!!transfer} onClick={()=>setNameEditor({mode:'rename',entry})} title={t('sshWorkspace.rename')}><Edit3 size={12}/></button><button type="button" className="danger" disabled={!!transfer} onClick={()=>setDeleteCandidate({entry})} title={t('common.delete')}><Trash2 size={12}/></button></div>):<span className="sftp-state">{t('workspace.emptyDirectory')}</span>}</div>
-			{transfer&&<FileTransferProgress transfer={transfer} onCancel={cancel}/>}
-			{notice&&<div className={`sftp-notice ${noticeError?'error':''}`}>{notice}<button onClick={()=>setNotice('')}><X size={11}/></button></div>}
-			{dragging&&<div className="sftp-drop"><UploadCloud size={28}/><b>{t('workspace.dropFilesHere')}</b></div>}
-		</aside>
-		{nameEditor&&<SFTPNameDialog mode={nameEditor.mode} initialName={nameEditor.mode==='rename'?nameEditor.entry.name:''} busy={busy} onCancel={()=>setNameEditor(null)} onConfirm={name=>void saveName(name)}/>}
-		{deleteCandidate&&<DestructiveConfirmDialog title={t('sshWorkspace.deleteTitle',{name:deleteCandidate.entry.name})} busy={busy} onCancel={()=>setDeleteCandidate(null)} onConfirm={()=>void remove()}/>}
-		{textFile&&<TextFileEditor path={textFile.entry.path} meta={`${textFile.entry.mode} · ${formatFileSize(textFile.entry.size||0)} · ${textFile.encoding.toUpperCase()} · ${new Date(textFile.entry.modified_at).toLocaleString(localeFor(instance.language))}`} content={textFile.content} binary={textFile.binary} editable onClose={()=>setTextFile(null)} onSave={saveTextFile} onDownload={()=>download(textFile.entry)}/>}
-	</>
-}
-
-function SFTPNameDialog({mode,initialName,busy,onCancel,onConfirm}:{mode:'create'|'rename';initialName:string;busy:boolean;onCancel:()=>void;onConfirm:(name:string)=>void}){
-	const {t}=useTranslation()
-	const [name,setName]=useState(initialName)
-	const valid=!!name.trim()&&name!=='.'&&name!=='..'&&!name.includes('/')
-	return createPortal(<div className="connection-dialog-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget&&!busy)onCancel()}}><form className="connection-dialog compact panel" noValidate onSubmit={event=>{event.preventDefault();if(valid)onConfirm(name)}}><header><span><FolderOpen size={19}/><span><small>SFTP</small><h2>{t(mode==='create'?'sshWorkspace.newDirectory':'sshWorkspace.rename')}</h2></span></span><button type="button" disabled={busy} onClick={onCancel}><X size={15}/></button></header><div className="connection-dialog-fields single"><label><span>{t('sshWorkspace.name')}</span><input value={name} onChange={event=>setName(event.target.value)} autoFocus/></label></div><footer><button type="button" disabled={busy} onClick={onCancel}>{t('common.cancel')}</button><button className="primary" disabled={busy||!valid}>{busy?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {t('common.save')}</button></footer></form></div>,document.body)
 }
 
 function SessionRenameDialog({session,busy,error,onCancel,onConfirm}:{session:ChatSession;busy:boolean;error:string;onCancel:()=>void;onConfirm:(title:string)=>void}){
@@ -1521,18 +1203,9 @@ function SessionRenameDialog({session,busy,error,onCancel,onConfirm}:{session:Ch
 	return createPortal(<div className="connection-dialog-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget&&!busy)onCancel()}}><form className="connection-dialog compact panel session-rename-dialog" noValidate onSubmit={event=>{event.preventDefault();if(normalized&&normalized!==session.title)onConfirm(normalized)}}><header><span><Edit3 size={19}/><span><h2>{t('chat.renameConversation')}</h2></span></span><button type="button" disabled={busy} onClick={onCancel}><X size={15}/></button></header><div className="connection-dialog-fields single"><label><span>{t('chat.sessionTitle')}</span><input value={title} maxLength={80} onChange={event=>setTitle(event.target.value)} autoFocus/></label></div>{error&&<div className="connection-dialog-error"><ShieldAlert size={14}/><span>{error}</span></div>}<footer><button type="button" disabled={busy} onClick={onCancel}>{t('common.cancel')}</button><button className="primary" disabled={busy||!normalized||normalized===session.title}>{busy?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {t('common.save')}</button></footer></form></div>,document.body)
 }
 
-function SFTPOverwriteDialog({path,busy,onCancel,onConfirm}:{path:string;busy:boolean;onCancel:()=>void;onConfirm:()=>void}){
-	const {t}=useTranslation()
-	return createPortal(<div className="connection-dialog-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget&&!busy)onCancel()}}><section className="sftp-overwrite-dialog panel"><header><FileText size={19}/><h2>{t('sshWorkspace.overwriteTitle')}</h2></header><code>{path}</code><footer><button type="button" disabled={busy} onClick={onCancel}>{t('common.cancel')}</button><button type="button" className="primary" disabled={busy} onClick={onConfirm}>{busy?<LoaderCircle className="spin" size={13}/>:<UploadCloud size={13}/>} {t('sshWorkspace.overwrite')}</button></footer></section></div>,document.body)
-}
 
 
 
-function DestructiveConfirmDialog({title,busy,onCancel,onConfirm}:{title:string;busy:boolean;onCancel:()=>void;onConfirm:()=>void}){
-	const {t}=useTranslation()
-	useEffect(()=>{const close=(event:KeyboardEvent)=>{if(event.key==='Escape'&&!busy)onCancel()};window.addEventListener('keydown',close);return()=>window.removeEventListener('keydown',close)},[busy,onCancel])
-	return <div className="destructive-dialog-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget&&!busy)onCancel()}}><section className="destructive-dialog panel" role="dialog" aria-modal="true" aria-labelledby="destructive-dialog-title"><header><Trash2 size={21}/><h2 id="destructive-dialog-title">{title}</h2></header><footer><button type="button" autoFocus disabled={busy} onClick={onCancel}>{t('common.cancel')}</button><button type="button" className="danger" disabled={busy} onClick={onConfirm}>{busy?<LoaderCircle className="spin" size={14}/>:<Trash2 size={14}/>} {busy?t('common.deleting'):t('common.delete')}</button></footer></section></div>
-}
 
 function FullAccessConfirmDialog({onCancel,onConfirm}:{onCancel:()=>void;onConfirm:()=>void}){
 	const {t}=useTranslation()
@@ -1768,7 +1441,7 @@ function LLMToolsPage({catalog,refresh,onCatalogChanged}:{catalog:LLMToolCatalog
 		<div className="tool-catalog-toolbar panel"><label><Search size={15}/><input value={query} onChange={event=>setQuery(event.target.value)} placeholder={t('tools.searchPlaceholder')}/></label><AppSelect value={category} ariaLabel={t('tools.category')} onChange={setCategory} options={[{value:'all',label:t('tools.allCategories',{count:tools.length})},...categories.map(value=>({value,label:`${toolCategoryLabel(value)} · ${tools.filter(tool=>tool.category===value).length}`}))]}/><span>{t('tools.visible',{count:filtered.length})}</span><button className="tool-catalog-refresh" onClick={refreshCatalog} disabled={refreshing} title={t('tools.refreshSnapshot')}><RefreshCw className={refreshing?'spin':''} size={14}/><span>{refreshing?t('common.refreshing'):t('tools.refreshSnapshot')}</span></button></div>
 		{!catalog?<div className="tool-catalog-loading panel"><LoaderCircle className="spin" size={20}/>{t('tools.loadingSnapshot')}</div>:!catalog.loaded?<Empty icon={<FunctionSquare/>} title={t('tools.runtimeMissing')} text={t('tools.runtimeMissingText')}/>:<div className="tool-catalog-browser">
 			<section className="tool-function-list panel">{filtered.length?filtered.map(tool=>{const count=toolParameters(tool).length;return <button className={`${selected?.name===tool.name?'active':''} ${tool.enabled?'':'disabled'}`} onClick={()=>setSelectedName(tool.name)} key={tool.name}><div className="tool-function-icon"><Braces size={16}/></div><span><code>{tool.name}</code><p>{tool.description}</p><small><em>{toolCategoryLabel(tool.category)}</em><i className={tool.guard}>{toolGuardLabel(tool.guard)}</i>{!tool.enabled&&<i className="disabled">{t('tools.disabled')}</i>}</small></span><b>{count}<small>{t('tools.argsUnit')}</small></b><ChevronRight size={14}/></button>}):<div className="tool-filter-empty"><Search size={20}/><b>{t('tools.noMatch')}</b></div>}</section>
-			<aside className={`tool-function-inspector panel ${selected?.enabled?'':'disabled'}`}>{selected?<><header><div className="tool-function-icon"><FunctionSquare size={18}/></div><span><small>{t('tools.functionDetail')}</small><code>{selected.name}</code></span><div className="tool-function-controls"><em className={selected.guard}>{toolGuardLabel(selected.guard)}</em><button className={selected.enabled?'enabled':''} role="switch" aria-checked={selected.enabled} onClick={()=>void setEnabled(selected)} disabled={busyName===selected.name} title={selected.enabled?t('tools.disableFunction'):t('tools.enableFunction')}>{busyName===selected.name?<LoaderCircle className="spin" size={14}/>:<Power size={14}/>}<span>{selected.enabled?t('common.enabled'):t('common.disabled')}</span></button></div></header><p className="tool-function-description">{selected.description}</p><dl className="tool-function-meta"><div><dt>{t('tools.category')}</dt><dd>{toolCategoryLabel(selected.category)}</dd></div><div><dt>{t('common.arguments')}</dt><dd>{parameters.length}</dd></div><div><dt>{t('tools.safetyGate')}</dt><dd>{toolGuardLabel(selected.guard)}</dd></div></dl><section className="tool-parameter-list"><h3>{t('tools.inputParameters')} <span>{t('tools.requiredCount',{count:parameters.filter(item=>item.required).length})}</span></h3>{parameters.length?parameters.map(parameter=><div key={parameter.name}><code>{parameter.name}</code><em>{parameter.type}</em>{parameter.required&&<b>{t('common.required')}</b>}{parameter.description&&<p>{parameter.description}</p>}</div>):<p className="tool-no-arguments">{t('tools.noArguments')}</p>}</section><details className="tool-schema-raw"><summary>{t('tools.rawSchema')} <ChevronRight size={13}/></summary><CopyablePre>{JSON.stringify(selected.input_schema,null,2)}</CopyablePre></details></>:<div className="tool-inspector-empty"><Braces size={26}/></div>}</aside>
+			<aside className={`tool-function-inspector panel ${selected?.enabled?'':'disabled'}`}>{selected?<><header><div className="tool-function-icon"><FunctionSquare size={18}/></div><span><small>{t('tools.functionDetail')}</small><code>{selected.name}</code></span><div className="tool-function-controls"><em className={selected.guard}>{toolGuardLabel(selected.guard)}</em><button className={selected.enabled?'enabled':''} role="switch" aria-checked={selected.enabled} onClick={()=>void setEnabled(selected)} disabled={busyName===selected.name} title={selected.enabled?t('tools.disableFunction'):t('tools.enableFunction')}>{busyName===selected.name?<LoaderCircle className="spin" size={14}/>:<Power size={14}/>}<span>{selected.enabled?t('common.enabled'):t('common.disabled')}</span></button></div></header><p className="tool-function-description">{selected.description}</p><dl className="tool-function-meta"><div><dt>{t('tools.category')}</dt><dd>{toolCategoryLabel(selected.category)}</dd></div><div><dt>{t('common.arguments')}</dt><dd>{parameters.length}</dd></div><div><dt>{t('tools.safetyGate')}</dt><dd>{toolGuardLabel(selected.guard)}</dd></div></dl><section className="tool-parameter-list"><h3>{t('tools.inputParameters')} <span>{t('tools.requiredCount',{count:parameters.filter(item=>item.required).length})}</span></h3>{parameters.length?parameters.map(parameter=><div key={parameter.name}><code>{parameter.name}</code><em>{parameter.type}</em>{parameter.required&&<b>{t('common.required')}</b>}{parameter.description&&<p>{parameter.description}</p>}</div>):<p className="tool-no-arguments">{t('tools.noArguments')}</p>}</section><details className="tool-schema-raw"><summary>{t('tools.rawSchema')} <ChevronRight size={13}/></summary><CopyablePre><HighlightedCode code={JSON.stringify(selected.input_schema,null,2)} language="json"/></CopyablePre></details></>:<div className="tool-inspector-empty"><Braces size={26}/></div>}</aside>
 		</div>}
 	</div>
 }
@@ -2585,27 +2258,12 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 }
 
 
-function FileTransferProgress({transfer,onCancel}:{transfer:ActiveFileTransfer;onCancel:()=>void}){
-	const {t}=useTranslation()
-	const percent=transfer.total>0?Math.min(100,Math.round(transfer.loaded/transfer.total*100)):0
-	return <div className={`file-transfer-progress ${transfer.total>0?'':'indeterminate'}`} role="progressbar" aria-valuemin={0} aria-valuemax={transfer.total||undefined} aria-valuenow={transfer.total>0?transfer.loaded:undefined}>
-		<div><span title={transfer.name}>{transfer.index&&transfer.count?`${transfer.index}/${transfer.count} · `:''}{transfer.name}</span><b>{formatFileSize(transfer.loaded)}{transfer.total>0?` / ${formatFileSize(transfer.total)}`:''}</b><button type="button" onClick={onCancel}>{t('common.cancel')}</button></div>
-		<i><em style={transfer.total>0?{width:`${percent}%`}:undefined}/></i>
-	</div>
-}
-
 type WorkspaceNotice={kind:'success'|'error';text:string}
 type WorkspaceDeleteCandidate={workspaceID:string;path:string;type:'file'|'directory'}
-type FileBrowserMode='workspace'|'sftp'
 
 function workspaceChildPath(path:string,name:string){return path==='.'?name:`${path}/${name}`}
 
 const MemoChatPage=memo(ChatPage)
-
-function FileBrowserTabs({mode,onChange}:{mode:FileBrowserMode;onChange:(mode:FileBrowserMode)=>void}){
-	const {t}=useTranslation()
-	return <div className="file-browser-tabs" role="tablist"><button type="button" className={mode==='workspace'?'active':''} role="tab" aria-selected={mode==='workspace'} onClick={()=>onChange('workspace')}><FolderOpen size={14}/><span>{t('common.workspace')}</span></button><button type="button" className={mode==='sftp'?'active':''} role="tab" aria-selected={mode==='sftp'} onClick={()=>onChange('sftp')}><Server size={14}/><span>SFTP</span></button></div>
-}
 
 const ChatWorkspacePanel=memo(function ChatWorkspacePanel({active,mode,onModeChange,workspaces,workspaceID,hosts,sftpHostID,onSFTPHostChange,shells,switching,disabled,bound,onSelect,onCreateShell,onOpenShell,onCollapse}:{active:boolean;mode:FileBrowserMode;onModeChange:(mode:FileBrowserMode)=>void;workspaces:WorkspaceCapability[];workspaceID:string;hosts:Host[];sftpHostID:string;onSFTPHostChange:(id:string)=>void;shells:SSHShell[];switching:boolean;disabled:boolean;bound:boolean;onSelect:(id:string)=>void|Promise<void>;onCreateShell:(workspaceID:string)=>Promise<void>;onOpenShell:(shell:SSHShell)=>void;onCollapse:()=>void}){
 	const {t}=useTranslation()
@@ -3210,12 +2868,12 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,liveSSHTaskOwner
 			<summary onClick={event=>{event.preventDefault();toggleExpanded(event.currentTarget)}}><div className="tool-summary-icon">{toolSummaryIcon(entry.tool)}</div><div className="tool-summary-copy"><div className="tool-summary-heading"><b>{summaryLabel}</b>{sshTransfer?<ToolTransferRoute sourceHost={sourceHostName} sourcePath={sourcePath} destinationHost={hostName} destinationPath={remotePath}/>:workspaceTransferRoute?<WorkspaceTransferRoute {...workspaceTransferRoute}/>:<>{targets.length>0&&<div className="tool-summary-targets">{targets.map((target,index)=><span className={`tool-target-chip tool-target-${target.kind}`} title={`${target.label}: ${[target.name,target.id].filter(Boolean).join(' · ')}`} key={`${target.kind}_${target.id||target.name}_${index}`}>{target.kind==='host'?<Server size={11}/>:target.kind==='workspace'?<FolderOpen size={11}/>:<ListChecks size={11}/>} {(targets.length>1||target.kind==='scope')&&<em>{target.label}</em>}<b>{target.name||target.id}</b></span>)}</div>}{commandSummary!==summaryLabel&&<code className={sshTaskOperation?'tool-task-id':undefined} title={previewText(commandSummary)}>{previewText(commandSummary)}</code>}</>}</div></div><div className="tool-summary-statuses">{loadingDetail&&<LoaderCircle className="spin" size={12}/>} {autoApproved&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}<span className={`tool-status ${status}`} key={status}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight className="tool-summary-chevron" size={14}/>{request&&<div className="tool-summary-meta"><span className={`tool-summary-permission ${permission}`}><em>{t('tool.permission')}</em><b>{permission}</b></span>{purpose&&<span className="tool-summary-purpose" title={purpose}><em>{t('tool.reason')}</em><b>{purpose}</b></span>}</div>}{toolLive&&<div className={`tool-live-progress ${transferTotal>0?'determinate':''}`} role="progressbar" aria-valuemin={transferTotal>0?0:undefined} aria-valuemax={transferTotal>0?transferTotal:undefined} aria-valuenow={transferTotal>0?transferred:undefined}><i><em style={transferTotal>0?{width:`${transferPercent}%`}:undefined}/></i><span>{transferTotal>0?`${formatFileSize(transferred)} / ${formatFileSize(transferTotal)}`:sshTaskOperation?t('tool.liveTask'):entry.liveOutputStream?.toUpperCase()||''}</span><time>{elapsed}</time></div>}{outputPreview&&<div className={`tool-summary-preview ${previewStream==='stderr'?'stderr':''}`}><span>{shellAction==='output'?shellActionLabel:(previewStream||'stdout').toUpperCase()}</span><pre>{outputPreview}</pre></div>}</summary>
 		{expanded&&<div className="tool-event-body">
 		  {detailError&&<div className="tool-detail-error">{detailError}</div>}
-		  {shellPrimaryAction&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellPrimaryContent||'—'}/><pre>{previewText(shellPrimaryContent||'—',toolOutputPreviewChars)}</pre></div></section>}
-		  {shellOutputAction&&!shellChunks.length&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellOutput||'—'}/><pre>{previewText(shellOutput||'—',toolOutputPreviewChars)}</pre></div></section>}
+		  {shellPrimaryAction&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellPrimaryContent||'—'}/><pre><HighlightedCode code={previewText(shellPrimaryContent||'—',toolOutputPreviewChars)} language={inferScriptLanguage(shellPrimaryContent||'')}/></pre></div></section>}
+		  {shellOutputAction&&!shellChunks.length&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellOutput||'—'}/><pre><HighlightedCode code={previewText(shellOutput||'—',toolOutputPreviewChars)} autoDetect live={toolLive}/></pre></div></section>}
 		  {!executionTool&&!sshTaskOperation&&toolArguments&&hasRecordEntries(toolArguments)&&<CompactTable title={t('tool.actualParameters')} columns={[t('tool.parameter'),t('tool.value')]} rows={limitedRecordEntries(toolArguments).entries.map(([key,value])=>[key,safeToolArgument(value,key)])}/>}
       {request?<section className="tool-command-pane">
 		  <div className="tool-command-head"><span>{shellOperation?t('sshShell.title'):tunnelOperation?t('tunnels.forwarding'):structuredFileOperation?t(fileSearchMode?'tool.searchOperation':'tool.readOperation'):filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}</div>
-			  <div className="tool-command-block"><CopyButton value={script||(program?()=>fullProgram(request,true):commandSummary)}/>{shellOperation?<pre>{shellSummary}</pre>:tunnelOperation?<pre>{tunnelRoute||requestMode}</pre>:workspaceUpload?<pre>workspace_upload {workspaceID}:{relativePath} → {hostName}:{remotePath}</pre>:workspaceDownload?<pre>workspace_download {hostName}:{remotePath} → {workspaceID}:{relativePath}</pre>:sshTransfer?<pre>{sourceHostName}:{sourcePath} → {hostName}:{remotePath}</pre>:structuredFileOperation?<pre>{fileSearchMode?'search':'read'} {fileTarget}</pre>:filePath?<pre>{requestMode} {workspaceID?`${workspaceID}:`:''}{filePath}</pre>:script?<pre>{previewText(script,toolOutputPreviewChars)}</pre>:program?<pre><span className="prompt-sign">$</span> {previewText(program)}</pre>:<pre>{requestMode} {remotePath}</pre>}</div>
+			  <div className="tool-command-block"><CopyButton value={script||(program?()=>fullProgram(request,true):commandSummary)}/>{shellOperation?<pre>{shellSummary}</pre>:tunnelOperation?<pre>{tunnelRoute||requestMode}</pre>:workspaceUpload?<pre>workspace_upload {workspaceID}:{relativePath} → {hostName}:{remotePath}</pre>:workspaceDownload?<pre>workspace_download {hostName}:{remotePath} → {workspaceID}:{relativePath}</pre>:sshTransfer?<pre>{sourceHostName}:{sourcePath} → {hostName}:{remotePath}</pre>:structuredFileOperation?<pre>{fileSearchMode?'search':'read'} {fileTarget}</pre>:filePath?<pre>{requestMode} {workspaceID?`${workspaceID}:`:''}{filePath}</pre>:script?<pre><HighlightedCode code={previewText(script,toolOutputPreviewChars)} language={inferScriptLanguage(script)}/></pre>:program?<pre><span className="prompt-sign">$</span> <HighlightedCode code={previewText(program)} language="bash"/></pre>:<pre>{requestMode} {remotePath}</pre>}</div>
 		  {change&&textValue(change.diff)&&<DiffViewer change={change}/>}
 		  {env&&hasRecordEntries(env)&&<CompactTable title={t('tool.environment')} columns={[t('tool.key'),t('tool.value')]} rows={recordTableRows(env)}/>}
       </section>:!sshTaskOperation&&!shellPrimaryAction&&!shellOutputAction&&(webTool?<WebToolResult tool={entry.tool!} payload={payload}/>:<GenericToolResult payload={payload}/>)}
@@ -3223,14 +2881,14 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,liveSSHTaskOwner
 	  {(textValue(payload.message)||textValue(payload.next_action))&&<div className={`tool-guidance ${payload.ok===false||['failed','denied','interrupted'].includes(status)?'error':''}`}><ShieldAlert size={15}/><div><b>{textValue(payload.code)||t('tool.result')}</b>{textValue(payload.message)&&<p>{textValue(payload.message)}</p>}{textValue(payload.next_action)&&<small>{t('common.next')} · {textValue(payload.next_action)}</small>}</div></div>}
 	  {instruction&&<div className="tool-instruction"><ShieldAlert size={15}/><div><b>{t('tool.operatorInstruction')}</b><p>{instruction}</p></div></div>}
 	  {fileTransfer&&transferTotal>0&&<div className="file-transfer-progress" role="progressbar" aria-valuemin={0} aria-valuemax={transferTotal} aria-valuenow={transferred}><div><span>{t('tool.transferProgress')}</span><b>{formatFileSize(transferred)} / {formatFileSize(transferTotal)}</b></div><i><em style={{width:`${transferPercent}%`}}/></i></div>}
-	  {workspaceDirectoryEntries!==undefined?<div className="tool-output-grid"><WorkspaceDirectoryOutput entries={workspaceDirectoryEntries} content={stdout}/>{stderr&&<ToolOutputPanel kind="stderr" label={outputLabel(t('tool.stderrResult'),stderrOmitted)} content={stderr} live={toolLive}/>}</div>:shellOperation&&shellChunks.length>0?<ShellOutputChunks chunks={shellChunks} live={toolLive}/>:((stdout&&(!shellOutputAction||shellChunks.length>0))||stderr)&&<div className="tool-output-grid">{stdout&&(!shellOutputAction||shellChunks.length>0)&&<ToolOutputPanel kind="stdout" label={outputLabel('STDOUT',stdoutOmitted)} content={stdout} live={toolLive}/>} {stderr&&<ToolOutputPanel kind="stderr" label={outputLabel(t('tool.stderrResult'),stderrOmitted)} content={stderr} live={toolLive}/>}</div>}
+	  {workspaceDirectoryEntries!==undefined?<div className="tool-output-grid"><WorkspaceDirectoryOutput entries={workspaceDirectoryEntries} content={stdout}/>{stderr&&<ToolOutputPanel kind="stderr" label={outputLabel(t('tool.stderrResult'),stderrOmitted)} content={stderr} live={toolLive}/>}</div>:shellOperation&&shellChunks.length>0?<ShellOutputChunks chunks={shellChunks} live={toolLive}/>:((stdout&&(!shellOutputAction||shellChunks.length>0))||stderr)&&<div className="tool-output-grid">{stdout&&(!shellOutputAction||shellChunks.length>0)&&<ToolOutputPanel kind="stdout" label={outputLabel('STDOUT',stdoutOmitted)} content={stdout} live={toolLive} language={fileReadMode?languageFromPath(filePath):undefined}/>} {stderr&&<ToolOutputPanel kind="stderr" label={outputLabel(t('tool.stderrResult'),stderrOmitted)} content={stderr} live={toolLive}/>}</div>}
 	  {(request||sshTaskOperation)&&(exitCode!=='—'||duration!=='—'||waitDeadlineReached||shellHasMore||sshTaskOperation&&(!!runID||numberValue(payload.stdout_total_bytes)>0||numberValue(payload.stderr_total_bytes)>0))&&<aside className="tool-context-pane"><dl className="tool-context-grid">{sshTaskOperation&&runID&&<div><dt>{t('tool.runId')}</dt><dd>{runID}</dd></div>}{exitCode!=='—'&&<div><dt>{t('tool.exitCode')}</dt><dd>{exitCode}</dd></div>}{duration!=='—'&&<div><dt>{t('tool.duration')}</dt><dd>{duration}</dd></div>}{sshTaskOperation&&numberValue(payload.stdout_total_bytes)>0&&<div><dt>STDOUT</dt><dd>{formatFileSize(numberValue(payload.stdout_total_bytes))}</dd></div>}{sshTaskOperation&&numberValue(payload.stderr_total_bytes)>0&&<div><dt>STDERR</dt><dd>{formatFileSize(numberValue(payload.stderr_total_bytes))}</dd></div>}{(waitDeadlineReached||shellHasMore)&&<div><dt>{t('common.status')}</dt><dd>{waitDeadlineReached?t('tool.waitDeadline'):t('tool.moreOutput')}</dd></div>}</dl></aside>}
 	  <LazyJSONDetails value={rawPayload}/>
     </div>}
   </details>
 }
 
-function ToolOutputPanel({kind,label,content,live}:{kind:'stdout'|'stderr';label:string;content:string;live:boolean}){
+function ToolOutputPanel({kind,label,content,live,language}:{kind:'stdout'|'stderr';label:string;content:string;live:boolean;language?:string}){
 	const outputRef=useRef<HTMLPreElement>(null)
 	const stickToBottom=useRef(true)
 	const preview=previewText(content,toolOutputPreviewChars)
@@ -3238,7 +2896,7 @@ function ToolOutputPanel({kind,label,content,live}:{kind:'stdout'|'stderr';label
 		const output=outputRef.current
 		if(live&&output&&stickToBottom.current)output.scrollTop=output.scrollHeight
 	},[preview,live])
-	return <div className={`tool-output ${kind} ${live?'live':''}`}><span>{label}</span><div className="tool-output-frame"><CopyButton value={content}/><pre ref={outputRef} onScroll={event=>{const output=event.currentTarget;stickToBottom.current=output.scrollHeight-output.scrollTop-output.clientHeight<32}}>{preview}</pre></div></div>
+	return <div className={`tool-output ${kind} ${live?'live':''}`}><span>{label}</span><div className="tool-output-frame"><CopyButton value={content}/><pre ref={outputRef} onScroll={event=>{const output=event.currentTarget;stickToBottom.current=output.scrollHeight-output.scrollTop-output.clientHeight<32}}><HighlightedCode code={preview} language={language} autoDetect live={live}/></pre></div></div>
 }
 
 function WorkspaceDirectoryOutput({entries,content}:{entries:ToolWorkspaceDirectoryEntry[];content:string}){
@@ -3260,7 +2918,7 @@ function LazyJSONDetails({value}:{value:JsonRecord}){
 	const {t}=useTranslation()
 	const [open,setOpen]=useState(false)
 	const formatted=open?JSON.stringify(previewStructuredValue(value),null,2):''
-	return <details className="tool-raw" open={open} onToggle={event=>setOpen(event.currentTarget.open)}><summary>{t('tool.rawJson')}</summary>{open&&<CopyablePre value={()=>JSON.stringify(value,null,2)}>{previewText(formatted,toolOutputPreviewChars)}</CopyablePre>}</details>
+	return <details className="tool-raw" open={open} onToggle={event=>setOpen(event.currentTarget.open)}><summary>{t('tool.rawJson')}</summary>{open&&<CopyablePre value={()=>JSON.stringify(value,null,2)}><HighlightedCode code={previewText(formatted,toolOutputPreviewChars)} language="json"/></CopyablePre>}</details>
 }
 
 function CompactTable({title,columns,rows}:{title:string;columns:string[];rows:Array<Array<unknown>>}){
@@ -3722,7 +3380,7 @@ function ApprovalDialog({
               rows={fileApprovalParameters}
             />
           )}
-          {change&&textValue(change.diff)?<DiffViewer change={change}/>:<CopyablePre value={script||(program&&operation===program?()=>fullProgram(request,true):operation)} preClassName="approval-command-preview">{previewText(script || `${tunnelApproval||interactiveShellApproval?'':'$ '}${operation}`,toolOutputPreviewChars)}</CopyablePre>}
+          {change&&textValue(change.diff)?<DiffViewer change={change}/>:<CopyablePre value={script||(program&&operation===program?()=>fullProgram(request,true):operation)} preClassName="approval-command-preview"><HighlightedCode code={previewText(script || `${tunnelApproval||interactiveShellApproval?'':'$ '}${operation}`,toolOutputPreviewChars)} language={script?inferScriptLanguage(script):program?'bash':undefined} autoDetect/></CopyablePre>}
           <dl>
             <div>
               <dt>
@@ -3807,7 +3465,7 @@ function ApprovalDialog({
         )}
         <details className="approval-request-detail" open={requestExpanded} onToggle={event=>setRequestExpanded(event.currentTarget.open)}>
           <summary>{t("approval.requestDetails")}</summary>
-          {requestExpanded&&<CopyablePre value={()=>JSON.stringify(request,null,2)}>{JSON.stringify(previewStructuredValue(request),null,2)}</CopyablePre>}
+          {requestExpanded&&<CopyablePre value={()=>JSON.stringify(request,null,2)}><HighlightedCode code={JSON.stringify(previewStructuredValue(request),null,2)} language="json"/></CopyablePre>}
         </details>
         <div className="approval-choice-grid">
           <button
@@ -4061,7 +3719,7 @@ function AuditRunDetail({run,req,hosts}:{run:Run;req:JsonRecord;hosts:Host[]}){
 		<div className="audit-run-primary">
 			<section className="audit-operation-pane">
 				<div className="tool-command-head"><span>{shellMode?shellModeLabel:tunnelMode?t('tunnels.forwarding'):searchMode?t('tool.searchOperation'):readMode?t('tool.readOperation'):workspaceTransfer||sshTransfer||filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{(workspaceShellBackend||rootExecution)&&<div className="audit-operation-badges">{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}{rootExecution&&<em><ShieldAlert size={12}/>root</em>}</div>}</div>
-				<div className="tool-command-block"><CopyButton value={program&&commandText===program?()=>fullProgram(req,true):commandText}/><pre>{program&&commandText===program?<><span className="prompt-sign">$</span> {previewText(program)}</>:previewText(commandText,toolOutputPreviewChars)}</pre></div>
+				<div className="tool-command-block"><CopyButton value={program&&commandText===program?()=>fullProgram(req,true):commandText}/><pre>{program&&commandText===program?<><span className="prompt-sign">$</span> <HighlightedCode code={previewText(program)} language="bash"/></>:<HighlightedCode code={previewText(commandText,toolOutputPreviewChars)} language={script?inferScriptLanguage(script):undefined} autoDetect/>}</pre></div>
 				{change&&textValue(change.diff)&&<DiffViewer change={change}/>}
 			</section>
 			<aside className="audit-run-context">
@@ -4075,13 +3733,13 @@ function AuditRunDetail({run,req,hosts}:{run:Run;req:JsonRecord;hosts:Host[]}){
 				{textValue(req.reason)&&<div className="audit-run-purpose"><span>{t('tool.reason')}</span><p>{textValue(req.reason)}</p></div>}
 			</aside>
 		</div>
-		{(run.stdout_redacted||run.stderr_redacted||run.error)&&<div className="tool-output-grid">{run.stdout_redacted&&<ToolOutputPanel kind="stdout" label="STDOUT · REDACTED" content={run.stdout_redacted} live={false}/>} {run.stderr_redacted&&<ToolOutputPanel kind="stderr" label="STDERR · REDACTED" content={run.stderr_redacted} live={false}/>} {run.error&&!run.stderr_redacted&&<ToolOutputPanel kind="stderr" label={t('common.error')} content={run.error} live={false}/>}</div>}
+		{(run.stdout_redacted||run.stderr_redacted||run.error)&&<div className="tool-output-grid">{run.stdout_redacted&&<ToolOutputPanel kind="stdout" label="STDOUT · REDACTED" content={run.stdout_redacted} live={false} language={readMode?languageFromPath(filePath):undefined}/>} {run.stderr_redacted&&<ToolOutputPanel kind="stderr" label="STDERR · REDACTED" content={run.stderr_redacted} live={false}/>} {run.error&&!run.stderr_redacted&&<ToolOutputPanel kind="stderr" label={t('common.error')} content={run.error} live={false}/>}</div>}
 		<details className="audit-request-detail" open={requestExpanded} onToggle={event=>setRequestExpanded(event.currentTarget.open)}>
 			<summary><Braces size={14}/><span>{t('tool.normalizedRequest')}</span><ChevronRight size={14}/></summary>
 			{requestExpanded&&<div className="audit-request-detail-body">
 				<dl className="audit-request-meta"><div><dt>{t('common.operation')}</dt><dd>{toolLabel(run.tool_name||'')}</dd></div><div><dt>{t('tool.runId')}</dt><dd>{run.id}</dd></div></dl>
 				{env&&hasRecordEntries(env)&&<CompactTable title={t('tool.environment')} columns={[t('tool.key'),t('tool.value')]} rows={recordTableRows(env)}/>}
-				<CopyablePre value={()=>JSON.stringify(req,null,2)}>{JSON.stringify(previewStructuredValue(req),null,2)}</CopyablePre>
+				<CopyablePre value={()=>JSON.stringify(req,null,2)}><HighlightedCode code={JSON.stringify(previewStructuredValue(req),null,2)} language="json"/></CopyablePre>
 			</div>}
 		</details>
 	</div>

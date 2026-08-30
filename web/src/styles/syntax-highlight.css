@@ -1,0 +1,22 @@
+.syntax-code{font:inherit;color:inherit;white-space:inherit}
+.syntax-code>span{font:inherit}
+
+.hljs-comment,.hljs-quote{color:#5f7c70;font-style:italic}
+.hljs-keyword,.hljs-selector-tag,.hljs-literal,.hljs-section,.hljs-link{color:#f09a76}
+.hljs-string,.hljs-title,.hljs-name,.hljs-type,.hljs-attribute,.hljs-symbol,.hljs-bullet,.hljs-addition{color:#83d6a8}
+.hljs-number,.hljs-meta,.hljs-built_in,.hljs-builtin-name,.hljs-params{color:#d8b46d}
+.hljs-variable,.hljs-template-variable,.hljs-selector-id,.hljs-selector-class{color:#79bde8}
+.hljs-regexp,.hljs-deletion{color:#ee8585}
+.hljs-function .hljs-title,.hljs-title.function_{color:#77d2c1}
+.hljs-subst{color:#b8cdc3}
+.hljs-emphasis{font-style:italic}
+.hljs-strong{font-weight:700}
+
+:root[data-theme='light'] .hljs-comment,:root[data-theme='light'] .hljs-quote{color:#74857d}
+:root[data-theme='light'] .hljs-keyword,:root[data-theme='light'] .hljs-selector-tag,:root[data-theme='light'] .hljs-literal,:root[data-theme='light'] .hljs-section,:root[data-theme='light'] .hljs-link{color:#a84324}
+:root[data-theme='light'] .hljs-string,:root[data-theme='light'] .hljs-title,:root[data-theme='light'] .hljs-name,:root[data-theme='light'] .hljs-type,:root[data-theme='light'] .hljs-attribute,:root[data-theme='light'] .hljs-symbol,:root[data-theme='light'] .hljs-bullet,:root[data-theme='light'] .hljs-addition{color:#167044}
+:root[data-theme='light'] .hljs-number,:root[data-theme='light'] .hljs-meta,:root[data-theme='light'] .hljs-built_in,:root[data-theme='light'] .hljs-builtin-name,:root[data-theme='light'] .hljs-params{color:#8a5b00}
+:root[data-theme='light'] .hljs-variable,:root[data-theme='light'] .hljs-template-variable,:root[data-theme='light'] .hljs-selector-id,:root[data-theme='light'] .hljs-selector-class{color:#17699c}
+:root[data-theme='light'] .hljs-regexp,:root[data-theme='light'] .hljs-deletion{color:#b12d3d}
+:root[data-theme='light'] .hljs-function .hljs-title,:root[data-theme='light'] .hljs-title.function_{color:#08776b}
+:root[data-theme='light'] .hljs-subst{color:#30463c}
