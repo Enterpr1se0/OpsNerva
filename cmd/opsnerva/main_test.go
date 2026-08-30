@@ -16,8 +16,8 @@ func TestPrepareQuickStartUsesApplicationDirectoryAndKeepsConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chdir(previous) })
 	appDir := t.TempDir()
+	t.Cleanup(func() { _ = os.Chdir(previous) })
 
 	path, created, err := prepareQuickStartIn(appDir)
 	if err != nil {
@@ -48,8 +48,8 @@ func TestPrepareQuickStartUsesConfiguredHome(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chdir(previous) })
 	appDir := t.TempDir()
+	t.Cleanup(func() { _ = os.Chdir(previous) })
 	t.Setenv("OPSNERVA_HOME", appDir)
 
 	path, created, err := prepareQuickStart()
