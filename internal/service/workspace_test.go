@@ -30,6 +30,44 @@ func (zeroReader) Read(buffer []byte) (int, error) {
 	return len(buffer), nil
 }
 
+func requireRunnableWorkspaceSandbox(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("bubblewrap sandbox is Linux-only")
+	}
+	sandbox, err := exec.LookPath("bwrap")
+	if err != nil {
+		t.Skip("bubblewrap is not installed")
+	}
+	args := []string{"--unshare-all", "--unshare-user", "--ro-bind", "/usr", "/usr", "--proc", "/proc", "--dev", "/dev", "--", "/usr/bin/true"}
+	if workspaceSandboxSupportsDisableUserns(sandbox) {
+		args = append([]string{"--disable-userns"}, args...)
+	}
+	if output, err := exec.Command(sandbox, args...).CombinedOutput(); err != nil {
+		message := string(output)
+		if strings.Contains(message, "Operation not permitted") || strings.Contains(message, "No permissions to creating new namespace") {
+			t.Skipf("bubblewrap namespaces are unavailable: %s", strings.TrimSpace(message))
+		}
+		t.Fatalf("bubblewrap preflight failed: %v: %s", err, strings.TrimSpace(message))
+	}
+}
+
+func requireBashWorkspaceHost(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("test exercises the Bash Workspace host shell")
+	}
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is not installed")
+	}
+}
+
+func sameWorkspaceFile(first, second string) bool {
+	firstInfo, firstErr := os.Stat(first)
+	secondInfo, secondErr := os.Stat(second)
+	return firstErr == nil && secondErr == nil && os.SameFile(firstInfo, secondInfo)
+}
+
 func newWorkspaceService(t *testing.T, access string) (*Service, string) {
 	t.Helper()
 	ctx := context.Background()
@@ -245,6 +283,19 @@ func TestWorkspaceManagedDirectoriesRejectUnsafeNamesAndSymlinks(t *testing.T) {
 	}
 	if _, err := svc.CreateAdminWorkspace(context.Background(), domain.WorkspaceInput{ID: "linked", Access: "read_write"}, "admin-web"); err == nil || !strings.Contains(err.Error(), "symbolic links") {
 		t.Fatalf("symlinked Workspace directory was accepted: %v", err)
+	}
+
+	parentTarget := t.TempDir()
+	parentLink := filepath.Join(t.TempDir(), "parent-link")
+	if err := os.Symlink(parentTarget, parentLink); err != nil {
+		t.Skipf("symbolic links are unavailable: %v", err)
+	}
+	configuredRoot := filepath.Join(parentLink, "managed")
+	if err := svc.InitializeWorkspaces(context.Background(), configuredRoot); err != nil {
+		t.Fatalf("Workspace root below a symlinked system parent was rejected: %v", err)
+	}
+	if !sameWorkspaceFile(svc.workspaceRoot, filepath.Join(parentTarget, "managed")) {
+		t.Fatalf("Workspace root was not canonicalized: %q", svc.workspaceRoot)
 	}
 }
 
@@ -945,7 +996,7 @@ func TestWorkspaceDirectUploadUsesOneVersionBoundApproval(t *testing.T) {
 		t.Fatalf("approved direct upload failed: result=%#v err=%v", approved, err)
 	}
 	expectWorkspaceTransferProgress(t, events, pending.RunID, 12)
-	if len(transport.calls) != 1 || transport.calls[0].Mode != domain.ExecWorkspaceUpload || transport.calls[0].LocalPath != localPath || transport.calls[0].ExpectedSHA256 != digest {
+	if len(transport.calls) != 1 || transport.calls[0].Mode != domain.ExecWorkspaceUpload || !sameWorkspaceFile(transport.calls[0].LocalPath, localPath) || transport.calls[0].ExpectedSHA256 != digest {
 		t.Fatalf("transport did not receive the resolved version-bound source: %#v", transport.calls)
 	}
 
@@ -980,9 +1031,7 @@ func expectWorkspaceTransferProgress(t *testing.T, events <-chan ExecutionEvent,
 }
 
 func TestWorkspaceShellRunsInApprovalGatedSandbox(t *testing.T) {
-	if _, err := exec.LookPath("bwrap"); err != nil {
-		t.Skip("bubblewrap is not installed")
-	}
+	requireRunnableWorkspaceSandbox(t)
 	svc, root := newWorkspaceService(t, "read_write")
 	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("WORKSPACE_SECRET=must-not-leak\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1027,9 +1076,7 @@ func TestWorkspaceShellFailsClosedWithoutSandbox(t *testing.T) {
 }
 
 func TestReadOnlyWorkspaceShellCannotPersistChanges(t *testing.T) {
-	if _, err := exec.LookPath("bwrap"); err != nil {
-		t.Skip("bubblewrap is not installed")
-	}
+	requireRunnableWorkspaceSandbox(t)
 	svc, root := newWorkspaceService(t, "read_only")
 	pending, err := svc.RunWorkspaceShell(context.Background(), "project", "printf 'blocked\\n' > created.txt", ".", nil, 10, "verify read-only mount", "eino-agent")
 	if err != nil {
@@ -1051,9 +1098,7 @@ func TestReadOnlyWorkspaceShellCannotPersistChanges(t *testing.T) {
 }
 
 func TestHostWorkspaceShellRequiresFreshOneTimeApproval(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash is not installed")
-	}
+	requireBashWorkspaceHost(t)
 	svc, root := newWorkspaceService(t, "read_write")
 	mode := domain.WorkspaceShellModeHost
 	if _, err := svc.SaveSystemSettings(context.Background(), domain.SystemSettingsInput{
@@ -1090,9 +1135,7 @@ func TestHostWorkspaceShellRequiresFreshOneTimeApproval(t *testing.T) {
 }
 
 func TestHostWorkspaceShellStreamsOutputBeforeCompletion(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash is not installed")
-	}
+	requireBashWorkspaceHost(t)
 	svc, root := newWorkspaceService(t, "read_write")
 	mode := domain.WorkspaceShellModeHost
 	if _, err := svc.SaveSystemSettings(context.Background(), domain.SystemSettingsInput{
@@ -1152,9 +1195,7 @@ func TestHostWorkspaceShellStreamsOutputBeforeCompletion(t *testing.T) {
 }
 
 func TestInteractiveHostWorkspaceShellStreamsInputAndOutput(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash is not installed")
-	}
+	requireBashWorkspaceHost(t)
 	svc, _ := newWorkspaceService(t, "read_write")
 	hostMode := domain.WorkspaceShellModeHost
 	if _, err := svc.SaveSystemSettings(context.Background(), domain.SystemSettingsInput{
@@ -1268,9 +1309,7 @@ func TestOperatorCanStartWorkspaceShellWithoutApproval(t *testing.T) {
 }
 
 func TestInteractiveSandboxWorkspaceShellHasTTY(t *testing.T) {
-	if _, err := exec.LookPath("bwrap"); err != nil {
-		t.Skip("bubblewrap is not installed")
-	}
+	requireRunnableWorkspaceSandbox(t)
 	svc, _ := newWorkspaceService(t, "read_write")
 	shell, err := svc.StartOperatorWorkspaceShell(context.Background(), "project", ".", "admin-web")
 	if err != nil {

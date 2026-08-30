@@ -116,17 +116,21 @@ func (s *Service) InitializeWorkspaces(ctx context.Context, workspaceRoot string
 	if filepath.Dir(workspaceRoot) == workspaceRoot {
 		return fmt.Errorf("a filesystem root cannot be used as the workspace directory")
 	}
+	if err := ensureWorkspaceDirectory(workspaceRoot); err != nil {
+		return fmt.Errorf("prepare workspace directory: %w", err)
+	}
+	workspaceRoot, err := filepath.EvalSymlinks(workspaceRoot)
+	if err != nil {
+		return fmt.Errorf("resolve workspace directory: %w", err)
+	}
 	if s.dataDir != "" {
-		dataRoot, err := filepath.Abs(s.dataDir)
+		dataRoot, err := filepath.EvalSymlinks(s.dataDir)
 		if err != nil {
-			return err
+			return fmt.Errorf("resolve application data directory: %w", err)
 		}
 		if localPathContains(workspaceRoot, dataRoot) || localPathContains(dataRoot, workspaceRoot) {
 			return fmt.Errorf("workspace directory cannot overlap the application data directory")
 		}
-	}
-	if err := ensureWorkspaceDirectory(workspaceRoot); err != nil {
-		return fmt.Errorf("prepare workspace directory: %w", err)
 	}
 	if err := s.store.InitializeWorkspaces(ctx); err != nil {
 		return err
@@ -270,9 +274,6 @@ func isReservedWindowsWorkspaceID(id string) bool {
 }
 
 func ensureWorkspaceDirectory(path string) error {
-	if err := rejectWorkspaceSymlinks(path); err != nil {
-		return err
-	}
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		if err := os.MkdirAll(path, 0o700); err != nil {
@@ -285,34 +286,6 @@ func ensureWorkspaceDirectory(path string) error {
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return fmt.Errorf("path must be a real directory, not a file or symbolic link")
-	}
-	return rejectWorkspaceSymlinks(path)
-}
-
-func rejectWorkspaceSymlinks(path string) error {
-	clean := filepath.Clean(path)
-	volume := filepath.VolumeName(clean)
-	current := volume
-	remainder := strings.TrimPrefix(clean, volume)
-	if filepath.IsAbs(clean) {
-		current += string(filepath.Separator)
-		remainder = strings.TrimLeft(remainder, `/\\`)
-	}
-	for _, component := range strings.Split(remainder, string(filepath.Separator)) {
-		if component == "" {
-			continue
-		}
-		current = filepath.Join(current, component)
-		info, err := os.Lstat(current)
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("inspect path component: %w", err)
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("workspace directories cannot contain symbolic links")
-		}
 	}
 	return nil
 }
