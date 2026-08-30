@@ -105,7 +105,11 @@ func TestLoadWithoutConfigurationUsesStartupDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.DataDir != filepath.Join(root, "data") || cfg.WorkspaceDir != filepath.Join(root, "workspace") {
+	startupRoot, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DataDir != filepath.Join(startupRoot, "data") || cfg.WorkspaceDir != filepath.Join(startupRoot, "workspace") {
 		t.Fatalf("runtime roots = data %q workspace %q", cfg.DataDir, cfg.WorkspaceDir)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -16,10 +17,18 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-func TestRemoteFileReadScriptDoesNotExposeMetadataMarkersOnMissingFile(t *testing.T) {
+func requireLinuxRemoteFileScript(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("generated remote file scripts target GNU/Linux hosts")
+	}
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("POSIX shell is unavailable")
 	}
+}
+
+func TestRemoteFileReadScriptDoesNotExposeMetadataMarkersOnMissingFile(t *testing.T) {
+	requireLinuxRemoteFileScript(t)
 	target := filepath.Join(t.TempDir(), "missing.conf")
 	script := buildRemoteFileReadScript(domain.ExecRequest{
 		Mode: domain.ExecRemoteRead, RemotePath: target,
@@ -44,9 +53,7 @@ func TestRemoteFileReadScriptDoesNotExposeMetadataMarkersOnMissingFile(t *testin
 }
 
 func TestRemoteFileReadScriptKeepsParseableMetadata(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("POSIX shell is unavailable")
-	}
+	requireLinuxRemoteFileScript(t)
 	target := filepath.Join(t.TempDir(), "config.conf")
 	content := "enabled=true\n"
 	if err := os.WriteFile(target, []byte(content), 0o640); err != nil {
@@ -265,9 +272,7 @@ func TestBuildTextEditNormalizesInputAndBuildsMinimalDiff(t *testing.T) {
 }
 
 func TestRemoteFileChangePreservesLineEndingsAndFinalNewlineState(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("POSIX shell is unavailable")
-	}
+	requireLinuxRemoteFileScript(t)
 	for _, testCase := range []struct {
 		name, original, oldText, newText, expected string
 	}{
@@ -300,9 +305,7 @@ func TestRemoteFileChangePreservesLineEndingsAndFinalNewlineState(t *testing.T) 
 }
 
 func TestRemoteFileChangeCreatesMissingFileWithoutPatch(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("POSIX shell is unavailable")
-	}
+	requireLinuxRemoteFileScript(t)
 	directory := t.TempDir()
 	target := filepath.Join(directory, "created.conf")
 	edit, change, err := buildTextEdit(target, "", "enabled=true")
@@ -325,9 +328,7 @@ func TestRemoteFileChangeCreatesMissingFileWithoutPatch(t *testing.T) {
 }
 
 func TestRemoteFileChangeScriptsApplyWithoutPersistentBackups(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("POSIX shell is unavailable")
-	}
+	requireLinuxRemoteFileScript(t)
 	directory := t.TempDir()
 	target := filepath.Join(directory, "app.conf")
 	if err := os.WriteFile(target, []byte("header\n状态=关闭\nfooter\n"), 0o640); err != nil {
@@ -362,9 +363,7 @@ func TestRemoteFileChangeScriptsApplyWithoutPersistentBackups(t *testing.T) {
 }
 
 func TestRemoteFileChangeRejectsAmbiguousOldText(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("POSIX shell is unavailable")
-	}
+	requireLinuxRemoteFileScript(t)
 	directory := t.TempDir()
 	target := filepath.Join(directory, "app.conf")
 	if err := os.WriteFile(target, []byte("enabled=false\nenabled=false\n"), 0o640); err != nil {
@@ -388,9 +387,7 @@ func TestRemoteFileChangeRejectsAmbiguousOldText(t *testing.T) {
 }
 
 func TestRemoteFileChangeRejectsConcurrentTargetChange(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("POSIX shell is unavailable")
-	}
+	requireLinuxRemoteFileScript(t)
 	directory := t.TempDir()
 	target := filepath.Join(directory, "app.conf")
 	if err := os.WriteFile(target, []byte("enabled=false\n"), 0o640); err != nil {

@@ -30,7 +30,15 @@ func TestPrepareQuickStartUsesApplicationDirectoryAndKeepsConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current != appDir {
+	currentInfo, err := os.Stat(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appInfo, err := os.Stat(appDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(currentInfo, appInfo) {
 		t.Fatalf("working directory = %q, want %q", current, appDir)
 	}
 
