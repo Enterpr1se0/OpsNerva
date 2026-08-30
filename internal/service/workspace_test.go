@@ -39,7 +39,18 @@ func requireRunnableWorkspaceSandbox(t *testing.T) {
 	if err != nil {
 		t.Skip("bubblewrap is not installed")
 	}
-	args := []string{"--unshare-all", "--unshare-user", "--ro-bind", "/usr", "/usr", "--proc", "/proc", "--dev", "/dev", "--", "/usr/bin/true"}
+	// Mirror the runtime mounts used by workspaceSandboxCommand so the preflight
+	// verifies bwrap can actually run the production sandbox. /usr/bin/true is
+	// dynamically linked, so /lib and /lib64 must be visible inside the sandbox.
+	args := []string{
+		"--unshare-all", "--unshare-user", "--cap-drop", "ALL",
+		"--ro-bind", "/usr", "/usr",
+		"--ro-bind-try", "/lib", "/lib",
+		"--ro-bind-try", "/lib64", "/lib64",
+		"--symlink", "usr/bin", "/bin", "--symlink", "usr/sbin", "/sbin",
+		"--proc", "/proc", "--dev", "/dev", "--",
+		"/usr/bin/true",
+	}
 	if workspaceSandboxSupportsDisableUserns(sandbox) {
 		args = append([]string{"--disable-userns"}, args...)
 	}
@@ -620,7 +631,7 @@ func TestWorkspacePreValidationFailureDoesNotTouchOriginal(t *testing.T) {
 	if err := os.WriteFile(validator, []byte(validatorBody), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	svc.validators["fixture"] = config.Validator{ID: "fixture", Scope: "workspace", Program: validator, Args: []string{"{{path}}"}, TimeoutSeconds: 5, PathPatterns: []string{filepath.Join(root, "**")}}
+	svc.validators["fixture"] = config.Validator{ID: "fixture", Scope: "workspace", Program: validator, Args: []string{"{{path}}"}, TimeoutSeconds: 5, PathPatterns: []string{filepath.Join(svc.workspaceRoot, "project", "**")}}
 	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", "port=8080", "port=9090", "fixture", "change port", "eino-agent")
 	if err != nil {
 		t.Fatal(err)

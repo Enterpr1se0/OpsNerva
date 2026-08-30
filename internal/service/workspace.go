@@ -285,7 +285,7 @@ func ensureWorkspaceDirectory(path string) error {
 		return fmt.Errorf("inspect directory: %w", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return fmt.Errorf("path must be a real directory, not a file or symbolic link")
+		return fmt.Errorf("workspace directories cannot contain symbolic links")
 	}
 	return nil
 }
