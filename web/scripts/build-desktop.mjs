@@ -23,6 +23,7 @@ if (targetArg) console.log(`Cross-compiling for target triple: ${targetArg}`)
 const env = process.platform === 'linux' ? linuxBuildEnvironment() : process.env
 const args = [tauriCli, 'build', '--bundles', bundles]
 if (targetArg) args.push('--target', targetArg)
+if (process.platform === 'darwin' && process.env.CI) args.push('--verbose')
 const result = spawnSync(process.execPath, args, { cwd: webDir, env, stdio: 'inherit' })
 if (result.error) throw result.error
 process.exit(result.status ?? 1)
