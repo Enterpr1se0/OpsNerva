@@ -2289,10 +2289,18 @@ func (s *Service) workspaceValidator(id string, workspace config.Workspace, rela
 		}
 		return config.Validator{}, fmt.Errorf("invalid Workspace validator_id %q; available IDs: %s", id, strings.Join(available, ", "))
 	}
-	if !validatorAllowsPath(validator, filepath.Join(workspace.Root, relative)) && !validatorAllowsPath(validator, relative) {
+	if !workspaceValidatorAllowsPath(validator, filepath.Join(workspace.Root, relative)) && !workspaceValidatorAllowsPath(validator, relative) {
 		return config.Validator{}, fmt.Errorf("validator_id %q is not allowed for Workspace path %s", id, relative)
 	}
 	return validator, nil
+}
+
+func workspaceValidatorAllowsPath(validator config.Validator, path string) bool {
+	validator.PathPatterns = append([]string(nil), validator.PathPatterns...)
+	for index, pattern := range validator.PathPatterns {
+		validator.PathPatterns[index] = filepath.ToSlash(pattern)
+	}
+	return validatorAllowsPath(validator, filepath.ToSlash(path))
 }
 
 func (s *Service) runWorkspaceValidator(ctx context.Context, id string, workspace config.Workspace, relative, path string) ([]byte, error) {

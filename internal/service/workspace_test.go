@@ -582,9 +582,11 @@ func TestWorkspacePreValidationFailureDoesNotTouchOriginal(t *testing.T) {
 	if readErr != nil || string(content) != "port=8080\n" {
 		t.Fatalf("failed validation touched the original: content=%q err=%v", content, readErr)
 	}
-	info, statErr := os.Stat(path)
-	if statErr != nil || info.Mode().Perm() != 0o640 {
-		t.Fatalf("failed validation changed file mode: info=%#v err=%v", info, statErr)
+	if runtime.GOOS != "windows" {
+		info, statErr := os.Stat(path)
+		if statErr != nil || info.Mode().Perm() != 0o640 {
+			t.Fatalf("failed validation changed file mode: info=%#v err=%v", info, statErr)
+		}
 	}
 }
 
@@ -603,9 +605,11 @@ func TestWorkspaceAdminUploadIsAtomicAndNeverOverwrites(t *testing.T) {
 	if err != nil || !bytes.Equal(stored, content) {
 		t.Fatalf("uploaded content mismatch: %q err=%v", stored, err)
 	}
-	info, err := os.Stat(filepath.Join(root, "main.go"))
-	if err != nil || info.Mode().Perm() != 0o644 {
-		t.Fatalf("uploaded mode = %v err=%v", info.Mode().Perm(), err)
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(filepath.Join(root, "main.go"))
+		if err != nil || info.Mode().Perm() != 0o644 {
+			t.Fatalf("uploaded mode = %v err=%v", info.Mode().Perm(), err)
+		}
 	}
 	if _, err := svc.UploadWorkspaceFile(context.Background(), "project", "main.go", "main.go", bytes.NewBufferString("overwrite\n"), "admin-web"); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("existing file was overwritten: %v", err)
@@ -707,9 +711,11 @@ func TestWorkspaceAdminTextEditorPreservesModeAndRejectsBinaryFiles(t *testing.T
 	if err != nil || string(content) != "after\n" {
 		t.Fatalf("edited content = %q, err = %v", content, err)
 	}
-	info, err := os.Stat(path)
-	if err != nil || info.Mode().Perm() != 0o640 {
-		t.Fatalf("edited mode = %v, err = %v", info.Mode().Perm(), err)
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(path)
+		if err != nil || info.Mode().Perm() != 0o640 {
+			t.Fatalf("edited mode = %v, err = %v", info.Mode().Perm(), err)
+		}
 	}
 	binaryPath := filepath.Join(root, "binary.dat")
 	if err := os.WriteFile(binaryPath, []byte{0, 1, 2}, 0o600); err != nil {
@@ -1006,6 +1012,9 @@ func TestWorkspaceShellRunsInApprovalGatedSandbox(t *testing.T) {
 }
 
 func TestWorkspaceShellFailsClosedWithoutSandbox(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("bubblewrap sandbox is Linux-only")
+	}
 	svc, _ := newWorkspaceService(t, "read_write")
 	svc.workspaceSandboxPath = filepath.Join(t.TempDir(), "missing-bwrap")
 	capabilities := svc.ListWorkspaceCapabilities()
