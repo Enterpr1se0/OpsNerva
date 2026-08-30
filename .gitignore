@@ -6,7 +6,7 @@ web/node_modules/
 web/src-tauri/binaries/
 web/src-tauri/gen/schemas/
 web/src-tauri/target/
-workspace/
+/workspace/
 .env
 *.log
 coverage.out

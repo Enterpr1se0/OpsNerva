@@ -1,0 +1,1 @@
+export function workspaceChildPath(path:string,name:string){return path==='.'?name:`${path}/${name}`}

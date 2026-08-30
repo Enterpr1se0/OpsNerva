@@ -6,10 +6,10 @@ import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import '@xterm/xterm/css/xterm.css'
 import {
-  Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronLeft, ChevronRight, CircleDot, Copy, Cpu, Edit3, ExternalLink, Eye, EyeOff, FileText, FolderOpen, FolderOutput, FunctionSquare, History, Home, ImagePlus, KeyRound, Maximize2, Minimize2, Minus, Monitor, Moon, PanelLeftClose, PanelLeftOpen, Sun,
+  Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronLeft, ChevronRight, CircleDot, Copy, Cpu, Edit3, ExternalLink, Eye, EyeOff, FileText, FolderOpen, FolderOutput, FunctionSquare, History, ImagePlus, KeyRound, Maximize2, Minimize2, Minus, Monitor, Moon, PanelLeftOpen, Sun,
   Cable, Download, ListChecks, ListPlus, LoaderCircle, LogOut, Plus, Power, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, Square, TerminalSquare, Trash2, UploadCloud, UserRound, X, Zap,
 } from 'lucide-react'
-import { api, chatAttachmentURL, reconnectChatStream, streamChat, workspaceFileEventsURL } from './api/api'
+import { api, chatAttachmentURL, reconnectChatStream, streamChat } from './api/api'
 import { subscribeApplicationEvents, type ApplicationLogPayload } from './api/appEvents'
 import { CopyButton, CopyablePre } from './components/CopyButton'
 import { HighlightedCode, inferScriptLanguage, languageFromPath } from './components/HighlightedCode'
@@ -17,15 +17,16 @@ import { AppSelect, ModelCombobox } from './components/Controls'
 import i18n, { localeFor, type SupportedLanguage } from './lib/i18n'
 import { activeLiveTaskStatus, useLiveSSHTasks, type LiveSSHTaskSnapshot, type LiveSSHTaskTarget } from './lib/liveTasks'
 import { appendStreamText, streamTextFrom, streamTextTail, streamTextValue, type StreamText } from './api/streamText'
-import { TextFileEditor } from './components/TextFileEditor'
 import { PasswordInput } from './components/PasswordInput'
-import { SSHHostHome, SSHShellCreateDialog, SSHShellStatus, SSHShellTerminal, SSHTunnelStatus, sshShellActive } from './features/ssh'
+import { SSHShellStatus, SSHShellTerminal, SSHTunnelStatus, sshShellActive } from './features/ssh'
+import { SettingsDisclosure } from './components/SettingsDisclosure'
+import { ChatWorkspacePanel, SSHWorkspacePage, WorkspaceSettingsPanel } from './features/workspace'
 import { useNotifier, NotificationContext, type NotificationSink, type AppNotification } from './lib/notifications'
 import { DestructiveConfirmDialog } from './components/DestructiveConfirmDialog'
-import { FileTransferProvider, SFTPBrowser, useWorkspaceTransfer, FileTransferProgress, FileBrowserTabs, type FileBrowserMode } from './features/sftp'
+import { FileTransferProvider } from './features/sftp'
 import { useAutoCollapseDetails } from './lib/hooks'
-import { errorStatus, errorText, formatFileSize, sshTunnelRoute } from './lib/utils'
-import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, AuthStatus, ChatMessage, ChatQueueMode, ChatSession, ChatSessionDelta, ChatState, ChatTokenUsage, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPActivityEvent, MCPActivitySnapshot, MCPClientSession, MCPServer, MCPServerInput, MCPToolCall, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, QueuedChatMessage, Run, ServerLogEntry, SSHShell, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
+import { desktopRuntime, errorStatus, errorText, formatFileSize, sshTunnelRoute } from './lib/utils'
+import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, AuthStatus, ChatMessage, ChatQueueMode, ChatSession, ChatSessionDelta, ChatState, ChatTokenUsage, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPActivityEvent, MCPActivitySnapshot, MCPClientSession, MCPServer, MCPServerInput, MCPToolCall, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, QueuedChatMessage, Run, ServerLogEntry, SSHShell, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceShellMode } from './types'
 
 type Page = 'chat' | 'ssh' | 'config' | 'extensions' | 'audit' | 'logs'
 const pageVisualOrder:Page[]=['chat','ssh','extensions','audit','logs','config']
@@ -494,7 +495,6 @@ function mergeLatestPage<T extends{id:string}>(latest:T[],current:T[],hasMore:bo
 
 const newSessionMarker = '__new__'
 const defaultChatImageTypes=['image/png','image/jpeg','image/webp','image/gif']
-const desktopRuntime='__TAURI_INTERNALS__' in window
 const desktopWindow=desktopRuntime?getCurrentWindow():null
 function rememberSession(id: string) { try { localStorage.setItem('opsnerva.activeSession', id) } catch { /* storage may be disabled */ } }
 function recalledSession() { try { return localStorage.getItem('opsnerva.activeSession') || '' } catch { return '' } }
@@ -1122,71 +1122,6 @@ function ComposerReasoningSelector({providers,disabled,onChanged,onError}:{provi
 	</details>
 }
 
-function SSHWorkspacePage({hosts,shells,onCreated,refresh,onError}:{hosts:Host[];shells:SSHShell[];onCreated:(shell:SSHShell)=>void;refresh:()=>Promise<void>;onError:(message:string)=>void}){
-	const {t}=useTranslation()
-	const [selectedShellID,setSelectedShellID]=useState(shells[0]?.id||'')
-	const [creating,setCreating]=useState(false)
-	const [connectingHostID,setConnectingHostID]=useState('')
-	const closingShellIDsRef=useRef(new Set<string>())
-	const [closingShellIDs,setClosingShellIDs]=useState<Set<string>>(new Set())
-	const [dismissedShellIDs,setDismissedShellIDs]=useState<Set<string>>(new Set())
-	const visibleShells=useMemo(()=>shells.filter(shell=>!dismissedShellIDs.has(shell.id)),[dismissedShellIDs,shells])
-	useEffect(()=>{
-		if(selectedShellID&&!visibleShells.some(shell=>shell.id===selectedShellID))setSelectedShellID('')
-	},[selectedShellID,visibleShells])
-	useEffect(()=>{
-		setDismissedShellIDs(current=>{
-			const listed=new Set(shells.map(shell=>shell.id))
-			const next=new Set([...current].filter(id=>listed.has(id)))
-			return next.size===current.size?current:next
-		})
-	},[shells])
-	const selectedShell=visibleShells.find(shell=>shell.id===selectedShellID)
-	const selectedHost=hosts.find(host=>host.id===selectedShell?.host_id)
-	const created=(shell:SSHShell)=>{onCreated(shell);setSelectedShellID(shell.id);setCreating(false)}
-	const connect=async(host:Host)=>{
-		if(connectingHostID)return
-		setConnectingHostID(host.id)
-		try{created(await api.startSSHShell({host_id:host.id,surface:'workspace'}))}
-		catch(err){onError(errorText(err))}
-		finally{setConnectingHostID('')}
-	}
-	const close=async(shell:SSHShell)=>{
-		if(closingShellIDsRef.current.has(shell.id))return
-		closingShellIDsRef.current.add(shell.id)
-		setClosingShellIDs(new Set(closingShellIDsRef.current))
-		const dismiss=()=>{
-			setDismissedShellIDs(current=>new Set(current).add(shell.id))
-			setSelectedShellID(current=>current===shell.id?'':current)
-		}
-		try{
-			await api.closeSSHShell(shell.id)
-			dismiss()
-			void refresh()
-		}catch(err){
-			if(errorStatus(err)===404){dismiss();void refresh()}
-			else onError(errorText(err))
-		}finally{
-			closingShellIDsRef.current.delete(shell.id)
-			setClosingShellIDs(new Set(closingShellIDsRef.current))
-		}
-	}
-	if(!hosts.length)return <div className="ssh-workspace-empty panel"><Server size={28}/><b>{t('connections.noHosts')}</b></div>
-	return <div className="ssh-workspace">
-		{selectedHost?<SFTPBrowser key={selectedHost.id} host={selectedHost}/>:<SSHHostHome hosts={hosts} connectingHostID={connectingHostID} onConnect={connect}/>}
-		<section className="ssh-workspace-terminal panel">
-			<header className="ssh-terminal-tabs">
-				<div><button type="button" className={`ssh-home-tab ${selectedShellID?'':'active'}`} onClick={()=>setSelectedShellID('')} title="Home" aria-label="Home"><Home size={16}/></button>{visibleShells.map(shell=>{const closing=closingShellIDs.has(shell.id);return <div className={`ssh-terminal-tab ${shell.id===selectedShellID?'active':''}`} key={shell.id}><button type="button" className="ssh-terminal-tab-select" disabled={closing} onClick={()=>setSelectedShellID(shell.id)}><i className={shell.status}/><span>{shell.host_name||shell.host_id}</span><small>{shell.elevated?'root':shell.user}</small></button><button type="button" className="ssh-terminal-tab-close" disabled={closing} onClick={event=>{event.stopPropagation();void close(shell)}} title={t('sshShell.closeSession')} aria-label={t('sshShell.closeSession')}>{closing?<LoaderCircle className="spin" size={11}/>:<X size={12}/>}</button></div>})}</div>
-				<button type="button" className="ssh-new-terminal" onClick={()=>setCreating(true)}><Plus size={14}/> {t('sshWorkspace.newTerminal')}</button>
-			</header>
-			<div className="ssh-terminal-stage">
-				{selectedShell?<SSHShellTerminal key={selectedShell.id} initialShell={selectedShell} embedded onClose={()=>setSelectedShellID('')} onChanged={()=>void refresh()} onError={onError}/>:<div className="ssh-terminal-empty"><TerminalSquare size={32}/><b>{t('sshWorkspace.noTerminal')}</b><button type="button" className="primary" onClick={()=>setCreating(true)}><Plus size={14}/> {t('sshWorkspace.newTerminal')}</button></div>}
-			</div>
-		</section>
-		{creating&&<SSHShellCreateDialog hosts={hosts} surface="workspace" onCancel={()=>setCreating(false)} onCreated={created}/>}
-	</div>
-}
-
 function applyChatSessionDelta(current:ChatSession[],delta:ChatSessionDelta){
 	const removed=new Set(delta.removed_ids||[])
 	const sessions=new Map(current.filter(session=>!removed.has(session.id)).map(session=>[session.id,session]))
@@ -1490,9 +1425,6 @@ function SkillsPage({skills,refreshSkills,refreshToolCatalog,onToolCatalogChange
 	</div>
 }
 
-function SettingsDisclosure({icon,title,meta,children,className=''}:{icon:React.ReactNode;title:string;meta?:React.ReactNode;children:React.ReactNode;className?:string}){
-	return <details className={`settings-disclosure panel ${className}`.trim()}><summary><span className="settings-disclosure-icon">{icon}</span><b>{title}</b>{meta&&<em>{meta}</em>}<ChevronRight size={16}/></summary><div className="settings-disclosure-body">{children}</div></details>
-}
 
 function SettingsSectionFooter({dirty,busy,saving,onDiscard}:{dirty:boolean;busy:boolean;saving:boolean;onDiscard:()=>void}){
 	const {t}=useTranslation()
@@ -1636,18 +1568,6 @@ function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus
 			<WebSearchSettingsPanel proxies={proxies}/>
 		</div>
   </div>
-}
-
-function WorkspaceSettingsPanel({workspaces,refresh,onNotify}:{workspaces:WorkspaceCapability[];refresh:()=>Promise<void>;onNotify:NotificationSink}){
-	const {t}=useTranslation()
-	const empty:WorkspaceInput={id:'',access:'read_only'}
-	const [open,setOpen]=useState(false),[editing,setEditing]=useState(''),[input,setInput]=useState<WorkspaceInput>(empty),[busy,setBusy]=useState(''),[deleteCandidate,setDeleteCandidate]=useState<WorkspaceCapability|null>(null)
-	const beginCreate=()=>{setEditing('');setInput(empty);setOpen(true)}
-	const beginEdit=(workspace:WorkspaceCapability)=>{setEditing(workspace.id);setInput({id:workspace.id,access:workspace.access});setOpen(true)}
-	const close=()=>{setOpen(false);setEditing('');setInput(empty)}
-	const save=async()=>{if(!input.id.trim())return;setBusy('save');try{if(editing)await api.updateWorkspace(editing,{...input,id:editing});else await api.createWorkspace({...input,id:input.id.trim()});await refresh();onNotify(editing?t('workspace.settingsUpdated',{id:editing}):t('workspace.settingsCreated',{id:input.id.trim()}));close()}catch(err){onNotify(errorText(err),'error')}finally{setBusy('')}}
-	const remove=async()=>{if(!deleteCandidate)return;const workspace=deleteCandidate;setBusy(`delete-${workspace.id}`);try{await api.deleteWorkspace(workspace.id);await refresh();onNotify(t('workspace.settingsRemoved',{id:workspace.id}));if(editing===workspace.id)close()}catch(err){onNotify(errorText(err),'error')}finally{setBusy('');setDeleteCandidate(null)}}
-	return <SettingsDisclosure className="workspace-settings" icon={<FolderOpen size={18}/>} title={t('settings.capabilities')} meta={t('workspace.registeredCount',{count:workspaces.length})}><div className="workspace-settings-actions"><button type="button" onClick={beginCreate}><Plus size={13}/>{t('workspace.add')}</button></div>{open&&<div className="workspace-settings-editor"><label><span>{t('workspace.id')}</span><input value={input.id} disabled={!!editing} maxLength={64} onChange={event=>setInput(current=>({...current,id:event.target.value}))}/></label><label><span>{t('workspace.permission')}</span><AppSelect value={input.access} ariaLabel={t('workspace.permission')} onChange={value=>setInput(current=>({...current,access:value as WorkspaceInput['access']}))} options={[{value:'read_only',label:t('workspace.readOnly')},{value:'read_write',label:t('workspace.readWrite')}]}/></label><div><button type="button" onClick={close}>{t('common.cancel')}</button><button type="button" className="primary" disabled={busy==='save'||!input.id.trim()} onClick={()=>void save()}>{busy==='save'?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {t('common.save')}</button></div></div>}<div className="workspace-settings-list">{workspaces.map(workspace=><div className="workspace-settings-row" key={workspace.id}><code>{workspace.id}</code><em className={workspace.access}>{workspace.access==='read_write'?t('workspace.readWrite'):t('workspace.readOnly')}</em><button type="button" title={t('common.edit')} onClick={()=>beginEdit(workspace)}><Edit3 size={13}/></button><button type="button" className="danger" disabled={busy===`delete-${workspace.id}`} title={t('workspace.remove')} onClick={()=>setDeleteCandidate(workspace)}>{busy===`delete-${workspace.id}`?<LoaderCircle className="spin" size={13}/>:<Trash2 size={13}/>}</button></div>)}{!workspaces.length&&<div className="workspace-settings-empty">{t('settings.noWorkspace')}</div>}</div>{deleteCandidate&&<DestructiveConfirmDialog title={t('workspace.removeTitle',{id:deleteCandidate.id})} busy={busy===`delete-${deleteCandidate.id}`} onCancel={()=>setDeleteCandidate(null)} onConfirm={()=>void remove()}/>}</SettingsDisclosure>
 }
 
 const defaultWebSearchInput:WebSearchSettingsInput={enabled:false,base_url:'https://api.tavily.com',api_key:'',proxy_id:'',timeout_seconds:20,max_results:10}
@@ -2258,152 +2178,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 }
 
 
-type WorkspaceNotice={kind:'success'|'error';text:string}
-type WorkspaceDeleteCandidate={workspaceID:string;path:string;type:'file'|'directory'}
-
-function workspaceChildPath(path:string,name:string){return path==='.'?name:`${path}/${name}`}
-
 const MemoChatPage=memo(ChatPage)
-
-const ChatWorkspacePanel=memo(function ChatWorkspacePanel({active,mode,onModeChange,workspaces,workspaceID,hosts,sftpHostID,onSFTPHostChange,shells,switching,disabled,bound,onSelect,onCreateShell,onOpenShell,onCollapse}:{active:boolean;mode:FileBrowserMode;onModeChange:(mode:FileBrowserMode)=>void;workspaces:WorkspaceCapability[];workspaceID:string;hosts:Host[];sftpHostID:string;onSFTPHostChange:(id:string)=>void;shells:SSHShell[];switching:boolean;disabled:boolean;bound:boolean;onSelect:(id:string)=>void|Promise<void>;onCreateShell:(workspaceID:string)=>Promise<void>;onOpenShell:(shell:SSHShell)=>void;onCollapse:()=>void}){
-	const {t}=useTranslation()
-	const workspace=workspaces.find(item=>item.id===workspaceID)||workspaces[0]
-	const sftpHost=hosts.find(item=>item.id===sftpHostID)||hosts[0]
-	const activeWorkspaceID=workspace?.id||''
-	const [path,setPath]=useState('.')
-	const [entries,setEntries]=useState<{name:string;type:'file'|'directory';size?:number}[]>([])
-	const [loading,setLoading]=useState(false),[error,setError]=useState('')
-	const [file,setFile]=useState<File|null>(null),[target,setTarget]=useState(''),[inputKey,setInputKey]=useState(0)
-	const [notice,setNotice]=useState<WorkspaceNotice|null>(null),[dragging,setDragging]=useState(false)
-	const [preview,setPreview]=useState<WorkspaceFilePreview|null>(null),[previewLoading,setPreviewLoading]=useState(''),[deleting,setDeleting]=useState('')
-	const [deleteCandidate,setDeleteCandidate]=useState<WorkspaceDeleteCandidate|null>(null)
-	const [startingShell,setStartingShell]=useState(false)
-	const {active:transfer,uploadVersion,upload:startUpload,download:startDownload,cancel}=useWorkspaceTransfer(activeWorkspaceID,active&&mode==='workspace')
-	const uploading=transfer?.operation==='upload'
-	const observedUploadVersion=useRef(uploadVersion)
-	const loadRequestRef=useRef(0),previewPathRef=useRef('')
-	const activeShells=shells.filter(shell=>shell.workspace_id===activeWorkspaceID&&sshShellActive(shell.status)).sort((left,right)=>left.started_at.localeCompare(right.started_at))
-
-	const load=useCallback(async(showLoading=true)=>{
-		if(!activeWorkspaceID)return
-		const requestID=++loadRequestRef.current
-		if(showLoading)setLoading(true)
-		try{
-			const result=await api.workspaceFiles(activeWorkspaceID,path)
-			if(loadRequestRef.current!==requestID)return
-			setEntries(result.entries||[]);setError('')
-		}catch(err){
-			if(loadRequestRef.current!==requestID)return
-			setEntries([]);setError(errorText(err))
-		}finally{
-			if(loadRequestRef.current===requestID)setLoading(false)
-		}
-	},[activeWorkspaceID,path])
-	const previewPath=preview?.path||''
-	useEffect(()=>{previewPathRef.current=previewPath},[previewPath])
-	const refreshPreview=useCallback(async()=>{
-		if(!activeWorkspaceID||!previewPath)return
-		try{const result=await api.previewWorkspaceFile(activeWorkspaceID,previewPath);if(previewPathRef.current===previewPath)setPreview(result)}catch{/* keep the last successful preview; the listing still reports the error */}
-	},[activeWorkspaceID,previewPath])
-	const synchronize=useCallback((showLoading=false)=>{void load(showLoading);void refreshPreview()},[load,refreshPreview])
-	useEffect(()=>{
-		if(observedUploadVersion.current===uploadVersion)return
-		observedUploadVersion.current=uploadVersion
-		setFile(null);setTarget('');setInputKey(value=>value+1)
-		if(active&&mode==='workspace')synchronize(false)
-	},[active,mode,synchronize,uploadVersion])
-
-	useEffect(()=>{if(active&&mode==='workspace')void load()},[active,load,mode])
-	useEffect(()=>{
-		if(!active||mode!=='workspace'||!activeWorkspaceID)return
-		const source=new EventSource(workspaceFileEventsURL(activeWorkspaceID,path))
-		const changed=()=>synchronize(false)
-		source.addEventListener('workspace-change',changed)
-		source.onopen=changed
-		return()=>{source.removeEventListener('workspace-change',changed);source.close()}
-	},[active,activeWorkspaceID,mode,path,synchronize])
-
-	const choose=(event:React.ChangeEvent<HTMLInputElement>)=>{
-		const selected=event.target.files?.[0]||null
-		setFile(selected);setTarget(selected?workspaceChildPath(path,selected.name):'');setNotice(null)
-	}
-	const upload=()=>{
-		if(!workspace||!file||!target.trim()||transfer)return
-		setNotice(null)
-		startUpload([{file,path:target.trim()}])
-	}
-	const uploadDropped=(files:File[])=>{
-		if(!workspace||workspace.access!=='read_write'||uploading||transfer||!files.length)return
-		setNotice(null)
-		startUpload(files.map(dropped=>({file:dropped,path:workspaceChildPath(path,dropped.name)})))
-	}
-	const acceptsFiles=(event:React.DragEvent<HTMLElement>)=>workspace?.access==='read_write'&&Array.from(event.dataTransfer.types).includes('Files')
-	const dragEnter=(event:React.DragEvent<HTMLElement>)=>{if(!acceptsFiles(event))return;event.preventDefault();event.stopPropagation();setDragging(true)}
-	const dragOver=(event:React.DragEvent<HTMLElement>)=>{if(!acceptsFiles(event))return;event.preventDefault();event.stopPropagation();event.dataTransfer.dropEffect=uploading||transfer?'none':'copy'}
-	const dragLeave=(event:React.DragEvent<HTMLElement>)=>{if(workspace?.access!=='read_write')return;event.preventDefault();event.stopPropagation();if(event.relatedTarget instanceof Node&&event.currentTarget.contains(event.relatedTarget))return;setDragging(false)}
-	const drop=(event:React.DragEvent<HTMLElement>)=>{if(!acceptsFiles(event))return;event.preventDefault();event.stopPropagation();setDragging(false);if(!uploading&&!transfer)void uploadDropped(Array.from(event.dataTransfer.files))}
-	const openEntry=async(name:string,type:'file'|'directory')=>{
-		const next=workspaceChildPath(path,name)
-		if(type==='directory'){setPath(next);return}
-		if(!workspace)return
-		setPreviewLoading(next);setNotice(null)
-		try{setPreview(await api.previewWorkspaceFile(workspace.id,next))}catch(err){setNotice({kind:'error',text:errorText(err)})}finally{setPreviewLoading('')}
-	}
-	const download=(relativePath:string,name:string,size=0)=>{
-		if(!workspace||transfer)return
-		setNotice(null)
-		startDownload(relativePath,name,size)
-	}
-	const requestEntryRemoval=(name:string,type:'file'|'directory')=>{
-		if(workspace)setDeleteCandidate({workspaceID:workspace.id,path:workspaceChildPath(path,name),type})
-	}
-	const revealDirectory=async(relativePath:string)=>{
-		if(!workspace||!desktopRuntime)return
-		setNotice(null)
-		try{await invoke('open_workspace_directory',{workspaceId:workspace.id,relativePath})}
-		catch(err){setNotice({kind:'error',text:errorText(err)})}
-	}
-	const removeEntry=async()=>{
-		if(!deleteCandidate)return
-		const candidate=deleteCandidate
-		setDeleting(candidate.path);setNotice(null)
-		try{
-			const result=await api.deleteWorkspaceEntry(candidate.workspaceID,candidate.path)
-			if(candidate.workspaceID===workspace?.id&&preview?.path===candidate.path)setPreview(null)
-			setNotice({kind:'success',text:t('workspace.deleted',{type:t(`workspace.${result.type}`,{defaultValue:result.type})})})
-		}catch(err){setNotice({kind:'error',text:errorText(err)})}finally{setDeleting('');setDeleteCandidate(null)}
-	}
-	const savePreview=async(content:string)=>{
-		if(!workspace||!preview)return
-		const saved=await api.saveWorkspaceTextFile(workspace.id,preview.path,content)
-		setPreview({...preview,content,binary:false,size:saved.size,sha256:saved.sha256})
-		setNotice({kind:'success',text:t('workspace.saved',{path:saved.path})})
-	}
-	const up=()=>{if(path==='.')return;const parts=path.split('/');parts.pop();setPath(parts.join('/')||'.')}
-	const createShell=async()=>{
-		if(!workspace||startingShell)return
-		setStartingShell(true)
-		try{await onCreateShell(workspace.id)}finally{setStartingShell(false)}
-	}
-
-	if(mode==='sftp')return <SFTPBrowser key={sftpHost?.id||'no-host'} host={sftpHost} active={active} embedded hosts={hosts} onHostSelect={onSFTPHostChange} onWorkspaceMode={()=>onModeChange('workspace')} onCollapse={onCollapse}/>
-	if(!workspace)return <aside className="workspace-browser-panel panel empty"><div className="panel-header"><FileBrowserTabs mode={mode} onChange={onModeChange}/><div className="workspace-panel-actions"><button type="button" onClick={onCollapse} title={t('workspace.collapsePanel')} aria-label={t('workspace.collapsePanel')}><PanelLeftClose size={14}/></button></div></div><div className="workspace-empty"><FolderOpen size={23}/><span>{t('workspace.noConfigured')}</span></div></aside>
-	return <>
-		<aside className={`workspace-browser-panel panel ${dragging?'dragging':''}`} onDragEnter={dragEnter} onDragOver={dragOver} onDragLeave={dragLeave} onDrop={drop}>
-			<div className="panel-header"><FileBrowserTabs mode={mode} onChange={onModeChange}/><div className="workspace-panel-actions"><button type="button" onClick={onCollapse} title={t('workspace.collapsePanel')} aria-label={t('workspace.collapsePanel')}><PanelLeftClose size={14}/></button></div></div>
-			<div className="workspace-summary"><div className="chat-workspace-head"><div className="chat-workspace-selector"><AppSelect className="workspace-switch-select" value={workspace.id} disabled={workspaces.length<2||disabled||switching} ariaLabel={t('workspace.switchWorkspace')} onChange={onSelect} options={workspaces.map(item=>({value:item.id,label:item.id}))}/>{(switching||bound)&&<small>{switching?t('workspace.switching'):t('workspace.boundToConversation')}</small>}</div><div className="chat-workspace-head-actions"><em className={workspace.access}>{workspace.access==='read_write'?t('workspace.readWrite'):t('workspace.readOnly')}</em><button type="button" disabled={!workspace.shell||startingShell} onClick={()=>void createShell()} title={t('workspace.newTerminal')} aria-label={t('workspace.newTerminal')}>{startingShell?<LoaderCircle className="spin" size={14}/>:<TerminalSquare size={14}/>}</button></div></div>{activeShells.length>0&&<div className="workspace-shell-sessions">{activeShells.map(shell=><button type="button" onClick={()=>onOpenShell(shell)} title={shell.id} key={shell.id}><i className={shell.status}/><b>{t(shell.surface==='workspace_agent'?'workspace.agent':'workspace.operator')}</b><code>{shell.cwd||'.'}</code></button>)}</div>}</div>
-			<div className="workspace-path-row"><button onClick={up} disabled={path==='.'} title={t('workspace.parent')}>‹</button><code title={path}>{path}</code>{workspace.access==='read_write'&&<label className={transfer?'disabled':''} title={t('workspace.uploadFile')}><UploadCloud size={14}/><input key={inputKey} type="file" disabled={!!transfer} onChange={choose}/></label>}<button onClick={()=>synchronize(true)} title={t('workspace.refreshFiles')}><RefreshCw size={12}/></button></div>
-			{file&&<div className="chat-upload-row"><input value={target} disabled={uploading} onChange={event=>setTarget(event.target.value)} aria-label={t('workspace.relativePath')}/><button onClick={upload} disabled={uploading||!target.trim()}>{uploading?'...':t('common.upload')}</button><button onClick={()=>{if(uploading){cancel();return}setFile(null);setTarget('');setInputKey(value=>value+1)}} title={t('workspace.cancelUpload')}><X size={11}/></button></div>}
-			{transfer&&<FileTransferProgress transfer={transfer} onCancel={cancel}/>}
-			<div className="workspace-file-list">{loading?<span className="workspace-files-state"><LoaderCircle className="spin" size={13}/>{t('common.loading')}</span>:error?<span className="workspace-files-state error">{error}</span>:entries.length?entries.map(entry=>{const fullPath=workspaceChildPath(path,entry.name);return <div className="workspace-file-row" key={`${entry.type}:${entry.name}`}><button className="workspace-file-open" onClick={()=>void openEntry(entry.name,entry.type)} title={entry.type==='file'?t('workspace.previewFile'):t('workspace.openDirectory')}>{previewLoading===fullPath?<LoaderCircle className="spin" size={13}/>:entry.type==='directory'?<FolderOpen size={13}/>:<FileText size={13}/>}<span>{entry.name}</span>{entry.type==='file'&&<small>{formatFileSize(entry.size??0)}</small>}</button>{(entry.type==='file'||desktopRuntime&&entry.type==='directory'||workspace.access==='read_write')&&<div className="workspace-file-actions">{entry.type==='file'&&<button className="workspace-file-download" disabled={!!transfer} onClick={()=>void download(fullPath,entry.name,entry.size??0)} title={t('common.download')}><Download size={12}/></button>}{desktopRuntime&&entry.type==='directory'&&<button className="workspace-file-reveal" onClick={()=>void revealDirectory(fullPath)} title={t('workspace.revealDirectory')}><FolderOutput size={12}/></button>}{workspace.access==='read_write'&&<button className="workspace-file-delete" onClick={()=>requestEntryRemoval(entry.name,entry.type)} disabled={deleting===fullPath||!!transfer} title={t('workspace.deleteEntry',{type:t(`workspace.${entry.type}`)})}><Trash2 size={12}/></button>}</div>}</div>}):<span className="workspace-files-state">{t('workspace.emptyDirectory')}</span>}</div>
-			{notice&&<div className={`chat-workspace-notice ${notice.kind}`}>{notice.text}</div>}
-			{dragging&&<div className="workspace-drop-overlay"><UploadCloud size={27}/><b>{t('workspace.dropFilesHere')}</b><span>{path}</span></div>}
-		</aside>
-		{preview&&<TextFileEditor path={preview.path} meta={`${formatFileSize(preview.size)} · SHA-256 ${preview.sha256}${preview.truncated?` · ${t('common.truncated')}`:''}`} content={preview.content||''} binary={preview.binary} editable={workspace.access==='read_write'&&!preview.truncated} onClose={()=>setPreview(null)} onSave={savePreview} onDownload={()=>void download(preview.path,preview.path.split('/').at(-1)||'download',preview.size)}/>}
-		{deleteCandidate&&<DestructiveConfirmDialog title={t('workspace.deleteTitle',{path:`${deleteCandidate.workspaceID}:${deleteCandidate.path}`})} busy={deleting===deleteCandidate.path} onCancel={()=>setDeleteCandidate(null)} onConfirm={()=>void removeEntry()}/>}
-	</>
-})
-
 type SessionTaskRow={task:AgentTask;blockers:string[];status:AgentTask['status']|'blocked'}
 
 function buildSessionTaskRows(tasks:AgentTaskList):SessionTaskRow[]{

@@ -20,3 +20,5 @@ export function sshTunnelRoute(host:string,direction:string,localHost:string,loc
 	const remote=`${host}:${remoteHost||'127.0.0.1'}:${remotePort||automatic}`
 	return direction==='reverse'?`${local} → ${remote}`:`${local} ← ${remote}`
 }
+
+export const desktopRuntime='__TAURI_INTERNALS__' in window

@@ -1,0 +1,22 @@
+import { useState } from 'react'
+import { useTranslation } from 'react-i18next'
+import { Edit3, FolderOpen, LoaderCircle, Plus, Save, Trash2 } from 'lucide-react'
+import { api } from '../../../api/api'
+import { AppSelect } from '../../../components/Controls'
+import { DestructiveConfirmDialog } from '../../../components/DestructiveConfirmDialog'
+import { SettingsDisclosure } from '../../../components/SettingsDisclosure'
+import { errorText } from '../../../lib/utils'
+import type { NotificationSink } from '../../../lib/notifications'
+import type { WorkspaceCapability, WorkspaceInput } from '../../../types'
+
+export function WorkspaceSettingsPanel({workspaces,refresh,onNotify}:{workspaces:WorkspaceCapability[];refresh:()=>Promise<void>;onNotify:NotificationSink}){
+	const {t}=useTranslation()
+	const empty:WorkspaceInput={id:'',access:'read_only'}
+	const [open,setOpen]=useState(false),[editing,setEditing]=useState(''),[input,setInput]=useState<WorkspaceInput>(empty),[busy,setBusy]=useState(''),[deleteCandidate,setDeleteCandidate]=useState<WorkspaceCapability|null>(null)
+	const beginCreate=()=>{setEditing('');setInput(empty);setOpen(true)}
+	const beginEdit=(workspace:WorkspaceCapability)=>{setEditing(workspace.id);setInput({id:workspace.id,access:workspace.access});setOpen(true)}
+	const close=()=>{setOpen(false);setEditing('');setInput(empty)}
+	const save=async()=>{if(!input.id.trim())return;setBusy('save');try{if(editing)await api.updateWorkspace(editing,{...input,id:editing});else await api.createWorkspace({...input,id:input.id.trim()});await refresh();onNotify(editing?t('workspace.settingsUpdated',{id:editing}):t('workspace.settingsCreated',{id:input.id.trim()}));close()}catch(err){onNotify(errorText(err),'error')}finally{setBusy('')}}
+	const remove=async()=>{if(!deleteCandidate)return;const workspace=deleteCandidate;setBusy(`delete-${workspace.id}`);try{await api.deleteWorkspace(workspace.id);await refresh();onNotify(t('workspace.settingsRemoved',{id:workspace.id}));if(editing===workspace.id)close()}catch(err){onNotify(errorText(err),'error')}finally{setBusy('');setDeleteCandidate(null)}}
+	return <SettingsDisclosure className="workspace-settings" icon={<FolderOpen size={18}/>} title={t('settings.capabilities')} meta={t('workspace.registeredCount',{count:workspaces.length})}><div className="workspace-settings-actions"><button type="button" onClick={beginCreate}><Plus size={13}/>{t('workspace.add')}</button></div>{open&&<div className="workspace-settings-editor"><label><span>{t('workspace.id')}</span><input value={input.id} disabled={!!editing} maxLength={64} onChange={event=>setInput(current=>({...current,id:event.target.value}))}/></label><label><span>{t('workspace.permission')}</span><AppSelect value={input.access} ariaLabel={t('workspace.permission')} onChange={value=>setInput(current=>({...current,access:value as WorkspaceInput['access']}))} options={[{value:'read_only',label:t('workspace.readOnly')},{value:'read_write',label:t('workspace.readWrite')}]}/></label><div><button type="button" onClick={close}>{t('common.cancel')}</button><button type="button" className="primary" disabled={busy==='save'||!input.id.trim()} onClick={()=>void save()}>{busy==='save'?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {t('common.save')}</button></div></div>}<div className="workspace-settings-list">{workspaces.map(workspace=><div className="workspace-settings-row" key={workspace.id}><code>{workspace.id}</code><em className={workspace.access}>{workspace.access==='read_write'?t('workspace.readWrite'):t('workspace.readOnly')}</em><button type="button" title={t('common.edit')} onClick={()=>beginEdit(workspace)}><Edit3 size={13}/></button><button type="button" className="danger" disabled={busy===`delete-${workspace.id}`} title={t('workspace.remove')} onClick={()=>setDeleteCandidate(workspace)}>{busy===`delete-${workspace.id}`?<LoaderCircle className="spin" size={13}/>:<Trash2 size={13}/>}</button></div>)}{!workspaces.length&&<div className="workspace-settings-empty">{t('settings.noWorkspace')}</div>}</div>{deleteCandidate&&<DestructiveConfirmDialog title={t('workspace.removeTitle',{id:deleteCandidate.id})} busy={busy===`delete-${deleteCandidate.id}`} onCancel={()=>setDeleteCandidate(null)} onConfirm={()=>void remove()}/>}</SettingsDisclosure>
+}
