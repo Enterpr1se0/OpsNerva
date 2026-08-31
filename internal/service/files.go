@@ -254,6 +254,7 @@ func buildRemoteFileChangeScript(path, tempPath string, edit domain.TextEdit, va
 	pathQ, tempQ := shellQuote(path), shellQuote(tempPath)
 	oldPath := tempPath + ".old"
 	oldQ := shellQuote(oldPath)
+	oldAwkPathQ := shellQuote(strings.ReplaceAll(oldPath, `\`, `\\`))
 	newPath := tempPath + ".new"
 	newQ := shellQuote(newPath)
 	outputPath := tempPath + ".output"
@@ -281,7 +282,7 @@ func buildRemoteFileChangeScript(path, tempPath string, edit domain.TextEdit, va
 			"original_sha256=${original_sha256%% *}",
 			"cp -p -- "+pathQ+" "+tempQ,
 			"file_size=$(wc -c < "+pathQ+")",
-			"match_info=$(LC_ALL=C awk -v old_path="+oldQ+" -v old_count="+strconv.Itoa(len(strings.Split(edit.OldText, "\n")))+" -v file_size=\"$file_size\" "+shellQuote(remoteTextEditLocateProgram())+" "+pathQ+")",
+			"match_info=$(LC_ALL=C awk -v old_path="+oldAwkPathQ+" -v old_count="+strconv.Itoa(len(strings.Split(edit.OldText, "\n")))+" -v file_size=\"$file_size\" "+shellQuote(remoteTextEditLocateProgram())+" "+pathQ+")",
 			"set -- $match_info",
 			"match_start=$1; match_end=$2; delete_start=$3; delete_end=$4; match_eol=$5",
 		)

@@ -238,6 +238,16 @@ func TestFileEditHeredocMarkerCannotTerminateFromContent(t *testing.T) {
 	}
 }
 
+func TestRemoteFileEditEscapesAwkPathOnWindowsStylePaths(t *testing.T) {
+	script := buildRemoteFileChangeScript(`C:\repo\app.conf`, `C:\repo\.edit.tmp`, domain.TextEdit{
+		OldText: "key=old",
+		NewText: "key=new",
+	}, "")
+	if !strings.Contains(script, "-v old_path='C:\\\\repo\\\\.edit.tmp.old'") {
+		t.Fatalf("remote edit script does not escape awk old_path for windows-style path:\n%s", script)
+	}
+}
+
 func TestRemoteFileEditRejectsSecretsAndInvalidReplacements(t *testing.T) {
 	svc, transport, host := newTestService(t)
 	for _, testCase := range []struct{ oldText, newText string }{
