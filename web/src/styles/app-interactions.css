@@ -421,7 +421,6 @@ body {
   }
 
   :where(
-    .tool-event-rich,
     .reasoning-card,
     .mcp-tools,
     .tool-schema-raw,
@@ -442,7 +441,6 @@ body {
   }
 
   :where(
-    .tool-event-rich,
     .reasoning-card,
     .mcp-tools,
     .tool-schema-raw,
@@ -514,7 +512,7 @@ body {
   transition: color var(--motion-fast) var(--motion-ease), transform var(--motion-disclosure) var(--motion-ease);
 }
 
-.tool-event-rich[open] > summary > svg,
+.tool-event-rich[open]:not(.closing) > summary > svg,
 .reasoning-card[open] > summary > svg:last-child,
 .session-tasks[open] > summary > svg:last-child,
 .mcp-tools[open] > summary > svg:last-child,

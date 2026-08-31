@@ -1,6 +1,6 @@
-@layer base, light, interaction;
+@layer base, light, syntax, interaction;
 
 @import './styles.css' layer(base);
-@import './syntax-highlight.css' layer(base);
 @import './light-theme.css' layer(light);
+@import './syntax-highlight.css' layer(syntax);
 @import './app-interactions.css' layer(interaction);

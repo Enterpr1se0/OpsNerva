@@ -24,6 +24,8 @@ import { ChatWorkspacePanel, SSHWorkspacePage, WorkspaceSettingsPanel } from './
 import { useNotifier, NotificationContext, type NotificationSink, type AppNotification } from './lib/notifications'
 import { DestructiveConfirmDialog } from './components/DestructiveConfirmDialog'
 import { FileTransferProvider } from './features/sftp'
+import { useAuditData, type AuditView } from './features/audit'
+import { useToolCardDisclosure } from './features/chat'
 import { useAutoCollapseDetails } from './lib/hooks'
 import { desktopRuntime, errorStatus, errorText, formatFileSize, sshTunnelRoute } from './lib/utils'
 import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, AuthStatus, ChatMessage, ChatQueueMode, ChatSession, ChatSessionDelta, ChatState, ChatTokenUsage, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPActivityEvent, MCPActivitySnapshot, MCPClientSession, MCPServer, MCPServerInput, MCPToolCall, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, QueuedChatMessage, Run, ServerLogEntry, SSHShell, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceShellMode } from './types'
@@ -478,21 +480,6 @@ function keepEquivalentHealth(current:Health|null,next:Health){
 	return JSON.stringify(currentState)===JSON.stringify(nextState)?current:next
 }
 
-type AuditPageCursor={hasMore:boolean;timestamp:string;id:string}
-type AuditView='runs'|'mcp'
-function mergeLatestPage<T extends{id:string}>(latest:T[],current:T[],hasMore:boolean,timestamp:(item:T)=>string){
-	if(!hasMore)return latest
-	const tail=latest.at(-1)
-	if(!tail)return current
-	const tailTime=timestamp(tail)
-	const retained=current.filter(item=>{
-		const value=timestamp(item)
-		return value<tailTime||value===tailTime&&item.id<tail.id
-	})
-	const seen=new Set(latest.map(item=>item.id))
-	return [...latest,...retained.filter(item=>!seen.has(item.id))]
-}
-
 const newSessionMarker = '__new__'
 const defaultChatImageTypes=['image/png','image/jpeg','image/webp','image/gif']
 const desktopWindow=desktopRuntime?getCurrentWindow():null
@@ -602,11 +589,6 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 	const [skills,setSkills]=useState<ManagedSkill[]>([])
 	const [mcpServers,setMCPServers]=useState<MCPServer[]>([])
   const [approvals, setApprovals] = useState<Approval[]>([])
-  const [runs, setRuns] = useState<Run[]>([])
-	const [auditRunCursor,setAuditRunCursor]=useState<AuditPageCursor>({hasMore:false,timestamp:'',id:''})
-	const [loadingMoreAudit,setLoadingMoreAudit]=useState(false)
-	const [auditSessions,setAuditSessions]=useState<ChatSession[]>([])
-	const [auditReady,setAuditReady]=useState(false)
 	const [auditView,setAuditView]=useState<AuditView>('runs')
 	const [mcpActivityRefresh,setMCPActivityRefresh]=useState(0)
   const [sshTunnels,setSSHTunnels]=useState<SSHTunnel[]>([])
@@ -615,10 +597,6 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
   const [openConnectionPanel,setOpenConnectionPanel]=useState<'tunnel'|'shell'|null>(null)
 	const [notifications,setNotifications]=useState<AppNotification[]>([])
 	const connectionRefreshRef=useRef<Promise<void>|null>(null)
-	const auditRefreshRef=useRef<Promise<void>|null>(null)
-	const auditRefreshQueuedRef=useRef(false)
-	const auditInitializedRef=useRef(false)
-	const auditRunsExtendedRef=useRef(false)
 	const dismissNotification=useCallback((id:string)=>setNotifications(current=>current.filter(item=>item.id!==id)),[])
 	const notify=useCallback<NotificationSink>((message,tone='success')=>{
 		const normalized=message.trim()
@@ -656,17 +634,6 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 		catch(err){notify(errorText(err),'error')}
 	},[notify])
 	const refreshExtensions=useCallback(async()=>{await Promise.all([refreshToolCatalog(),refreshSkills(),refreshMCPServers()])},[refreshMCPServers,refreshSkills,refreshToolCatalog])
-	const refreshRuns=useCallback(async(reset=false)=>{
-		try{
-			const page=await api.runSummaries()
-			setRuns(current=>reset?page.runs:mergeLatestPage(page.runs,current,page.has_more,item=>item.started_at))
-			if(reset||!auditRunsExtendedRef.current){setAuditRunCursor({hasMore:page.has_more,timestamp:page.next_started_at||'',id:page.next_id||''});auditRunsExtendedRef.current=false}
-		}catch(err){notify(errorText(err),'error')}
-	},[notify])
-	const refreshAuditSessions=useCallback(async()=>{
-		try{setAuditSessions(await api.chatSessions())}
-		catch(err){notify(errorText(err),'error')}
-	},[notify])
 	const refreshHealth=useCallback(async()=>{
 		try{const next=await api.health();setHealth(current=>keepEquivalentHealth(current,next))}
 		catch(err){notify(errorText(err),'error')}
@@ -692,6 +659,7 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 		try{setCapabilities(await api.capabilities())}
 		catch(err){notify(errorText(err),'error')}
 	},[notify])
+	const audit=useAuditData({active:page==='audit'&&auditView==='runs',refreshHosts,notify})
 	const dismissApproval=useCallback((approvalID:string)=>{
 		setApprovals(current=>current.filter(item=>item.id!==approvalID))
 	},[])
@@ -701,36 +669,6 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 	const refreshConfiguration=useCallback(async()=>{
 		await Promise.all([refreshHealth(),refreshHosts(),refreshProviders(),refreshProxies(),refreshSettings(),refreshCapabilities()])
 	},[refreshCapabilities,refreshHealth,refreshHosts,refreshProviders,refreshProxies,refreshSettings])
-	const refreshAudit=useCallback(function refreshAudit():Promise<void>{
-		if(auditRefreshRef.current){auditRefreshQueuedRef.current=true;return auditRefreshRef.current}
-		auditRefreshQueuedRef.current=false
-		const reset=!auditInitializedRef.current
-		const task=Promise.all([refreshRuns(reset),refreshHosts(),refreshAuditSessions()]).then(()=>{auditInitializedRef.current=true;setAuditReady(true)})
-		auditRefreshRef.current=task
-		void task.finally(()=>{
-			if(auditRefreshRef.current===task)auditRefreshRef.current=null
-			if(auditRefreshQueuedRef.current){auditRefreshQueuedRef.current=false;void refreshAudit()}
-		})
-		return task
-	},[refreshAuditSessions,refreshHosts,refreshRuns])
-	const loadMoreAuditRuns=useCallback(async()=>{
-		if(loadingMoreAudit||!auditRunCursor.hasMore||!auditRunCursor.timestamp||!auditRunCursor.id)return
-		setLoadingMoreAudit(true)
-		try{
-			const page=await api.runSummaries({cursorStartedAt:auditRunCursor.timestamp,cursorID:auditRunCursor.id})
-			setRuns(current=>[...current,...page.runs.filter(item=>!current.some(existing=>existing.id===item.id))])
-			auditRunsExtendedRef.current=true
-			setAuditRunCursor({hasMore:page.has_more,timestamp:page.next_started_at||'',id:page.next_id||''})
-		}catch(err){notify(errorText(err),'error')}
-		finally{setLoadingMoreAudit(false)}
-	},[auditRunCursor,loadingMoreAudit,notify])
-	const deleteAuditRuns=useCallback(async(sessionID?:string|null)=>{
-		try{
-			const result=await api.deleteAuditRuns(sessionID)
-			await refreshRuns(true)
-			notify(result.retained?t('audit.deletedWithRetained',{deleted:result.deleted,retained:result.retained}):t('audit.deleted',{count:result.deleted}))
-		}catch(err){notify(errorText(err),'error');throw err}
-	},[notify,refreshRuns,t])
 	const refreshChat=useCallback(async()=>{
 		await Promise.all([refreshHealth(),refreshHosts(),refreshProviders(),refreshSettings(),refreshCapabilities()])
 	},[refreshCapabilities,refreshHealth,refreshHosts,refreshProviders,refreshSettings])
@@ -791,15 +729,6 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 		if(event.type==='event'&&event.data)setHealth(current=>keepEquivalentHealth(current,event.data!))
 	}),[])
 	useEffect(()=>{
-		if(page!=='audit'||auditView!=='runs')return
-		return subscribeApplicationEvents<{id?:string;type?:string}>('audit',event=>{
-			if(event.type==='error'&&event.error){notify(event.error,'error');return}
-			if(event.type!=='event')return
-			if(event.data?.type==='audit_records_deleted')void refreshRuns(true)
-			else void refreshAudit()
-		})
-	},[auditView,notify,page,refreshAudit,refreshRuns])
-	useEffect(()=>{
 		if(page==='extensions')void refreshExtensions()
 		else if(page==='ssh')void Promise.all([refreshHosts(),refreshConnections()])
 		else if(page==='config')void refreshConfiguration()
@@ -855,7 +784,7 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 		setRefreshing(true)
 		try{
 			if(page==='extensions')await refreshExtensions()
-			else if(page==='audit'&&auditView==='runs')await refreshAudit()
+			else if(page==='audit'&&auditView==='runs')await audit.refresh()
 			else if(page==='audit')setMCPActivityRefresh(value=>value+1)
 			else if(page==='ssh')await Promise.all([refreshHosts(),refreshConnections()])
 			else if(page==='config')await refreshConfiguration()
@@ -944,7 +873,7 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
       </div></header>
       <section ref={workspaceRef} className={`workspace workspace-${page}`}>
 			<MemoChatPage visible={page==='chat'} onActivate={activateChat}
-				hosts={hosts} providers={providers} approvals={approvals} runs={runs} workspaceShells={workspaceShells}
+				hosts={hosts} providers={providers} approvals={approvals} runs={audit.runs} workspaceShells={workspaceShells}
 				capabilities={capabilities} settings={settings} imageTypes={settings?.chat_image_allowed_types||defaultChatImageTypes}
 					agentAvailable={!!health?.agent_available} modelName={health?.model?.model} contextWindow={health?.model?.context_window||0} refreshConnections={refreshConnections}
 				dismissApproval={dismissApproval} onCreateWorkspaceShell={createWorkspaceShell} onOpenWorkspaceShell={setSelectedShell} onWorkspaceShellStarted={observeAgentWorkspaceShell} onSettingsChanged={setSettings}
@@ -958,7 +887,7 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 			/>}
 		{page === 'config' && <ConfigurationPage hosts={hosts} providers={providers} proxies={proxies} settings={settings} capabilities={capabilities} health={health} refreshModels={refreshModels} refreshHosts={refreshHosts} refreshProxies={refreshProxies} refreshCapabilities={refreshCapabilities} refreshHealth={refreshHealth} onSettingsChanged={setSettings} onOpenMCPActivity={()=>{setAuditView('mcp');navigate('audit')}}/>}
 		{page === 'extensions' && <ExtensionsPage skills={skills} mcpServers={mcpServers} toolCatalog={toolCatalog} refreshSkills={refreshSkills} refreshMCPServers={refreshMCPServers} refreshToolCatalog={refreshToolCatalog} onToolCatalogChanged={setToolCatalog}/>}
-		{page === 'audit' && <AuditPage view={auditView} onViewChange={setAuditView} mcpRefreshKey={mcpActivityRefresh} runs={runs} hosts={hosts} sessions={auditSessions} ready={auditReady} runsHasMore={auditRunCursor.hasMore} loadingMore={loadingMoreAudit} onLoadMoreRuns={loadMoreAuditRuns} onDeleteRuns={deleteAuditRuns}/>}
+		{page === 'audit' && <AuditPage view={auditView} onViewChange={setAuditView} mcpRefreshKey={mcpActivityRefresh} runs={audit.runs} hosts={hosts} sessions={audit.sessions} ready={audit.ready} error={audit.error} runsHasMore={audit.runsHasMore} loadingMore={audit.loadingMore} onLoadMoreRuns={audit.loadMore} onDeleteRuns={audit.deleteRuns}/>}
         {page === 'logs' && <LogsPage/>}
       </section>
 	      {selectedShell&&<SSHShellTerminal
@@ -1743,7 +1672,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		const timer=window.setInterval(()=>setRetryClock(Date.now()),1000)
 		return()=>window.clearInterval(timer)
 	},[connectionRetry,visible])
-	useEffect(()=>()=>{sessionLoadRef.current='';const stream=activeStreamRef.current;activeStreamRef.current=null;stream?.controller.abort();window.cancelAnimationFrame(disclosureScrollFrame.current);window.cancelAnimationFrame(autoScrollFrame.current)},[])
+	useEffect(()=>()=>{sessionLoadRef.current='';const stream=activeStreamRef.current;activeStreamRef.current=null;stream?.controller.abort();window.cancelAnimationFrame(disclosureScrollFrame.current);window.cancelAnimationFrame(autoScrollFrame.current);messagesRef.current?.classList.remove('tool-disclosure-active')},[])
 	useEffect(()=>()=>{for(const url of imageURLsRef.current)URL.revokeObjectURL(url);imageURLsRef.current.clear()},[])
 	const addImages=(files:File[])=>{const accepted=files.filter(file=>imageTypes.includes(file.type));if(accepted.length!==files.length)setImageNotice(t('chat.imageTypeRejected'));if(!accepted.length)return;const next=accepted.map(file=>{const url=URL.createObjectURL(file);imageURLsRef.current.add(url);return{id:clientId(),file,url}});setPendingImages(current=>[...current,...next])}
 	const removePendingImage=(id:string)=>{setPendingImages(current=>{const target=current.find(image=>image.id===id);if(target){URL.revokeObjectURL(target.url);imageURLsRef.current.delete(target.url)}return current.filter(image=>image.id!==id)});setImageInputKey(value=>value+1)}
@@ -1839,9 +1768,10 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		stickToLatest.current=false
 		const top=summary.getBoundingClientRect().top
 		window.cancelAnimationFrame(disclosureScrollFrame.current)
+		container.classList.add('tool-disclosure-active')
 		disclosureScrollFrame.current=window.requestAnimationFrame(()=>{
-			if(!container.isConnected||!summary.isConnected)return
-			container.scrollTop+=summary.getBoundingClientRect().top-top
+			if(container.isConnected&&summary.isConnected){container.scrollTop+=summary.getBoundingClientRect().top-top;lastMessagesScrollTop.current=container.scrollTop}
+			container.classList.remove('tool-disclosure-active')
 		})
 	},[])
 
@@ -2431,7 +2361,7 @@ function taskToolOperationSummary(entry:ChatEntry,argumentsValue=taskToolArgumen
 
 const TaskToolGroupCard=memo(function TaskToolGroupCard({group,onDisclosure}:{group:TaskToolEntryGroup;onDisclosure:(summary:HTMLElement)=>void}){
 	const {t}=useTranslation()
-	const [expanded,setExpanded]=useState(false)
+	const disclosure=useToolCardDisclosure(onDisclosure)
 	const status=taskToolGroupStatus(group.entries)
 	const operations=group.entries.map(entry=>{
 		const argumentsValue=taskToolArguments(entry)
@@ -2439,16 +2369,16 @@ const TaskToolGroupCard=memo(function TaskToolGroupCard({group,onDisclosure}:{gr
 		return{summary:taskToolOperationSummary(entry,argumentsValue),arguments:safeArguments,status:taskToolEntryStatus(entry)}
 	})
 	const summary=operations.map(operation=>operation.summary).join(' · ')
-	return <details className={`tool-event tool-event-rich task-tool-group ${status}`} open={expanded}>
-		<summary onClick={event=>{event.preventDefault();onDisclosure(event.currentTarget);setExpanded(value=>!value)}}><div className="tool-summary-icon"><ListChecks size={15}/></div><div className="tool-summary-copy"><div className="tool-summary-heading"><b>{toolLabel(group.tool)}</b><span className="task-tool-group-count">{t('agentTasks.operationCount',{count:group.entries.length})}</span><code title={summary}>{summary}</code></div></div><div className="tool-summary-statuses"><span className={`tool-status ${status}`} key={status}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight className="tool-summary-chevron" size={14}/></summary>
-		{expanded&&<div className="tool-event-body"><CompactTable title={t('agentTasks.operations')} columns={[t('agentTasks.operation'),t('tool.actualParameters'),t('common.status')]} rows={operations.map(operation=>[operation.summary,operation.arguments,t(`statusLabels.${operation.status}`,{defaultValue:operation.status.replaceAll('_',' ')})])}/></div>}
+	return <details className={`tool-event tool-event-rich task-tool-group ${status}${disclosure.closing?' closing':''}`} open={disclosure.open}>
+		<summary onClick={event=>{event.preventDefault();disclosure.toggle(event.currentTarget)}}><div className="tool-summary-icon"><ListChecks size={15}/></div><div className="tool-summary-copy"><div className="tool-summary-heading"><b>{toolLabel(group.tool)}</b><span className="task-tool-group-count">{t('agentTasks.operationCount',{count:group.entries.length})}</span><code title={summary}>{summary}</code></div></div><div className="tool-summary-statuses"><span className={`tool-status ${status}`} key={status}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight className="tool-summary-chevron" size={14}/></summary>
+		{disclosure.open&&<div className={`tool-event-body${disclosure.closing?' closing':''}`} onAnimationEnd={disclosure.finishClosing}><CompactTable title={t('agentTasks.operations')} columns={[t('agentTasks.operation'),t('tool.actualParameters'),t('common.status')]} rows={operations.map(operation=>[operation.summary,operation.arguments,t(`statusLabels.${operation.status}`,{defaultValue:operation.status.replaceAll('_',' ')})])}/></div>}
 	</details>
 },(previous,next)=>previous.onDisclosure===next.onDisclosure&&previous.group.tool===next.group.tool&&previous.group.entries.length===next.group.entries.length&&previous.group.entries.every((entry,index)=>entry===next.group.entries[index]))
 
 function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,liveSSHTaskOwner,currentLiveSSHTask,onDisclosure}:{sessionID:string;entry:ChatEntry;runs:Run[];hosts:Host[];liveSSHTaskOwner:boolean;currentLiveSSHTask?:LiveSSHTaskSnapshot;onDisclosure:(summary:HTMLElement)=>void}){
 	const {t}=useTranslation()
 	const chatVisible=useContext(ChatVisibilityContext)
-	const [expanded,setExpanded]=useState(false)
+	const disclosure=useToolCardDisclosure(onDisclosure)
 	const [fullContent,setFullContent]=useState('')
 	const [loadingDetail,setLoadingDetail]=useState(false)
 	const [detailError,setDetailError]=useState('')
@@ -2632,16 +2562,14 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,liveSSHTaskOwner
 	const permission=executionPermission(request,hosts,destinationHostID,...(sshTransfer?[sourceHostID]:[]))
 	const purpose=request?textValue(request.reason):''
 	const toggleExpanded=(summary:HTMLElement)=>{
-		onDisclosure(summary)
-		const opening=!expanded
-		setExpanded(opening)
+		const opening=disclosure.toggle(summary)
 		if(!opening||!initialEntry.contentTruncated||!initialEntry.sourceMessageId||loadingDetail||fullContent)return
 		setLoadingDetail(true);setDetailError('')
 		void api.chatMessage(sessionID,initialEntry.sourceMessageId).then(message=>setFullContent(message.content)).catch(error=>setDetailError(errorText(error))).finally(()=>setLoadingDetail(false))
 	}
-		  return <details className={`tool-event tool-event-rich ${sshTaskOperation?'ssh-task-tool ':''}${status}`} open={expanded}>
+		  return <details className={`tool-event tool-event-rich ${sshTaskOperation?'ssh-task-tool ':''}${status}${disclosure.closing?' closing':''}`} open={disclosure.open}>
 			<summary onClick={event=>{event.preventDefault();toggleExpanded(event.currentTarget)}}><div className="tool-summary-icon">{toolSummaryIcon(entry.tool)}</div><div className="tool-summary-copy"><div className="tool-summary-heading"><b>{summaryLabel}</b>{sshTransfer?<ToolTransferRoute sourceHost={sourceHostName} sourcePath={sourcePath} destinationHost={hostName} destinationPath={remotePath}/>:workspaceTransferRoute?<WorkspaceTransferRoute {...workspaceTransferRoute}/>:<>{targets.length>0&&<div className="tool-summary-targets">{targets.map((target,index)=><span className={`tool-target-chip tool-target-${target.kind}`} title={`${target.label}: ${[target.name,target.id].filter(Boolean).join(' · ')}`} key={`${target.kind}_${target.id||target.name}_${index}`}>{target.kind==='host'?<Server size={11}/>:target.kind==='workspace'?<FolderOpen size={11}/>:<ListChecks size={11}/>} {(targets.length>1||target.kind==='scope')&&<em>{target.label}</em>}<b>{target.name||target.id}</b></span>)}</div>}{commandSummary!==summaryLabel&&<code className={sshTaskOperation?'tool-task-id':undefined} title={previewText(commandSummary)}>{previewText(commandSummary)}</code>}</>}</div></div><div className="tool-summary-statuses">{loadingDetail&&<LoaderCircle className="spin" size={12}/>} {autoApproved&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}<span className={`tool-status ${status}`} key={status}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight className="tool-summary-chevron" size={14}/>{request&&<div className="tool-summary-meta"><span className={`tool-summary-permission ${permission}`}><em>{t('tool.permission')}</em><b>{permission}</b></span>{purpose&&<span className="tool-summary-purpose" title={purpose}><em>{t('tool.reason')}</em><b>{purpose}</b></span>}</div>}{toolLive&&<div className={`tool-live-progress ${transferTotal>0?'determinate':''}`} role="progressbar" aria-valuemin={transferTotal>0?0:undefined} aria-valuemax={transferTotal>0?transferTotal:undefined} aria-valuenow={transferTotal>0?transferred:undefined}><i><em style={transferTotal>0?{width:`${transferPercent}%`}:undefined}/></i><span>{transferTotal>0?`${formatFileSize(transferred)} / ${formatFileSize(transferTotal)}`:sshTaskOperation?t('tool.liveTask'):entry.liveOutputStream?.toUpperCase()||''}</span><time>{elapsed}</time></div>}{outputPreview&&<div className={`tool-summary-preview ${previewStream==='stderr'?'stderr':''}`}><span>{shellAction==='output'?shellActionLabel:(previewStream||'stdout').toUpperCase()}</span><pre>{outputPreview}</pre></div>}</summary>
-		{expanded&&<div className="tool-event-body">
+		{disclosure.open&&<div className={`tool-event-body${disclosure.closing?' closing':''}`} onAnimationEnd={disclosure.finishClosing}>
 		  {detailError&&<div className="tool-detail-error">{detailError}</div>}
 		  {shellPrimaryAction&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellPrimaryContent||'—'}/><pre><HighlightedCode code={previewText(shellPrimaryContent||'—',toolOutputPreviewChars)} language={inferScriptLanguage(shellPrimaryContent||'')}/></pre></div></section>}
 		  {shellOutputAction&&!shellChunks.length&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellOutput||'—'}/><pre><HighlightedCode code={previewText(shellOutput||'—',toolOutputPreviewChars)} autoDetect live={toolLive}/></pre></div></section>}
@@ -3584,7 +3512,7 @@ function AuditRunRow({run,hosts}:{run:Run;hosts:Host[]}){
 
 type AuditDeleteTarget={kind:'session';id:string;title:string}|{kind:'all'}
 
-type AuditPageProps={view:AuditView;onViewChange:(view:AuditView)=>void;mcpRefreshKey:number;runs:Run[];hosts:Host[];sessions:ChatSession[];ready:boolean;runsHasMore:boolean;loadingMore:boolean;onLoadMoreRuns:()=>Promise<void>;onDeleteRuns:(sessionID?:string|null)=>Promise<void>}
+type AuditPageProps={view:AuditView;onViewChange:(view:AuditView)=>void;mcpRefreshKey:number;runs:Run[];hosts:Host[];sessions:ChatSession[];ready:boolean;error:string;runsHasMore:boolean;loadingMore:boolean;onLoadMoreRuns:()=>Promise<void>;onDeleteRuns:(sessionID?:string|null)=>Promise<void>}
 
 function AuditPage({view,onViewChange,mcpRefreshKey,...props}:AuditPageProps){
 	const {t}=useTranslation()
@@ -3597,7 +3525,7 @@ function AuditPage({view,onViewChange,mcpRefreshKey,...props}:AuditPageProps){
 	</div>
 }
 
-function AuditRunsView({runs,hosts,sessions,ready,runsHasMore,loadingMore,onLoadMoreRuns,onDeleteRuns}:{runs:Run[];hosts:Host[];sessions:ChatSession[];ready:boolean;runsHasMore:boolean;loadingMore:boolean;onLoadMoreRuns:()=>Promise<void>;onDeleteRuns:(sessionID?:string|null)=>Promise<void>}) {
+function AuditRunsView({runs,hosts,sessions,ready,error,runsHasMore,loadingMore,onLoadMoreRuns,onDeleteRuns}:{runs:Run[];hosts:Host[];sessions:ChatSession[];ready:boolean;error:string;runsHasMore:boolean;loadingMore:boolean;onLoadMoreRuns:()=>Promise<void>;onDeleteRuns:(sessionID?:string|null)=>Promise<void>}) {
 	const {t,i18n:instance}=useTranslation()
 	const [query,setQuery]=useState('')
 	const [deleteTarget,setDeleteTarget]=useState<AuditDeleteTarget|null>(null)
@@ -3632,6 +3560,7 @@ function AuditRunsView({runs,hosts,sessions,ready,runsHasMore,loadingMore,onLoad
 	const deleteTitle=deleteTarget?.kind==='session'?t('audit.deleteSessionTitle',{title:deleteTarget.title}):t('audit.deleteAllTitle')
 	if(!ready)return <div className="audit-loading panel" role="status"><LoaderCircle className="spin" size={16}/><span>{t('common.loading')}</span></div>
 	return <div className="audit-runs-view page-stack">
+		{error&&<div className="inline-error">{error}</div>}
 		<div className="audit-toolbar"><div className="search-box"><Search size={16}/><input aria-label={t('common.search')} value={query} onChange={event=>setQuery(event.target.value)}/></div><span>{t('audit.counts',{sessions:groups.length,runs:filtered.length})}</span>{runs.length>0&&<button type="button" className="audit-clear-button" onClick={()=>setDeleteTarget({kind:'all'})}><Trash2 size={13}/>{t('audit.clear')}</button>}</div>
 		<div className="audit-groups">{groups.map(group=><details className="audit-session panel" key={group.id}>
 			<summary className="audit-session-summary"><div className="audit-session-glyph"><History size={17}/></div><div className="audit-session-name"><b>{group.title}</b><span>{group.id==='__direct__'?t('audit.noSession'):group.id} · {t('audit.lastRun',{date:new Date(group.latest).toLocaleString(localeFor(instance.language))})}</span></div><div className="audit-session-stats"><span><b>{group.runs.length}</b> {t('audit.runs')}</span>{group.pending>0&&<span className="pending-count"><b>{group.pending}</b> {t('audit.pending')}</span>}</div><ChevronRight className="audit-session-chevron" size={17}/></summary>
