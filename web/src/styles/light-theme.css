@@ -1208,8 +1208,7 @@
   .sftp-browser,
   .ssh-workspace-terminal,
   .workspace-settings-row,
-  .workspace-preview-dialog,
-  .highlighted-text-editor
+  .workspace-preview-dialog
 ) {
   border-color: var(--light-border);
   background: var(--light-surface);
@@ -1279,15 +1278,8 @@
   box-shadow: var(--light-shadow-high);
 }
 
-:root[data-theme='light'] :where(.workspace-preview-dialog > header b, .highlighted-text-editor > pre) {
+:root[data-theme='light'] .workspace-preview-dialog > header b {
   color: var(--light-text);
-}
-
-:root[data-theme='light'] .highlighted-text-editor > .text-file-input {
-  background: transparent;
-  color: transparent;
-  caret-color: var(--light-text);
-  -webkit-text-fill-color: transparent;
 }
 
 :root[data-theme='light'] .workspace-preview-dialog > pre {

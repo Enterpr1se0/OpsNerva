@@ -9,7 +9,9 @@ const languageAliases:Record<string,string>={
 	'c++':'cpp',
 	'c#':'csharp',
 	cs:'csharp',
+	dockerfile:'bash',
 	html:'xml',
+	jsonl:'json',
 	jsx:'javascript',
 	js:'javascript',
 	md:'markdown',
@@ -25,10 +27,10 @@ const languageAliases:Record<string,string>={
 
 const extensionLanguages:Record<string,string>={
 	bash:'bash',c:'c',cc:'cpp',conf:'ini',cpp:'cpp',cs:'csharp',css:'css',diff:'diff',env:'bash',go:'go',
-	h:'c',hpp:'cpp',htm:'xml',html:'xml',ini:'ini',java:'java',js:'javascript',json:'json',jsonl:'json',
-	jsx:'javascript',kt:'kotlin',kts:'kotlin',less:'less',lua:'lua',md:'markdown',php:'php',pl:'perl',
+	h:'c',hpp:'cpp',htm:'html',html:'html',ini:'ini',java:'java',js:'javascript',json:'json',jsonl:'jsonl',
+	jsx:'jsx',kt:'kotlin',kts:'kotlin',less:'less',lua:'lua',md:'markdown',php:'php',pl:'perl',
 	ps1:'powershell',py:'python',rb:'ruby',rs:'rust',scss:'scss',sh:'bash',sql:'sql',swift:'swift',
-	toml:'ini',ts:'typescript',tsx:'typescript',xml:'xml',yaml:'yaml',yml:'yaml',zsh:'bash',
+	toml:'toml',ts:'typescript',tsx:'tsx',xml:'xml',yaml:'yaml',yml:'yaml',zsh:'bash',
 }
 
 let loadedHighlighter:HLJSApi|undefined
@@ -60,7 +62,7 @@ export function languageFromCodeClass(className?:string){
 export function languageFromPath(path?:string){
 	if(!path)return undefined
 	const name=path.split(/[\\/]/).at(-1)?.toLowerCase().split(/[?#]/,1)[0]||''
-	if(name==='dockerfile')return'bash'
+	if(name==='dockerfile')return'dockerfile'
 	if(name==='makefile')return'makefile'
 	const extension=name.includes('.')?name.slice(name.lastIndexOf('.')+1):''
 	return extensionLanguages[extension]
