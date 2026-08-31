@@ -1209,7 +1209,7 @@
   .ssh-workspace-terminal,
   .workspace-settings-row,
   .workspace-preview-dialog,
-  .text-file-input
+  .highlighted-text-editor
 ) {
   border-color: var(--light-border);
   background: var(--light-surface);
@@ -1279,8 +1279,15 @@
   box-shadow: var(--light-shadow-high);
 }
 
-:root[data-theme='light'] :where(.workspace-preview-dialog > header b, .text-file-input) {
+:root[data-theme='light'] :where(.workspace-preview-dialog > header b, .highlighted-text-editor > pre) {
   color: var(--light-text);
+}
+
+:root[data-theme='light'] .highlighted-text-editor > .text-file-input {
+  background: transparent;
+  color: transparent;
+  caret-color: var(--light-text);
+  -webkit-text-fill-color: transparent;
 }
 
 :root[data-theme='light'] .workspace-preview-dialog > pre {

@@ -421,6 +421,7 @@ body {
   }
 
   :where(
+    .tool-event-rich,
     .reasoning-card,
     .mcp-tools,
     .tool-schema-raw,
@@ -441,6 +442,7 @@ body {
   }
 
   :where(
+    .tool-event-rich,
     .reasoning-card,
     .mcp-tools,
     .tool-schema-raw,
@@ -471,13 +473,6 @@ body {
   .settings-disclosure
 )[open] > :not(summary) {
   animation: app-disclosure-content-in var(--motion-disclosure) var(--motion-ease) both;
-}
-
-/* 退出动画：条件渲染的 details 组件收缩时 */
-:where(
-  .tool-event-rich
-) > :not(summary).closing {
-  animation: app-disclosure-content-out var(--motion-disclosure) var(--motion-ease) both;
 }
 
 :where(
@@ -512,7 +507,7 @@ body {
   transition: color var(--motion-fast) var(--motion-ease), transform var(--motion-disclosure) var(--motion-ease);
 }
 
-.tool-event-rich[open]:not(.closing) > summary > svg,
+.tool-event-rich[open] > summary > svg,
 .reasoning-card[open] > summary > svg:last-child,
 .session-tasks[open] > summary > svg:last-child,
 .mcp-tools[open] > summary > svg:last-child,
@@ -613,10 +608,6 @@ body {
 
 @keyframes app-disclosure-content-in {
   from { opacity: 0; transform: translateY(4px); }
-}
-
-@keyframes app-disclosure-content-out {
-  to { opacity: 0; transform: translateY(4px); }
 }
 
 @keyframes app-status-settle {

@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { Download, Edit3, FileText, LoaderCircle, Save, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { HighlightedCode, languageFromPath } from './HighlightedCode'
+import { HighlightedTextEditor } from './HighlightedTextEditor'
 import { CopyButton } from './CopyButton'
 
 type TextFileEditorProps = {
@@ -51,6 +52,7 @@ function lineStartsInSelection(value:string,start:number,end:number){
 
 export function TextFileEditor({path,meta,content,binary=false,editable=false,onClose,onSave,onDownload}:TextFileEditorProps){
 	const {t}=useTranslation()
+	const language=languageFromPath(path)
 	const [editing,setEditing]=useState(false)
 	const [draft,setDraft]=useState(content)
 	const [saving,setSaving]=useState(false)
@@ -97,7 +99,7 @@ export function TextFileEditor({path,meta,content,binary=false,editable=false,on
 					<button type="button" disabled={saving} onClick={close} title={t('common.close')}><X size={16}/></button>
 				</section>
 			</header>
-			{binary?<div className="workspace-binary-preview"><FileText size={30}/><b>{t('workspace.binary')}</b></div>:editing?<textarea className="text-file-input" value={draft} onChange={event=>setDraft(event.target.value)} onKeyDown={indent} spellCheck={false} autoFocus/>:<pre><HighlightedCode code={content} language={languageFromPath(path)} autoDetect/></pre>}
+			{binary?<div className="workspace-binary-preview"><FileText size={30}/><b>{t('workspace.binary')}</b></div>:editing?<HighlightedTextEditor value={draft} language={language} ariaLabel={path} onChange={setDraft} onKeyDown={indent} autoFocus/>:<pre><HighlightedCode code={content} language={language} autoDetect/></pre>}
 			{editing&&<footer className="text-file-footer">
 				{error&&<span>{error}</span>}
 				<div><button type="button" disabled={saving} onClick={()=>{setDraft(content);setError('');setEditing(false)}}>{t('common.cancel')}</button><button type="button" className="primary" disabled={saving||draft===content} onClick={()=>void save()}>{saving?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {saving?t('common.saving'):t('common.save')}</button></div>

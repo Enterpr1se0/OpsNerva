@@ -1,1 +1,2 @@
-export { useToolCardDisclosure } from './useToolCardDisclosure'
+export { useChatCardDisclosure } from './useChatCardDisclosure'
+export type { ChatDisclosurePositionHandler } from './useChatCardDisclosure'

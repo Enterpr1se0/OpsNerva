@@ -25,7 +25,7 @@ import { useNotifier, NotificationContext, type NotificationSink, type AppNotifi
 import { DestructiveConfirmDialog } from './components/DestructiveConfirmDialog'
 import { FileTransferProvider } from './features/sftp'
 import { useAuditData, type AuditView } from './features/audit'
-import { useToolCardDisclosure } from './features/chat'
+import { useChatCardDisclosure, type ChatDisclosurePositionHandler } from './features/chat'
 import { useAutoCollapseDetails } from './lib/hooks'
 import { desktopRuntime, errorStatus, errorText, formatFileSize, sshTunnelRoute } from './lib/utils'
 import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, AuthStatus, ChatMessage, ChatQueueMode, ChatSession, ChatSessionDelta, ChatState, ChatTokenUsage, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPActivityEvent, MCPActivitySnapshot, MCPClientSession, MCPServer, MCPServerInput, MCPToolCall, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, QueuedChatMessage, Run, ServerLogEntry, SSHShell, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceShellMode } from './types'
@@ -1627,6 +1627,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
   const stickToLatest=useRef(true)
 	const lastMessagesScrollTop=useRef(0)
 	const disclosureScrollFrame=useRef(0)
+	const activeChatDisclosures=useRef(new Set<symbol>())
 	const autoScrollFrame=useRef(0)
 	  const activeStreamRef=useRef<ActiveChatStream|null>(null)
 	const lastAgentEventIDRef=useRef(0)
@@ -1672,7 +1673,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		const timer=window.setInterval(()=>setRetryClock(Date.now()),1000)
 		return()=>window.clearInterval(timer)
 	},[connectionRetry,visible])
-	useEffect(()=>()=>{sessionLoadRef.current='';const stream=activeStreamRef.current;activeStreamRef.current=null;stream?.controller.abort();window.cancelAnimationFrame(disclosureScrollFrame.current);window.cancelAnimationFrame(autoScrollFrame.current);messagesRef.current?.classList.remove('tool-disclosure-active')},[])
+	useEffect(()=>()=>{sessionLoadRef.current='';const stream=activeStreamRef.current;activeStreamRef.current=null;stream?.controller.abort();window.cancelAnimationFrame(disclosureScrollFrame.current);window.cancelAnimationFrame(autoScrollFrame.current);activeChatDisclosures.current.clear();messagesRef.current?.classList.remove('chat-disclosure-active')},[])
 	useEffect(()=>()=>{for(const url of imageURLsRef.current)URL.revokeObjectURL(url);imageURLsRef.current.clear()},[])
 	const addImages=(files:File[])=>{const accepted=files.filter(file=>imageTypes.includes(file.type));if(accepted.length!==files.length)setImageNotice(t('chat.imageTypeRejected'));if(!accepted.length)return;const next=accepted.map(file=>{const url=URL.createObjectURL(file);imageURLsRef.current.add(url);return{id:clientId(),file,url}});setPendingImages(current=>[...current,...next])}
 	const removePendingImage=(id:string)=>{setPendingImages(current=>{const target=current.find(image=>image.id===id);if(target){URL.revokeObjectURL(target.url);imageURLsRef.current.delete(target.url)}return current.filter(image=>image.id!==id)});setImageInputKey(value=>value+1)}
@@ -1762,16 +1763,22 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	const pauseLatestOnWheel=useCallback((event:React.WheelEvent<HTMLDivElement>)=>{if(event.deltaY<0)stickToLatest.current=false},[])
 	const pauseLatestOnTouch=useCallback(()=>{stickToLatest.current=false},[])
 
-	const preserveToolDisclosurePosition=useCallback((summary:HTMLElement)=>{
+	const preserveChatDisclosurePosition=useCallback<ChatDisclosurePositionHandler>((disclosure,summary,holdAnchor)=>{
 		const container=messagesRef.current
-		if(!container||!container.contains(summary))return
+		if(!container)return
+		if(holdAnchor)activeChatDisclosures.current.add(disclosure)
+		else activeChatDisclosures.current.delete(disclosure)
+		if(!summary||!container.contains(summary)){
+			if(activeChatDisclosures.current.size===0)container.classList.remove('chat-disclosure-active')
+			return
+		}
 		stickToLatest.current=false
 		const top=summary.getBoundingClientRect().top
 		window.cancelAnimationFrame(disclosureScrollFrame.current)
-		container.classList.add('tool-disclosure-active')
+		container.classList.add('chat-disclosure-active')
 		disclosureScrollFrame.current=window.requestAnimationFrame(()=>{
 			if(container.isConnected&&summary.isConnected){container.scrollTop+=summary.getBoundingClientRect().top-top;lastMessagesScrollTop.current=container.scrollTop}
-			container.classList.remove('tool-disclosure-active')
+			if(activeChatDisclosures.current.size===0)container.classList.remove('chat-disclosure-active')
 		})
 	},[])
 
@@ -2086,9 +2093,9 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 				{historyHasMore&&<button type="button" className="chat-history-more" disabled={loadingOlderMessages} onClick={()=>void loadOlderMessages()}>{loadingOlderMessages?<LoaderCircle className="spin" size={13}/>:<History size={13}/>} {t('chat.loadEarlier')}</button>}
 				{conversationEntries.length === 0 && <div className="empty-chat"><div className="radar"><Activity size={35}/></div><h2>{t('chat.emptyTitle')}</h2></div>}
 				{renderEntries.map(item=>{
-					if(item.kind==='task_tool_group')return <TaskToolGroupCard key={item.id} group={item} onDisclosure={preserveToolDisclosurePosition}/>
+					if(item.kind==='task_tool_group')return <TaskToolGroupCard key={item.id} group={item} onDisclosure={preserveChatDisclosurePosition}/>
 					const liveTaskID=liveSSHTaskOwnerByEntryID.get(item.entry.id)
-					return <ChatBubble key={item.entry.id} sessionID={sessionId} entry={item.entry} showActions={item.entry.id===latestCompletedAssistantEntryID} runs={runs} hosts={hosts} liveSSHTaskOwner={!!liveTaskID} liveSSHTask={liveTaskID?liveSSHTasks.get(liveTaskID):undefined} onToolDisclosure={preserveToolDisclosurePosition}/>
+					return <ChatBubble key={item.entry.id} sessionID={sessionId} entry={item.entry} showActions={item.entry.id===latestCompletedAssistantEntryID} runs={runs} hosts={hosts} liveSSHTaskOwner={!!liveTaskID} liveSSHTask={liveTaskID?liveSSHTasks.get(liveTaskID):undefined} onDisclosure={preserveChatDisclosurePosition}/>
 				})}
 				{(sessionBusy||toolsRunning)&&<div className={`model-activity ${stopping?'stopping':''}`} role="status" aria-live="polite"><span className="model-activity-mark" aria-hidden="true">✻</span><b key={stopping||connectionRetry||modelRetry?'priority':workStatusIndex}>{workStatusLabel}</b></div>}
 				{conversationEntries.length>0&&<div className="chat-scroll-anchor" aria-hidden="true"/>}
@@ -2136,10 +2143,10 @@ const StreamingTextNodes=memo(function StreamingTextNodes({value}:{value:StreamT
 	return <>{value.blocks.map((block,index)=><span key={index}>{block}</span>)}{value.tail&&<span key="tail">{value.tail}</span>}</>
 })
 
-const ChatBubble=memo(function ChatBubble({ sessionID, entry, showActions, runs, hosts, liveSSHTaskOwner, liveSSHTask, onToolDisclosure }: {sessionID:string;entry:ChatEntry;showActions:boolean;runs:Run[];hosts:Host[];liveSSHTaskOwner:boolean;liveSSHTask?:LiveSSHTaskSnapshot;onToolDisclosure:(summary:HTMLElement)=>void}) {
+const ChatBubble=memo(function ChatBubble({ sessionID, entry, showActions, runs, hosts, liveSSHTaskOwner, liveSSHTask, onDisclosure }: {sessionID:string;entry:ChatEntry;showActions:boolean;runs:Run[];hosts:Host[];liveSSHTaskOwner:boolean;liveSSHTask?:LiveSSHTaskSnapshot;onDisclosure:ChatDisclosurePositionHandler}) {
 	const {t}=useTranslation()
-  if (entry.kind === 'tool') return <ToolEventCard sessionID={sessionID} entry={entry} runs={runs} hosts={hosts} liveSSHTaskOwner={liveSSHTaskOwner} currentLiveSSHTask={liveSSHTask} onDisclosure={onToolDisclosure}/>
-  if (entry.kind === 'reasoning') return <ReasoningCard content={entry.content} streamText={entry.streamText} active={!!entry.active}/>
+  if (entry.kind === 'tool') return <ToolEventCard sessionID={sessionID} entry={entry} runs={runs} hosts={hosts} liveSSHTaskOwner={liveSSHTaskOwner} currentLiveSSHTask={liveSSHTask} onDisclosure={onDisclosure}/>
+  if (entry.kind === 'reasoning') return <ReasoningCard content={entry.content} streamText={entry.streamText} active={!!entry.active} onDisclosure={onDisclosure}/>
 	const hasContent=!!entry.content||!!entry.streamText?.length
   if (entry.kind === 'assistant' && !hasContent) return null
 	return <div className={`bubble ${entry.kind} ${entry.status||''} ${entry.progress?'progress':''}`}><div className="avatar">{entry.kind === 'user' ? <UserRound size={17}/> : entry.kind === 'error' ? '!' : <Bot size={17}/>}</div><div><span className="bubble-label">{entry.kind === 'user' ? <>{t('chat.operator')}{entry.status==='failed'&&<em>{t('chat.turnIncomplete')}</em>}{entry.status==='pending'&&<em>{t('chat.processing')}</em>}{entry.status==='waiting_for_approval'&&<em>{t('statusLabels.approval_required')}</em>}</> : entry.kind === 'error' ? t('common.error') : 'OpsNerva'}</span>{entry.images&&entry.images.length>0&&<div className="message-images">{entry.images.map(image=>image.url?<a href={image.url} target="_blank" rel="noopener noreferrer" title={`${image.name} · ${formatFileSize(image.sizeBytes)}`} key={image.id}><img src={image.url} alt={image.name}/><span>{image.name}</span></a>:<span className="message-image-placeholder" title={`${image.name} · ${formatFileSize(image.sizeBytes)}`} key={image.id}><ImagePlus size={18}/><span>{image.name}</span></span>)}</div>}{hasContent&&<div className={`bubble-copy ${entry.kind==='assistant'&&entry.lifecycle!=='streaming'?'markdown-body':''}`}>{entry.kind==='assistant'&&entry.lifecycle!=='streaming'?<Suspense fallback={entry.content}><MarkdownMessage content={entry.content}/></Suspense>:entry.streamText?<StreamingTextNodes value={entry.streamText}/>:entry.content}</div>}{showActions&&<div className="assistant-message-footer"><CopyButton value={entry.content} className="message-copy-button"/>{entry.tokenUsage&&<TokenUsageLine usage={entry.tokenUsage}/>}</div>}</div></div>
@@ -2159,13 +2166,13 @@ function latestReasoningLine(content:string){
 	return characters.length>72?`…${characters.slice(-72).join('')}`:line
 }
 
-function ReasoningCard({content,streamText,active}:{content:string;streamText?:StreamText;active:boolean}){
+function ReasoningCard({content,streamText,active,onDisclosure}:{content:string;streamText?:StreamText;active:boolean;onDisclosure:ChatDisclosurePositionHandler}){
 	const {t}=useTranslation()
-	const [expanded,setExpanded]=useState(false)
+	const disclosure=useChatCardDisclosure(onDisclosure,'reasoning-chevron')
 	const latest=latestReasoningLine(streamText?streamTextTail(streamText,2048):content)
-	return <details className={`reasoning-card ${active?'active':''}`} open={expanded} onToggle={event=>setExpanded(event.currentTarget.open)}>
-	  <summary><span className="reasoning-icon"><BrainCircuit size={15}/></span><span className="reasoning-title">{active?t('chat.reasoningActive'):t('chat.reasoning')}</span><span className="reasoning-latest" title={latest}>{latest}</span><ChevronRight className="reasoning-chevron" size={14}/></summary>
-	  {expanded&&<div className="reasoning-content"><pre>{streamText?<StreamingTextNodes value={streamText}/>:content}</pre></div>}
+	return <details className={`reasoning-card ${active?'active':''}`} open={disclosure.expanded} onTransitionEnd={disclosure.finishTransition}>
+	  <summary onClick={event=>{event.preventDefault();disclosure.toggle(event.currentTarget)}}><span className="reasoning-icon"><BrainCircuit size={15}/></span><span className="reasoning-title">{active?t('chat.reasoningActive'):t('chat.reasoning')}</span><span className="reasoning-latest" title={latest}>{latest}</span><ChevronRight className="reasoning-chevron" size={14}/></summary>
+	  {disclosure.renderBody&&<div className="reasoning-content"><pre>{streamText?<StreamingTextNodes value={streamText}/>:content}</pre></div>}
   </details>
 }
 
@@ -2359,9 +2366,9 @@ function taskToolOperationSummary(entry:ChatEntry,argumentsValue=taskToolArgumen
 	return entry.tool==='TaskCreate'&&taskID?[`#${taskID}`,summary].filter(Boolean).join(' · '):summary||toolLabel(entry.tool||'')
 }
 
-const TaskToolGroupCard=memo(function TaskToolGroupCard({group,onDisclosure}:{group:TaskToolEntryGroup;onDisclosure:(summary:HTMLElement)=>void}){
+const TaskToolGroupCard=memo(function TaskToolGroupCard({group,onDisclosure}:{group:TaskToolEntryGroup;onDisclosure:ChatDisclosurePositionHandler}){
 	const {t}=useTranslation()
-	const disclosure=useToolCardDisclosure(onDisclosure)
+	const disclosure=useChatCardDisclosure(onDisclosure,'tool-summary-chevron')
 	const status=taskToolGroupStatus(group.entries)
 	const operations=group.entries.map(entry=>{
 		const argumentsValue=taskToolArguments(entry)
@@ -2369,16 +2376,16 @@ const TaskToolGroupCard=memo(function TaskToolGroupCard({group,onDisclosure}:{gr
 		return{summary:taskToolOperationSummary(entry,argumentsValue),arguments:safeArguments,status:taskToolEntryStatus(entry)}
 	})
 	const summary=operations.map(operation=>operation.summary).join(' · ')
-	return <details className={`tool-event tool-event-rich task-tool-group ${status}${disclosure.closing?' closing':''}`} open={disclosure.open}>
+	return <details className={`tool-event tool-event-rich task-tool-group ${status}`} open={disclosure.expanded} onTransitionEnd={disclosure.finishTransition}>
 		<summary onClick={event=>{event.preventDefault();disclosure.toggle(event.currentTarget)}}><div className="tool-summary-icon"><ListChecks size={15}/></div><div className="tool-summary-copy"><div className="tool-summary-heading"><b>{toolLabel(group.tool)}</b><span className="task-tool-group-count">{t('agentTasks.operationCount',{count:group.entries.length})}</span><code title={summary}>{summary}</code></div></div><div className="tool-summary-statuses"><span className={`tool-status ${status}`} key={status}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight className="tool-summary-chevron" size={14}/></summary>
-		{disclosure.open&&<div className={`tool-event-body${disclosure.closing?' closing':''}`} onAnimationEnd={disclosure.finishClosing}><CompactTable title={t('agentTasks.operations')} columns={[t('agentTasks.operation'),t('tool.actualParameters'),t('common.status')]} rows={operations.map(operation=>[operation.summary,operation.arguments,t(`statusLabels.${operation.status}`,{defaultValue:operation.status.replaceAll('_',' ')})])}/></div>}
+		{disclosure.renderBody&&<div className="tool-event-body"><CompactTable title={t('agentTasks.operations')} columns={[t('agentTasks.operation'),t('tool.actualParameters'),t('common.status')]} rows={operations.map(operation=>[operation.summary,operation.arguments,t(`statusLabels.${operation.status}`,{defaultValue:operation.status.replaceAll('_',' ')})])}/></div>}
 	</details>
 },(previous,next)=>previous.onDisclosure===next.onDisclosure&&previous.group.tool===next.group.tool&&previous.group.entries.length===next.group.entries.length&&previous.group.entries.every((entry,index)=>entry===next.group.entries[index]))
 
-function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,liveSSHTaskOwner,currentLiveSSHTask,onDisclosure}:{sessionID:string;entry:ChatEntry;runs:Run[];hosts:Host[];liveSSHTaskOwner:boolean;currentLiveSSHTask?:LiveSSHTaskSnapshot;onDisclosure:(summary:HTMLElement)=>void}){
+function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,liveSSHTaskOwner,currentLiveSSHTask,onDisclosure}:{sessionID:string;entry:ChatEntry;runs:Run[];hosts:Host[];liveSSHTaskOwner:boolean;currentLiveSSHTask?:LiveSSHTaskSnapshot;onDisclosure:ChatDisclosurePositionHandler}){
 	const {t}=useTranslation()
 	const chatVisible=useContext(ChatVisibilityContext)
-	const disclosure=useToolCardDisclosure(onDisclosure)
+	const disclosure=useChatCardDisclosure(onDisclosure,'tool-summary-chevron')
 	const [fullContent,setFullContent]=useState('')
 	const [loadingDetail,setLoadingDetail]=useState(false)
 	const [detailError,setDetailError]=useState('')
@@ -2567,9 +2574,9 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,liveSSHTaskOwner
 		setLoadingDetail(true);setDetailError('')
 		void api.chatMessage(sessionID,initialEntry.sourceMessageId).then(message=>setFullContent(message.content)).catch(error=>setDetailError(errorText(error))).finally(()=>setLoadingDetail(false))
 	}
-		  return <details className={`tool-event tool-event-rich ${sshTaskOperation?'ssh-task-tool ':''}${status}${disclosure.closing?' closing':''}`} open={disclosure.open}>
+		  return <details className={`tool-event tool-event-rich ${sshTaskOperation?'ssh-task-tool ':''}${status}`} open={disclosure.expanded} onTransitionEnd={disclosure.finishTransition}>
 			<summary onClick={event=>{event.preventDefault();toggleExpanded(event.currentTarget)}}><div className="tool-summary-icon">{toolSummaryIcon(entry.tool)}</div><div className="tool-summary-copy"><div className="tool-summary-heading"><b>{summaryLabel}</b>{sshTransfer?<ToolTransferRoute sourceHost={sourceHostName} sourcePath={sourcePath} destinationHost={hostName} destinationPath={remotePath}/>:workspaceTransferRoute?<WorkspaceTransferRoute {...workspaceTransferRoute}/>:<>{targets.length>0&&<div className="tool-summary-targets">{targets.map((target,index)=><span className={`tool-target-chip tool-target-${target.kind}`} title={`${target.label}: ${[target.name,target.id].filter(Boolean).join(' · ')}`} key={`${target.kind}_${target.id||target.name}_${index}`}>{target.kind==='host'?<Server size={11}/>:target.kind==='workspace'?<FolderOpen size={11}/>:<ListChecks size={11}/>} {(targets.length>1||target.kind==='scope')&&<em>{target.label}</em>}<b>{target.name||target.id}</b></span>)}</div>}{commandSummary!==summaryLabel&&<code className={sshTaskOperation?'tool-task-id':undefined} title={previewText(commandSummary)}>{previewText(commandSummary)}</code>}</>}</div></div><div className="tool-summary-statuses">{loadingDetail&&<LoaderCircle className="spin" size={12}/>} {autoApproved&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}<span className={`tool-status ${status}`} key={status}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span></div><ChevronRight className="tool-summary-chevron" size={14}/>{request&&<div className="tool-summary-meta"><span className={`tool-summary-permission ${permission}`}><em>{t('tool.permission')}</em><b>{permission}</b></span>{purpose&&<span className="tool-summary-purpose" title={purpose}><em>{t('tool.reason')}</em><b>{purpose}</b></span>}</div>}{toolLive&&<div className={`tool-live-progress ${transferTotal>0?'determinate':''}`} role="progressbar" aria-valuemin={transferTotal>0?0:undefined} aria-valuemax={transferTotal>0?transferTotal:undefined} aria-valuenow={transferTotal>0?transferred:undefined}><i><em style={transferTotal>0?{width:`${transferPercent}%`}:undefined}/></i><span>{transferTotal>0?`${formatFileSize(transferred)} / ${formatFileSize(transferTotal)}`:sshTaskOperation?t('tool.liveTask'):entry.liveOutputStream?.toUpperCase()||''}</span><time>{elapsed}</time></div>}{outputPreview&&<div className={`tool-summary-preview ${previewStream==='stderr'?'stderr':''}`}><span>{shellAction==='output'?shellActionLabel:(previewStream||'stdout').toUpperCase()}</span><pre>{outputPreview}</pre></div>}</summary>
-		{disclosure.open&&<div className={`tool-event-body${disclosure.closing?' closing':''}`} onAnimationEnd={disclosure.finishClosing}>
+		{disclosure.renderBody&&<div className="tool-event-body">
 		  {detailError&&<div className="tool-detail-error">{detailError}</div>}
 		  {shellPrimaryAction&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellPrimaryContent||'—'}/><pre><HighlightedCode code={previewText(shellPrimaryContent||'—',toolOutputPreviewChars)} language={inferScriptLanguage(shellPrimaryContent||'')}/></pre></div></section>}
 		  {shellOutputAction&&!shellChunks.length&&<section className="tool-command-pane"><div className="tool-command-head"><span>{shellActionLabel}</span></div><div className="tool-command-block"><CopyButton value={shellOutput||'—'}/><pre><HighlightedCode code={previewText(shellOutput||'—',toolOutputPreviewChars)} autoDetect live={toolLive}/></pre></div></section>}

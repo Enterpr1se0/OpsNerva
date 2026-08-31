@@ -20,6 +20,13 @@
 - Organize code into cohesive files by module or feature responsibility. Do not accumulate unrelated components, handlers, state management, and protocol logic in one oversized, tightly coupled file.
 - When refactoring a touched area, split existing oversized or coupled files along clear responsibility boundaries when that improves cohesion; avoid arbitrary fragmentation into trivial files.
 
+## Frontend performance
+
+- Treat frontend runtime performance as an implementation-quality requirement. Inspect update frequency, render scope, lifecycle, and idle resource use before adding timers, subscriptions, animations, or streaming UI updates.
+- Do not use aggressive polling when an event-driven or server-push path is available. When polling is required, use a justified interval and bounded lifecycle, and stop it when the view is inactive, hidden, unmounted, or the operation reaches a terminal state.
+- Do not leave loading indicators or decorative animations running indefinitely. Tie animation lifetime to real activity, stop it when hidden or complete, and avoid continuously repainting expensive properties.
+- Coalesce or throttle high-frequency progress and streaming updates, keep rapidly changing state close to its consumers, and avoid rerendering entire pages or long lists for localized changes.
+
 ## Frontend copy
 
 - Keep frontend text concise and limited to labels, values, statuses, actionable errors, and instructions required to complete an operation.
