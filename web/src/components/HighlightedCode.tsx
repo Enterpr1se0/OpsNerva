@@ -1,4 +1,4 @@
-import { memo, useEffect, useState } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
 import type { HLJSApi } from 'highlight.js'
 
 const outputLanguages=['bash','powershell','json','yaml','xml','diff','javascript','typescript','go','rust','python','sql']
@@ -31,6 +31,7 @@ const extensionLanguages:Record<string,string>={
 	toml:'ini',ts:'typescript',tsx:'typescript',xml:'xml',yaml:'yaml',yml:'yaml',zsh:'bash',
 }
 
+let loadedHighlighter:HLJSApi|undefined
 let highlighterPromise:Promise<HLJSApi>|undefined
 
 function loadHighlighter(){
@@ -40,6 +41,7 @@ function loadHighlighter(){
 	]).then(([common,powershell])=>{
 		const highlighter=common.default
 		if(!highlighter.getLanguage('powershell'))highlighter.registerLanguage('powershell',powershell.default)
+		loadedHighlighter=highlighter
 		return highlighter
 	})
 	return highlighterPromise
@@ -69,24 +71,22 @@ export function inferScriptLanguage(script:string){
 	return'bash'
 }
 
-type HighlightedResult={source:string;language?:string;autoDetect:boolean;html:string}
+function highlight(highlighter:HLJSApi,code:string,language:string|undefined){
+	return language&&highlighter.getLanguage(language)
+		?highlighter.highlight(code,{language,ignoreIllegals:true}).value
+		:highlighter.highlightAuto(code,outputLanguages).value
+}
 
 export const HighlightedCode=memo(function HighlightedCode({code,language,autoDetect=false,live=false,className=''}:{code:string;language?:string;autoDetect?:boolean;live?:boolean;className?:string}){
 	const normalizedLanguage=normalizeLanguage(language)
-	const [result,setResult]=useState<HighlightedResult>()
+	const highlightable=!live&&!!code&&code.length<=maxHighlightedChars&&(!!normalizedLanguage||autoDetect&&code.length<=maxAutoDetectedChars)
+	const [highlighter,setHighlighter]=useState<HLJSApi|undefined>(loadedHighlighter)
 	useEffect(()=>{
-		if(!code||live||code.length>maxHighlightedChars||(!normalizedLanguage&&(!autoDetect||code.length>maxAutoDetectedChars)))return
+		if(!highlightable||highlighter)return
 		let active=true
-		const timer=window.setTimeout(()=>{
-			void loadHighlighter().then(highlighter=>{
-				const html=normalizedLanguage&&highlighter.getLanguage(normalizedLanguage)
-					?highlighter.highlight(code,{language:normalizedLanguage,ignoreIllegals:true}).value
-					:highlighter.highlightAuto(code,outputLanguages).value
-				if(active)setResult({source:code,language:normalizedLanguage,autoDetect,html})
-			})
-		},60)
-		return()=>{active=false;window.clearTimeout(timer)}
-	},[autoDetect,code,live,normalizedLanguage])
-	const highlighted=!live&&result?.source===code&&result.language===normalizedLanguage&&result.autoDetect===autoDetect
-	return <code className={`syntax-code ${normalizedLanguage?`language-${normalizedLanguage}`:''} ${className}`.trim()}>{highlighted?<span dangerouslySetInnerHTML={{__html:result.html}}/>:code}</code>
+		void loadHighlighter().then(value=>{if(active)setHighlighter(value)})
+		return()=>{active=false}
+	},[highlightable,highlighter])
+	const html=useMemo(()=>highlightable&&highlighter?highlight(highlighter,code,normalizedLanguage):undefined,[code,highlightable,highlighter,normalizedLanguage])
+	return <code className={`syntax-code ${normalizedLanguage?`language-${normalizedLanguage}`:''} ${className}`.trim()}>{html!==undefined?<span dangerouslySetInnerHTML={{__html:html}}/>:code}</code>
 })

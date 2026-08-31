@@ -21,7 +21,7 @@ export function HighlightedTextEditor({value,language,ariaLabel,autoFocus=false,
 	}
 	const mirrorValue=value.endsWith('\n')?`${value} `:value||' '
 	return <div className="highlighted-text-editor">
-		<pre ref={mirrorRef} aria-hidden="true"><HighlightedCode code={mirrorValue} language={language} autoDetect/></pre>
+		<pre ref={mirrorRef} aria-hidden="true"><HighlightedCode code={mirrorValue} language={language}/></pre>
 		<textarea className="text-file-input" aria-label={ariaLabel} value={value} wrap="off" onChange={event=>onChange(event.target.value)} onKeyDown={onKeyDown} onScroll={syncScroll} spellCheck={false} autoFocus={autoFocus}/>
 	</div>
 }
