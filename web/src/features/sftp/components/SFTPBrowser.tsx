@@ -34,21 +34,22 @@ export function SFTPBrowser({host,active=true,embedded=false,hosts=[],onHostSele
 	const [openingFile,setOpeningFile]=useState('')
 	const {active:transfer,uploadVersion,upload:uploadTransfer,download,cancel}=useSFTPTransfer(hostID,active)
 	const loadRequest=useRef(0)
+	const currentPath=useRef('')
 	const observedUploadVersion=useRef(uploadVersion)
-	const load=useCallback(async(target='')=>{
+	const load=useCallback(async(target=currentPath.current)=>{
 		if(!hostID)return
 		const request=++loadRequest.current
 		setLoading(true);setListError('')
 		try{
 			const result=await api.sftpEntries(hostID,target)
 			if(request!==loadRequest.current)return
-			setPath(result.path);setPathInput(result.path);setEntries(result.entries||[])
+			currentPath.current=result.path;setPath(result.path);setPathInput(result.path);setEntries(result.entries||[])
 		}catch(err){
 			if(request!==loadRequest.current)return
 			setEntries([]);setListError(errorText(err))
 		}finally{if(request===loadRequest.current)setLoading(false)}
 	},[hostID])
-	useEffect(()=>{if(!active)return;observedUploadVersion.current=uploadVersion;void load('')},[active,load])
+	useEffect(()=>{if(!active)return;observedUploadVersion.current=uploadVersion;void load()},[active,load])
 	useEffect(()=>{
 		if(!active)return
 		if(observedUploadVersion.current===uploadVersion)return
