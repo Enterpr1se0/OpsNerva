@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -134,7 +135,7 @@ func newContextSummarizationMiddleware(ctx context.Context, chatModel model.Base
 		ModelOptions: []model.Option{model.WithMaxTokens(contextCompressionSummaryMaxTokens)},
 		Trigger:      &summarization.TriggerCondition{ContextTokens: triggerTokens},
 		TokenCounter: func(_ context.Context, input *summarization.TokenCounterInput) (int, error) {
-			return estimateContextTokens(input.Messages, nil), nil
+			return estimateContextTokens(input.Messages, nil)
 		},
 		UserInstruction: contextSummaryInstruction,
 		GenModelInput:   contextSummaryModelInput,
@@ -187,7 +188,10 @@ func (m *contextSummarizationMiddleware) BeforeModelRewriteState(ctx context.Con
 	if run == nil || run.boundaryID == "" || run.isComplete() {
 		return ctx, state, nil
 	}
-	contextTokens := estimateContextTokens(state.Messages, state.ToolInfos)
+	contextTokens, err := estimateContextTokens(state.Messages, state.ToolInfos)
+	if err != nil {
+		return ctx, state, fmt.Errorf("estimate model context: %w", err)
+	}
 	contextWindow, percent, triggerTokens := m.compressionThreshold()
 	if contextTokens <= triggerTokens {
 		return ctx, state, nil
@@ -344,8 +348,14 @@ func (m *contextSummarizationMiddleware) persistSummary(ctx context.Context, bef
 	if content == "" {
 		return fmt.Errorf("context compression produced no durable summary")
 	}
-	beforeTokens := estimateContextTokens(before.Messages, before.ToolInfos)
-	afterTokens := estimateContextTokens(after.Messages, after.ToolInfos)
+	beforeTokens, err := estimateContextTokens(before.Messages, before.ToolInfos)
+	if err != nil {
+		return fmt.Errorf("estimate context before summary: %w", err)
+	}
+	afterTokens, err := estimateContextTokens(after.Messages, after.ToolInfos)
+	if err != nil {
+		return fmt.Errorf("estimate context after summary: %w", err)
+	}
 	saved, err := m.store.SaveChatContextSummary(ctx, domain.ChatContextSummary{
 		SessionID: run.sessionID, Summary: content, ThroughMessageID: run.boundaryID,
 		Trigger: run.trigger, SourceTokens: beforeTokens, SummaryTokens: max(1, len(content)/4), Model: run.model,
@@ -362,24 +372,13 @@ func (m *contextSummarizationMiddleware) persistSummary(ctx context.Context, bef
 	return nil
 }
 
-func estimateContextTokens(messages []*schema.Message, tools []*schema.ToolInfo) int {
-	bytes := 0
-	for _, message := range messages {
-		if message == nil {
-			continue
-		}
-		bytes += len(message.Content) + len(message.ReasoningContent)
-		for _, part := range message.UserInputMultiContent {
-			bytes += len(part.Text)
-			if part.Image != nil && part.Image.Base64Data != nil {
-				bytes += len(*part.Image.Base64Data)
-			}
-		}
+func estimateContextTokens(messages []*schema.Message, tools []*schema.ToolInfo) (int, error) {
+	payload, err := json.Marshal(struct {
+		Messages []*schema.Message  `json:"messages"`
+		Tools    []*schema.ToolInfo `json:"tools,omitempty"`
+	}{Messages: messages, Tools: tools})
+	if err != nil {
+		return 0, err
 	}
-	for _, tool := range tools {
-		if tool != nil {
-			bytes += len(tool.Name) + len(tool.Desc)
-		}
-	}
-	return max(1, (bytes+3)/4)
+	return max(1, (len(payload)+3)/4), nil
 }

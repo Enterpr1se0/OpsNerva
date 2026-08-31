@@ -338,10 +338,6 @@ func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st
 		// "" for chunk-concat stability; restore them before tool invocation.
 		middlewares = append([]compose.ToolMiddleware{{Invokable: normalizeEmptyToolArguments}}, middlewares...)
 	}
-	toolReductionMiddleware, err := newToolReductionMiddleware(ctx, descriptors)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("build Eino tool reduction middleware: %w", err)
-	}
 	contextSummarizer, err := newContextSummarizationMiddleware(ctx, chatModel, st,
 		cfg.ContextWindow, settings.ContextCompressionPercent)
 	if err != nil {
@@ -360,7 +356,7 @@ func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st
 			Tools: tools, ExecuteSequentially: true, UnknownToolsHandler: unknownToolResult,
 			ToolCallMiddlewares: middlewares,
 		}},
-		Handlers: []adk.ChatModelAgentMiddleware{hostCatalogMiddleware, toolReductionMiddleware, contextSummarizer, plantaskMiddleware, skillMiddleware},
+		Handlers: []adk.ChatModelAgentMiddleware{hostCatalogMiddleware, contextSummarizer, plantaskMiddleware, skillMiddleware},
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("create Eino agent: %w", err)

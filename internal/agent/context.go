@@ -158,43 +158,32 @@ func buildMultimodalModelContextWithSummaryForProvider(history []domain.ChatMess
 			prepared = append(prepared, item)
 		}
 	}
-	selectedStart := len(prepared)
-	selectedBytes := 0
-	for index := len(prepared) - 1; index >= 0; index-- {
-		turnBytes := preparedModelTurnBytes(prepared[index])
-		if selectedBytes+turnBytes > modelHistoryMaxBytes {
-			break
-		}
-		selectedStart = index
-		selectedBytes += turnBytes
-	}
-	selected := prepared[selectedStart:]
-	if len(selected) > contextCompressionPreserveTurns {
-		stats.CompressionBoundaryID = selected[len(selected)-contextCompressionPreserveTurns-1].boundaryID
+	if len(prepared) > contextCompressionPreserveTurns {
+		stats.CompressionBoundaryID = prepared[len(prepared)-contextCompressionPreserveTurns-1].boundaryID
 	}
 
 	stats.Images = len(current.Attachments)
 	for _, attachment := range current.Attachments {
 		stats.ImageBytes += int64(len(attachment.Data))
 	}
-	for _, turn := range selected {
+	for _, turn := range prepared {
 		stats.Images += len(turn.attachments)
 		for _, attachment := range turn.attachments {
 			stats.ImageBytes += int64(len(attachment.Data))
 		}
 	}
 
-	messages := make([]*schema.Message, 0, len(selected)*3+2)
+	messages := make([]*schema.Message, 0, len(prepared)*3+2)
 	if summary.Summary != "" {
 		messages = append(messages, schema.SystemMessage(durableContextSummaryPrefix+summary.Summary))
 	}
-	for _, turn := range selected {
+	for _, turn := range prepared {
 		messages = append(messages, multimodalUserMessage(turn.user, turn.attachments))
 		messages = append(messages, turn.messages...)
 		stats.ToolResults += turn.toolResults
 	}
 	messages = append(messages, multimodalUserMessage(current.Content, current.Attachments))
-	stats.IncludedTurns = len(selected)
+	stats.IncludedTurns = len(prepared)
 	for _, message := range messages {
 		stats.Bytes += len(message.Content) + len(message.ReasoningContent)
 		for _, toolCall := range message.ToolCalls {
@@ -280,7 +269,6 @@ func prepareModelTurn(turn storedModelTurn, providerKind string, turnIndex int) 
 				arguments = "{}"
 			}
 			result := strings.TrimSpace(stripToolContextMetadata(toolResult.ToolName, toolResult.Content))
-			result = compactModelPayload(result, modelStoredToolResultMaxBytes, true)
 			toolCalls = append(toolCalls, schema.ToolCall{ID: toolCallID, Type: "function", Function: schema.FunctionCall{Name: toolName, Arguments: arguments}})
 			toolMessages = append(toolMessages, schema.ToolMessage(result, toolCallID, schema.WithToolName(toolName)))
 		}
@@ -382,22 +370,6 @@ func multimodalUserMessage(text string, attachments []domain.ChatAttachment) *sc
 		})
 	}
 	return &schema.Message{Role: schema.User, UserInputMultiContent: parts}
-}
-
-func preparedModelTurnBytes(turn preparedModelTurn) int {
-	total := len(turn.user)
-	for _, message := range turn.messages {
-		if message != nil {
-			total += len(message.Content) + len(message.ReasoningContent)
-			for _, toolCall := range message.ToolCalls {
-				total += len(toolCall.ID) + len(toolCall.Function.Name) + len(toolCall.Function.Arguments)
-			}
-		}
-	}
-	for _, attachment := range turn.attachments {
-		total += (len(attachment.Data)*4 + 2) / 3
-	}
-	return total
 }
 
 func containsInternalContextMarker(content string) bool {

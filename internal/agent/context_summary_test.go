@@ -98,6 +98,41 @@ func TestAutoContextCompressionTriggerUsesKnownModelWindow(t *testing.T) {
 	}
 }
 
+func TestEstimateContextTokensIncludesToolArgumentsAndSchema(t *testing.T) {
+	base, err := estimateContextTokens([]*schema.Message{schema.UserMessage("inspect")}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arguments := strings.Repeat("a", 8<<10)
+	messages := []*schema.Message{
+		schema.UserMessage("inspect"),
+		schema.AssistantMessage("", []schema.ToolCall{{
+			ID: "call-large", Function: schema.FunctionCall{Name: "ssh_run_script", Arguments: arguments},
+		}}),
+	}
+	withArguments, err := estimateContextTokens(messages, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withArguments-base < len(arguments)/4 {
+		t.Fatalf("tool arguments were not fully estimated: base=%d with_arguments=%d", base, withArguments)
+	}
+	tools := []*schema.ToolInfo{{
+		Name: "fixture_tool",
+		Desc: "fixture",
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"content": {Type: schema.String, Desc: strings.Repeat("schema", 1024), Required: true},
+		}),
+	}}
+	withSchema, err := estimateContextTokens(messages, tools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withSchema <= withArguments {
+		t.Fatalf("tool schema was not estimated: without=%d with=%d", withArguments, withSchema)
+	}
+}
+
 func TestContextSummarizerUpdatesThresholdAfterWindowDetection(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "summary-threshold.db"))
