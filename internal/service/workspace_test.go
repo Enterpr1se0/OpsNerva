@@ -533,7 +533,7 @@ func TestWorkspaceFileEditRejectsInvalidReplacementAndMissingTarget(t *testing.T
 }
 
 func TestApplyTextEditRequiresOneExactBlock(t *testing.T) {
-	if _, err := applyTextEdit("a\n", domain.TextEdit{OldText: "wrong", NewText: "b"}); err == nil || !strings.Contains(err.Error(), "matched 0") {
+	if _, err := applyTextEdit("a\n", domain.TextEdit{OldText: "wrong", NewText: "b"}); err == nil || !strings.Contains(err.Error(), "matched 0") || !strings.Contains(err.Error(), "preserving all leading whitespace") {
 		t.Fatalf("missing old_text was accepted: %v", err)
 	}
 	if _, err := applyTextEdit("a\na\n", domain.TextEdit{OldText: "a", NewText: "b"}); err == nil || !strings.Contains(err.Error(), "matched 2") {
@@ -554,6 +554,14 @@ func TestApplyTextEditRequiresOneExactBlock(t *testing.T) {
 	crlf, err := applyTextEdit("a\r\nb\r\nc\r\n", domain.TextEdit{OldText: "b", NewText: "b-edited"})
 	if err != nil || crlf != "a\r\nb-edited\r\nc\r\n" {
 		t.Fatalf("CRLF bytes changed: updated=%q err=%v", crlf, err)
+	}
+	yaml := "tasks:\n    - name: install package\n      module: apt\n"
+	if _, err := applyTextEdit(yaml, domain.TextEdit{OldText: "- name: install package\n      module: apt", NewText: "- name: update package\n      module: apt"}); err == nil || !strings.Contains(err.Error(), "matched 0") {
+		t.Fatalf("unindented YAML block was accepted: %v", err)
+	}
+	updated, err = applyTextEdit(yaml, domain.TextEdit{OldText: "    - name: install package\n      module: apt", NewText: "    - name: update package\n      module: apt"})
+	if err != nil || updated != "tasks:\n    - name: update package\n      module: apt\n" {
+		t.Fatalf("exactly indented YAML block failed: updated=%q err=%v", updated, err)
 	}
 }
 

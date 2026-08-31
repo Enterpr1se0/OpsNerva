@@ -117,7 +117,7 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_file_edit", "Create a remote text file or replace/delete one exact unique line block; read existing files first."+validatorHint(remoteValidatorIDs), func(ctx context.Context, input agenttool.FileEditInput) (agenttool.ExecResult, error) {
+	if err := appendTool(toolutils.InferTool("ssh_file_edit", agenttool.RemoteFileEditDescription+validatorHint(remoteValidatorIDs), func(ctx context.Context, input agenttool.FileEditInput) (agenttool.ExecResult, error) {
 		return sshTools.RunFileEdit(ctx, input, "eino-agent")
 	})); err != nil {
 		return nil, err

@@ -87,6 +87,8 @@ func ClassifyExecError(err error) (string, bool, string) {
 		return "denied", false, "respect the denial and choose a permitted operation"
 	case strings.Contains(message, "required"), strings.Contains(message, "invalid"), strings.Contains(message, "unsupported"):
 		return "validation_failed", false, "correct the tool input using the error message; do not repeat unchanged input"
+	case strings.Contains(message, "old_text matched"):
+		return "conflict", true, "copy one exact unique block from the latest file read, preserving all leading whitespace, then retry"
 	case strings.Contains(message, "changed"), strings.Contains(message, "conflict"):
 		return "conflict", true, "read the current state again before proposing another change"
 	case strings.Contains(message, "constraint failed"):

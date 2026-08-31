@@ -59,7 +59,7 @@ func registerTools(server *mcp.Server, svc *service.Service) {
 			output, err := sshTools.RunFileList(ctx, input, "mcp-client")
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_edit", Description: "Create a remote text file or replace/delete one exact unique line block; read existing files first.", InputSchema: inputSchema[agenttool.FileEditInput](), Annotations: changeAnnotations("Edit SSH file", true)},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_edit", Description: agenttool.RemoteFileEditDescription, InputSchema: inputSchema[agenttool.FileEditInput](), Annotations: changeAnnotations("Edit SSH file", true)},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agenttool.FileEditInput) (*mcp.CallToolResult, agenttool.ExecResult, error) {
 			output, err := sshTools.RunFileEdit(ctx, input, "mcp-client")
 			return nil, output, err

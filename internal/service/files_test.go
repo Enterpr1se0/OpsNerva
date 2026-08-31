@@ -129,6 +129,19 @@ func TestRemoteFileEditBuildsReviewedDiffAndScriptAfterApproval(t *testing.T) {
 	}
 }
 
+func TestRemoteFileEditPreservesExactMatchConflict(t *testing.T) {
+	svc, transport, host := newTestService(t)
+	saveApprovalMode(t, svc, domain.ApprovalModeFullAccess)
+	transport.stdout = []byte{}
+	transport.stderr = []byte("file edit conflict: old_text matched 0 blocks; " + fileEditRetryAdvice + "\n")
+	transport.exitCode = 75
+
+	result, err := svc.EditRemoteFile(context.Background(), host.ID, "/etc/app.yml", "- name: task", "- name: updated", "", false, "update task", "eino-agent")
+	if err == nil || result.ExitCode != 75 || !strings.Contains(err.Error(), "matched 0 blocks") || !strings.Contains(err.Error(), "preserving all leading whitespace") {
+		t.Fatalf("remote edit conflict lost exact-match details: result=%#v err=%v", result, err)
+	}
+}
+
 func TestRemoteFileSearchSupportsExplicitModesAndNoMatchSuccess(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("POSIX shell is unavailable")
@@ -383,6 +396,51 @@ func TestRemoteFileChangeRejectsAmbiguousOldText(t *testing.T) {
 	content, readErr := os.ReadFile(target)
 	if readErr != nil || string(content) != "enabled=false\nenabled=false\n" {
 		t.Fatalf("ambiguous edit touched target: content=%q err=%v", content, readErr)
+	}
+}
+
+func TestRemoteFileChangeRequiresExactLeadingWhitespace(t *testing.T) {
+	requireLinuxRemoteFileScript(t)
+	directory := t.TempDir()
+	target := filepath.Join(directory, "tasks.yml")
+	original := "tasks:\n    - name: install package\n      ansible.builtin.apt:\n        name: curl\n"
+	if err := os.WriteFile(target, []byte(original), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	withoutIndent, _, err := buildTextEdit(target,
+		"- name: install package\n      ansible.builtin.apt:\n        name: curl",
+		"- name: update package\n      ansible.builtin.apt:\n        name: curl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("sh", "-se")
+	command.Stdin = strings.NewReader(buildRemoteFileChangeScript(target, filepath.Join(directory, ".edit.tmp"), withoutIndent, ""))
+	output, err := command.CombinedOutput()
+	var exitError *exec.ExitError
+	if err == nil || !errors.As(err, &exitError) || exitError.ExitCode() != 75 || !strings.Contains(string(output), "preserving all leading whitespace") {
+		t.Fatalf("unindented edit was not diagnosed: output=%q err=%v", output, err)
+	}
+	content, readErr := os.ReadFile(target)
+	if readErr != nil || string(content) != original {
+		t.Fatalf("unindented edit changed target: content=%q err=%v", content, readErr)
+	}
+
+	withIndent, _, err := buildTextEdit(target,
+		"    - name: install package\n      ansible.builtin.apt:\n        name: curl",
+		"    - name: update package\n      ansible.builtin.apt:\n        name: curl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	command = exec.Command("sh", "-se")
+	command.Stdin = strings.NewReader(buildRemoteFileChangeScript(target, filepath.Join(directory, ".edit.tmp"), withIndent, ""))
+	if output, err = command.CombinedOutput(); err != nil {
+		t.Fatalf("correctly indented edit failed: output=%q err=%v", output, err)
+	}
+	content, readErr = os.ReadFile(target)
+	want := strings.Replace(original, "    - name: install package", "    - name: update package", 1)
+	if readErr != nil || string(content) != want {
+		t.Fatalf("correctly indented edit content=%q want=%q err=%v", content, want, readErr)
 	}
 }
 

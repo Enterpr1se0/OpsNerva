@@ -105,11 +105,13 @@ type FileListInput struct {
 	Path   string `json:"path" jsonschema_description:"absolute remote directory path"`
 }
 
+const RemoteFileEditDescription = "Create a remote text file or replace/delete one exact unique line block. Read existing files first; leading whitespace is significant."
+
 type FileEditInput struct {
 	HostID      string `json:"host_id" jsonschema_description:"registered host identifier"`
 	Path        string `json:"path" jsonschema_description:"absolute remote file"`
-	OldText     string `json:"old_text" jsonschema_description:"exact complete lines from latest read; must match once; empty creates a new file"`
-	NewText     string `json:"new_text" jsonschema_description:"replacement lines; empty deletes old_text"`
+	OldText     string `json:"old_text" jsonschema_description:"exact complete lines copied from the latest read, preserving all leading whitespace; must match once; empty creates a new file"`
+	NewText     string `json:"new_text" jsonschema_description:"replacement lines with the intended leading whitespace; empty deletes old_text"`
 	ValidatorID string `json:"validator_id,omitempty" jsonschema_description:"listed validator ID only; never a command"`
 	Elevated    bool   `json:"elevated,omitempty" jsonschema_description:"edit with managed root access"`
 	Reason      string `json:"reason" jsonschema_description:"one-sentence purpose"`
@@ -143,8 +145,8 @@ type WorkspaceReadInput struct {
 
 type WorkspaceFileEditInput struct {
 	Path        string `json:"path" jsonschema_description:"Workspace-relative file"`
-	OldText     string `json:"old_text" jsonschema_description:"exact complete lines from latest read; must match once; empty creates a new file"`
-	NewText     string `json:"new_text" jsonschema_description:"replacement lines; empty deletes old_text"`
+	OldText     string `json:"old_text" jsonschema_description:"exact complete lines copied from the latest read, preserving all leading whitespace; must match once; empty creates a new file"`
+	NewText     string `json:"new_text" jsonschema_description:"replacement lines with the intended leading whitespace; empty deletes old_text"`
 	ValidatorID string `json:"validator_id,omitempty" jsonschema_description:"listed Workspace validator ID only; never a command"`
 	Reason      string `json:"reason" jsonschema_description:"one-sentence purpose"`
 }

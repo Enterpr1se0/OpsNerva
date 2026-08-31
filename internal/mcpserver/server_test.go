@@ -176,7 +176,7 @@ func TestServerExposesMergedBackgroundTaskTools(t *testing.T) {
 				t.Fatal(marshalErr)
 			}
 			schema := string(schemaJSON)
-			fileEditFound = strings.Contains(schema, `"old_text"`) && strings.Contains(schema, `"new_text"`) && strings.Contains(schema, `"validator_id"`) && !strings.Contains(schema, `"diff"`) && !strings.Contains(schema, `"validator"`)
+			fileEditFound = registered.Description == agenttool.RemoteFileEditDescription && strings.Contains(schema, `"old_text"`) && strings.Contains(schema, `"new_text"`) && strings.Contains(schema, `"validator_id"`) && strings.Contains(schema, "preserving all leading whitespace") && !strings.Contains(schema, `"diff"`) && !strings.Contains(schema, `"validator"`)
 		}
 		if registered.Name == "ssh_shell" {
 			schemaJSON, marshalErr := json.Marshal(registered.InputSchema)

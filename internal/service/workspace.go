@@ -949,7 +949,7 @@ func (s *Service) EditWorkspaceFile(ctx context.Context, workspaceID, relativePa
 		return result, fmt.Errorf("workspace validation failed; the target file was not changed")
 	}
 	if result.ExitCode == 75 {
-		return result, fmt.Errorf("workspace file edit conflict; read the current path and retry")
+		return result, fileEditConflictError(result, "workspace file edit conflict: "+fileEditRetryAdvice)
 	}
 	return result, submitErr
 }
@@ -2196,7 +2196,7 @@ func (s *Service) editWorkspaceFile(ctx context.Context, workspace config.Worksp
 		originalDigest = sha256.Sum256(original)
 		updated, err = applyTextEditBytes(original, *req.TextEdit)
 		if err != nil {
-			return sshx.RawResult{ExitCode: 1, Stderr: []byte(err.Error()), Duration: time.Since(started)}, err
+			return sshx.RawResult{ExitCode: 75, Stderr: []byte(err.Error()), Duration: time.Since(started)}, err
 		}
 	} else {
 		updated = []byte(req.TextEdit.NewText)
@@ -2389,7 +2389,7 @@ func applyTextEditBytes(original []byte, edit domain.TextEdit) ([]byte, error) {
 		}
 	}
 	if len(matches) != 1 {
-		return nil, fmt.Errorf("file edit conflict: old_text matched %d blocks; read the current file and retry with a unique block", len(matches))
+		return nil, fmt.Errorf("file edit conflict: old_text matched %d blocks; %s", len(matches), fileEditRetryAdvice)
 	}
 	start := matches[0]
 	first := originalLines[start]

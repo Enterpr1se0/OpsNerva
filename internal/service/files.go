@@ -20,6 +20,7 @@ const (
 	fileContentMarker    = "__OPS_FILE_CONTENT__"
 	fileAfterMarker      = "__OPS_FILE_AFTER__"
 	fileValidationMarker = "__OPS_FILE_VALIDATION_OK__"
+	fileEditRetryAdvice  = "copy one exact unique block from the latest read, preserving all leading whitespace"
 )
 
 // ValidatorIDs returns the configured validator identifiers for one execution
@@ -221,9 +222,16 @@ func (s *Service) EditRemoteFile(ctx context.Context, hostID, path, oldText, new
 		return result, fmt.Errorf("validation failed; the target file was not changed")
 	}
 	if result.ExitCode == 75 {
-		return result, fmt.Errorf("file edit conflict: old_text no longer matches exactly one block in the current file")
+		return result, fileEditConflictError(result, "file edit conflict: "+fileEditRetryAdvice)
 	}
 	return result, submitErr
+}
+
+func fileEditConflictError(result domain.ExecResult, fallback string) error {
+	if detail := strings.TrimSpace(result.Stderr); detail != "" {
+		return fmt.Errorf("%s", detail)
+	}
+	return fmt.Errorf("%s", fallback)
 }
 
 func (s *Service) prepareRemoteFileChange(req domain.ExecRequest) (domain.ExecRequest, error) {
@@ -470,7 +478,7 @@ func remoteTextEditLocateProgram() string {
 		"END {",
 		"  if (read_status < 0 || expected_count != old_count || expected_count == 0) { exit 76 }",
 		"  if (matches != 1) {",
-		"    printf \"file edit conflict: old_text matched %d blocks; read the current file and retry with a unique block\\n\", matches > \"/dev/stderr\"",
+		"    printf \"file edit conflict: old_text matched %d blocks; " + fileEditRetryAdvice + "\\n\", matches > \"/dev/stderr\"",
 		"    exit 75",
 		"  }",
 		"  print match_start, match_end, delete_start, delete_end, match_eol",

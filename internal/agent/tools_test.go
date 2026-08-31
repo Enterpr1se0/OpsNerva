@@ -250,13 +250,13 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 		}
 		if descriptor.Name == "ssh_file_edit" {
 			schema := string(descriptor.InputSchema)
-			if !strings.Contains(schema, `"old_text"`) || !strings.Contains(schema, `"new_text"`) || !strings.Contains(schema, `"validator_id"`) || strings.Contains(schema, `"diff"`) || strings.Contains(schema, `"validator"`) || strings.Contains(schema, `"expected_sha256"`) || strings.Contains(schema, `"content"`) {
+			if !strings.Contains(descriptor.Description, "leading whitespace") || !strings.Contains(schema, `"old_text"`) || !strings.Contains(schema, `"new_text"`) || !strings.Contains(schema, `"validator_id"`) || !strings.Contains(schema, "preserving all leading whitespace") || strings.Contains(schema, `"diff"`) || strings.Contains(schema, `"validator"`) || strings.Contains(schema, `"expected_sha256"`) || strings.Contains(schema, `"content"`) {
 				t.Fatalf("ssh_file_edit still exposes the retired edit contract: %s", schema)
 			}
 		}
 		if descriptor.Name == "workspace_file_edit" {
 			schema := string(descriptor.InputSchema)
-			if !strings.Contains(schema, `"old_text"`) || !strings.Contains(schema, `"new_text"`) || !strings.Contains(schema, `"validator_id"`) || strings.Contains(schema, `"diff"`) || strings.Contains(schema, `"validator"`) || strings.Contains(schema, `"expected_sha256"`) || strings.Contains(schema, `"content"`) {
+			if !strings.Contains(schema, `"old_text"`) || !strings.Contains(schema, `"new_text"`) || !strings.Contains(schema, `"validator_id"`) || !strings.Contains(schema, "preserving all leading whitespace") || strings.Contains(schema, `"diff"`) || strings.Contains(schema, `"validator"`) || strings.Contains(schema, `"expected_sha256"`) || strings.Contains(schema, `"content"`) {
 				t.Fatalf("workspace_file_edit still exposes the retired edit contract: %s", schema)
 			}
 		}

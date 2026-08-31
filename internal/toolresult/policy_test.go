@@ -2,6 +2,8 @@ package toolresult
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/Enterpr1se0/opsnerva/internal/agenttool"
@@ -26,5 +28,15 @@ func TestPolicyPreservesValidationDetails(t *testing.T) {
 	failure, ok := value.(domain.ToolFailure)
 	if !ok || failure.Validation == nil || len(failure.Validation.UnexpectedFields) != 1 {
 		t.Fatalf("normalized validation failure = %#v", value)
+	}
+}
+
+func TestPolicyExplainsExactFileEditWhitespace(t *testing.T) {
+	result, err := CompactExec(domain.ExecResult{Status: "failed", ExitCode: 75}, errors.New("file edit conflict: old_text matched 0 blocks"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Code != "conflict" || !result.Retryable || !strings.Contains(result.NextAction, "preserving all leading whitespace") {
+		t.Fatalf("normalized file edit conflict = %#v", result)
 	}
 }
