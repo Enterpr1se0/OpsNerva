@@ -8,6 +8,7 @@ import (
 	"github.com/Enterpr1se0/opsnerva/internal/agenttool"
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
 	"github.com/Enterpr1se0/opsnerva/internal/service"
+	"github.com/Enterpr1se0/opsnerva/internal/toolresult"
 
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
@@ -35,21 +36,21 @@ func TestNormalizeEmptyToolArguments(t *testing.T) {
 }
 
 func TestTypedToolInputErrorIsReportedAsValidationFailure(t *testing.T) {
-	failure := toolFailureFromError("ssh_tunnel", agenttool.InvalidInput("action=list does not accept host_id"))
+	failure := toolresult.FailureFromError("ssh_tunnel", agenttool.InvalidInput("action=list does not accept host_id"))
 	if failure.OK || failure.Code != "validation_failed" || failure.Retryable || !strings.Contains(failure.Message, "host_id") {
 		t.Fatalf("unexpected typed input failure: %#v", failure)
 	}
 }
 
 func TestAgentHostAccessErrorIsReportedAsDenial(t *testing.T) {
-	failure := toolFailureFromError("ssh_exec", service.ErrAgentHostAccessDenied)
+	failure := toolresult.FailureFromError("ssh_exec", service.ErrAgentHostAccessDenied)
 	if failure.OK || failure.Code != "denied" || failure.Retryable {
 		t.Fatalf("unexpected Agent host access failure: %#v", failure)
 	}
 }
 
 func TestStructuredToolInputErrorPreservesCorrectionDetails(t *testing.T) {
-	failure := toolFailureFromError("ssh_shell", agenttool.StructuredInputError(
+	failure := toolresult.FailureFromError("ssh_shell", agenttool.StructuredInputError(
 		"action=input received unsupported fields: host_id",
 		domain.ToolValidationDetails{
 			Action: "input", AllowedFields: []string{"action", "shell_id", "input", "submit", "reason"},
@@ -67,7 +68,7 @@ func TestStructuredToolInputErrorPreservesCorrectionDetails(t *testing.T) {
 }
 
 func TestSSHShellCredentialPromptRequiresPrivateOperatorInput(t *testing.T) {
-	failure := toolFailureFromError("ssh_shell", &shellCredentialPromptTestError{})
+	failure := toolresult.FailureFromError("ssh_shell", &shellCredentialPromptTestError{})
 	if failure.OK || failure.Code != "operator_input_required" || failure.Retryable {
 		t.Fatalf("unexpected credential prompt failure: %#v", failure)
 	}

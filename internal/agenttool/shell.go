@@ -9,6 +9,20 @@ import (
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
 )
 
+type ShellSnapshotReader interface {
+	ReadableSSHShellSnapshot(context.Context, domain.SSHShellSnapshot, uint64) (domain.SSHShellSnapshot, error)
+}
+
+type ShellService interface {
+	ShellSnapshotReader
+	StartSSHShell(context.Context, string, string, bool, int, int, string, string) (domain.ExecResult, error)
+	WriteSSHShellPage(context.Context, string, string, string, time.Duration, int, string, string) (domain.SSHShellOutputPage, error)
+	QuerySSHShellOutput(context.Context, string, string, *uint64, time.Duration, int, string, string) (domain.SSHShellOutputPage, error)
+	ListSSHShells(context.Context, string, bool, string, string) (domain.SSHShellList, error)
+	InterruptSSHShell(context.Context, string, string, string, string) (domain.SSHShell, error)
+	CloseSSHShell(context.Context, string, string, string, string) (domain.SSHShell, error)
+}
+
 const defaultShellOutputBytes = 128 << 10
 
 func ShellOutputPolicy(waitSeconds, maxOutputBytes *int) (time.Duration, int, error) {
@@ -74,8 +88,8 @@ func invalidSSHShellValue(input SSHShellInput, action, message string, allowed [
 	})
 }
 
-func (ssh *SSH) readableShellSnapshot(ctx context.Context, snapshot domain.SSHShellSnapshot, after uint64) domain.SSHShellSnapshot {
-	readable, err := ssh.dependencies.Shells.ReadableSSHShellSnapshot(ctx, snapshot, after)
+func readableShellSnapshot(ctx context.Context, reader ShellSnapshotReader, snapshot domain.SSHShellSnapshot, after uint64) domain.SSHShellSnapshot {
+	readable, err := reader.ReadableSSHShellSnapshot(ctx, snapshot, after)
 	if err == nil {
 		return readable
 	}
@@ -111,8 +125,8 @@ type ShellResult struct {
 	Error             string             `json:"error,omitempty"`
 }
 
-func (ssh *SSH) FormatShellPage(ctx context.Context, page domain.SSHShellOutputPage, after uint64, stripInputEcho bool) ShellResult {
-	readable := ssh.readableShellSnapshot(ctx, page.Snapshot, after)
+func formatShellPage(ctx context.Context, reader ShellSnapshotReader, page domain.SSHShellOutputPage, after uint64, stripInputEcho bool) ShellResult {
+	readable := readableShellSnapshot(ctx, reader, page.Snapshot, after)
 	shell := readable.Shell
 	chunks := ModelShellChunks(readable.Events, stripInputEcho)
 	outputBytes := 0
@@ -293,7 +307,7 @@ func (ssh *SSH) RunShell(ctx context.Context, sessionID string, input SSHShellIn
 			return ssh.dependencies.Results.Value(ctx, "ssh_shell", domain.SSHShellSnapshot{}, invalidSSHShellValue(input, action, policyErr.Error(), allowed, example))
 		}
 		page, err := ssh.dependencies.Shells.WriteSSHShellPage(ctx, input.ShellID, sessionID, shellInput, queryDelay, maxBytes, input.Reason, actor)
-		return ssh.dependencies.Results.Value(ctx, "ssh_shell", ssh.FormatShellPage(ctx, page, ShellSnapshotAfter(page.Snapshot), true), err)
+		return ssh.dependencies.Results.Value(ctx, "ssh_shell", formatShellPage(ctx, ssh.dependencies.Shells, page, ShellSnapshotAfter(page.Snapshot), true), err)
 	case "output":
 		allowed := []string{"action", "shell_id", "after_sequence", "wait_seconds", "max_output_bytes", "reason"}
 		example := map[string]any{"action": "output", "shell_id": "shell_xxx", "wait_seconds": 10}
@@ -311,7 +325,7 @@ func (ssh *SSH) RunShell(ctx context.Context, sessionID string, input SSHShellIn
 			return ssh.dependencies.Results.Value(ctx, "ssh_shell", domain.SSHShellSnapshot{}, invalidSSHShellValue(input, action, policyErr.Error(), allowed, example))
 		}
 		page, err := ssh.dependencies.Shells.QuerySSHShellOutput(ctx, input.ShellID, sessionID, input.AfterSequence, queryDelay, maxBytes, input.Reason, actor)
-		return ssh.dependencies.Results.Value(ctx, "ssh_shell", ssh.FormatShellPage(ctx, page, ShellSnapshotAfter(page.Snapshot), false), err)
+		return ssh.dependencies.Results.Value(ctx, "ssh_shell", formatShellPage(ctx, ssh.dependencies.Shells, page, ShellSnapshotAfter(page.Snapshot), false), err)
 	case "list":
 		allowed := []string{"action", "reason"}
 		example := map[string]any{"action": "list"}

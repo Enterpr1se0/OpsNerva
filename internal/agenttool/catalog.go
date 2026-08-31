@@ -92,11 +92,11 @@ func category(name string) string {
 		return "web"
 	case strings.HasPrefix(name, "ssh_host_"):
 		return "hosts"
-	case name == "ssh_task" || strings.HasPrefix(name, "ssh_task_"):
+	case name == "ssh_task":
 		return "tasks"
 	case strings.HasPrefix(name, "ssh_file_"):
 		return "remote_files"
-	case name == "ssh_history" || strings.HasPrefix(name, "ssh_history_"):
+	case name == "ssh_history":
 		return "history"
 	default:
 		return "execution"

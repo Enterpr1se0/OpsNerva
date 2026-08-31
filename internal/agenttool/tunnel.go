@@ -7,6 +7,12 @@ import (
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
 )
 
+type TunnelService interface {
+	StartSSHTunnel(context.Context, string, domain.SSHTunnelConfig, string, string) (domain.ExecResult, error)
+	ListSSHTunnels() domain.SSHTunnelList
+	StopSSHTunnel(context.Context, string, string) (domain.SSHTunnel, error)
+}
+
 func (ssh *SSH) RunTunnel(ctx context.Context, input SSHTunnelInput, actor string) (any, error) {
 	action := strings.ToLower(strings.TrimSpace(input.Action))
 	direction := strings.ToLower(strings.TrimSpace(input.Direction))

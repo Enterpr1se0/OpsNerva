@@ -458,6 +458,7 @@ body {
   }
 }
 
+/* 进入动画：平台上用于条件渲染的 details 组件 */
 :where(
   .tool-event-rich,
   .reasoning-card,
@@ -472,6 +473,13 @@ body {
   .settings-disclosure
 )[open] > :not(summary) {
   animation: app-disclosure-content-in var(--motion-disclosure) var(--motion-ease) both;
+}
+
+/* 退出动画：条件渲染的 details 组件收缩时 */
+:where(
+  .tool-event-rich
+) > :not(summary).closing {
+  animation: app-disclosure-content-out var(--motion-disclosure) var(--motion-ease) both;
 }
 
 :where(
@@ -606,7 +614,11 @@ body {
 }
 
 @keyframes app-disclosure-content-in {
-  from { opacity: 0; transform: translateY(-4px); }
+  from { opacity: 0; transform: translateY(4px); }
+}
+
+@keyframes app-disclosure-content-out {
+  to { opacity: 0; transform: translateY(4px); }
 }
 
 @keyframes app-status-settle {

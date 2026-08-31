@@ -20,6 +20,7 @@ import (
 	"github.com/Enterpr1se0/opsnerva/internal/service"
 	"github.com/Enterpr1se0/opsnerva/internal/sshx"
 	"github.com/Enterpr1se0/opsnerva/internal/store"
+	"github.com/Enterpr1se0/opsnerva/internal/toolresult"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
@@ -550,22 +551,6 @@ func TestSSHShellUsageNamesOutputAction(t *testing.T) {
 	}
 }
 
-func TestWorkspaceShellActionValidationRejectsRunFieldsOnInput(t *testing.T) {
-	input := agenttool.WorkspaceShellInput{Action: "input", ShellID: "shell-1", Input: "go test ./...", Submit: true, Script: "pwd", TimeoutSeconds: 30}
-	err := validateWorkspaceShellActionFields(input, "input",
-		[]string{"action", "shell_id", "input", "submit", "reason"},
-		map[string]any{"action": "input", "shell_id": "shell_xxx", "input": "go test ./...", "submit": true},
-	)
-	var validation *agenttool.InputError
-	if !errors.As(err, &validation) || validation.Validation() == nil {
-		t.Fatalf("structured validation error was not returned: %v", err)
-	}
-	details := validation.Validation()
-	if strings.Join(details.UnexpectedFields, ",") != "script,timeout_seconds" {
-		t.Fatalf("unexpected Workspace shell fields = %#v", details)
-	}
-}
-
 func TestSSHTunnelListRejectsEveryOtherParameter(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir()+"/tunnel-tools.db")
@@ -628,7 +613,7 @@ func TestSSHTunnelListRejectsEveryOtherParameter(t *testing.T) {
 }
 
 func TestSSHTunnelDirectionUsesNamedValues(t *testing.T) {
-	result, err := RunSSHTunnelTool(context.Background(), nil, agenttool.SSHTunnelInput{Action: "start", Direction: "-L"}, "test")
+	result, err := newSSHTools(nil).RunTunnel(context.Background(), agenttool.SSHTunnelInput{Action: "start", Direction: "-L"}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -639,7 +624,7 @@ func TestSSHTunnelDirectionUsesNamedValues(t *testing.T) {
 }
 
 func TestSSHTaskBlockUntilUsesWaitConditions(t *testing.T) {
-	result, err := RunTaskTool(context.Background(), nil, agenttool.TaskInput{
+	result, err := newSSHTools(nil).RunTask(context.Background(), agenttool.TaskInput{
 		TaskID: "task_test", Action: "status", WaitSeconds: 10, BlockUntil: "completed",
 	}, "test")
 	if err != nil {
@@ -713,7 +698,7 @@ func TestWorkspaceToolUsesConversationBinding(t *testing.T) {
 }
 
 func TestWebExtractToolResultExposesPartialAndProviderFailures(t *testing.T) {
-	partial, err := NormalizeWebExtractToolResult(domain.WebExtractResponse{
+	partial, err := toolresult.NormalizeWebExtract(domain.WebExtractResponse{
 		Results:       []domain.WebExtractResult{{URL: "https://example.com", RawContent: "ok"}},
 		FailedResults: []domain.WebExtractFailedResult{{URL: "https://example.org", Error: "failed"}},
 	}, nil)
@@ -723,7 +708,7 @@ func TestWebExtractToolResultExposesPartialAndProviderFailures(t *testing.T) {
 	if !partial.OK || partial.Code != "partial" || len(partial.FailedResults) != 1 || !partial.ContentIsUntrusted {
 		t.Fatalf("partial extraction was not exposed to the model: %#v", partial)
 	}
-	failed, err := NormalizeWebExtractToolResult(domain.WebExtractResponse{
+	failed, err := toolresult.NormalizeWebExtract(domain.WebExtractResponse{
 		FailedResults: []domain.WebExtractFailedResult{{URL: "https://example.org", Error: "blocked"}},
 	}, service.ErrWebSearchUpstream)
 	if err != nil {
@@ -749,11 +734,11 @@ func TestWebToolResultClassifiesProviderFailures(t *testing.T) {
 	for _, testCase := range testCases {
 		t.Run(testCase.code, func(t *testing.T) {
 			providerError := &service.WebSearchProviderError{Code: testCase.code, Retryable: testCase.retryable, Message: "provider response"}
-			search, err := NormalizeWebSearchToolResult(domain.WebSearchResponse{}, providerError)
+			search, err := toolresult.NormalizeWebSearch(domain.WebSearchResponse{}, providerError)
 			if err != nil || search.OK || search.Code != testCase.code || search.Retryable != testCase.retryable || search.ToolVersion != "1.1" || search.NextAction == "" {
 				t.Fatalf("search provider error = %#v, err=%v", search, err)
 			}
-			extract, err := NormalizeWebExtractToolResult(domain.WebExtractResponse{}, providerError)
+			extract, err := toolresult.NormalizeWebExtract(domain.WebExtractResponse{}, providerError)
 			if err != nil || extract.OK || extract.Code != testCase.code || extract.Retryable != testCase.retryable || extract.ToolVersion != "1.1" || extract.NextAction == "" {
 				t.Fatalf("extract provider error = %#v, err=%v", extract, err)
 			}
@@ -762,7 +747,7 @@ func TestWebToolResultClassifiesProviderFailures(t *testing.T) {
 }
 
 func TestTaskToolResultsExposeRejectionAndStderr(t *testing.T) {
-	validationFailure, err := CompactExecToolResult(domain.ExecResult{}, agenttool.InvalidInput("block_until requires wait_seconds"))
+	validationFailure, err := toolresult.CompactExec(domain.ExecResult{}, agenttool.InvalidInput("block_until requires wait_seconds"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -773,7 +758,7 @@ func TestTaskToolResultsExposeRejectionAndStderr(t *testing.T) {
 		t.Fatalf("typed task input failure omitted correction guidance: %#v", validationFailure)
 	}
 
-	routingFailure, err := CompactExecToolResult(domain.ExecResult{}, &service.ExecutionToolSelectionError{
+	routingFailure, err := toolresult.CompactExec(domain.ExecResult{}, &service.ExecutionToolSelectionError{
 		Message:       "ssh_exec cannot run interactive program \"bash\" because it has no PTY; use ssh_shell",
 		SuggestedTool: "ssh_shell",
 		NextAction:    "call ssh_shell with action=start",
@@ -787,7 +772,7 @@ func TestTaskToolResultsExposeRejectionAndStderr(t *testing.T) {
 		t.Fatalf("execution routing failure was not actionable: %#v", routingFailure)
 	}
 
-	persistenceFailure, err := CompactExecToolResult(domain.ExecResult{}, errors.New("constraint failed: FOREIGN KEY constraint failed (787)"))
+	persistenceFailure, err := toolresult.CompactExec(domain.ExecResult{}, errors.New("constraint failed: FOREIGN KEY constraint failed (787)"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -795,7 +780,7 @@ func TestTaskToolResultsExposeRejectionAndStderr(t *testing.T) {
 		t.Fatalf("control-plane constraint failure was exposed as retryable remote failure: %#v", persistenceFailure)
 	}
 
-	partial, err := CompactExecToolResult(domain.ExecResult{
+	partial, err := toolresult.CompactExec(domain.ExecResult{
 		RunID: "run_partial", Status: "partial", ExitCode: 2, Stdout: "matched configuration\n",
 	}, nil)
 	if err != nil {
@@ -814,7 +799,7 @@ func TestTaskToolResultsExposeRejectionAndStderr(t *testing.T) {
 		}
 	}
 
-	execResult, err := CompactExecToolResult(domain.ExecResult{
+	execResult, err := toolresult.CompactExec(domain.ExecResult{
 		RunID:               "run_exec_rejected",
 		Status:              "rejected",
 		OperatorInstruction: "inspect logs instead",
@@ -825,7 +810,7 @@ func TestTaskToolResultsExposeRejectionAndStderr(t *testing.T) {
 	if execResult.Status != "rejected" || execResult.AutoApproved || execResult.Code != "" || execResult.OperatorInstruction == "" {
 		t.Fatalf("rejected execution was not exposed as an operator interruption: %#v", execResult)
 	}
-	autoApproved, err := CompactExecToolResult(domain.ExecResult{RunID: "run_auto", Status: "completed", AutoApproved: true}, nil)
+	autoApproved, err := toolresult.CompactExec(domain.ExecResult{RunID: "run_auto", Status: "completed", AutoApproved: true}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1151,7 +1136,7 @@ func TestUnifiedTaskToolCancelsWithStandardExecResult(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("background task did not start")
 	}
-	result, err := RunTaskTool(context.Background(), svc, agenttool.TaskInput{TaskID: task.ID, Action: "cancel"}, "test")
+	result, err := newSSHTools(svc).RunTask(context.Background(), agenttool.TaskInput{TaskID: task.ID, Action: "cancel"}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1198,7 +1183,7 @@ func TestFileReadMetadataOnlyKeepsSHA256WithoutContent(t *testing.T) {
 		base, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		beforeCalls := transport.callCount
-		pending, readErr := RunFileReadTool(base, svc, input, "eino-agent")
+		pending, readErr := newSSHTools(svc).RunFileRead(base, input, "eino-agent")
 		if readErr != nil {
 			t.Fatal(readErr)
 		}
@@ -1212,7 +1197,7 @@ func TestFileReadMetadataOnlyKeepsSHA256WithoutContent(t *testing.T) {
 		if transport.callCount != beforeCalls+1 {
 			t.Fatalf("approved file read executed %d times", transport.callCount-beforeCalls)
 		}
-		completed, compactErr := CompactExecToolResult(approved, nil)
+		completed, compactErr := toolresult.CompactExec(approved, nil)
 		if compactErr != nil {
 			t.Fatal(compactErr)
 		}
@@ -1263,15 +1248,15 @@ func TestFileReadMetadataOnlyKeepsSHA256WithoutContent(t *testing.T) {
 	if searchRequest.Mode != domain.ExecRemoteSearch || searchRequest.RemotePath != "/etc/example.conf" || searchRequest.SearchPattern != "secret|token" || searchRequest.SearchMatchMode != domain.FileSearchRegex || searchRequest.ContextLines != 2 || searchRequest.Script != "" {
 		t.Fatalf("remote search was not persisted structurally: %#v", searchRequest)
 	}
-	result, err = RunFileReadTool(ctx, svc, agenttool.FileReadInput{HostID: host.ID, Path: "/etc/example.conf", Pattern: "secret", MatchMode: domain.FileSearchLiteral, MaxBytes: 10}, "test")
+	result, err = newSSHTools(svc).RunFileRead(ctx, agenttool.FileReadInput{HostID: host.ID, Path: "/etc/example.conf", Pattern: "secret", MatchMode: domain.FileSearchLiteral, MaxBytes: 10}, "test")
 	if err != nil || result.Status != "failed" || result.Code != "validation_failed" {
 		t.Fatalf("ambiguous file read mode was not rejected: result=%#v err=%v", result, err)
 	}
-	result, err = RunFileReadTool(ctx, svc, agenttool.FileReadInput{HostID: host.ID, Path: "/etc/example.conf", Pattern: "secret"}, "test")
+	result, err = newSSHTools(svc).RunFileRead(ctx, agenttool.FileReadInput{HostID: host.ID, Path: "/etc/example.conf", Pattern: "secret"}, "test")
 	if err != nil || result.Status != "failed" || result.Code != "validation_failed" || !strings.Contains(result.Message, "match_mode") {
 		t.Fatalf("search without match_mode was not rejected: result=%#v err=%v", result, err)
 	}
-	result, err = RunFileReadTool(ctx, svc, agenttool.FileReadInput{HostID: host.ID, Path: "/etc/example.conf", MetadataOnly: true, MaxBytes: 10}, "test")
+	result, err = newSSHTools(svc).RunFileRead(ctx, agenttool.FileReadInput{HostID: host.ID, Path: "/etc/example.conf", MetadataOnly: true, MaxBytes: 10}, "test")
 	if err != nil || result.Status != "failed" || result.Code != "validation_failed" {
 		t.Fatalf("ambiguous metadata read was not rejected: result=%#v err=%v", result, err)
 	}
@@ -1317,18 +1302,18 @@ func TestUnifiedHistoryToolSearchesAndReadsExactRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := service.New(st, nil, encryptor, security.NewRedactor(), config.Default().Limits)
-	searched, err := ReadHistoryTool(ctx, svc, agenttool.HistorySearchInput{Query: "nginx", Limit: 10})
+	searched, err := newHistoryTools(svc).Read(ctx, agenttool.HistorySearchInput{Query: "nginx", Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if searched.Runs == nil || len(*searched.Runs) != 1 || (*searched.Runs)[0].ID != "run-nginx" || (*searched.Runs)[0].Operation != "nginx" {
 		t.Fatalf("history search result = %#v", searched)
 	}
-	outputMatched, err := ReadHistoryTool(ctx, svc, agenttool.HistorySearchInput{Query: "disk full", QueryScope: "output", ToolName: "ssh_file_read", Status: "failed", StartedAfter: now.Add(-time.Second).Format(time.RFC3339), Limit: 10})
+	outputMatched, err := newHistoryTools(svc).Read(ctx, agenttool.HistorySearchInput{Query: "disk full", QueryScope: "output", ToolName: "ssh_file_read", Status: "failed", StartedAfter: now.Add(-time.Second).Format(time.RFC3339), Limit: 10})
 	if err != nil || outputMatched.Runs == nil || len(*outputMatched.Runs) != 1 || (*outputMatched.Runs)[0].ID != "run-disk" || (*outputMatched.Runs)[0].DurationMS != 2000 {
 		t.Fatalf("structured history filters = %#v, err=%v", outputMatched, err)
 	}
-	requestOnly, err := ReadHistoryTool(ctx, svc, agenttool.HistorySearchInput{Query: "disk full", QueryScope: "request"})
+	requestOnly, err := newHistoryTools(svc).Read(ctx, agenttool.HistorySearchInput{Query: "disk full", QueryScope: "request"})
 	if err != nil || requestOnly.Runs == nil || len(*requestOnly.Runs) != 0 {
 		t.Fatalf("request-scoped history matched output: %#v, err=%v", requestOnly, err)
 	}
@@ -1336,11 +1321,11 @@ func TestUnifiedHistoryToolSearchesAndReadsExactRun(t *testing.T) {
 	if err != nil || string(emptyJSON) != `{"runs":[]}` {
 		t.Fatalf("empty history search is ambiguous: %s, err=%v", emptyJSON, err)
 	}
-	regexMatched, err := ReadHistoryTool(ctx, svc, agenttool.HistorySearchInput{Query: `nginx|/var/log/disk`, MatchMode: domain.FileSearchRegex, Limit: 10})
+	regexMatched, err := newHistoryTools(svc).Read(ctx, agenttool.HistorySearchInput{Query: `nginx|/var/log/disk`, MatchMode: domain.FileSearchRegex, Limit: 10})
 	if err != nil || regexMatched.Runs == nil || len(*regexMatched.Runs) != 2 {
 		t.Fatalf("history regex search result = %#v, err=%v", regexMatched, err)
 	}
-	if _, err := ReadHistoryTool(ctx, svc, agenttool.HistorySearchInput{Query: `[`, MatchMode: domain.FileSearchRegex}); err == nil || !strings.Contains(err.Error(), "POSIX") {
+	if _, err := newHistoryTools(svc).Read(ctx, agenttool.HistorySearchInput{Query: `[`, MatchMode: domain.FileSearchRegex}); err == nil || !strings.Contains(err.Error(), "POSIX") {
 		t.Fatalf("invalid history regex was accepted: %v", err)
 	}
 	encodedHistory, err := json.Marshal(searched)
@@ -1357,7 +1342,7 @@ func TestUnifiedHistoryToolSearchesAndReadsExactRun(t *testing.T) {
 			t.Fatalf("history search summary contains full run field %q: %s", verbose, encodedHistory)
 		}
 	}
-	exact, err := ReadHistoryTool(ctx, svc, agenttool.HistorySearchInput{RunID: "run-disk"})
+	exact, err := newHistoryTools(svc).Read(ctx, agenttool.HistorySearchInput{RunID: "run-disk"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1368,29 +1353,29 @@ func TestUnifiedHistoryToolSearchesAndReadsExactRun(t *testing.T) {
 	if !ok || request["remote_path"] != "/var/log/disk" {
 		t.Fatalf("exact history request is not structured: %#v", exact.Run.Request)
 	}
-	matchedRun, err := ReadHistoryTool(ctx, svc, agenttool.HistorySearchInput{
+	matchedRun, err := newHistoryTools(svc).Read(ctx, agenttool.HistorySearchInput{
 		RunID: "run-disk", Query: `disk[[:space:]]+full`, MatchMode: domain.FileSearchRegex,
 		QueryScope: "output", Limit: 5, MaxOutput: 1024,
 	})
 	if err != nil || matchedRun.Match == nil || matchedRun.Match.MatchLimit != 5 || !matchedRun.Match.Found || !strings.Contains(matchedRun.Match.StderrExcerpt, "disk full") {
 		t.Fatalf("run-scoped history match = %#v, err=%v", matchedRun, err)
 	}
-	requestMatch, err := ReadHistoryTool(ctx, svc, agenttool.HistorySearchInput{RunID: "run-disk", Query: "/var/log/disk", QueryScope: "request"})
+	requestMatch, err := newHistoryTools(svc).Read(ctx, agenttool.HistorySearchInput{RunID: "run-disk", Query: "/var/log/disk", QueryScope: "request"})
 	if err != nil || requestMatch.Match == nil || !requestMatch.Match.Found || !requestMatch.Match.RequestMatched {
 		t.Fatalf("run-scoped request match = %#v, err=%v", requestMatch, err)
 	}
 	sessionCtx := service.WithSessionID(ctx, "session-a")
-	sessionRuns, err := ReadHistoryTool(sessionCtx, svc, agenttool.HistorySearchInput{Limit: 10})
+	sessionRuns, err := newHistoryTools(svc).Read(sessionCtx, agenttool.HistorySearchInput{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if sessionRuns.Runs == nil || len(*sessionRuns.Runs) != 1 || (*sessionRuns.Runs)[0].ID != "run-nginx" {
 		t.Fatalf("session history leaked another conversation: %#v", sessionRuns)
 	}
-	if _, err := ReadHistoryTool(sessionCtx, svc, agenttool.HistorySearchInput{RunID: "run-disk"}); !errors.Is(err, store.ErrNotFound) {
+	if _, err := newHistoryTools(svc).Read(sessionCtx, agenttool.HistorySearchInput{RunID: "run-disk"}); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("exact history read crossed session boundary: %v", err)
 	}
-	sessionExact, err := ReadHistoryTool(sessionCtx, svc, agenttool.HistorySearchInput{RunID: "run-nginx"})
+	sessionExact, err := newHistoryTools(svc).Read(sessionCtx, agenttool.HistorySearchInput{RunID: "run-nginx"})
 	if err != nil || sessionExact.Run == nil || sessionExact.Run.ID != "run-nginx" {
 		t.Fatalf("current-session exact history failed: %#v err=%v", sessionExact, err)
 	}
@@ -1482,28 +1467,28 @@ func TestHistoryToolUsesStablePagesAndBoundsExactOutput(t *testing.T) {
 	svc := service.New(st, nil, encryptor, security.NewRedactor(), config.Default().Limits)
 	sessionCtx := service.WithSessionID(ctx, "session-pages")
 
-	first, err := ReadHistoryTool(sessionCtx, svc, agenttool.HistorySearchInput{})
-	if err != nil || first.Runs == nil || len(*first.Runs) != defaultHistorySearchLimit || !first.HasMore || first.NextCursor == "" {
+	first, err := newHistoryTools(svc).Read(sessionCtx, agenttool.HistorySearchInput{})
+	if err != nil || first.Runs == nil || len(*first.Runs) != 20 || !first.HasMore || first.NextCursor == "" {
 		t.Fatalf("first history page = %#v, err=%v", first, err)
 	}
 	if (*first.Runs)[0].ID != "run-page-24" || (*first.Runs)[len(*first.Runs)-1].ID != "run-page-05" {
 		t.Fatalf("first history page order = %#v", *first.Runs)
 	}
 	for _, summary := range *first.Runs {
-		if len(summary.Operation) > maxHistoryOperationBytes {
+		if len(summary.Operation) > 512 {
 			t.Fatalf("history operation was not bounded: %d", len(summary.Operation))
 		}
 	}
-	second, err := ReadHistoryTool(sessionCtx, svc, agenttool.HistorySearchInput{Cursor: first.NextCursor})
+	second, err := newHistoryTools(svc).Read(sessionCtx, agenttool.HistorySearchInput{Cursor: first.NextCursor})
 	if err != nil || second.Runs == nil || len(*second.Runs) != 5 || second.HasMore || (*second.Runs)[0].ID != "run-page-04" || (*second.Runs)[4].ID != "run-page-00" {
 		t.Fatalf("second history page = %#v, err=%v", second, err)
 	}
-	if _, err := ReadHistoryTool(sessionCtx, svc, agenttool.HistorySearchInput{Cursor: "not-a-cursor"}); err == nil || !strings.Contains(err.Error(), "cursor") {
+	if _, err := newHistoryTools(svc).Read(sessionCtx, agenttool.HistorySearchInput{Cursor: "not-a-cursor"}); err == nil || !strings.Contains(err.Error(), "cursor") {
 		t.Fatalf("invalid history cursor was accepted: %v", err)
 	}
 
-	exact, err := ReadHistoryTool(sessionCtx, svc, agenttool.HistorySearchInput{RunID: "run-page-24"})
-	if err != nil || exact.Run == nil || len(exact.Run.Stdout) > defaultHistoryOutputBytes || !exact.Run.OutputLimited ||
+	exact, err := newHistoryTools(svc).Read(sessionCtx, agenttool.HistorySearchInput{RunID: "run-page-24"})
+	if err != nil || exact.Run == nil || len(exact.Run.Stdout) > 16<<10 || !exact.Run.OutputLimited ||
 		exact.Run.StdoutTotalBytes != len(largeOutput) || exact.Run.OutputView != "head_tail" || !strings.HasSuffix(exact.Run.Stdout, "TAIL") {
 		t.Fatalf("bounded history detail = %#v, err=%v", exact, err)
 	}
@@ -1515,15 +1500,15 @@ func TestHistoryToolUsesStablePagesAndBoundsExactOutput(t *testing.T) {
 	if encoded, err := json.Marshal(exact); err != nil || len(encoded) > 128<<10 {
 		t.Fatalf("default history detail payload bytes=%d err=%v", len(encoded), err)
 	}
-	head, err := ReadHistoryTool(sessionCtx, svc, agenttool.HistorySearchInput{RunID: "run-page-24", MaxOutput: 1024, OutputView: "head"})
+	head, err := newHistoryTools(svc).Read(sessionCtx, agenttool.HistorySearchInput{RunID: "run-page-24", MaxOutput: 1024, OutputView: "head"})
 	if err != nil || head.Run == nil || len(head.Run.Stdout) != 1024 || head.Run.StdoutNextOffset != 1024 {
 		t.Fatalf("history detail head page = %#v, err=%v", head, err)
 	}
-	next, err := ReadHistoryTool(sessionCtx, svc, agenttool.HistorySearchInput{RunID: "run-page-24", AfterStdout: head.Run.StdoutNextOffset, MaxOutput: 1024})
+	next, err := newHistoryTools(svc).Read(sessionCtx, agenttool.HistorySearchInput{RunID: "run-page-24", AfterStdout: head.Run.StdoutNextOffset, MaxOutput: 1024})
 	if err != nil || next.Run == nil || next.Run.StdoutOffsetBytes != 1024 || next.Run.StdoutNextOffset != 2048 || next.Run.OutputView != "head" {
 		t.Fatalf("history detail continuation = %#v, err=%v", next, err)
 	}
-	if _, err := ReadHistoryTool(sessionCtx, svc, agenttool.HistorySearchInput{RunID: "run-page-24", MaxOutput: maxHistoryOutputBytes + 1}); err == nil {
+	if _, err := newHistoryTools(svc).Read(sessionCtx, agenttool.HistorySearchInput{RunID: "run-page-24", MaxOutput: (64 << 10) + 1}); err == nil {
 		t.Fatal("oversized history detail page was accepted")
 	}
 }

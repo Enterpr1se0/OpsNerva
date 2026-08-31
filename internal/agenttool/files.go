@@ -6,6 +6,14 @@ import (
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
 )
 
+type FileService interface {
+	ReadFileAdvanced(context.Context, string, string, bool, int, int64, int, bool, string) (domain.ExecResult, error)
+	SearchFile(context.Context, string, string, string, domain.FileSearchMatchMode, int, bool, string) (domain.ExecResult, error)
+	ListFiles(context.Context, string, string, string) (domain.ExecResult, error)
+	EditRemoteFile(context.Context, string, string, string, string, string, bool, string, string) (domain.ExecResult, error)
+	TransferFileBetweenHosts(context.Context, string, string, string, string, string, string, int, string, string) (domain.ExecResult, error)
+}
+
 const defaultFileReadBytes = 128 << 10
 
 func (ssh *SSH) RunFileRead(ctx context.Context, input FileReadInput, actor string) (ExecResult, error) {

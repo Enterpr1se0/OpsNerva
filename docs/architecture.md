@@ -10,7 +10,7 @@ LLM、Prompt、Skill、远程输出和 MCP Client 都不属于可信计算基。
 4. 仅在实际执行前解密所需 SSH/sudo 密码，获取并发令牌，通过绑定的内置 SSH Transport 执行。
 5. 加密原始请求和输出，生成脱敏视图并追加审计事件。
 
-Eino Tool、MCP Tool、HTTP 和 CLI 都是这个 Service 的适配器。模型侧执行结果只保留状态、有效输出和必要标识；预期失败额外返回 `code/message/retryable` 与可用的结构化校验信息。只有上下文取消或内部持久化损坏会成为 ToolNode fatal error。
+Eino Tool、MCP Tool、HTTP 和 CLI 都是这个 Service 的适配器。Eino 与 MCP 复用 `internal/agenttool` 中的输入契约、Schema 和执行适配器，并通过 `internal/toolresult` 共享 Service 错误到模型结果的映射；Eino 的 interrupt、checkpoint 和审批恢复只保留在 `internal/agent`。模型侧执行结果只保留状态、有效输出和必要标识；预期失败额外返回 `code/message/retryable` 与可用的结构化校验信息。只有上下文取消或内部持久化损坏会成为 ToolNode fatal error。
 
 这里的 MCP Tool 分为两个方向。`opsnerva mcp` 通过 stdio、设置中的 MCP Server Mode 通过同一 HTTP 服务上的 `/mcp`，把受控 SSH Service 暴露给 MCP Client，因此完整复用输入校验、审批模式和审计。只读工具通过 MCP annotations 明确标记；`ssh_shell` 使用独立 MCP surface，`ssh_tunnel` 复用已有转发状态，`ssh_history` 只能读取当前 MCP 会话创建的运行。HTTP 使用有状态 Streamable HTTP，由服务端为每次 initialize 分配高熵 `mcp_sess_*`；stdio 进程拥有一个独立会话。客户端上报的 name/version 仅作展示，不作为身份认证，共享 Bearer Token 仍是 HTTP 访问边界。设置开关按请求即时生效，Token 仅在生成时返回，SQLite 只保存 SHA-256 摘要。管理员配置的外部 MCP Server 则属于独立信任域：它的工具在远端/子进程自身权限下执行，不自动继承 OpsNerva 的审批控制。Web 会明确提示该边界，只有启用状态为 ready 且未被 func 管理单独关闭的外部工具才进入主 Agent，审批 Agent 仍保持无 Tool。
 
@@ -26,7 +26,9 @@ App 控制面通过 loopback HTTP API 连接本地 Sidecar。`auth.password` 非
 - `internal/service/websearch.go`：Tavily 请求、HTTP/HTTPS/SOCKS5 代理、凭据解密、响应限额与外部内容脱敏。
 - `internal/service`：审批状态机、摘要绑定、执行并发、任务、审计事务，以及外部 MCP Client Session 与动态工具生命周期。
 - `internal/store`：SQLite hosts、runs、approvals、events、chat、加密模型/MCP 配置与 Eino checkpoints。
-- `internal/agent`：Eino ChatModelAgent、强类型 Tools、消息历史、事件流与并发安全的 Runner 热切换。
+- `internal/agenttool`：Eino 与 MCP 共用的 Tool 输入契约、Schema、结果投影和 SSH/Workspace/Web/History 执行适配器。
+- `internal/toolresult`：Service、Store 和 Skill 错误到模型/MCP 结构化结果的共享映射。
+- `internal/agent`：Eino ChatModelAgent、Tool 装配、HITL checkpoint、消息历史、事件流与并发安全的 Runner 热切换。
 - `internal/mcpserver`：官方 MCP Go SDK stdio 与 Streamable HTTP 适配器。
 - `internal/httpapi`：本地 HTTP API、SSE、应用状态/交互终端 WebSocket 和嵌入 Go 二进制的 React 静态资源。
 - `internal/observability`：`slog` 多路 Handler、字段脱敏、JSONL 文件轮转与 Web 内存日志缓冲。

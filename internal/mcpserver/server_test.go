@@ -7,8 +7,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Enterpr1se0/opsnerva/internal/agent"
 	"github.com/Enterpr1se0/opsnerva/internal/agenttool"
+	"github.com/Enterpr1se0/opsnerva/internal/config"
+	"github.com/Enterpr1se0/opsnerva/internal/security"
+	"github.com/Enterpr1se0/opsnerva/internal/service"
+	"github.com/Enterpr1se0/opsnerva/internal/store"
 
+	"github.com/cloudwego/eino/components/tool"
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -52,6 +58,23 @@ func assertSchemaValidation(t *testing.T, schema *jsonschema.Schema, arguments s
 	if !valid && err == nil {
 		t.Fatalf("schema accepted invalid arguments %s", arguments)
 	}
+}
+
+func connectTestClient(t *testing.T, instance *Server) *mcp.ClientSession {
+	t.Helper()
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	serverSession, err := instance.server.Connect(context.Background(), serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = serverSession.Close() })
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "test"}, nil)
+	clientSession, err := client.Connect(context.Background(), clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = clientSession.Close() })
+	return clientSession
 }
 
 func TestMergedToolSchemasExpressTheirModes(t *testing.T) {
@@ -108,19 +131,7 @@ func TestMergedToolSchemasExpressTheirModes(t *testing.T) {
 func TestServerExposesMergedBackgroundTaskTools(t *testing.T) {
 	ctx := context.Background()
 	instance := New(nil, "test")
-	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-	serverSession, err := instance.server.Connect(ctx, serverTransport, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer serverSession.Close()
-
-	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "test"}, nil)
-	clientSession, err := client.Connect(ctx, clientTransport, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer clientSession.Close()
+	clientSession := connectTestClient(t, instance)
 
 	result, err := clientSession.ListTools(ctx, nil)
 	if err != nil {
@@ -247,5 +258,68 @@ func TestServerExposesMergedBackgroundTaskTools(t *testing.T) {
 	}
 	if !shellFound || !tunnelFound {
 		t.Fatalf("interactive MCP tools are incomplete: shell=%v tunnel=%v", shellFound, tunnelFound)
+	}
+}
+
+func TestAgentAndMCPReturnTheSameStructuredTaskFailure(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, t.TempDir()+"/cross-entry.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	encryptor, err := security.NewEncryptor("", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := service.New(database, nil, encryptor, security.NewRedactor(), config.Default().Limits)
+
+	available, err := agent.BuildTools(svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var agentTask tool.InvokableTool
+	for _, candidate := range available {
+		info, infoErr := candidate.Info(ctx)
+		if infoErr != nil {
+			t.Fatal(infoErr)
+		}
+		if info.Name == "ssh_task" {
+			agentTask = candidate.(tool.InvokableTool)
+			break
+		}
+	}
+	if agentTask == nil {
+		t.Fatal("Agent ssh_task tool is missing")
+	}
+	agentJSON, err := agentTask.InvokableRun(ctx, `{"action":"status","task_id":"task_missing"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var agentResult agenttool.ExecResult
+	if err := json.Unmarshal([]byte(agentJSON), &agentResult); err != nil {
+		t.Fatal(err)
+	}
+
+	clientSession := connectTestClient(t, New(svc, "test"))
+	mcpResponse, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+		Name: "ssh_task", Arguments: map[string]any{"action": "status", "task_id": "task_missing"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(mcpResponse.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mcpResult agenttool.ExecResult
+	if err := json.Unmarshal(encoded, &mcpResult); err != nil {
+		t.Fatal(err)
+	}
+	if agentResult.Status != "failed" || agentResult.Code != "not_found" {
+		t.Fatalf("Agent task failure = %#v", agentResult)
+	}
+	if !reflect.DeepEqual(mcpResult, agentResult) {
+		t.Fatalf("MCP task failure diverged from Agent: mcp=%#v agent=%#v", mcpResult, agentResult)
 	}
 }

@@ -1,5 +1,3 @@
-import type { ModelReasoningEffort, ModelProviderKind } from './model'
-
 export type WorkspaceShellMode = 'sandbox' | 'host' | 'disabled'
 export type ApprovalMode = 'manual' | 'auto' | 'full_access'
 

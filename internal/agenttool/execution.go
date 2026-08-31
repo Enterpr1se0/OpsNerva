@@ -8,6 +8,57 @@ import (
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
 )
 
+type TaskReader interface {
+	GetTaskForContext(context.Context, string) (domain.Task, domain.ExecResult, string, error)
+}
+
+type ExecutionService interface {
+	TaskReader
+	Submit(context.Context, domain.ExecRequest, string) (domain.ExecResult, error)
+	StartTask(context.Context, domain.ExecRequest, string) (domain.Task, error)
+}
+
+type TaskService interface {
+	TaskReader
+	WaitTask(context.Context, string, int, int, time.Duration, string) (domain.Task, domain.ExecResult, string, bool, error)
+	CancelTaskForContext(context.Context, string, string) error
+}
+
+type ResultPolicy interface {
+	NormalizeExec(domain.ExecResult, error) (domain.ExecResult, error)
+	Value(context.Context, string, any, error) (any, error)
+}
+
+type SSHDependencies struct {
+	Execution ExecutionService
+	Tasks     TaskService
+	Files     FileService
+	Tunnels   TunnelService
+	Shells    ShellService
+	Results   ResultPolicy
+}
+
+type SSH struct {
+	dependencies SSHDependencies
+}
+
+func NewSSH(dependencies SSHDependencies) *SSH {
+	return &SSH{dependencies: dependencies}
+}
+
+func (ssh *SSH) execResult(result domain.ExecResult, err error) (ExecResult, error) {
+	normalized, normalizedErr := ssh.dependencies.Results.NormalizeExec(result, err)
+	return ProjectExecResult(normalized), normalizedErr
+}
+
+func ExecutionRequest(input ExecInput) domain.ExecRequest {
+	return domain.ExecRequest{HostID: input.HostID, Mode: domain.ExecProgram, Program: input.Program, Args: input.Args, Background: input.Background, Cwd: input.Cwd, Env: input.Env, Elevated: input.Elevated, TimeoutSeconds: input.TimeoutSeconds, MaxOutputBytes: input.MaxOutputBytes, OutputView: input.OutputView, Reason: input.Reason}
+}
+
+func ScriptRequest(input ScriptInput) domain.ExecRequest {
+	return domain.ExecRequest{HostID: input.HostID, Mode: domain.ExecScript, Script: input.Script, Background: input.Background, Cwd: input.Cwd, Env: input.Env, Elevated: input.Elevated, TimeoutSeconds: input.TimeoutSeconds, MaxOutputBytes: input.MaxOutputBytes, OutputView: input.OutputView, Reason: input.Reason}
+}
+
 func (ssh *SSH) normalizeTaskResult(task domain.Task, result domain.ExecResult, taskErr string, err error) (domain.ExecResult, error) {
 	result.TaskID = task.ID
 	if result.RunID == "" {

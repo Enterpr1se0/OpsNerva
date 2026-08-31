@@ -68,6 +68,18 @@ func TestCatalogClassification(t *testing.T) {
 	}
 }
 
+func TestRetiredSplitToolsHaveNoSpecialClassification(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"ssh_task_status", "ssh_task_cancel", "ssh_history_search", "ssh_history_get"} {
+		if got := category(name); got != "execution" {
+			t.Errorf("category(%q) = %q, want execution for retired tool", name, got)
+		}
+		if got := guard(name); got != "read_only" {
+			t.Errorf("guard(%q) = %q, want read_only for retired tool", name, got)
+		}
+	}
+}
+
 func contains(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {

@@ -249,7 +249,7 @@ func TestApprovalToolStatefulInterruptResumesExactRunOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	fixtureTool, err := toolutils.InferTool("approval_fixture", "approval fixture", func(toolCtx context.Context, _ struct{}) (agenttool.ExecResult, error) {
-		return RunExecutionTool(toolCtx, svc, domain.ExecRequest{
+		return newSSHTools(svc).RunExecution(toolCtx, domain.ExecRequest{
 			HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"}, Reason: "test approval resume",
 		}, "eino-agent")
 	})
@@ -367,7 +367,7 @@ func TestParallelApprovalInterruptsResumeAfterEveryDecision(t *testing.T) {
 		Unit string `json:"unit"`
 	}
 	fixtureTool, err := toolutils.InferTool("parallel_approval_fixture", "parallel approval fixture", func(toolCtx context.Context, input approvalInput) (agenttool.ExecResult, error) {
-		return RunExecutionTool(toolCtx, svc, domain.ExecRequest{
+		return newSSHTools(svc).RunExecution(toolCtx, domain.ExecRequest{
 			HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", input.Unit}, Reason: "test parallel approval resume",
 		}, "eino-agent")
 	})

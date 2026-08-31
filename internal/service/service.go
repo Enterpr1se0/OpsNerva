@@ -1897,10 +1897,6 @@ func containsCredentialControl(value string) bool {
 	return strings.ContainsAny(value, "\x00\r\n")
 }
 
-func (s *Service) ReadFile(ctx context.Context, hostID, path string, maxBytes int, actor string) (domain.ExecResult, error) {
-	return s.ReadFileAdvanced(ctx, hostID, path, false, maxBytes, 0, 0, false, actor)
-}
-
 func (s *Service) ListFiles(ctx context.Context, hostID, path string, actor string) (domain.ExecResult, error) {
 	if !posixpath.IsAbs(path) {
 		return domain.ExecResult{}, asInputValidationError(fmt.Errorf("remote directory path must be absolute"))
@@ -1909,12 +1905,9 @@ func (s *Service) ListFiles(ctx context.Context, hostID, path string, actor stri
 }
 
 func (s *Service) GetRun(ctx context.Context, id string, includeRaw bool) (HistoryResult, error) {
-	run, err := s.store.GetRun(ctx, id)
+	run, err := s.GetRunRecord(ctx, id)
 	if err != nil {
 		return HistoryResult{}, err
-	}
-	if sessionID := SessionIDFromContext(ctx); sessionID != "" && run.SessionID != sessionID {
-		return HistoryResult{}, store.ErrNotFound
 	}
 	result := HistoryResult{Run: run}
 	if includeRaw {
@@ -1932,20 +1925,19 @@ func (s *Service) GetRun(ctx context.Context, id string, includeRaw bool) (Histo
 	return result, nil
 }
 
-func (s *Service) SearchRuns(ctx context.Context, query, hostID string, limit int) ([]domain.Run, error) {
-	return s.store.SearchRuns(ctx, query, hostID, SessionIDFromContext(ctx), limit)
+func (s *Service) GetRunRecord(ctx context.Context, id string) (domain.Run, error) {
+	run, err := s.store.GetRun(ctx, id)
+	if err != nil {
+		return domain.Run{}, err
+	}
+	if sessionID := SessionIDFromContext(ctx); sessionID != "" && run.SessionID != sessionID {
+		return domain.Run{}, store.ErrNotFound
+	}
+	return run, nil
 }
 
-func (s *Service) SearchRunsMatching(ctx context.Context, filter domain.RunSearchFilter, matchMode domain.FileSearchMatchMode) ([]domain.Run, error) {
-	filter.SessionID = SessionIDFromContext(ctx)
-	switch matchMode {
-	case "", domain.FileSearchLiteral:
-		return s.store.SearchRunsFiltered(ctx, filter)
-	case domain.FileSearchRegex:
-		return s.store.SearchRunsRegexFiltered(ctx, filter.Query, filter)
-	default:
-		return nil, fmt.Errorf("invalid history match_mode: use literal or regex")
-	}
+func (s *Service) SearchRuns(ctx context.Context, query, hostID string, limit int) ([]domain.Run, error) {
+	return s.store.SearchRuns(ctx, query, hostID, SessionIDFromContext(ctx), limit)
 }
 
 func (s *Service) SearchRunSummariesMatchingPage(ctx context.Context, filter domain.RunSearchFilter, matchMode domain.FileSearchMatchMode) (domain.RunSearchPage, error) {
