@@ -356,7 +356,7 @@ func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st
 			Tools: tools, ExecuteSequentially: true, UnknownToolsHandler: unknownToolResult,
 			ToolCallMiddlewares: middlewares,
 		}},
-		Handlers: []adk.ChatModelAgentMiddleware{hostCatalogMiddleware, contextSummarizer, plantaskMiddleware, skillMiddleware},
+		Handlers: []adk.ChatModelAgentMiddleware{newCurrentDateTimeMiddleware(time.Now), hostCatalogMiddleware, contextSummarizer, plantaskMiddleware, skillMiddleware},
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("create Eino agent: %w", err)
