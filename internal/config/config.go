@@ -212,9 +212,9 @@ func validateOperationsConfig(cfg *Config) error {
 	}
 	cfg.Model.ReasoningEffort = strings.ToLower(strings.TrimSpace(cfg.Model.ReasoningEffort))
 	switch cfg.Model.ReasoningEffort {
-	case "", "low", "medium", "high", "xhigh":
+	case "", "low", "medium", "high", "xhigh", "max":
 	default:
-		return fmt.Errorf("model.reasoning_effort must be low, medium, high, xhigh, or empty")
+		return fmt.Errorf("model.reasoning_effort must be low, medium, high, xhigh, max, or empty")
 	}
 	dataRoot, _ := filepath.Abs(cfg.DataDir)
 	if sameOrWithin(cfg.WorkspaceDir, dataRoot) || sameOrWithin(dataRoot, cfg.WorkspaceDir) {

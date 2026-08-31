@@ -1,5 +1,5 @@
 export type ModelProviderKind = 'openai' | 'deepseek' | 'anthropic' | 'openai_compatible' | 'ollama'
-export type ModelReasoningEffort = '' | 'low' | 'medium' | 'high' | 'xhigh'
+export type ModelReasoningEffort = '' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 export interface ModelProvider {
   id: string

@@ -136,15 +136,15 @@ func TestLoadRejectsWorkspaceDirectoryOverlappingDataDirectory(t *testing.T) {
 func TestLoadNormalizesAndValidatesReasoningEffort(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "config.yaml")
-	if err := os.WriteFile(path, []byte("model:\n  reasoning_effort: XHIGH\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("model:\n  reasoning_effort: MAX\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Model.ReasoningEffort != "xhigh" {
-		t.Fatalf("reasoning effort = %q, want xhigh", cfg.Model.ReasoningEffort)
+	if cfg.Model.ReasoningEffort != "max" {
+		t.Fatalf("reasoning effort = %q, want max", cfg.Model.ReasoningEffort)
 	}
 	if err := os.WriteFile(path, []byte("model:\n  reasoning_effort: maximum\n"), 0o600); err != nil {
 		t.Fatal(err)

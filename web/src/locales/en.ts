@@ -228,7 +228,7 @@ const en = {
     editTitle: 'Edit provider', newTitle: 'New model provider',
     displayName: 'Display name', providerType: 'Provider type', modelId: 'Model ID', fetching: 'Fetching...', fetchModels: 'Fetch models',
     modelPlaceholder: 'Fetch models or enter an ID', apiKey: 'API key', keepKey: 'Leave blank to keep current key',
-		reasoningEffort: 'Reasoning effort', contextWindow: 'Context window', contextAuto: 'Auto', default: 'Default', contextRange: 'Enter 1,024–10,000,000',
+		reasoningEffort: 'Reasoning effort', contextWindow: 'Context window', contextAuto: 'Auto', contextRange: 'Enter 1,024–10,000,000',
     baseUrl: 'Base URL', officialEndpoint: 'Blank uses the official OpenAI endpoint',
     userAgent: 'User-Agent override', userAgentHint: 'Blank keeps the SDK default; set this when a gateway rejects SDK requests',
 		proxy: 'Proxy', noProxy: 'Direct',

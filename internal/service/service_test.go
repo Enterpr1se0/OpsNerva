@@ -2264,14 +2264,14 @@ func TestCredentialReadUsesManualApproval(t *testing.T) {
 func TestModelProvidersEncryptKeysAndSwitchActiveProvider(t *testing.T) {
 	svc, _, _ := newTestService(t)
 	ctx := context.Background()
-	reasoningEffort := "xhigh"
+	reasoningEffort := "max"
 	first, err := svc.SaveModelProvider(ctx, domain.ModelProviderInput{
 		Name: "primary", Kind: "openai", Model: "gpt-test", ReasoningEffort: &reasoningEffort, APIKey: "sk-super-secret",
 	}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !first.HasAPIKey || first.Active || first.ReasoningEffort != "xhigh" || first.ContextWindow != 0 {
+	if !first.HasAPIKey || first.Active || first.ReasoningEffort != "max" || first.ContextWindow != 0 {
 		t.Fatalf("unexpected saved provider %#v", first)
 	}
 	stored, err := svc.store.GetModelProvider(ctx, first.ID)
@@ -2327,7 +2327,7 @@ func TestModelProvidersEncryptKeysAndSwitchActiveProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updatedCfg.APIKey != "sk-super-secret" || updatedCfg.ReasoningEffort != "xhigh" {
+	if updatedCfg.APIKey != "sk-super-secret" || updatedCfg.ReasoningEffort != "max" {
 		t.Fatalf("blank update did not preserve provider settings: %#v", updatedCfg)
 	}
 	contextWindow := 200000

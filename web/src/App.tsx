@@ -1021,7 +1021,7 @@ function ComposerModelSelector({providers,fallbackModel,disabled,onChanged,onErr
 	</details>
 }
 
-const reasoningEfforts:ModelReasoningEffort[]=['','low','medium','high','xhigh']
+const reasoningEfforts:ModelReasoningEffort[]=['low','medium','high','xhigh','max']
 
 function ComposerReasoningSelector({providers,disabled,onChanged,onError}:{providers:ModelProvider[];disabled:boolean;onChanged:(provider:ModelProvider)=>void;onError:(message:string)=>void}){
 	const {t}=useTranslation()
@@ -1044,9 +1044,9 @@ function ComposerReasoningSelector({providers,disabled,onChanged,onError}:{provi
 		finally{setBusy(false)}
 	}
 	return <details ref={detailsRef} className="composer-selector composer-reasoning" open={open} onToggle={event=>setOpen(event.currentTarget.open)}>
-		<summary title={t('models.reasoningEffort')} aria-label={t('models.reasoningEffort')}>{busy?<LoaderCircle className="spin" size={13}/>:<BrainCircuit size={13}/>}<span>{current||'default'}</span><ChevronRight size={11}/></summary>
+		<summary title={t('models.reasoningEffort')} aria-label={t('models.reasoningEffort')}>{busy?<LoaderCircle className="spin" size={13}/>:<BrainCircuit size={13}/>}<span>{current||'—'}</span><ChevronRight size={11}/></summary>
 		<div className="composer-selector-menu composer-reasoning-menu">
-			{reasoningEfforts.map(value=><button type="button" className={value===current?'active':''} disabled={!active||disabled||busy} onClick={()=>void apply(value)} key={value||'default'}><span><b>{value||'default'}</b></span>{value===current&&<Check size={13}/>}</button>)}
+			{reasoningEfforts.map(value=><button type="button" className={value===current?'active':''} disabled={!active||disabled||busy} onClick={()=>void apply(value)} key={value}><span><b>{value}</b></span>{value===current&&<Check size={13}/>}</button>)}
 		</div>
 	</details>
 }
@@ -3369,7 +3369,7 @@ function ModelsPage({providers,proxies,showAddresses,onToggleAddresses,refresh}:
 		<label className={formErrors.name?'invalid':''}><span>{t('models.displayName')}</span><input value={form.name} aria-invalid={!!formErrors.name} onChange={event=>updateForm('name',event.target.value)}/>{formErrors.name&&<small className="form-field-error">{formErrors.name}</small>}</label>
 		<label><span>{t('models.providerType')}</span><AppSelect value={form.kind} ariaLabel={t('models.providerType')} onChange={value=>changeKind(value as ModelProviderKind)} options={(Object.keys(providerLabels) as ModelProviderKind[]).map(kind=>({value:kind,label:providerLabels[kind]}))}/></label>
 		<label className={`model-id-field ${formErrors.model?'invalid':''}`}><span className="field-title"><span>{t('models.modelId')}</span><button type="button" onClick={discover} disabled={discovering}><RefreshCw size={12}/>{discovering?t('models.fetching'):t('models.fetchModels')}</button></span><ModelCombobox value={form.model} models={catalog?.models||[]} metadata={catalog?.metadata} onChange={value=>updateForm('model',value)} placeholder={t('models.modelPlaceholder')} ariaLabel={t('models.modelId')} invalid={!!formErrors.model}/>{formErrors.model&&<small className="form-field-error">{formErrors.model}</small>}</label>
-			<label><span>{t('models.reasoningEffort')}</span><AppSelect value={form.reasoning_effort} ariaLabel={t('models.reasoningEffort')} onChange={value=>updateForm('reasoning_effort',value as ModelProviderInput['reasoning_effort'])} options={[{value:'',label:t('models.default')},...(['low','medium','high','xhigh'] as const).map(value=>({value,label:value}))]}/></label>
+			<label><span>{t('models.reasoningEffort')}</span><AppSelect value={form.reasoning_effort||'—'} ariaLabel={t('models.reasoningEffort')} onChange={value=>updateForm('reasoning_effort',value as ModelProviderInput['reasoning_effort'])} options={reasoningEfforts.map(value=>({value,label:value}))}/></label>
 			<label className={formErrors.context_window?'invalid':''}><span>{t('models.contextWindow')}</span><input inputMode="numeric" value={form.context_window??''} aria-invalid={!!formErrors.context_window} onChange={event=>{const value=event.target.value.replace(/\D/g,'').slice(0,8);updateForm('context_window',value?Number(value):null)}} placeholder={selectedMetadata?.context_window?compactTokenCount(selectedMetadata.context_window):t('models.contextAuto')}/>{formErrors.context_window&&<small className="form-field-error">{formErrors.context_window}</small>}</label>
 			<label><span>{t('models.apiKey')}</span><PasswordInput autoComplete="new-password" value={form.api_key} onChange={event=>{setCatalog(null);setForm({...form,api_key:event.target.value})}} placeholder={editing?t('models.keepKey'):''}/></label>
 			<label className="base-url-field"><span>{t('models.baseUrl')}</span><input value={form.base_url} onChange={event=>{setCatalog(null);setForm({...form,base_url:event.target.value})}} placeholder={form.kind==='openai'?t('models.officialEndpoint'):''}/></label>

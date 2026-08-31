@@ -215,8 +215,8 @@ func TestProviderSendsConstrainedPromptAndAcceptsNonEmptyResponse(t *testing.T) 
 		if request.MaxTokens != 512 {
 			t.Fatalf("max_tokens = %d, want 512", request.MaxTokens)
 		}
-		if request.ReasoningEffort != "high" {
-			t.Fatalf("reasoning_effort = %q, want high", request.ReasoningEffort)
+		if request.ReasoningEffort != "max" {
+			t.Fatalf("reasoning_effort = %q, want max", request.ReasoningEffort)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
@@ -228,7 +228,7 @@ func TestProviderSendsConstrainedPromptAndAcceptsNonEmptyResponse(t *testing.T) 
 	defer server.Close()
 
 	result, err := (&Runtime{}).TestProvider(context.Background(), config.Model{
-		APIKey: "fixture-key", BaseURL: server.URL + "/v1", Name: "fixture-model", ReasoningEffort: "high",
+		APIKey: "fixture-key", BaseURL: server.URL + "/v1", Name: "fixture-model", ReasoningEffort: "max",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -358,7 +358,7 @@ func TestProviderAnthropicUsesNativeMessagesRequest(t *testing.T) {
 		if request.Model != "claude-fixture" || !strings.Contains(string(request.Messages), "Hello") {
 			t.Errorf("unexpected Anthropic request: model=%q messages=%s", request.Model, request.Messages)
 		}
-		if request.Thinking.Type != "adaptive" || request.OutputConfig.Effort != "high" {
+		if request.Thinking.Type != "adaptive" || request.OutputConfig.Effort != "max" {
 			t.Errorf("unexpected Anthropic reasoning config: thinking=%q effort=%q", request.Thinking.Type, request.OutputConfig.Effort)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -372,7 +372,7 @@ func TestProviderAnthropicUsesNativeMessagesRequest(t *testing.T) {
 	defer server.Close()
 
 	result, err := (&Runtime{}).TestProvider(context.Background(), config.Model{
-		APIKey: apiKey, Kind: "anthropic", BaseURL: server.URL, Name: "claude-fixture", ReasoningEffort: "high", UserAgent: userAgent,
+		APIKey: apiKey, Kind: "anthropic", BaseURL: server.URL, Name: "claude-fixture", ReasoningEffort: "max", UserAgent: userAgent,
 	})
 	if err != nil {
 		t.Fatal(err)

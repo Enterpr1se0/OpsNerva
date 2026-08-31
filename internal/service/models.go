@@ -73,10 +73,10 @@ func setModelProviderRequestHeaders(request *http.Request, resolved resolvedMode
 func normalizeReasoningEffort(value string) (string, error) {
 	value = strings.ToLower(strings.TrimSpace(value))
 	switch value {
-	case "", "low", "medium", "high", "xhigh":
+	case "", "low", "medium", "high", "xhigh", "max":
 		return value, nil
 	default:
-		return "", fmt.Errorf("reasoning_effort must be low, medium, high, xhigh, or empty")
+		return "", fmt.Errorf("reasoning_effort must be low, medium, high, xhigh, max, or empty")
 	}
 }
 
