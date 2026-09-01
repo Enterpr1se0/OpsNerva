@@ -367,10 +367,6 @@ body {
   animation: app-sidebar-enter var(--motion-view) var(--motion-ease);
 }
 
-.session-item:hover {
-  transform: translateX(2px);
-}
-
 .session-actions {
   transition: opacity var(--motion-fast) var(--motion-ease);
 }
