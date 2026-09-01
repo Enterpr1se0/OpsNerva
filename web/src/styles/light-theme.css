@@ -878,7 +878,7 @@
 
 :root[data-theme='light'] :where(.auth-screen,.configuration-transfer-backdrop){background:color-mix(in srgb,var(--light-canvas) 92%,transparent)}
 :root[data-theme='light'] :where(.auth-card,.configuration-transfer-dialog){border-color:var(--light-border);background:var(--light-surface);box-shadow:var(--light-shadow)}
-:root[data-theme='light'] :where(.auth-card input,.configuration-transfer-dialog input,.configuration-import-file>b,.auth-logout,.configuration-transfer-actions>button:not(.primary)){border-color:var(--light-border);background:var(--light-surface);color:var(--light-text-secondary)}
+:root[data-theme='light'] :where(.auth-card input,.configuration-transfer-dialog input,.configuration-import-file>b,.auth-logout,.settings-action-row>button:not(.primary)){border-color:var(--light-border);background:var(--light-surface);color:var(--light-text-secondary)}
 
 :root[data-theme='light'] .system-settings .settings-form {
   border-color: var(--light-border);

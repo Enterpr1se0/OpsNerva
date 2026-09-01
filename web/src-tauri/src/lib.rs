@@ -56,6 +56,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             set_tray_mode,
             enter_lightweight_mode,
+            open_developer_tools,
             open_workspace_directory,
             open_external_url
         ])
@@ -112,6 +113,15 @@ fn enter_lightweight_mode(app: tauri::AppHandle) -> Result<(), String> {
         .get_webview_window("main")
         .ok_or_else(|| "main window is unavailable".to_string())?;
     window.destroy().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn open_developer_tools(app: tauri::AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window is unavailable".to_string())?;
+    window.open_devtools();
+    Ok(())
 }
 
 #[tauri::command]

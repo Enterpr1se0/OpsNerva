@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "desktop-controls"
+description = "Allows desktop window controls, developer tools, and opening validated Workspace directories and URLs."
+commands.allow = ["set_tray_mode", "enter_lightweight_mode", "open_developer_tools", "open_workspace_directory", "open_external_url"]

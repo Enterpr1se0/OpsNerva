@@ -123,7 +123,7 @@ const en = {
     subagentProvider: 'Approval model',
     activeMain: 'Main model', timeout: 'Timeout', seconds: '{{count}} seconds',
 	contextCompression: 'Context compression', autoCompression: 'Automatic compression', compressionThreshold: 'Trigger threshold (%)', compressionOff: 'Off',
-	chatImages: 'Chat image formats',
+	chatImages: 'Chat image formats', developerTools: 'Browser developer tools', openDeveloperTools: 'Open developer tools',
     workspaceShell: 'Workspace Shell execution',
     shellDisabled: 'Disabled', shellSandbox: 'Bubblewrap sandbox', shellHost: 'Host shell', shellUnsupported: 'Bubblewrap is unavailable on this host.',
     shellBackend: 'Workspace Shell', detecting: 'Detecting', sandbox: 'Sandbox', sandboxAvailable: 'Bubblewrap · no network', unavailableHost: 'Unavailable', hostShell: 'Host', systemShell: 'System Shell', fullAuthority: 'Full access', noShell: 'No Shell available', hostWarning: 'Can access host files and network', sandboxWarning: 'Sandbox unavailable; commands will not run on the host',
