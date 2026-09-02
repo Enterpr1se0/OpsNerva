@@ -817,12 +817,6 @@ body {
   opacity: .72;
 }
 
-:root[data-window-active='false'] *,
-:root[data-window-active='false'] *::before,
-:root[data-window-active='false'] *::after {
-  animation-play-state: paused !important;
-}
-
 .desktop-titlebar-brand {
   height: 100%;
   display: flex;
