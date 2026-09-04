@@ -309,15 +309,24 @@ func TestOperatorCanEditTunnel(t *testing.T) {
 	if list.Count != 1 || list.Tunnels[0].ID != updated.ID {
 		t.Fatalf("edited tunnel did not replace the original: %#v", list)
 	}
-	if _, err := svc.StopSSHTunnel(context.Background(), updated.ID, "admin-web"); err != nil {
+	if _, err := svc.StopOperatorSSHTunnel(context.Background(), updated.ID, "admin-web"); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestOperatorCanStartTunnelWithoutAgentApproval(t *testing.T) {
+func TestOperatorTunnelStaysOutOfAgentHistory(t *testing.T) {
 	svc, _, host := newTestService(t)
+	ctx := context.Background()
+	runsBefore, err := svc.store.SearchRuns(ctx, "", "", "", 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditBefore, err := svc.store.ListAudit(ctx, "", 500)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	tunnel, err := svc.StartOperatorSSHTunnel(context.Background(), host.ID, domain.SSHTunnelConfig{RemotePort: 8080}, "admin-web")
+	tunnel, err := svc.StartOperatorSSHTunnel(ctx, host.ID, domain.SSHTunnelConfig{RemotePort: 8080}, "admin-web")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,8 +335,26 @@ func TestOperatorCanStartTunnelWithoutAgentApproval(t *testing.T) {
 		t.Fatalf("unexpected operator tunnel: %#v", tunnel)
 	}
 	assertNoPendingApprovals(t, svc)
-	if _, err := svc.StopSSHTunnel(context.Background(), tunnel.ID, "admin-web"); err != nil {
+	tunnel, err = svc.UpdateOperatorSSHTunnel(ctx, tunnel.ID, tunnel.HostID, domain.SSHTunnelConfig{
+		Direction: tunnel.Direction, LocalHost: tunnel.LocalHost, LocalPort: tunnel.LocalPort,
+		RemoteHost: tunnel.RemoteHost, RemotePort: 8081,
+	}, "admin-web")
+	if err != nil || tunnel.RemotePort != 8081 {
+		t.Fatalf("operator tunnel update failed: tunnel=%#v err=%v", tunnel, err)
+	}
+	if _, err := svc.StopOperatorSSHTunnel(ctx, tunnel.ID, "admin-web"); err != nil {
 		t.Fatal(err)
+	}
+	runsAfter, err := svc.store.SearchRuns(ctx, "", "", "", 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditAfter, err := svc.store.ListAudit(ctx, "", 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runsAfter) != len(runsBefore) || len(auditAfter) != len(auditBefore) {
+		t.Fatalf("operator tunnel changed Agent history: runs %d -> %d, audit %d -> %d", len(runsBefore), len(runsAfter), len(auditBefore), len(auditAfter))
 	}
 }
 
@@ -367,7 +394,7 @@ func TestOperatorTunnelReconnectsAutomatically(t *testing.T) {
 		t.Fatalf("automatic reconnect did not preserve the tunnel or reload its host: started=%#v current=%#v", started, current)
 	}
 	assertNoPendingApprovals(t, svc)
-	if _, err := svc.StopSSHTunnel(context.Background(), started.ID, "admin-web"); err != nil {
+	if _, err := svc.StopOperatorSSHTunnel(context.Background(), started.ID, "admin-web"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -448,7 +475,7 @@ func TestOperatorTunnelReconnectReloadsStoredCredentials(t *testing.T) {
 		len(reconnected.Jumps) != 1 || reconnected.Jumps[0].Password != "jump-secret" {
 		t.Fatalf("automatic reconnect did not hydrate stored credentials: %#v", reconnected)
 	}
-	if _, err := svc.StopSSHTunnel(ctx, started.ID, "admin-web"); err != nil {
+	if _, err := svc.StopOperatorSSHTunnel(ctx, started.ID, "admin-web"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -480,7 +507,7 @@ func TestStoppingTunnelCancelsAutomaticReconnect(t *testing.T) {
 	if err := svc.DeleteHost(context.Background(), host.ID, "test"); err == nil || !strings.Contains(err.Error(), "active SSH tunnel") {
 		t.Fatalf("reconnecting tunnel did not protect its host: %v", err)
 	}
-	if _, err := svc.StopSSHTunnel(context.Background(), started.ID, "admin-web"); err != nil {
+	if _, err := svc.StopOperatorSSHTunnel(context.Background(), started.ID, "admin-web"); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(sshTunnelReconnectInitialDelay + 100*time.Millisecond)
@@ -534,7 +561,7 @@ func TestOperatorTunnelEditValidatesBeforeStopAndRollsBackRuntimeFailure(t *test
 		list.Tunnels[0].LocalPort != original.LocalPort || list.Tunnels[0].RemotePort != original.RemotePort {
 		t.Fatalf("failed edit did not restore the original tunnel: %#v", list)
 	}
-	if _, err := svc.StopSSHTunnel(context.Background(), original.ID, "admin-web"); err != nil {
+	if _, err := svc.StopOperatorSSHTunnel(context.Background(), original.ID, "admin-web"); err != nil {
 		t.Fatal(err)
 	}
 }

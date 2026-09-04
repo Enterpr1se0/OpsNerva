@@ -1313,7 +1313,7 @@ func (s *Server) updateSSHTunnel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) stopSSHTunnel(w http.ResponseWriter, r *http.Request) {
-	result, err := s.service.StopSSHTunnel(r.Context(), r.PathValue("id"), actor(r))
+	result, err := s.service.StopOperatorSSHTunnel(r.Context(), r.PathValue("id"), actor(r))
 	if err != nil {
 		writeError(w, err)
 		return

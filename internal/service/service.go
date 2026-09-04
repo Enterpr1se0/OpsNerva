@@ -32,6 +32,8 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
+const webOperatorReason = "started directly by the operator from the Web console"
+
 type Service struct {
 	store                *store.Store
 	transport            sshx.Transport
