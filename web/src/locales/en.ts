@@ -240,7 +240,7 @@ const en = {
     noMCPActivity: 'No MCP activity', noMCPCalls: 'No tool calls', selectMCPSession: 'Select a client session', mcpStreamFailed: 'MCP activity stream failed',
     callId: 'Call ID', approvalId: 'Approval ID', taskId: 'Task ID', runEvidence: 'Run audit', mcpRunGroup: 'MCP Server calls',
     direct: 'Direct / legacy operations', missingConversation: 'Deleted or unavailable conversation',
-    counts: '{{sessions}} SESSIONS · {{runs}} RUNS', noSession: 'No Agent session context', lastRun: 'Last run {{date}}', runs: 'runs', pending: 'pending',
+    counts: '{{sessions}} SESSIONS · {{runs}} RUNS', noSession: 'No Agent session context', lastRun: 'Last run {{date}}', pending: 'pending',
     columns: { time: 'Time', operation: 'Operation', status: 'Status', host: 'Host', exit: 'Exit' }, unknownOperation: 'Unknown operation',
 		loadMore: 'Load earlier records', clear: 'Delete all', deleteSession: 'Delete records',
 		deleteSessionTitle: 'Delete audit records for “{{title}}”?', deleteAllTitle: 'Delete all audit records?',

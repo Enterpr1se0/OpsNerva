@@ -25,6 +25,7 @@ type StateEvent struct {
 	Topic      string                `json:"topic"`
 	SessionID  string                `json:"session_id,omitempty"`
 	Connection *ConnectionStateDelta `json:"connection,omitempty"`
+	Audit      *domain.AuditEvent    `json:"audit,omitempty"`
 }
 
 type stateSubscriber struct {
@@ -108,7 +109,7 @@ func (s *Service) publishStoreChange(change store.Change) {
 	case store.ChangeApprovals:
 		s.publishStateEvent(StateEvent{Topic: StateTopicApprovals})
 	case store.ChangeAudit:
-		s.publishStateEvent(StateEvent{Topic: StateTopicAudit})
+		s.publishStateEvent(StateEvent{Topic: StateTopicAudit, Audit: change.Audit})
 	case store.ChangeSessions:
 		s.publishStateEvent(StateEvent{Topic: StateTopicSessions, SessionID: change.SessionID})
 	case store.ChangeChatState:

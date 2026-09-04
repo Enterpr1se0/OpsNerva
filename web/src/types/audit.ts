@@ -85,6 +85,9 @@ export interface RunSearchPage {
 export interface AuditRunDeleteResult {
   deleted: number
   retained: number
+  scope: 'all' | 'session' | 'direct'
+  session_id?: string
+  retained_run_ids?: string[]
 }
 
 export interface RunDetail {

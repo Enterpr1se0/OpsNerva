@@ -1,5 +1,7 @@
 package store
 
+import "github.com/Enterpr1se0/opsnerva/internal/domain"
+
 const (
 	ChangeApprovals = "approvals"
 	ChangeAudit     = "audit"
@@ -8,10 +10,12 @@ const (
 )
 
 // Change identifies a committed control-plane mutation. SessionID narrows
-// conversation-scoped invalidations; an empty value invalidates every session.
+// conversation-scoped invalidations; Audit carries an exact committed audit
+// event when one exists. An empty value invalidates every session.
 type Change struct {
 	Topic     string
 	SessionID string
+	Audit     *domain.AuditEvent
 }
 
 // SubscribeChanges registers a listener for changes published after a

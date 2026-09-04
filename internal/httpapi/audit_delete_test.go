@@ -60,7 +60,7 @@ func TestDeleteAuditRunsEndpointRetainsActiveRun(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
 		t.Fatal(err)
 	}
-	if response.StatusCode != http.StatusOK || result.Deleted != 1 || result.Retained != 1 {
+	if response.StatusCode != http.StatusOK || result.Deleted != 1 || result.Retained != 1 || result.Scope != "direct" || len(result.RetainedRunIDs) != 1 || result.RetainedRunIDs[0] != "run-http-active" {
 		t.Fatalf("delete status=%d result=%#v", response.StatusCode, result)
 	}
 }

@@ -26,7 +26,7 @@ func TestStoreChangesFollowSuccessfulWrites(t *testing.T) {
 	if err := st.AppendAudit(ctx, event); err != nil {
 		t.Fatal(err)
 	}
-	if len(changes) != 1 || changes[0].Topic != ChangeAudit {
+	if len(changes) != 1 || changes[0].Topic != ChangeAudit || changes[0].Audit == nil || changes[0].Audit.ID != event.ID {
 		t.Fatalf("audit changes = %#v", changes)
 	}
 	if err := st.AppendAudit(ctx, event); err == nil {

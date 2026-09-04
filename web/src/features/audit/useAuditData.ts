@@ -4,11 +4,13 @@ import { api } from '../../api/api'
 import { subscribeApplicationEvents } from '../../api/appEvents'
 import type { NotificationSink } from '../../lib/notifications'
 import { errorText } from '../../lib/utils'
-import type { ChatSession, Run } from '../../types'
+import type { AuditRunDeleteResult, ChatSession, Run } from '../../types'
+import { applyAuditRunDeletion, auditSessionID } from './auditRuns'
 
 export type AuditView='runs'|'mcp'
 
 type AuditPageCursor={hasMore:boolean;timestamp:string;id:string}
+type AuditStateSnapshot={id?:string;type?:string;data?:AuditRunDeleteResult}
 
 type AuditDataOptions={
 	active:boolean
@@ -72,37 +74,50 @@ export function useAuditData({active,refreshHosts,notify}:AuditDataOptions){
 		refreshRef.current=task
 		return task
 	},[refreshHosts,refreshRuns,refreshSessions,reportError])
-	const loadMore=useCallback(async()=>{
-		if(loadingMore||!cursor.hasMore||!cursor.timestamp||!cursor.id)return
+	const applyDeletion=useCallback((result:AuditRunDeleteResult)=>{
+		setRuns(current=>applyAuditRunDeletion(current,result))
+		if(result.scope==='all'){
+			setCursor({hasMore:false,timestamp:'',id:''})
+			extendedRef.current=false
+		}
+	},[])
+	const loadMore=useCallback(async():Promise<string[]>=>{
+		if(loadingMore||!cursor.hasMore||!cursor.timestamp||!cursor.id)return[]
 		setLoadingMore(true);setError('')
 		try{
 			const page=await api.runSummaries({cursorStartedAt:cursor.timestamp,cursorID:cursor.id})
-			setRuns(current=>[...current,...page.runs.filter(item=>!current.some(existing=>existing.id===item.id))])
+			setRuns(current=>{
+				const seen=new Set(current.map(item=>item.id))
+				return[...current,...page.runs.filter(item=>!seen.has(item.id))]
+			})
 			extendedRef.current=true
 			setCursor({hasMore:page.has_more,timestamp:page.next_started_at||'',id:page.next_id||''})
-		}catch(cause){reportError(cause)}
+			return[...new Set(page.runs.map(auditSessionID))]
+		}catch(cause){reportError(cause);return[]}
 		finally{setLoadingMore(false)}
 	},[cursor,loadingMore,reportError])
-	const deleteRuns=useCallback(async(sessionID?:string|null)=>{
+	const deleteRuns=useCallback(async(sessionID?:string|null):Promise<AuditRunDeleteResult>=>{
 		try{
 			const result=await api.deleteAuditRuns(sessionID)
-			await refreshRuns(true)
+			applyDeletion(result)
 			notify(result.retained?t('audit.deletedWithRetained',{deleted:result.deleted,retained:result.retained}):t('audit.deleted',{count:result.deleted}))
+			return result
 		}catch(cause){reportError(cause);throw cause}
-	},[notify,refreshRuns,reportError,t])
+	},[applyDeletion,notify,reportError,t])
 
 	useEffect(()=>{if(active)void refresh()},[active,refresh])
 	useEffect(()=>{
 		if(!active)return
 		let initialSnapshot=true
-		return subscribeApplicationEvents<{id?:string;type?:string}>('audit',event=>{
+		return subscribeApplicationEvents<AuditStateSnapshot>('audit',event=>{
 			if(event.type==='error'){reportError(event.error||'Audit event stream failed');return}
 			if(event.type!=='event')return
 			if(initialSnapshot&&event.mode==='snapshot'){initialSnapshot=false;return}
-			if(event.data?.type==='audit_records_deleted')void refreshRuns(true).catch(reportError)
+			if(event.mode==='snapshot'){void refreshRuns(true).catch(reportError);return}
+			if(event.data?.type==='audit_records_deleted'&&event.data.data)applyDeletion(event.data.data)
 			else void refresh()
 		})
-	},[active,refresh,refreshRuns,reportError])
+	},[active,applyDeletion,refresh,refreshRuns,reportError])
 
 	return{runs,sessions,ready,error,runsHasMore:cursor.hasMore,loadingMore,refresh,loadMore,deleteRuns}
 }

@@ -24,12 +24,12 @@ import { ChatWorkspacePanel, SSHWorkspacePage, WorkspaceSettingsPanel } from './
 import { useNotifier, NotificationContext, type NotificationSink, type AppNotification } from './lib/notifications'
 import { DestructiveConfirmDialog } from './components/DestructiveConfirmDialog'
 import { FileTransferProvider } from './features/sftp'
-import { useAuditData, type AuditView } from './features/audit'
+import { auditSessionID, directAuditSessionID, useAuditData, useAuditGroupDisclosure, type AuditView } from './features/audit'
 import { useChatCardDisclosure, type ChatDisclosurePositionHandler } from './features/chat'
 import { DesktopDeveloperToolsPanel } from './features/settings'
 import { useAutoCollapseDetails } from './lib/hooks'
 import { desktopRuntime, errorStatus, errorText, formatFileSize, sshTunnelRoute } from './lib/utils'
-import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, AuthStatus, ChatMessage, ChatQueueMode, ChatSession, ChatSessionDelta, ChatState, ChatTokenUsage, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPActivityEvent, MCPActivitySnapshot, MCPClientSession, MCPServer, MCPServerInput, MCPToolCall, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, QueuedChatMessage, Run, ServerLogEntry, SSHShell, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceShellMode } from './types'
+import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, AuditRunDeleteResult, AuthStatus, ChatMessage, ChatQueueMode, ChatSession, ChatSessionDelta, ChatState, ChatTokenUsage, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPActivityEvent, MCPActivitySnapshot, MCPClientSession, MCPServer, MCPServerInput, MCPToolCall, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, QueuedChatMessage, Run, ServerLogEntry, SSHShell, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceShellMode } from './types'
 
 type Page = 'chat' | 'ssh' | 'config' | 'extensions' | 'audit' | 'logs'
 const pageVisualOrder:Page[]=['chat','ssh','extensions','audit','logs','config']
@@ -2733,7 +2733,6 @@ function WebToolResult({tool,payload}:{tool:string;payload:JsonRecord}){
 	const credits=numberValue(payload.credits)
 	const omitted=numberValue(payload.omitted_results)
 	return <div className="web-tool-result">
-		{(responseTime>0||credits>0||textValue(payload.request_id))&&<div className="web-tool-meta">{responseTime>0&&<span>{responseTime.toFixed(2)}s</span>}{credits>0&&<span>{t('webSearch.credits',{count:credits})}</span>}{textValue(payload.request_id)&&<code title={textValue(payload.request_id)}>{textValue(payload.request_id)}</code>}</div>}
 		{results.length>0&&<div className="web-source-list">{results.map((result,index)=>{
 			const parsed=publicWebLink(textValue(result.url))
 			const content=textValue(result.content)||textValue(result.raw_content)
@@ -2745,6 +2744,7 @@ function WebToolResult({tool,payload}:{tool:string;payload:JsonRecord}){
 				{(textValue(result.published_date)||numberValue(result.score)>0||truncated)&&<footer>{textValue(result.published_date)&&<time>{textValue(result.published_date)}</time>}{numberValue(result.score)>0&&<span>{Math.round(numberValue(result.score)*100)}%</span>}{truncated&&<em>{t('webSearch.truncated')}</em>}</footer>}
 			</article>
 		})}</div>}
+		{(responseTime>0||credits>0||textValue(payload.request_id))&&<div className="web-tool-meta">{responseTime>0&&<span>{responseTime.toFixed(2)}s</span>}{credits>0&&<span>{t('webSearch.credits',{count:credits})}</span>}{textValue(payload.request_id)&&<code title={textValue(payload.request_id)}>{textValue(payload.request_id)}</code>}</div>}
 		{failures.length>0&&<section className="web-source-failures"><b>{t('webSearch.failures')}</b>{failures.map((failure,index)=>{const parsed=publicWebLink(textValue(failure.url));return <div key={`${textValue(failure.url)}_${index}`}><span>{parsed?.hostname||textValue(failure.url)}</span><small>{textValue(failure.error)}</small></div>})}</section>}
 		{omitted>0&&<div className="web-tool-omitted">{t('webSearch.omitted',{count:omitted})}</div>}
 	</div>
@@ -3487,7 +3487,7 @@ function auditOperationSummary(req:JsonRecord,run:Run,hosts:Host[],t:TFunction){
 	}
 }
 
-function AuditRunRow({run,hosts}:{run:Run;hosts:Host[]}){
+const AuditRunRow=memo(function AuditRunRow({run,hosts}:{run:Run;hosts:Host[]}){
 	const {t,i18n:instance}=useTranslation()
 	const [detail,setDetail]=useState<Run|null>(null)
 	const [loading,setLoading]=useState(false)
@@ -3517,11 +3517,11 @@ function AuditRunRow({run,hosts}:{run:Run;hosts:Host[]}){
 			{loading?<div className="audit-loading" role="status"><LoaderCircle className="spin" size={16}/><span>{t('common.loading')}</span></div>:error?<div className="inline-error">{error}</div>:detail&&<AuditRunDetail run={resolved} req={resolvedRequest} hosts={hosts}/>}
 		</div>
 	</details>
-}
+})
 
 type AuditDeleteTarget={kind:'session';id:string;title:string}|{kind:'all'}
 
-type AuditPageProps={view:AuditView;onViewChange:(view:AuditView)=>void;mcpRefreshKey:number;runs:Run[];hosts:Host[];sessions:ChatSession[];ready:boolean;error:string;runsHasMore:boolean;loadingMore:boolean;onLoadMoreRuns:()=>Promise<void>;onDeleteRuns:(sessionID?:string|null)=>Promise<void>}
+type AuditPageProps={view:AuditView;onViewChange:(view:AuditView)=>void;mcpRefreshKey:number;runs:Run[];hosts:Host[];sessions:ChatSession[];ready:boolean;error:string;runsHasMore:boolean;loadingMore:boolean;onLoadMoreRuns:()=>Promise<string[]>;onDeleteRuns:(sessionID?:string|null)=>Promise<AuditRunDeleteResult>}
 
 function AuditPage({view,onViewChange,mcpRefreshKey,...props}:AuditPageProps){
 	const {t}=useTranslation()
@@ -3534,7 +3534,7 @@ function AuditPage({view,onViewChange,mcpRefreshKey,...props}:AuditPageProps){
 	</div>
 }
 
-function AuditRunsView({runs,hosts,sessions,ready,error,runsHasMore,loadingMore,onLoadMoreRuns,onDeleteRuns}:{runs:Run[];hosts:Host[];sessions:ChatSession[];ready:boolean;error:string;runsHasMore:boolean;loadingMore:boolean;onLoadMoreRuns:()=>Promise<void>;onDeleteRuns:(sessionID?:string|null)=>Promise<void>}) {
+function AuditRunsView({runs,hosts,sessions,ready,error,runsHasMore,loadingMore,onLoadMoreRuns,onDeleteRuns}:{runs:Run[];hosts:Host[];sessions:ChatSession[];ready:boolean;error:string;runsHasMore:boolean;loadingMore:boolean;onLoadMoreRuns:()=>Promise<string[]>;onDeleteRuns:(sessionID?:string|null)=>Promise<AuditRunDeleteResult>}) {
 	const {t,i18n:instance}=useTranslation()
 	const [query,setQuery]=useState('')
 	const [deleteTarget,setDeleteTarget]=useState<AuditDeleteTarget|null>(null)
@@ -3550,18 +3550,25 @@ function AuditRunsView({runs,hosts,sessions,ready,error,runsHasMore,loadingMore,
 	const groups=useMemo(()=>{
 		const titles=new Map(sessions.map(session=>[session.id,session.title]))
 		const grouped=new Map<string,Run[]>()
-		for(const run of filtered){const key=run.session_id||'__direct__';grouped.set(key,[...(grouped.get(key)||[]),run])}
+		for(const run of filtered){const key=auditSessionID(run),items=grouped.get(key);if(items)items.push(run);else grouped.set(key,[run])}
 		return [...grouped.entries()].map(([id,items])=>{
 			items.sort((a,b)=>Date.parse(b.started_at)-Date.parse(a.started_at))
-			return{id,title:id==='__direct__'?t('audit.direct'):id.startsWith('mcp_sess_')?t('audit.mcpRunGroup'):titles.get(id)||t('audit.missingConversation'),runs:items,latest:items[0]?.started_at,pending:items.filter(run=>run.status==='approval_required').length}
+			return{id,title:id===directAuditSessionID?t('audit.direct'):id.startsWith('mcp_sess_')?t('audit.mcpRunGroup'):titles.get(id)||t('audit.missingConversation'),runs:items,latest:items[0]?.started_at,pending:items.filter(run=>run.status==='approval_required').length}
 		}).sort((a,b)=>Date.parse(b.latest||'')-Date.parse(a.latest||''))
 	},[filtered,sessions,t,instance.language])
+	const groupIDs=useMemo(()=>groups.map(group=>group.id),[groups])
+	const disclosure=useAuditGroupDisclosure(groupIDs,filtered.length)
 	const confirmDelete=async()=>{
 		if(!deleteTarget||deleting)return
 		setDeleting(true)
 		try{
-			if(deleteTarget.kind==='session')await onDeleteRuns(deleteTarget.id)
-			else await onDeleteRuns(undefined)
+			const result=deleteTarget.kind==='session'?await onDeleteRuns(deleteTarget.id===directAuditSessionID?'':deleteTarget.id):await onDeleteRuns(undefined)
+			if(result.scope==='all'){
+				const retainedRunIDs=new Set(result.retained_run_ids||[])
+				const retainedGroupIDs=new Set(runs.filter(run=>retainedRunIDs.has(run.id)).map(auditSessionID))
+				disclosure.forget(groupIDs.filter(id=>!retainedGroupIDs.has(id)))
+			}
+			else if(result.retained===0)disclosure.forget([deleteTarget.kind==='session'?deleteTarget.id:directAuditSessionID])
 			setDeleteTarget(null)
 		}catch{/* the application notification channel presents the actionable error */}
 		finally{setDeleting(false)}
@@ -3571,12 +3578,11 @@ function AuditRunsView({runs,hosts,sessions,ready,error,runsHasMore,loadingMore,
 	return <div className="audit-runs-view page-stack">
 		{error&&<div className="inline-error">{error}</div>}
 		<div className="audit-toolbar"><div className="search-box"><Search size={16}/><input aria-label={t('common.search')} value={query} onChange={event=>setQuery(event.target.value)}/></div><span>{t('audit.counts',{sessions:groups.length,runs:filtered.length})}</span>{runs.length>0&&<button type="button" className="audit-clear-button" onClick={()=>setDeleteTarget({kind:'all'})}><Trash2 size={13}/>{t('audit.clear')}</button>}</div>
-		<div className="audit-groups">{groups.map(group=><details className="audit-session panel" key={group.id}>
-			<summary className="audit-session-summary"><div className="audit-session-glyph"><History size={17}/></div><div className="audit-session-name"><b>{group.title}</b><span>{group.id==='__direct__'?t('audit.noSession'):group.id} · {t('audit.lastRun',{date:new Date(group.latest).toLocaleString(localeFor(instance.language))})}</span></div><div className="audit-session-stats"><span><b>{group.runs.length}</b> {t('audit.runs')}</span>{group.pending>0&&<span className="pending-count"><b>{group.pending}</b> {t('audit.pending')}</span>}</div><ChevronRight className="audit-session-chevron" size={17}/></summary>
-			<div className="audit-session-actions"><button type="button" className="danger" onClick={()=>setDeleteTarget({kind:'session',id:group.id==='__direct__'?'':group.id,title:group.title})}><Trash2 size={13}/>{t('audit.deleteSession')}</button></div>
+		<div className="audit-groups">{groups.map(group=><details className="audit-session panel" open={disclosure.expanded.has(group.id)} onToggle={event=>disclosure.setOpen(group.id,event.currentTarget.open)} key={group.id}>
+			<summary className="audit-session-summary"><div className="audit-session-glyph"><History size={17}/></div><div className="audit-session-name"><b>{group.title}</b><span>{group.id===directAuditSessionID?t('audit.noSession'):group.id} · {t('audit.lastRun',{date:new Date(group.latest).toLocaleString(localeFor(instance.language))})}</span></div><div className="audit-session-stats">{group.pending>0&&<span className="pending-count"><b>{group.pending}</b> {t('audit.pending')}</span>}<button type="button" className="audit-session-delete danger" onClick={event=>{event.preventDefault();event.stopPropagation();setDeleteTarget({kind:'session',id:group.id,title:group.title})}}><Trash2 size={13}/>{t('audit.deleteSession')}</button></div><ChevronRight className="audit-session-chevron" size={17}/></summary>
 			<div className="audit-table"><div className="audit-row audit-head"><span>{t('audit.columns.time')}</span><span>{t('audit.columns.operation')}</span><span>{t('audit.columns.status')}</span><span>{t('audit.columns.host')}</span><span>{t('audit.columns.exit')}</span><span aria-hidden="true"/></div>{group.runs.map(run=><AuditRunRow key={run.id} run={run} hosts={hosts}/>)}</div>
 		</details>)}</div>
-		{runsHasMore&&<button type="button" className="audit-load-more panel" disabled={loadingMore} onClick={()=>void onLoadMoreRuns()}>{loadingMore?<LoaderCircle className="spin" size={14}/>:<History size={14}/>} {t('audit.loadMore')}</button>}
+		{runsHasMore&&<button type="button" className="audit-load-more panel" disabled={loadingMore} onClick={()=>void onLoadMoreRuns().then(disclosure.reveal)}>{loadingMore?<LoaderCircle className="spin" size={14}/>:<History size={14}/>} {t('audit.loadMore')}</button>}
 		{!runs.length&&<Empty icon={<History/>} title={t('audit.emptyTitle')}/>}
 		{runs.length>0&&!groups.length&&<Empty icon={<Search/>} title={t('audit.noMatch')}/>}
 		{deleteTarget&&<DestructiveConfirmDialog title={deleteTitle} busy={deleting} onCancel={()=>setDeleteTarget(null)} onConfirm={()=>void confirmDelete()}/>}

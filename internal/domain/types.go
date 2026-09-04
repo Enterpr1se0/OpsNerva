@@ -1021,8 +1021,11 @@ type RunSearchPage struct {
 }
 
 type AuditRunDeleteResult struct {
-	Deleted  int `json:"deleted"`
-	Retained int `json:"retained"`
+	Deleted        int      `json:"deleted"`
+	Retained       int      `json:"retained"`
+	Scope          string   `json:"scope"`
+	SessionID      string   `json:"session_id,omitempty"`
+	RetainedRunIDs []string `json:"retained_run_ids,omitempty"`
 }
 
 type Approval struct {

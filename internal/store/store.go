@@ -1201,7 +1201,7 @@ func (s *Store) AppendAudit(ctx context.Context, event domain.AuditEvent) error 
 	_, err = s.db.ExecContext(ctx, `INSERT INTO audit_events(id,run_id,event_type,actor,data_json,created_at)
 VALUES(?,?,?,?,?,?)`, event.ID, event.RunID, event.Type, event.Actor, string(data), formatTime(event.CreatedAt))
 	if err == nil {
-		s.publishChange(Change{Topic: ChangeAudit})
+		s.publishChange(Change{Topic: ChangeAudit, Audit: &event})
 	}
 	return err
 }
@@ -1279,19 +1279,21 @@ func (s *Store) DeleteAuditRuns(ctx context.Context, sessionID *string, actor st
 	where := "1=1"
 	var arguments []any
 	scope := "all"
+	resultSessionID := ""
 	if sessionID != nil {
+		resultSessionID = strings.TrimSpace(*sessionID)
 		where = "runs.session_id=?"
-		arguments = []any{strings.TrimSpace(*sessionID)}
+		arguments = []any{resultSessionID}
 		scope = "session"
-		if strings.TrimSpace(*sessionID) == "" {
+		if resultSessionID == "" {
 			scope = "direct"
 		}
 	}
-	result, _, err := s.deleteAuditRuns(ctx, where, arguments, actor, scope)
+	result, _, err := s.deleteAuditRuns(ctx, where, arguments, actor, scope, resultSessionID)
 	return result, err
 }
 
-func (s *Store) deleteAuditRuns(ctx context.Context, where string, arguments []any, actor, scope string) (domain.AuditRunDeleteResult, int, error) {
+func (s *Store) deleteAuditRuns(ctx context.Context, where string, arguments []any, actor, scope, sessionID string) (domain.AuditRunDeleteResult, int, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return domain.AuditRunDeleteResult{}, 0, err
@@ -1302,7 +1304,7 @@ func (s *Store) deleteAuditRuns(ctx context.Context, where string, arguments []a
 	if err := tx.QueryRowContext(ctx, countStatement, arguments...).Scan(&total, &deletable); err != nil {
 		return domain.AuditRunDeleteResult{}, 0, err
 	}
-	result := domain.AuditRunDeleteResult{Deleted: deletable, Retained: total - deletable}
+	result := domain.AuditRunDeleteResult{Deleted: deletable, Retained: total - deletable, Scope: scope, SessionID: sessionID}
 	if deletable == 0 {
 		return result, total, tx.Commit()
 	}
@@ -1320,21 +1322,63 @@ func (s *Store) deleteAuditRuns(ctx context.Context, where string, arguments []a
 			return domain.AuditRunDeleteResult{}, total, err
 		}
 	}
+	if result.Retained > 0 {
+		rows, err := tx.QueryContext(ctx, `SELECT runs.id FROM runs WHERE `+where+` ORDER BY started_at DESC,id DESC`, arguments...)
+		if err != nil {
+			return domain.AuditRunDeleteResult{}, total, err
+		}
+		for rows.Next() {
+			var runID string
+			if err := rows.Scan(&runID); err != nil {
+				rows.Close()
+				return domain.AuditRunDeleteResult{}, total, err
+			}
+			result.RetainedRunIDs = append(result.RetainedRunIDs, runID)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return domain.AuditRunDeleteResult{}, total, err
+		}
+		if err := rows.Close(); err != nil {
+			return domain.AuditRunDeleteResult{}, total, err
+		}
+		if len(result.RetainedRunIDs) != result.Retained {
+			return domain.AuditRunDeleteResult{}, total, fmt.Errorf("collect retained audit runs: expected %d, got %d", result.Retained, len(result.RetainedRunIDs))
+		}
+	}
 	if actor == "" {
 		actor = "local-user"
 	}
-	data, err := json.Marshal(map[string]any{"deleted": result.Deleted, "retained": result.Retained, "scope": scope})
+	eventData := map[string]any{
+		"deleted":  result.Deleted,
+		"retained": result.Retained,
+		"scope":    result.Scope,
+	}
+	if result.SessionID != "" {
+		eventData["session_id"] = result.SessionID
+	}
+	if len(result.RetainedRunIDs) > 0 {
+		eventData["retained_run_ids"] = result.RetainedRunIDs
+	}
+	auditEvent := domain.AuditEvent{
+		ID:        ids.New("evt"),
+		Type:      "audit_records_deleted",
+		Actor:     actor,
+		Data:      eventData,
+		CreatedAt: time.Now().UTC(),
+	}
+	data, err := json.Marshal(auditEvent.Data)
 	if err != nil {
 		return domain.AuditRunDeleteResult{}, total, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO audit_events(id,run_id,event_type,actor,data_json,created_at) VALUES(?,?,?,?,?,?)`,
-		ids.New("evt"), "", "audit_records_deleted", actor, string(data), formatTime(time.Now().UTC())); err != nil {
+		auditEvent.ID, auditEvent.RunID, auditEvent.Type, auditEvent.Actor, string(data), formatTime(auditEvent.CreatedAt)); err != nil {
 		return domain.AuditRunDeleteResult{}, total, err
 	}
 	if err := tx.Commit(); err != nil {
 		return domain.AuditRunDeleteResult{}, total, err
 	}
-	s.publishChange(Change{Topic: ChangeAudit})
+	s.publishChange(Change{Topic: ChangeAudit, Audit: &auditEvent})
 	return result, total, nil
 }
 

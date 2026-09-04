@@ -46,6 +46,17 @@ type applicationSessionDelta struct {
 	RemovedIDs []string             `json:"removed_ids,omitempty"`
 }
 
+type applicationAuditEvent struct {
+	ID        string         `json:"id"`
+	Type      string         `json:"type"`
+	Data      map[string]any `json:"data,omitempty"`
+	CreatedAt time.Time      `json:"created_at"`
+}
+
+func newApplicationAuditEvent(event domain.AuditEvent) applicationAuditEvent {
+	return applicationAuditEvent{ID: event.ID, Type: event.Type, Data: event.Data, CreatedAt: event.CreatedAt}
+}
+
 func (s *Server) applicationWebSocket(w http.ResponseWriter, r *http.Request) {
 	server := websocket.Server{
 		Handshake: validateWebSocketOrigin,
@@ -296,6 +307,13 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 			}
 			if event.Connection != nil {
 				payload, err := json.Marshal(event.Connection)
+				if err == nil && send(event.Topic, "delta", payload) != nil {
+					return
+				}
+				continue
+			}
+			if event.Topic == service.StateTopicAudit && event.Audit != nil {
+				payload, err := json.Marshal(newApplicationAuditEvent(*event.Audit))
 				if err == nil && send(event.Topic, "delta", payload) != nil {
 					return
 				}
@@ -606,8 +624,7 @@ func (s *Server) applicationTopicSnapshot(ctx context.Context, topic string, sub
 		if len(page.Events) == 0 {
 			value = map[string]any{}
 		} else {
-			latest := page.Events[0]
-			value = map[string]any{"id": latest.ID, "type": latest.Type, "created_at": latest.CreatedAt}
+			value = newApplicationAuditEvent(page.Events[0])
 		}
 	case "mcp_activity":
 		snapshot, err := s.service.ListMCPActivity(ctx, subscription.mcpSessionID, 100, 200)

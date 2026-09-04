@@ -346,7 +346,7 @@ func TestApplicationWebSocketStreamsAuditAfterCommittedWrite(t *testing.T) {
 	if snapshot.Topic != "audit" || snapshot.Mode != "snapshot" {
 		t.Fatalf("unexpected audit snapshot: %#v", snapshot)
 	}
-	if err := st.AppendAudit(ctx, domain.AuditEvent{ID: "event-websocket", Type: "test", Actor: "test"}); err != nil {
+	if err := st.AppendAudit(ctx, domain.AuditEvent{ID: "event-websocket", Type: "test", Actor: "test", Data: map[string]any{"scope": "session"}}); err != nil {
 		t.Fatal(err)
 	}
 	var update applicationWebSocketEvent
@@ -357,8 +357,31 @@ func TestApplicationWebSocketStreamsAuditAfterCommittedWrite(t *testing.T) {
 	if err := json.Unmarshal(update.Data, &audit); err != nil {
 		t.Fatal(err)
 	}
-	if update.Topic != "audit" || update.Mode != "snapshot" || audit["id"] != "event-websocket" {
+	auditData, _ := audit["data"].(map[string]any)
+	if update.Topic != "audit" || update.Mode != "delta" || audit["id"] != "event-websocket" || auditData["scope"] != "session" {
 		t.Fatalf("unexpected audit update: %#v payload=%#v", update, audit)
+	}
+
+	now := time.Now().UTC()
+	host, err := st.UpsertHost(ctx, domain.Host{ID: "host-audit-websocket", Name: "audit-websocket", Address: "192.0.2.30", Port: 22, User: "ops", AuthType: "agent", SudoMode: "none", CreatedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sessionID = "session-audit-websocket"
+	if err := st.CreateRun(ctx, domain.Run{ID: "run-audit-websocket", SessionID: sessionID, HostID: host.ID, RequestJSON: `{}`, RequestDigest: "audit-websocket", Status: "completed", StartedAt: now, CompletedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	deleteSessionID := sessionID
+	if _, err := st.DeleteAuditRuns(ctx, &deleteSessionID, "test"); err != nil {
+		t.Fatal(err)
+	}
+	deletion := receiveApplicationEvent(t, connection)
+	var deletionEvent applicationAuditEvent
+	if err := json.Unmarshal(deletion.Data, &deletionEvent); err != nil {
+		t.Fatal(err)
+	}
+	if deletion.Topic != "audit" || deletion.Mode != "delta" || deletionEvent.Type != "audit_records_deleted" || deletionEvent.Data["scope"] != "session" || deletionEvent.Data["session_id"] != sessionID || deletionEvent.Data["deleted"] != float64(1) {
+		t.Fatalf("unexpected audit deletion delta: event=%#v payload=%#v", deletion, deletionEvent)
 	}
 }
 

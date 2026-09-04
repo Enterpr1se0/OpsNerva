@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -79,7 +80,7 @@ func TestDeleteAuditRunsIsTransactionalAndPreservesChat(t *testing.T) {
 
 	sessionID := run.SessionID
 	result, err := st.DeleteAuditRuns(ctx, &sessionID, "test")
-	if err != nil || result.Deleted != 1 || result.Retained != 0 {
+	if err != nil || result.Deleted != 1 || result.Retained != 0 || result.Scope != "session" || result.SessionID != sessionID || len(result.RetainedRunIDs) != 0 {
 		t.Fatalf("delete result=%#v err=%v", result, err)
 	}
 	if _, err := st.GetRun(ctx, run.ID); !errors.Is(err, ErrNotFound) {
@@ -133,7 +134,7 @@ func TestDeleteAuditRunsRetainsActiveRecords(t *testing.T) {
 	}
 	sessionID := "session-bulk"
 	result, err := st.DeleteAuditRuns(ctx, &sessionID, "test")
-	if err != nil || result.Deleted != 1 || result.Retained != 2 {
+	if err != nil || result.Deleted != 1 || result.Retained != 2 || result.Scope != "session" || result.SessionID != sessionID || !slices.Equal(result.RetainedRunIDs, []string{"run-active-shell", "run-active"}) {
 		t.Fatalf("delete result=%#v err=%v", result, err)
 	}
 	if _, err := st.GetRun(ctx, "run-finished"); !errors.Is(err, ErrNotFound) {
