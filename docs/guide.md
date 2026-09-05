@@ -360,7 +360,7 @@ Web 的 **Extensions / MCP Servers** 还支持反向角色：让 OpsNerva 作为
 
 ```bash
 make test       # Go 单元测试
-make test-web   # TypeScript + Vite 构建
+make test-web   # ESLint + TypeScript + Vite 构建
 make build      # 构建 Web 与单二进制后端
 make check      # 测试并构建全部组件
 
@@ -371,6 +371,10 @@ make check      # 测试并构建全部组件
 ./bin/opsnerva audit show RUN_ID --raw
 
 ```
+
+前端检查可分别运行 `pnpm --dir web run lint` 与 `pnpm --dir web run typecheck`。CI 在 Web 构建前执行 ESLint，错误和警告都会阻止构建。检查覆盖浏览器源码、Vite 配置和 Node 构建脚本，使用各自的全局变量环境。
+
+`typescript` 使用 TypeScript 6 的 JavaScript API，满足当前 typescript-eslint 的依赖范围；`@typescript/native` 指向 TypeScript 7 编译器。`typecheck` 显式调用后者，避免两个包的同名 `tsc` 命令发生冲突。
 
 ## 当前边界
 

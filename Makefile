@@ -20,8 +20,9 @@ test: build-web
 	go test ./...
 
 test-web: build-web
+	pnpm --dir web run lint
 
-check: test build-go
+check: test-web test build-go
 
 clean:
 	rm -rf bin
