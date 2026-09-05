@@ -283,12 +283,10 @@ func desktopReadyLine(options serveOptions, url string) string {
 		URL               string `json:"url"`
 		ConfigPath        string `json:"config_path"`
 		ConfigurationMade bool   `json:"configuration_created"`
-		MCPHTTPEnabled    bool   `json:"mcp_http_enabled"`
 		WorkspaceRoot     string `json:"workspace_root"`
 	}{
 		URL: url, ConfigPath: options.ConfigPath,
 		ConfigurationMade: options.ConfigCreated,
-		MCPHTTPEnabled:    options.MCPHTTPEnabled,
 		WorkspaceRoot:     options.WorkspaceRoot,
 	})
 	return "OPSNERVA_DESKTOP_READY=" + string(payload)

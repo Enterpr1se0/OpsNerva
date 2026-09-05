@@ -78,7 +78,7 @@ func TestLocalWebURLUsesLoopbackForWildcardListener(t *testing.T) {
 
 func TestDesktopReadyLineIsMachineReadable(t *testing.T) {
 	line := desktopReadyLine(serveOptions{
-		Desktop: true, ConfigPath: `/tmp/opsnerva/config.yaml`, ConfigCreated: true, MCPHTTPEnabled: true,
+		Desktop: true, ConfigPath: `/tmp/opsnerva/config.yaml`, ConfigCreated: true,
 		WorkspaceRoot: `/tmp/opsnerva/workspace`,
 	}, "http://127.0.0.1:49152")
 	const prefix = "OPSNERVA_DESKTOP_READY="
@@ -89,13 +89,12 @@ func TestDesktopReadyLineIsMachineReadable(t *testing.T) {
 		URL               string `json:"url"`
 		ConfigPath        string `json:"config_path"`
 		ConfigurationMade bool   `json:"configuration_created"`
-		MCPHTTPEnabled    bool   `json:"mcp_http_enabled"`
 		WorkspaceRoot     string `json:"workspace_root"`
 	}
 	if err := json.Unmarshal([]byte(strings.TrimPrefix(line, prefix)), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.URL != "http://127.0.0.1:49152" || !payload.ConfigurationMade || !payload.MCPHTTPEnabled || payload.WorkspaceRoot != "/tmp/opsnerva/workspace" {
+	if payload.URL != "http://127.0.0.1:49152" || !payload.ConfigurationMade || payload.WorkspaceRoot != "/tmp/opsnerva/workspace" {
 		t.Fatalf("desktop payload = %#v", payload)
 	}
 }

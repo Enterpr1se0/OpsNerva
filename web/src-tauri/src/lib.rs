@@ -6,12 +6,15 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
-use tauri::{
-    Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent,
-    menu::MenuBuilder,
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-};
+use tauri::{Manager, RunEvent, WindowEvent};
 use tauri_plugin_shell::{ShellExt, process::CommandEvent};
+
+mod desktop_window;
+
+use desktop_window::{
+    DesktopWindowState, TrayState, enter_lightweight_mode, open_developer_tools,
+    setup_tray, show_main_window,
+};
 
 const READY_PREFIX: &str = "OPSNERVA_DESKTOP_READY=";
 
@@ -21,23 +24,9 @@ struct SidecarState(Mutex<Option<tauri_plugin_shell::process::CommandChild>>);
 #[derive(Default)]
 struct DesktopWorkspaceState(Mutex<Option<PathBuf>>);
 
-#[derive(Default)]
-struct DesktopWindowState {
-    url: Mutex<Option<tauri::Url>>,
-    opening: AtomicBool,
-}
-
-#[derive(Default)]
-struct TrayState {
-    enabled: AtomicBool,
-    exiting: AtomicBool,
-}
-
 #[derive(Debug, Deserialize, PartialEq)]
 struct DesktopReady {
     url: String,
-    #[serde(default)]
-    mcp_http_enabled: bool,
     #[serde(default)]
     workspace_root: String,
 }
@@ -54,7 +43,6 @@ pub fn run() {
         .manage(DesktopWindowState::default())
         .manage(TrayState::default())
         .invoke_handler(tauri::generate_handler![
-            set_tray_mode,
             enter_lightweight_mode,
             open_developer_tools,
             open_workspace_directory,
@@ -63,7 +51,7 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let tray = window.state::<TrayState>();
-                if !tray.exiting.load(Ordering::Acquire) {
+                if !tray.exiting() {
                     api.prevent_close();
                     let _ = window.hide();
                 }
@@ -79,10 +67,7 @@ pub fn run() {
     app.run(|handle, event| match event {
         RunEvent::ExitRequested { code, api, .. } => {
             let tray = handle.state::<TrayState>();
-            if code.is_none()
-                && tray.enabled.load(Ordering::Acquire)
-                && !tray.exiting.load(Ordering::Acquire)
-            {
+            if code.is_none() && !tray.exiting() {
                 api.prevent_exit();
             }
         }
@@ -93,35 +78,6 @@ pub fn run() {
         }
         _ => {}
     });
-}
-
-#[tauri::command]
-fn set_tray_mode(enabled: bool, state: tauri::State<'_, TrayState>) {
-    state.enabled.store(enabled, Ordering::Release);
-}
-
-#[tauri::command]
-fn enter_lightweight_mode(app: tauri::AppHandle) -> Result<(), String> {
-    if !app
-        .state::<TrayState>()
-        .enabled
-        .load(Ordering::Acquire)
-    {
-        return Err("MCP Server Mode is disabled".into());
-    }
-    let window = app
-        .get_webview_window("main")
-        .ok_or_else(|| "main window is unavailable".to_string())?;
-    window.destroy().map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-fn open_developer_tools(app: tauri::AppHandle) -> Result<(), String> {
-    let window = app
-        .get_webview_window("main")
-        .ok_or_else(|| "main window is unavailable".to_string())?;
-    window.open_devtools();
-    Ok(())
 }
 
 #[tauri::command]
@@ -257,105 +213,6 @@ fn file_manager_path(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-fn show_main_window(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-        return;
-    }
-    let state = app.state::<DesktopWindowState>();
-    if state
-        .opening
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return;
-    }
-    let handle = app.clone();
-    std::thread::spawn(move || {
-        if let Err(error) = recreate_main_window(&handle) {
-            eprintln!("failed to recreate OpsNerva window: {error}");
-        }
-        handle
-            .state::<DesktopWindowState>()
-            .opening
-            .store(false, Ordering::Release);
-    });
-}
-
-fn recreate_main_window(app: &tauri::AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("main") {
-        window.show().map_err(|error| error.to_string())?;
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-        return Ok(());
-    }
-    let url = app
-        .state::<DesktopWindowState>()
-        .url
-        .lock()
-        .map_err(|_| "desktop window state is unavailable".to_string())?
-        .clone()
-        .ok_or_else(|| "backend URL is unavailable".to_string())?;
-    let mut config = app
-        .config()
-        .app
-        .windows
-        .iter()
-        .find(|config| config.label == "main")
-        .cloned()
-        .ok_or_else(|| "main window configuration is unavailable".to_string())?;
-    config.url = WebviewUrl::External(url);
-    config.visible = true;
-    let window = WebviewWindowBuilder::from_config(app, &config)
-        .map_err(|error| error.to_string())?
-        .build()
-        .map_err(|error| error.to_string())?;
-    let _ = window.unminimize();
-    let _ = window.set_focus();
-    Ok(())
-}
-
-fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    let menu = MenuBuilder::new(app)
-        .text("open", "打开 OpsNerva")
-        .separator()
-        .text("quit", "退出")
-        .build()?;
-    let mut tray = TrayIconBuilder::with_id("opsnerva")
-        .menu(&menu)
-        .tooltip("OpsNerva")
-        .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            "open" => show_main_window(app),
-            "quit" => {
-                app.state::<TrayState>()
-                    .exiting
-                    .store(true, Ordering::Release);
-                app.exit(0);
-            }
-            _ => {}
-        })
-        .on_tray_icon_event(|tray, event| {
-            if matches!(
-                event,
-                TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
-                }
-            ) {
-                show_main_window(tray.app_handle());
-            }
-        });
-    if let Some(icon) = app.default_window_icon() {
-        tray = tray.icon(icon.clone());
-    }
-    tray.build(app)?;
-    Ok(())
-}
-
 fn start_sidecar(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let executable = std::env::current_exe()?;
     let install_dir = executable.parent().ok_or_else(|| {
@@ -440,9 +297,6 @@ fn open_application(app: &tauri::AppHandle, ready: DesktopReady) {
             return;
         }
     };
-    app.state::<TrayState>()
-        .enabled
-        .store(ready.mcp_http_enabled, Ordering::Release);
     if !ready.workspace_root.trim().is_empty() {
         app.state::<DesktopWorkspaceState>()
             .0
@@ -451,10 +305,7 @@ fn open_application(app: &tauri::AppHandle, ready: DesktopReady) {
             .replace(PathBuf::from(&ready.workspace_root));
     }
     app.state::<DesktopWindowState>()
-        .url
-        .lock()
-        .unwrap()
-        .replace(destination.clone());
+        .set_url(destination.clone());
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.navigate(destination);
     }
@@ -508,7 +359,6 @@ mod tests {
             ready,
             DesktopReady {
                 url: "http://127.0.0.1:49152".into(),
-                mcp_http_enabled: false,
                 workspace_root: "/tmp/opsnerva/workspace".into(),
             }
         );
@@ -524,7 +374,6 @@ mod tests {
     fn uses_backend_url_without_credentials() {
         let ready = DesktopReady {
             url: "http://127.0.0.1:49152".into(),
-            mcp_http_enabled: true,
             workspace_root: String::new(),
         };
         let url = application_url(&ready).unwrap();
@@ -535,7 +384,6 @@ mod tests {
     fn rejects_non_loopback_backend_url() {
         let ready = DesktopReady {
             url: "https://example.com/".into(),
-            mcp_http_enabled: false,
             workspace_root: String::new(),
         };
         assert!(application_url(&ready).is_err());
