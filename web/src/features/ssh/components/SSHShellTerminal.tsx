@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useRef, useState } from 'react'
+import { FormEvent, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { Terminal as XTermInstance } from '@xterm/xterm'
 import { LoaderCircle, LockKeyhole, Power, Send, ShieldAlert, Square, TerminalSquare, X } from 'lucide-react'
@@ -6,7 +6,7 @@ import type { SSHShell, SSHShellEvent } from '../../../types'
 import { api, sshShellWebSocketURL } from '../../../api/api'
 import { AppSelect } from '../../../components/Controls'
 import { PasswordInput } from '../../../components/PasswordInput'
-import { writeClipboard } from '../../../components/CopyButton'
+import { writeClipboard } from '../../../lib/clipboard'
 import { errorText } from '../../../lib/utils'
 import { sshShellActive } from '../utils'
 import { SSHHostStatusBar } from './SSHHostStatusBar'
@@ -23,8 +23,7 @@ export function SSHShellTerminal({initialShell,relatedShells=[],onSelect,onClose
 	const lastSequence=useRef(0)
 	const onChangedRef=useRef(onChanged)
 	const onErrorRef=useRef(onError)
-	onChangedRef.current=onChanged
-	onErrorRef.current=onError
+	useLayoutEffect(()=>{onChangedRef.current=onChanged;onErrorRef.current=onError},[onChanged,onError])
 	const active=sshShellActive(shell.status)
 
 	useEffect(()=>{

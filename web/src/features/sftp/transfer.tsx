@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { api, downloadFile, sftpDownloadURL, workspaceDownloadURL } from '../../api/api'
 import { useNotifier } from '../../lib/notifications'
@@ -8,12 +8,12 @@ import type { SFTPFileEntry } from '../../types'
 import type { ActiveFileTransfer, FileTransferManager, FileTransferRecord, SFTPOverwriteCandidate, WorkspaceTransferItem } from './types'
 import { emptyFileTransferRecord, isAbortError, remoteChildPath, sftpTransferKey, workspaceTransferKey } from './utils'
 
-export const FileTransferContext=createContext<FileTransferManager|null>(null)
+import { FileTransferContext } from './useFileTransfer'
 
 export function FileTransferProvider({children}:{children:ReactNode}){
 	const {t}=useTranslation()
 	const notify=useNotifier()
-	const [,refreshDialogs]=useState(0)
+	const [conflicts,setConflicts]=useState<ReadonlyMap<string,FileTransferRecord>>(()=>new Map())
 	const recordsRef=useRef<ReadonlyMap<string,FileTransferRecord>>(new Map())
 	const subscribersRef=useRef(new Map<string,Set<()=>void>>())
 	const record=useCallback((key:string)=>recordsRef.current.get(key)||emptyFileTransferRecord,[])
@@ -30,7 +30,11 @@ export function FileTransferProvider({children}:{children:ReactNode}){
 		const updated=update(current)
 		next.set(key,updated)
 		recordsRef.current=next
-		if(current.conflict!==updated.conflict)refreshDialogs(version=>version+1)
+		if(current.conflict!==updated.conflict||updated.conflict&&!!current.active!==!!updated.active)setConflicts(current=>{
+			const next=new Map(current)
+			if(updated.conflict)next.set(key,updated);else next.delete(key)
+			return next
+		})
 		for(const listener of subscribersRef.current.get(key)||[])listener()
 	},[])
 	const begin=useCallback((key:string,transfer:ActiveFileTransfer)=>{
@@ -134,27 +138,5 @@ export function FileTransferProvider({children}:{children:ReactNode}){
 	const cancel=useCallback((key:string)=>controllers.current.get(key)?.abort(),[])
 	useEffect(()=>()=>{for(const controller of controllers.current.values())controller.abort();controllers.current.clear();subscribersRef.current.clear()},[])
 	const value=useMemo<FileTransferManager>(()=>({record,subscribe,uploadSFTP,downloadSFTP,uploadWorkspace,downloadWorkspace,cancel}),[cancel,downloadSFTP,downloadWorkspace,record,subscribe,uploadSFTP,uploadWorkspace])
-	return <FileTransferContext.Provider value={value}><>{children}{[...recordsRef.current].map(([key,record])=>record.conflict&&<SFTPOverwriteDialog key={key} path={record.conflict.path} busy={!!record.active} onCancel={()=>dismissConflict(key.slice(5))} onConfirm={()=>overwrite(key.slice(5))}/>)}</></FileTransferContext.Provider>
-}
-
-export function useFileTransferRecord(manager:FileTransferManager|null,key:string,enabled:boolean){
-	const subscribe=useCallback((listener:()=>void)=>enabled&&key&&manager?manager.subscribe(key,listener):()=>{},[enabled,key,manager])
-	const snapshot=useCallback(()=>enabled&&key&&manager?manager.record(key):emptyFileTransferRecord,[enabled,key,manager])
-	return useSyncExternalStore(subscribe,snapshot,snapshot)
-}
-
-export function useSFTPTransfer(hostID:string,active=true){
-	const manager=useContext(FileTransferContext)
-	const key=sftpTransferKey(hostID)
-	const record=useFileTransferRecord(manager,key,active)
-	if(!manager)throw new Error('FileTransferProvider is missing')
-	return{...record,upload:(directory:string,files:File[])=>manager.uploadSFTP(hostID,directory,files),download:(entry:SFTPFileEntry)=>manager.downloadSFTP(hostID,entry),cancel:()=>manager.cancel(key)}
-}
-
-export function useWorkspaceTransfer(workspaceID:string,active=true){
-	const manager=useContext(FileTransferContext)
-	const key=workspaceTransferKey(workspaceID)
-	const record=useFileTransferRecord(manager,key,active)
-	if(!manager)throw new Error('FileTransferProvider is missing')
-	return{...record,upload:(items:WorkspaceTransferItem[])=>manager.uploadWorkspace(workspaceID,items),download:(path:string,name:string,size:number)=>manager.downloadWorkspace(workspaceID,path,name,size),cancel:()=>manager.cancel(key)}
+	return <FileTransferContext.Provider value={value}><>{children}{[...conflicts].map(([key,record])=>record.conflict&&<SFTPOverwriteDialog key={key} path={record.conflict.path} busy={!!record.active} onCancel={()=>dismissConflict(key.slice(5))} onConfirm={()=>overwrite(key.slice(5))}/>)}</></FileTransferContext.Provider>
 }

@@ -112,24 +112,23 @@ export function useLiveSSHTasks(visible:boolean,sessionID:string,targets:readonl
 	const pendingEvents=useRef<LiveSSHTaskEvent[]>([])
 	const flushTimer=useRef<number|undefined>(undefined)
 	const snapshots=state.sessionID===sessionID?state.snapshots:emptySnapshots
-	const targetTaskIDs=useMemo(()=>[...new Set(targets.map(target=>target.taskID))].sort(),[targets])
-	const targetTaskIDsKey=targetTaskIDs.join('\0')
-	const watchingTaskIDs=useMemo(()=>targetTaskIDs.filter(taskID=>{
-		const target=targets.find(candidate=>candidate.taskID===taskID)
-		return!!target&&activeLiveTaskStatus(snapshotStatus(snapshots.get(taskID))||target.status)
-	}),[snapshots,targetTaskIDsKey,targets])
-	const watchingTaskIDsKey=watchingTaskIDs.join('\0')
-
-	useEffect(()=>{
+	const targetTaskIDsKey=useMemo(()=>[...new Set(targets.map(target=>target.taskID))].sort().join('\0'),[targets])
+	const targetTaskIDs=useMemo(()=>targetTaskIDsKey?targetTaskIDsKey.split('\0'):[],[targetTaskIDsKey])
+	const watchingTaskIDsKey=useMemo(()=>{
+		const statuses=new Map(targets.map(target=>[target.taskID,target.status]))
+		return targetTaskIDs.filter(taskID=>activeLiveTaskStatus(snapshotStatus(snapshots.get(taskID))||statuses.get(taskID)||'')).join('\0')
+	},[snapshots,targetTaskIDs,targets])
+	const watchingTaskIDs=useMemo(()=>watchingTaskIDsKey?watchingTaskIDsKey.split('\0'):[],[watchingTaskIDsKey])
+	const [retainedTargets,setRetainedTargets]=useState({sessionID,key:targetTaskIDsKey})
+	if(retainedTargets.sessionID!==sessionID||retainedTargets.key!==targetTaskIDsKey){
+		setRetainedTargets({sessionID,key:targetTaskIDsKey})
 		const allowed=new Set(targetTaskIDs)
 		setState(current=>{
 			if(current.sessionID!==sessionID)return{sessionID,snapshots:emptySnapshots}
-			let changed=false
-			const next=new Map<string,LiveSSHTaskSnapshot>()
-			for(const[taskID,snapshot]of current.snapshots){if(allowed.has(taskID))next.set(taskID,snapshot);else changed=true}
-			return changed?{sessionID,snapshots:next}:current
+			const next=new Map([...current.snapshots].filter(([taskID])=>allowed.has(taskID)))
+			return next.size===current.snapshots.size?current:{sessionID,snapshots:next}
 		})
-	},[sessionID,targetTaskIDsKey])
+	}
 
 	useEffect(()=>{
 		if(flushTimer.current!==undefined){window.clearTimeout(flushTimer.current);flushTimer.current=undefined}
@@ -174,7 +173,7 @@ export function useLiveSSHTasks(visible:boolean,sessionID:string,targets:readonl
 			if(flushTimer.current!==undefined){window.clearTimeout(flushTimer.current);flushTimer.current=undefined}
 			pendingEvents.current=[]
 		}
-	},[sessionID,visible,watchingTaskIDsKey])
+	},[sessionID,visible,watchingTaskIDs])
 
 	return snapshots
 }

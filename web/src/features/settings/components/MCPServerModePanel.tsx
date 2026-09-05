@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Activity, Braces, Copy, LoaderCircle, Power, RefreshCw } from 'lucide-react'
 import { api } from '../../../api/api'
@@ -13,7 +13,8 @@ export function MCPServerModePanel({settings,onChanged,onOpenActivity}:{settings
 	const [busy,setBusy]=useState<'start'|'stop'|'rotate'|''>(''),[token,setToken]=useState('')
 	const enabled=!!settings?.mcp_http_enabled
 	const endpoint=`${window.location.origin}/mcp`
-	useEffect(()=>{if(!enabled)setToken('')},[enabled])
+	const [wasEnabled,setWasEnabled]=useState(enabled)
+	if(wasEnabled!==enabled){setWasEnabled(enabled);if(!enabled)setToken('')}
 	const update=async(nextEnabled:boolean,rotate=false)=>{
 		if(!settings)return
 		setBusy(rotate?'rotate':nextEnabled?'start':'stop')

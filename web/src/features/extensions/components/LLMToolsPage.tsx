@@ -33,7 +33,7 @@ export function LLMToolsPage({catalog,refresh,onCatalogChanged}:{catalog:LLMTool
 	const [refreshing,setRefreshing]=useState(false)
 	const [busyName,setBusyName]=useState('')
 	const [error,setError]=useState('')
-	const tools=catalog?.tools||[]
+	const tools=useMemo(()=>catalog?.tools||[],[catalog])
 	const categories=useMemo(()=>Array.from(new Set(tools.map(tool=>tool.category))),[tools])
 	const filtered=useMemo(()=>{const needle=query.trim().toLowerCase();return tools.filter(tool=>(category==='all'||tool.category===category)&&(!needle||`${tool.name} ${tool.description} ${tool.category}`.toLowerCase().includes(needle)))},[tools,query,category])
 	const selected=filtered.find(tool=>tool.name===selectedName)||filtered[0]

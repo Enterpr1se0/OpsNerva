@@ -1,8 +1,9 @@
-import { lazy, Suspense, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Download, Edit3, FileText, LoaderCircle, Save, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { HighlightedCode, languageFromPath } from './HighlightedCode'
+import { HighlightedCode } from './HighlightedCode'
+import { languageFromPath } from '../lib/codeLanguage'
 import type { CodeTextEditorHandle } from './CodeTextEditor'
 import { CopyButton } from './CopyButton'
 
@@ -19,7 +20,11 @@ type TextFileEditorProps = {
 	onDownload?: () => void
 }
 
-export function TextFileEditor({path,meta,content,binary=false,editable=false,onClose,onSave,onDownload}:TextFileEditorProps){
+export function TextFileEditor(props:TextFileEditorProps){
+	return <TextFileEditorDialog key={props.path} {...props}/>
+}
+
+function TextFileEditorDialog({path,meta,content,binary=false,editable=false,onClose,onSave,onDownload}:TextFileEditorProps){
 	const {t}=useTranslation()
 	const language=languageFromPath(path)
 	const editorRef=useRef<CodeTextEditorHandle>(null)
@@ -27,8 +32,6 @@ export function TextFileEditor({path,meta,content,binary=false,editable=false,on
 	const [dirty,setDirty]=useState(false)
 	const [saving,setSaving]=useState(false)
 	const [error,setError]=useState('')
-	useEffect(()=>{setEditing(false);setDirty(false);setError('')},[path])
-	useEffect(()=>{if(!editing)setDirty(false)},[content,editing])
 	const save=async()=>{
 		const editor=editorRef.current
 		if(!onSave||saving||!editor)return

@@ -8,6 +8,10 @@ import { formatHostUptime, formatStatusBytes, formatStatusPair, sshShellActive }
 import type { SSHHostStatusView } from '../types'
 
 export function SSHHostStatusBar({shell}:{shell:SSHShell}){
+	return <SSHHostStatusSample key={`${shell.id}:${shell.status}`} shell={shell}/>
+}
+
+function SSHHostStatusSample({shell}:{shell:SSHShell}){
 	const {t}=useTranslation()
 	const [view,setView]=useState<SSHHostStatusView|null>(null)
 	const [unavailable,setUnavailable]=useState(false)
@@ -17,8 +21,6 @@ export function SSHHostStatusBar({shell}:{shell:SSHShell}){
 		let monitoringEnded=false
 		let timer:number|undefined
 		previousRef.current=null
-		setView(null)
-		setUnavailable(false)
 		const sample=async()=>{
 			let nextDelay=3000
 			try{

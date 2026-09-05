@@ -1,4 +1,5 @@
 import i18n from '../../lib/i18n'
+import type { TFunction } from 'i18next'
 
 export type JsonRecord = Record<string,unknown>
 const toolValuePreviewChars=8<<10
@@ -6,10 +7,10 @@ export const toolOutputPreviewChars=128<<10
 export const toolDiffPreviewChars=128<<10
 export const toolCollectionPreviewItems=100
 const toolStructuredParseChars=512<<10
-export function previewText(value:string,limit=toolValuePreviewChars){
+export function previewText(value:string,limit=toolValuePreviewChars,t:TFunction=i18n.t){
 	if(value.length<=limit)return value
 	const edge=Math.max(1,Math.floor(limit/2))
-	return `${value.slice(0,edge)}\n… ${i18n.t('tool.previewOmitted',{count:value.length-edge*2})} …\n${value.slice(-edge)}`
+	return `${value.slice(0,edge)}\n… ${t('tool.previewOmitted',{count:value.length-edge*2})} …\n${value.slice(-edge)}`
 }
 export function jsonRecord(value:unknown):JsonRecord|undefined{return value!==null&&typeof value==='object'&&!Array.isArray(value)?value as JsonRecord:undefined}
 export function limitedRecordEntries(value:JsonRecord,limit=toolCollectionPreviewItems){
@@ -37,13 +38,32 @@ export function previewStructuredValue(value:unknown,depth=0):unknown{
 	if(truncated)result['…']=i18n.t('tool.moreItemsOmitted')
 	return result
 }
-export function parseRecord(value:string):JsonRecord{
+export function parseRecord(value:string,t:TFunction=i18n.t):JsonRecord{
 	if(value.length>toolStructuredParseChars){
 		const envelope=value.slice(0,toolValuePreviewChars)
 		const runID=envelope.match(/"run_id"\s*:\s*"([^"\\]+)"/)?.[1]
 		const status=envelope.match(/"status"\s*:\s*"([^"\\]+)"/)?.[1]
-		return{...(runID?{run_id:runID}:{}),...(status?{status}:{}),output_limited:true,original_chars:value.length,preview:previewText(value,toolOutputPreviewChars)}
+		return{...(runID?{run_id:runID}:{}),...(status?{status}:{}),output_limited:true,original_chars:value.length,preview:previewText(value,toolOutputPreviewChars,t)}
 	}
-	try{const parsed=JSON.parse(value);return jsonRecord(parsed)||{value:parsed}}catch{return{value:previewText(value,toolOutputPreviewChars)}}
+	try{const parsed=JSON.parse(value);return jsonRecord(parsed)||{value:parsed}}catch{return{value:previewText(value,toolOutputPreviewChars,t)}}
 }
 export function textValue(value:unknown){return typeof value==='string'?value:''}
+export function numberValue(value:unknown){return typeof value==='number'&&Number.isFinite(value)?value:0}
+
+export function displayValue(value:unknown,depth=0):string{
+  if(value===null||value===undefined||value==='')return'—'
+	if(typeof value==='string')return previewText(value)
+	if(depth>=4)return'…'
+  if(Array.isArray(value)){
+		const visible=value.slice(0,toolCollectionPreviewItems).map(item=>displayValue(item,depth+1))
+		if(value.length>visible.length)visible.push(i18n.t('tool.previewItemsOmitted',{count:value.length-visible.length}))
+		return previewText(visible.join(', '))
+	}
+  const record=jsonRecord(value)
+  if(record){
+		const {entries,truncated}=limitedRecordEntries(record),visible=entries.map(([key,item])=>`${key}=${displayValue(item,depth+1)}`)
+		if(truncated)visible.push(i18n.t('tool.moreItemsOmitted'))
+		return previewText(visible.join(' · '))
+	}
+  return String(value)
+}

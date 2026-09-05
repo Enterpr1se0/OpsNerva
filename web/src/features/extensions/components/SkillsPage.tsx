@@ -16,7 +16,8 @@ export function SkillsPage({skills,refreshSkills,refreshToolCatalog,onToolCatalo
 	const {t,i18n:instance}=useTranslation()
 	const notify=useNotifier()
 	const [query,setQuery]=useState('')
-	const [selectedName,setSelectedName]=useState(()=>skills[0]?.name||'')
+	const [selectedNameChoice,setSelectedName]=useState(()=>skills[0]?.name||'')
+	const selectedName=skills.some(skill=>skill.name===selectedNameChoice)?selectedNameChoice:skills[0]?.name||''
 	const [selected,setSelected]=useState<ManagedSkill|null>(null)
 	const [draft,setDraft]=useState('')
 	const [loading,setLoading]=useState(()=>skills.length>0)
@@ -31,8 +32,9 @@ export function SkillsPage({skills,refreshSkills,refreshToolCatalog,onToolCatalo
 	const [toggling,setToggling]=useState(false)
 	const [error,setError]=useState('')
 	const filtered=useMemo(()=>{const needle=query.trim().toLowerCase();return skills.filter(skill=>!needle||`${skill.name} ${skill.summary}`.toLowerCase().includes(needle))},[skills,query])
-	useEffect(()=>{if(!skills.length){setSelectedName('');setSelected(null);setDraft('');return}if(!selectedName||!skills.some(skill=>skill.name===selectedName))setSelectedName(skills[0].name)},[skills,selectedName])
-	useEffect(()=>{if(!selectedName)return;let cancelled=false;setLoading(true);setError('');api.skill(selectedName).then(skill=>{if(cancelled)return;setSelected(skill);setDraft(skill.content||'')}).catch(err=>{if(!cancelled)setError(errorText(err))}).finally(()=>{if(!cancelled)setLoading(false)});return()=>{cancelled=true}},[selectedName])
+	const [loadedSelection,setLoadedSelection]=useState(selectedName)
+	if(loadedSelection!==selectedName){setLoadedSelection(selectedName);setSelected(null);setDraft('');setError('');setLoading(!!selectedName)}
+	useEffect(()=>{if(!selectedName)return;let cancelled=false;api.skill(selectedName).then(skill=>{if(cancelled)return;setSelected(skill);setDraft(skill.content||'')}).catch(err=>{if(!cancelled)setError(errorText(err))}).finally(()=>{if(!cancelled)setLoading(false)});return()=>{cancelled=true}},[selectedName])
 	const dirty=!!selected&&draft!==selected.content
 	const markdownUpload=!!uploadFile&&/\.(?:md|markdown)$/i.test(uploadFile.name)
 	const selectFile=(file:File|null)=>{setUploadFile(file);if(file&&/\.(?:md|markdown)$/i.test(file.name)&&!uploadName){const base=file.name.replace(/\.(markdown|md)$/i,'').replace(/[^A-Za-z0-9_.-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,64);setUploadName(base)}else if(file)setUploadName('')}

@@ -9,7 +9,7 @@ export const workspaceTransferKey=(workspaceID:string)=>`workspace:${workspaceID
 export const emptyFileTransferRecord:FileTransferRecord={active:null,conflict:null,uploadVersion:0}
 
 export function remoteChildPath(parent:string,name:string){return parent==='/'?`/${name}`:`${parent}/${name}`}
-export function remoteParentPath(value:string){if(!value||value==='/')return '/';const parts=value.split('/').filter(Boolean);parts.pop();return `/${parts.join('/')}`||'/'}
+export function remoteParentPath(value:string){if(!value||value==='/')return '/';const parts=value.split('/').filter(Boolean);parts.pop();return `/${parts.join('/')}`}
 export function textFileName(name:string){
 	const extension=name.toLowerCase().match(/(?:^|\.)([^./]+)$/)?.[1]||''
 	return new Set(['txt','md','markdown','json','jsonl','yaml','yml','toml','ini','conf','config','env','properties','xml','html','htm','css','scss','less','js','jsx','ts','tsx','mjs','cjs','go','rs','py','rb','php','java','kt','kts','c','h','cc','cpp','hpp','cs','swift','sh','bash','zsh','fish','ps1','bat','cmd','sql','csv','tsv','log','service','socket','timer']).has(extension)

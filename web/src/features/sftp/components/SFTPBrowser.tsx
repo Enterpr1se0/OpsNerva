@@ -7,7 +7,7 @@ import { DestructiveConfirmDialog } from '../../../components/DestructiveConfirm
 import { TextFileEditor } from '../../../components/TextFileEditor'
 import { localeFor } from '../../../lib/i18n'
 import { errorText, formatFileSize } from '../../../lib/utils'
-import { useSFTPTransfer } from '../transfer'
+import { useSFTPTransfer } from '../useFileTransfer'
 import type { SFTPFileEntry, Host } from '../../../types'
 import type { SFTPDeleteCandidate, SFTPNameEditor, SFTPTextFile } from '../types'
 import { decodeTextFile, maxFilePreviewBytes, remoteChildPath, remoteParentPath } from '../utils'
@@ -35,7 +35,6 @@ export function SFTPBrowser({host,active=true,embedded=false,hosts=[],onHostSele
 	const {active:transfer,uploadVersion,upload:uploadTransfer,download,cancel}=useSFTPTransfer(hostID,active)
 	const loadRequest=useRef(0)
 	const currentPath=useRef('')
-	const observedUploadVersion=useRef(uploadVersion)
 	const load=useCallback(async(target=currentPath.current)=>{
 		if(!hostID)return
 		const request=++loadRequest.current
@@ -49,13 +48,11 @@ export function SFTPBrowser({host,active=true,embedded=false,hosts=[],onHostSele
 			setEntries([]);setListError(errorText(err))
 		}finally{if(request===loadRequest.current)setLoading(false)}
 	},[hostID])
-	useEffect(()=>{if(!active)return;observedUploadVersion.current=uploadVersion;void load()},[active,load])
 	useEffect(()=>{
 		if(!active)return
-		if(observedUploadVersion.current===uploadVersion)return
-		observedUploadVersion.current=uploadVersion
-		void load(path)
-	},[active,load,path,uploadVersion])
+		// eslint-disable-next-line react-hooks/set-state-in-effect -- Start the loading indicator with the directory request; returned entries do not retrigger this effect.
+		void load()
+	},[active,load,uploadVersion])
 	const openTextFile=async(entry:SFTPFileEntry)=>{
 		if(openingFile)return
 		setOpeningFile(entry.path);setNotice('');setNoticeError(false)

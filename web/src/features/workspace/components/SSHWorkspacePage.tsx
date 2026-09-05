@@ -1,4 +1,4 @@
-import { useMemo, useEffect, useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Home, LoaderCircle, Plus, Server, TerminalSquare, X } from 'lucide-react'
 import { api } from '../../../api/api'
@@ -16,16 +16,14 @@ export function SSHWorkspacePage({hosts,shells,onCreated,refresh,onError}:{hosts
 	const [closingShellIDs,setClosingShellIDs]=useState<Set<string>>(new Set())
 	const [dismissedShellIDs,setDismissedShellIDs]=useState<Set<string>>(new Set())
 	const visibleShells=useMemo(()=>shells.filter(shell=>!dismissedShellIDs.has(shell.id)),[dismissedShellIDs,shells])
-	useEffect(()=>{
+	const [previousShells,setPreviousShells]=useState(shells)
+	if(previousShells!==shells){
+		setPreviousShells(shells)
 		if(selectedShellID&&!visibleShells.some(shell=>shell.id===selectedShellID))setSelectedShellID('')
-	},[selectedShellID,visibleShells])
-	useEffect(()=>{
-		setDismissedShellIDs(current=>{
-			const listed=new Set(shells.map(shell=>shell.id))
-			const next=new Set([...current].filter(id=>listed.has(id)))
-			return next.size===current.size?current:next
-		})
-	},[shells])
+		const listed=new Set(shells.map(shell=>shell.id))
+		const retained=new Set([...dismissedShellIDs].filter(id=>listed.has(id)))
+		if(retained.size!==dismissedShellIDs.size)setDismissedShellIDs(retained)
+	}
 	const selectedShell=visibleShells.find(shell=>shell.id===selectedShellID)
 	const selectedHost=hosts.find(host=>host.id===selectedShell?.host_id)
 	const created=(shell:SSHShell)=>{onCreated(shell);setSelectedShellID(shell.id);setCreating(false)}

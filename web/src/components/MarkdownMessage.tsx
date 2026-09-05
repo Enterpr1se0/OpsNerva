@@ -4,7 +4,8 @@ import { useTranslation } from 'react-i18next'
 import { isValidElement, type ReactNode } from 'react'
 
 import { CopyablePre } from './CopyButton'
-import { HighlightedCode, languageFromCodeClass } from './HighlightedCode'
+import { HighlightedCode } from './HighlightedCode'
+import { languageFromCodeClass } from '../lib/codeLanguage'
 
 type MarkdownCodeElement={children?:ReactNode;className?:string}
 

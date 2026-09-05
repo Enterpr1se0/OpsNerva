@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useEffectEvent, useRef, useState } from 'react'
 
 export function useDocumentVisible(){
 	const [visible,setVisible]=useState(()=>document.visibilityState==='visible')
@@ -22,18 +22,17 @@ export function useDebouncedValue<T>(value:T,delay:number){
 
 export function useAutoCollapseDetails(open:boolean,onClose:()=>void){
 	const detailsRef=useRef<HTMLDetailsElement>(null)
-	const closeRef=useRef(onClose)
-	closeRef.current=onClose
+	const close=useEffectEvent(onClose)
 	useEffect(()=>{
 		if(!open)return
 		const outside=(event:Event)=>{
 			const target=event.target
-			if(target instanceof Node&&!detailsRef.current?.contains(target))closeRef.current()
+			if(target instanceof Node&&!detailsRef.current?.contains(target))close()
 		}
 		const escape=(event:KeyboardEvent)=>{
 			if(event.key!=='Escape')return
 			event.preventDefault()
-			closeRef.current()
+			close()
 			detailsRef.current?.querySelector<HTMLElement>('summary')?.focus()
 		}
 		document.addEventListener('pointerdown',outside,true)

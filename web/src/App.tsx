@@ -7,7 +7,13 @@ import { Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronRight, Cir
 import { api, reconnectChatStream, streamChat } from './api/api'
 import { subscribeApplicationEvents } from './api/appEvents'
 import { CopyButton, CopyablePre } from './components/CopyButton'
-import { HighlightedCode, inferScriptLanguage, languageFromPath } from './components/HighlightedCode'
+import { ApprovalDialog } from './features/approval/ApprovalDialog'
+import { CompactTable } from './features/tools/components/CompactTable'
+import { DiffViewer } from './features/tools/components/DiffViewer'
+import { executionPermission, fullProgram, hostIdentity, requestFromRun } from './features/tools/request'
+import { ToolOutputPanel, WorkspaceDirectoryOutput } from './features/tools/components/ToolOutput'
+import { HighlightedCode } from './components/HighlightedCode'
+import { inferScriptLanguage, languageFromPath } from './lib/codeLanguage'
 import i18n, { localeFor, type SupportedLanguage } from './lib/i18n'
 import { activeLiveTaskStatus, useLiveSSHTasks, type LiveSSHTaskSnapshot, type LiveSSHTaskTarget } from './lib/liveTasks'
 import { streamTextTail, type StreamText } from './api/streamText'
@@ -21,13 +27,13 @@ import { auditSessionID, directAuditSessionID, useAuditData, useAuditGroupDisclo
 import { useChatCardDisclosure, type ChatDisclosurePositionHandler } from './features/chat'
 import {  useDocumentVisible } from './lib/hooks'
 import { desktopRuntime, errorStatus, errorText, formatFileSize, sshTunnelRoute, clientId, compactTokenCount } from './lib/utils'
-import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult,  AuditRunDeleteResult, AuthStatus, ChatQueueMode, ChatSession, ChatSessionDelta, ChatState, ChatTokenUsage, CommandReview, Health, Host, LLMToolCatalog, ManagedSkill, MCPActivityEvent, MCPActivitySnapshot, MCPClientSession, MCPServer, MCPToolCall, ModelProvider,  Proxy, QueuedChatMessage, Run, SSHShell, SSHTunnel, SystemSettings, ToolCapabilities } from './types'
+import type { AgentEvent, AgentTask, AgentTaskList, Approval,  AuditRunDeleteResult, AuthStatus, ChatQueueMode, ChatSession, ChatSessionDelta, ChatState, ChatTokenUsage, Health, Host, LLMToolCatalog, ManagedSkill, MCPActivityEvent, MCPActivitySnapshot, MCPClientSession, MCPServer, MCPToolCall, ModelProvider,  Proxy, QueuedChatMessage, Run, SSHShell, SSHTunnel, SystemSettings, ToolCapabilities } from './types'
 import { ChatActivityStatus } from './features/chat/ChatActivityStatus'
 import { ComposerControls } from './features/chat/ComposerControls'
 import type { ContextUsage } from './features/chat/types'
 import { insertQueuedMessage, queuedMessageEntries, historyEntries, deactivateReasoning, toolContentStatus, settledTurnEntries, prependHistoryEntries, mergePersistedToolEntries, updateToolRunStatus, agentFrameAffectsEntries, reduceAgentEntryFrames } from './features/chat/chatEntries'
 import { tasksFromToolContent, groupedTaskToolEntries, latestLiveSSHTaskTargets } from './features/chat/taskEntries'
-import { type JsonRecord, toolOutputPreviewChars, toolDiffPreviewChars, toolCollectionPreviewItems, previewText, jsonRecord, limitedRecordEntries, hasRecordEntries, previewStructuredValue, parseRecord, textValue } from './features/tools/payload'
+import { type JsonRecord, numberValue, displayValue, toolOutputPreviewChars, toolCollectionPreviewItems, previewText, jsonRecord, limitedRecordEntries, hasRecordEntries, previewStructuredValue, parseRecord, textValue } from './features/tools/payload'
 import { Empty } from './components/PageLayout'
 import { defaultChatImageTypes } from './features/settings/defaults'
 import type { PendingChatImage, ChatEntry, TaskToolEntryGroup, ChatRenderItem, ModelRetryState, ConnectionRetryState } from './features/chat/types'
@@ -155,11 +161,11 @@ function App() {
 	const [auth,setAuth]=useState<AuthStatus|null>(null)
 	const [loading,setLoading]=useState(true)
 	const [error,setError]=useState('')
-	const refresh=useCallback(async()=>{setLoading(true);setError('');try{setAuth(await api.authStatus())}catch(err){setError(errorText(err))}finally{setLoading(false)}},[])
+	const refresh=useCallback(()=>api.authStatus().then(setAuth).catch(err=>setError(errorText(err))).finally(()=>setLoading(false)),[])
 	useEffect(()=>{void refresh()},[refresh])
 	useEffect(()=>{const unauthorized=()=>setAuth(current=>current?.enabled?{enabled:true,authenticated:false}:current);window.addEventListener('opsnerva:unauthorized',unauthorized);return()=>window.removeEventListener('opsnerva:unauthorized',unauthorized)},[])
 	if(loading)return <AppFrame><div className="auth-screen"><LoaderCircle className="spin" size={24}/></div></AppFrame>
-	if(error&&!auth)return <AppFrame><div className="auth-screen"><section className="auth-card panel"><ShieldAlert size={24}/><div className="auth-error" role="alert">{error}</div><button className="primary" onClick={()=>void refresh()}>{t('common.retry')}</button></section></div></AppFrame>
+	if(error&&!auth)return <AppFrame><div className="auth-screen"><section className="auth-card panel"><ShieldAlert size={24}/><div className="auth-error" role="alert">{error}</div><button className="primary" onClick={()=>{setLoading(true);setError('');void refresh()}}>{t('common.retry')}</button></section></div></AppFrame>
 	if(auth?.enabled&&!auth.authenticated)return <LoginPage onAuthenticated={setAuth}/>
 	return <Application auth={auth||{enabled:false,authenticated:true}} onLogout={()=>setAuth({enabled:true,authenticated:false})}/>
 }
@@ -229,44 +235,17 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 		return task
 	},[])
 
-	const refreshToolCatalog=useCallback(async()=>{
-		try{setToolCatalog(await api.llmTools())}
-		catch(err){notify(errorText(err),'error')}
-	},[notify])
-	const refreshSkills=useCallback(async()=>{
-		try{setSkills(await api.skills())}
-		catch(err){notify(errorText(err),'error')}
-	},[notify])
-	const refreshMCPServers=useCallback(async()=>{
-		try{setMCPServers(await api.mcpServers())}
-		catch(err){notify(errorText(err),'error')}
-	},[notify])
+	const refreshToolCatalog=useCallback(()=>api.llmTools().then(setToolCatalog).catch(err=>notify(errorText(err),'error')),[notify])
+	const refreshSkills=useCallback(()=>api.skills().then(setSkills).catch(err=>notify(errorText(err),'error')),[notify])
+	const refreshMCPServers=useCallback(()=>api.mcpServers().then(setMCPServers).catch(err=>notify(errorText(err),'error')),[notify])
 	const refreshExtensions=useCallback(async()=>{await Promise.all([refreshToolCatalog(),refreshSkills(),refreshMCPServers()])},[refreshMCPServers,refreshSkills,refreshToolCatalog])
-	const refreshHealth=useCallback(async()=>{
-		try{const next=await api.health();setHealth(current=>keepEquivalentHealth(current,next))}
-		catch(err){notify(errorText(err),'error')}
-	},[notify])
-	const refreshHosts=useCallback(async()=>{
-		try{setHosts(await api.hosts())}
-		catch(err){notify(errorText(err),'error')}
-	},[notify])
-	const refreshProviders=useCallback(async()=>{
-		try{setProviders(await api.modelProviders())}
-		catch(err){notify(errorText(err),'error')}
-	},[notify])
+	const refreshHealth=useCallback(()=>api.health().then(next=>setHealth(current=>keepEquivalentHealth(current,next))).catch(err=>notify(errorText(err),'error')),[notify])
+	const refreshHosts=useCallback(()=>api.hosts().then(setHosts).catch(err=>notify(errorText(err),'error')),[notify])
+	const refreshProviders=useCallback(()=>api.modelProviders().then(setProviders).catch(err=>notify(errorText(err),'error')),[notify])
 	const refreshModels=useCallback(async()=>{await Promise.all([refreshProviders(),refreshHealth()])},[refreshHealth,refreshProviders])
-	const refreshProxies=useCallback(async()=>{
-		try{setProxies(await api.proxies())}
-		catch(err){notify(errorText(err),'error')}
-	},[notify])
-	const refreshSettings=useCallback(async()=>{
-		try{setSettings(await api.systemSettings())}
-		catch(err){notify(errorText(err),'error')}
-	},[notify])
-	const refreshCapabilities=useCallback(async()=>{
-		try{setCapabilities(await api.capabilities())}
-		catch(err){notify(errorText(err),'error')}
-	},[notify])
+	const refreshProxies=useCallback(()=>api.proxies().then(setProxies).catch(err=>notify(errorText(err),'error')),[notify])
+	const refreshSettings=useCallback(()=>api.systemSettings().then(setSettings).catch(err=>notify(errorText(err),'error')),[notify])
+	const refreshCapabilities=useCallback(()=>api.capabilities().then(setCapabilities).catch(err=>notify(errorText(err),'error')),[notify])
 	const audit=useAuditData({active:page==='audit'&&auditView==='runs',refreshHosts,notify})
 	const dismissApproval=useCallback((approvalID:string)=>{
 		setApprovals(current=>current.filter(item=>item.id!==approvalID))
@@ -650,7 +629,13 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	useEffect(()=>{sessionIDRef.current=sessionId},[sessionId])
 	useEffect(()=>{if(!sessionId)setContextUsage({tokens:0,window:activeContextWindow})},[activeContextWindow,sessionId])
 	useEffect(()=>{if(!selectedWorkspace)return;if(workspaceID!==selectedWorkspace.id)setWorkspaceID(selectedWorkspace.id);rememberWorkspace(selectedWorkspace.id)},[selectedWorkspace,workspaceID])
-	useEffect(()=>{if(!tasks)setTasksExpanded(false);else setTasksExpanded(true)},[tasks?.session_id,!!tasks])
+	const taskSessionID=tasks?.session_id
+	const hasTasks=!!tasks
+	const [taskDisclosureOwner,setTaskDisclosureOwner]=useState({sessionID:taskSessionID,hasTasks})
+	if(taskDisclosureOwner.sessionID!==taskSessionID||taskDisclosureOwner.hasTasks!==hasTasks){
+		setTaskDisclosureOwner({sessionID:taskSessionID,hasTasks})
+		setTasksExpanded(hasTasks)
+	}
 	useEffect(()=>()=>{sessionLoadRef.current='';const stream=activeStreamRef.current;activeStreamRef.current=null;stream?.controller.abort();window.cancelAnimationFrame(disclosureScrollFrame.current);window.cancelAnimationFrame(autoScrollFrame.current);activeChatDisclosures.current.clear();messagesRef.current?.classList.remove('chat-disclosure-active')},[])
 	useEffect(()=>()=>{for(const url of imageURLsRef.current)URL.revokeObjectURL(url);imageURLsRef.current.clear()},[])
 	const addImages=(files:File[])=>{const accepted=files.filter(file=>imageTypes.includes(file.type));if(accepted.length!==files.length)setImageNotice(t('chat.imageTypeRejected'));if(!accepted.length)return;const next=accepted.map(file=>{const url=URL.createObjectURL(file);imageURLsRef.current.add(url);return{id:clientId(),file,url}});setPendingImages(current=>[...current,...next])}
@@ -990,16 +975,29 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			}
 		}
     finally {
-      if(!isAttached())return
-      setModelRetry(null)
-			setConnectionRetry(null)
-			setEntries((old) => old.map(deactivateReasoning))
-      setRunning(false)
-		setStopping(false)
-		setCompressingContext(false)
-		if(querySessionID){try{const state=await api.chatState(querySessionID);if(!isAttached())return;setDetachedRunning(!!state.active);setQueuedMessages(state.queued_messages||[]);setTasks(state.tasks?.items?.length?state.tasks:null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setBoundWorkspaceID(state.workspace_id||'');setEntries(old=>settledTurnEntries(state.messages||[],querySessionID,old,!!state.active));for(const image of queryImages){URL.revokeObjectURL(image.url);imageURLsRef.current.delete(image.url)}}catch{/* the next state event or reload will recover state */}}
-      if(!isAttached())return
-      activeStreamRef.current=null
+      if(isAttached()){
+        setModelRetry(null)
+        setConnectionRetry(null)
+        setEntries(old=>old.map(deactivateReasoning))
+        setRunning(false)
+        setStopping(false)
+        setCompressingContext(false)
+        if(querySessionID){
+          try{
+            const state=await api.chatState(querySessionID)
+            if(isAttached()){
+              setDetachedRunning(!!state.active)
+              setQueuedMessages(state.queued_messages||[])
+              setTasks(state.tasks?.items?.length?state.tasks:null)
+              setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)})
+              setBoundWorkspaceID(state.workspace_id||'')
+              setEntries(old=>settledTurnEntries(state.messages||[],querySessionID,old,!!state.active))
+              for(const image of queryImages){URL.revokeObjectURL(image.url);imageURLsRef.current.delete(image.url)}
+            }
+          }catch{/* the next state event or reload will recover state */}
+        }
+        if(isAttached())activeStreamRef.current=null
+      }
     }
 	  }
 
@@ -1165,22 +1163,10 @@ function toolSummaryIcon(name:string|undefined){
 	if(name?.startsWith('ssh_'))return name==='ssh_exec'||name==='ssh_run_script'||name==='ssh_shell'?<TerminalSquare size={15}/>:<Server size={15}/>
 	return <FunctionSquare size={15}/>
 }
-function requestFromRun(run?:Run):JsonRecord|undefined{if(!run)return;try{return jsonRecord(JSON.parse(run.request_json))}catch{return}}
 function runAutoApproved(run?:Run){return run?.ai_review?.kind==='automatic_approval'&&run.ai_review.status==='completed'&&run.ai_review.decision==='allow'}
-function shellArg(value:string){return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value)?value:JSON.stringify(value)}
-function fullProgram(request:JsonRecord,full=false){
-	const program=full?textValue(request.program):previewText(textValue(request.program))
-	const source=Array.isArray(request.args)?request.args:[]
-	const selected=full?source:source.slice(0,toolCollectionPreviewItems)
-	const args=selected.map(value=>full?String(value):previewText(String(value)))
-	if(!full&&source.length>selected.length)args.push(i18n.t('tool.previewItemsOmitted',{count:source.length-selected.length}))
-	const command=[program,...args].filter(Boolean).map(shellArg).join(' ')
-	return full?command:previewText(command,toolOutputPreviewChars)
-}
 function compactScript(script:string){const source=script.length>toolOutputPreviewChars?script.slice(0,toolOutputPreviewChars):script,lines=source.split(/\r?\n/).map(line=>line.trim()).filter(Boolean);if(!lines.length)return i18n.t('tool.shellScript');const first=previewText(lines[0],180);return lines.length===1&&source.length===script.length?first:i18n.t('tool.moreLines',{line:first,count:Math.max(1,lines.length-1)})}
 function latestOutput(value:string,limit=3){const tail=value.length>toolOutputPreviewChars?value.slice(-toolOutputPreviewChars):value;return tail.trimEnd().split(/\r?\n/).filter(line=>line.trim()!=='').slice(-limit).map(line=>previewText(line,180)).join('\n')}
 function formatDuration(value:unknown,run?:Run){if(typeof value==='number'&&Number.isFinite(value))return value>=1e9?`${(value/1e9).toFixed(2)} s`:`${(value/1e6).toFixed(1)} ms`;if(run?.completed_at){const ms=Date.parse(run.completed_at)-Date.parse(run.started_at);if(Number.isFinite(ms))return ms>=1000?`${(ms/1000).toFixed(2)} s`:`${ms} ms`}return'—'}
-function numberValue(value:unknown){return typeof value==='number'&&Number.isFinite(value)?value:0}
 function cleanFileChangeOutput(value:string){const lines=value.split(/\r?\n/),result:string[]=[];for(let index=0;index<lines.length;index++){if(lines[index]==='__OPS_FILE_VALIDATION_OK__')continue;if(lines[index]==='__OPS_FILE_AFTER__'){index++;continue}result.push(lines[index])}return result.join('\n').trim()}
 
 type ToolTarget={kind:'host'|'workspace'|'scope';label:string;name:string;id?:string}
@@ -1197,59 +1183,16 @@ function WorkspaceTransferRoute({source,destination}:WorkspaceTransferRouteValue
 	const route=`${source.name}:${source.path} → ${destination.name}:${destination.path}`
 	return <span className="tool-transfer-route tool-workspace-transfer-route" title={route}><WorkspaceTransferEndpointLabel endpoint={source}/><i>→</i><WorkspaceTransferEndpointLabel endpoint={destination}/></span>
 }
-function hostIdentity(hosts:Host[],hostID:string){
-	const host=hosts.find(item=>item.id===hostID||item.name===hostID)
-	return {name:host?.name||'',id:host?.id||hostID,user:host?.user||''}
-}
-function executionPermission(request:JsonRecord|undefined,hosts:Host[],...hostIDs:string[]){
-	if(request?.elevated===true)return'root'
-	return hostIDs.some(hostID=>hosts.find(host=>host.id===hostID||host.name===hostID)?.user.trim().toLowerCase()==='root')?'root':'user'
-}
 function recordArray(value:unknown,fromEnd=false){
 	if(!Array.isArray(value))return[]
 	const selected=fromEnd?value.slice(-toolCollectionPreviewItems):value.slice(0,toolCollectionPreviewItems)
 	return selected.map(jsonRecord).filter((item):item is JsonRecord=>!!item)
-}
-type ToolWorkspaceDirectoryEntry={name:string;type:'file'|'directory';size?:number}
-function parseWorkspaceDirectoryOutput(value:string):ToolWorkspaceDirectoryEntry[]|undefined{
-	if(!value)return
-	try{
-		const result=jsonRecord(JSON.parse(value))
-		if(!result||!Array.isArray(result.entries))return
-		const entries:ToolWorkspaceDirectoryEntry[]=[]
-		for(const value of result.entries){
-			const entry=jsonRecord(value),name=textValue(entry?.name),type=textValue(entry?.type)
-			if(!entry||!name||(type!=='file'&&type!=='directory')||(entry.size!==undefined&&(typeof entry.size!=='number'||!Number.isFinite(entry.size))))return
-			entries.push({name,type,size:typeof entry.size==='number'?entry.size:undefined})
-		}
-		return entries
-	}catch{return}
 }
 function recordTableRows(value:JsonRecord){
 	const {entries,truncated}=limitedRecordEntries(value,toolCollectionPreviewItems-1)
 	const rows:Array<Array<unknown>>=entries.map(([key,item])=>[key,item])
 	if(truncated)rows.push(['…',i18n.t('tool.moreItemsOmitted')])
 	return rows
-}
-
-type DiffRow={kind:'header'|'hunk'|'add'|'delete'|'context'|'meta';oldLine?:number;newLine?:number;text:string}
-function parseDiffRows(diff:string):DiffRow[]{
-	let oldLine:number|undefined,newLine:number|undefined
-	return diff.replace(/\n$/, '').split('\n').map(line=>{
-		const hunk=line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/)
-		if(hunk){oldLine=Number(hunk[1]);newLine=Number(hunk[2]);return{kind:'hunk',text:line}}
-		if(line.startsWith('@@ ')){oldLine=undefined;newLine=undefined;return{kind:'hunk',text:line}}
-		if(line.startsWith('--- ')||line.startsWith('+++ '))return{kind:'header',text:line}
-		if(line.startsWith('+')){const row={kind:'add' as const,newLine,text:line};if(newLine!==undefined)newLine++;return row}
-		if(line.startsWith('-')){const row={kind:'delete' as const,oldLine,text:line};if(oldLine!==undefined)oldLine++;return row}
-		if(line.startsWith(' ')){const row={kind:'context' as const,oldLine,newLine,text:line};if(oldLine!==undefined)oldLine++;if(newLine!==undefined)newLine++;return row}
-		return{kind:'meta',text:line}
-	})
-}
-
-function DiffViewer({change}:{change:JsonRecord}){
-	const {t}=useTranslation(),diff=textValue(change.diff),rows=parseDiffRows(previewText(diff,toolDiffPreviewChars))
-	return <section className="diff-viewer"><header><span><FileText size={14}/>{t('tool.fileEdit')}</span><div><em className="add">+{numberValue(change.additions)}</em><em className="delete">-{numberValue(change.deletions)}</em><CopyButton value={diff}/></div></header><div className="diff-scroll" role="table" aria-label={t('tool.diff')}><div className="diff-lines">{rows.map((row,index)=><div className={`diff-line ${row.kind}`} role="row" key={index}><span className="old-line">{row.oldLine??''}</span><span className="new-line">{row.newLine??''}</span><code>{row.text||' '}</code></div>)}</div></div></section>
 }
 
 function taskToolArguments(entry:ChatEntry){
@@ -1300,9 +1243,13 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,liveSSHTaskOwner
 	const [fullContent,setFullContent]=useState('')
 	const [loadingDetail,setLoadingDetail]=useState(false)
 	const [detailError,setDetailError]=useState('')
+	const [detailSourceID,setDetailSourceID]=useState(initialEntry.sourceMessageId)
+	if(detailSourceID!==initialEntry.sourceMessageId){
+		setDetailSourceID(initialEntry.sourceMessageId)
+		setFullContent('');setLoadingDetail(false);setDetailError('')
+	}
 	const entry=fullContent?{...initialEntry,content:fullContent,contentTruncated:false}:initialEntry
-	useEffect(()=>{setFullContent('');setLoadingDetail(false);setDetailError('')},[initialEntry.sourceMessageId])
-	const storedPayload=useMemo(()=>parseRecord(entry.content),[entry.content,t])
+	const storedPayload=useMemo(()=>parseRecord(entry.content,t),[entry.content,t])
 	const storedDisplay=jsonRecord(storedPayload._display)
 	const storedToolArguments=jsonRecord(storedDisplay?.arguments)
 	const sshTaskOperation=entry.tool==='ssh_task'
@@ -1428,7 +1375,7 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,liveSSHTaskOwner
   const env=request?jsonRecord(request.env):undefined
 	const rawStdout=shellOperation&&(shellAction==='input'||shellAction==='output')?(shellChunks.length?shellChunkStdout:shellOutput):textValue(payload.stdout)||textValue(resultPayload?.stdout)||entry.liveStdout||run?.stdout_redacted||''
 	const stdout=change?cleanFileChangeOutput(rawStdout):rawStdout
-	const workspaceDirectoryEntries=useMemo(()=>entry.tool==='workspace_file_list'?parseWorkspaceDirectoryOutput(stdout):undefined,[entry.tool,stdout])
+	const workspaceDirectory=entry.tool==='workspace_file_list'
 	  const stderr=(shellOperation&&shellChunks.length?shellChunkStderr:'')||textValue(payload.stderr)||textValue(resultPayload?.stderr)||entry.liveStderr||run?.stderr_redacted||run?.error||''
 	const outputView=textValue(payload.output_view)||textValue(resultPayload?.output_view)
 	const stdoutOmitted=numberValue(payload.stdout_omitted_bytes)||numberValue(resultPayload?.stdout_omitted_bytes)
@@ -1461,14 +1408,13 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,liveSSHTaskOwner
 	}
   const instruction=textValue(payload.operator_instruction)||textValue(taskPayload?.operator_instruction)||textValue(resultPayload?.operator_instruction)
   const rawPayload={...payload};delete rawPayload._display
-		const firstSeenAt=useRef(Date.now())
+		const [firstSeenAt]=useState(Date.now)
 		const liveTaskStartedAt=textValue(currentLiveSSHTask?.task?.started_at)
 		const persistedStartedAt=run?.started_at?Date.parse(run.started_at):liveTaskStartedAt?Date.parse(liveTaskStartedAt):entry.startedAt
-		const startedAt=Number.isFinite(persistedStartedAt)?persistedStartedAt!:firstSeenAt.current
-		const [now,setNow]=useState(Date.now())
+		const startedAt=Number.isFinite(persistedStartedAt)?persistedStartedAt!:firstSeenAt
+		const [now,setNow]=useState(Date.now)
 		useEffect(()=>{
 		if(!chatVisible||!toolLive)return
-		setNow(Date.now())
 		const timer=window.setInterval(()=>setNow(Date.now()),1000)
 		return()=>window.clearInterval(timer)
 		},[chatVisible,toolLive])
@@ -1502,28 +1448,11 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,liveSSHTaskOwner
 	  {(textValue(payload.message)||textValue(payload.next_action))&&<div className={`tool-guidance ${payload.ok===false||['failed','denied','interrupted'].includes(status)?'error':''}`}><ShieldAlert size={15}/><div><b>{textValue(payload.code)||t('tool.result')}</b>{textValue(payload.message)&&<p>{textValue(payload.message)}</p>}{textValue(payload.next_action)&&<small>{t('common.next')} · {textValue(payload.next_action)}</small>}</div></div>}
 	  {instruction&&<div className="tool-instruction"><ShieldAlert size={15}/><div><b>{t('tool.operatorInstruction')}</b><p>{instruction}</p></div></div>}
 	  {fileTransfer&&transferTotal>0&&<div className="file-transfer-progress" role="progressbar" aria-valuemin={0} aria-valuemax={transferTotal} aria-valuenow={transferred}><div><span>{t('tool.transferProgress')}</span><b>{formatFileSize(transferred)} / {formatFileSize(transferTotal)}</b></div><i><em style={{width:`${transferPercent}%`}}/></i></div>}
-	  {workspaceDirectoryEntries!==undefined?<div className="tool-output-grid"><WorkspaceDirectoryOutput entries={workspaceDirectoryEntries} content={stdout}/>{stderr&&<ToolOutputPanel kind="stderr" label={outputLabel(t('tool.stderrResult'),stderrOmitted)} content={stderr} live={toolLive}/>}</div>:shellOperation&&shellChunks.length>0?<ShellOutputChunks chunks={shellChunks} live={toolLive}/>:((stdout&&(!shellOutputAction||shellChunks.length>0))||stderr)&&<div className="tool-output-grid">{stdout&&(!shellOutputAction||shellChunks.length>0)&&<ToolOutputPanel kind="stdout" label={outputLabel('STDOUT',stdoutOmitted)} content={stdout} live={toolLive} language={fileReadMode?languageFromPath(filePath):undefined}/>} {stderr&&<ToolOutputPanel kind="stderr" label={outputLabel(t('tool.stderrResult'),stderrOmitted)} content={stderr} live={toolLive}/>}</div>}
+	  {workspaceDirectory&&stdout?<div className="tool-output-grid"><WorkspaceDirectoryOutput content={stdout} label={outputLabel('STDOUT',stdoutOmitted)} live={toolLive}/>{stderr&&<ToolOutputPanel kind="stderr" label={outputLabel(t('tool.stderrResult'),stderrOmitted)} content={stderr} live={toolLive}/>}</div>:shellOperation&&shellChunks.length>0?<ShellOutputChunks chunks={shellChunks} live={toolLive}/>:((stdout&&(!shellOutputAction||shellChunks.length>0))||stderr)&&<div className="tool-output-grid">{stdout&&(!shellOutputAction||shellChunks.length>0)&&<ToolOutputPanel kind="stdout" label={outputLabel('STDOUT',stdoutOmitted)} content={stdout} live={toolLive} language={fileReadMode?languageFromPath(filePath):undefined}/>} {stderr&&<ToolOutputPanel kind="stderr" label={outputLabel(t('tool.stderrResult'),stderrOmitted)} content={stderr} live={toolLive}/>}</div>}
 	  {(request||sshTaskOperation)&&(exitCode!=='—'||duration!=='—'||waitDeadlineReached||shellHasMore||sshTaskOperation&&(!!runID||numberValue(payload.stdout_total_bytes)>0||numberValue(payload.stderr_total_bytes)>0))&&<aside className="tool-context-pane"><dl className="tool-context-grid">{sshTaskOperation&&runID&&<div><dt>{t('tool.runId')}</dt><dd>{runID}</dd></div>}{exitCode!=='—'&&<div><dt>{t('tool.exitCode')}</dt><dd>{exitCode}</dd></div>}{duration!=='—'&&<div><dt>{t('tool.duration')}</dt><dd>{duration}</dd></div>}{sshTaskOperation&&numberValue(payload.stdout_total_bytes)>0&&<div><dt>STDOUT</dt><dd>{formatFileSize(numberValue(payload.stdout_total_bytes))}</dd></div>}{sshTaskOperation&&numberValue(payload.stderr_total_bytes)>0&&<div><dt>STDERR</dt><dd>{formatFileSize(numberValue(payload.stderr_total_bytes))}</dd></div>}{(waitDeadlineReached||shellHasMore)&&<div><dt>{t('common.status')}</dt><dd>{waitDeadlineReached?t('tool.waitDeadline'):t('tool.moreOutput')}</dd></div>}</dl></aside>}
 	  <LazyJSONDetails value={rawPayload}/>
     </div>}
   </details>
-}
-
-function ToolOutputPanel({kind,label,content,live,language}:{kind:'stdout'|'stderr';label:string;content:string;live:boolean;language?:string}){
-	const outputRef=useRef<HTMLPreElement>(null)
-	const stickToBottom=useRef(true)
-	const preview=previewText(content,toolOutputPreviewChars)
-	useEffect(()=>{
-		const output=outputRef.current
-		if(live&&output&&stickToBottom.current)output.scrollTop=output.scrollHeight
-	},[preview,live])
-	return <div className={`tool-output ${kind} ${live?'live':''}`}><span>{label}</span><div className="tool-output-frame"><CopyButton value={content}/><pre ref={outputRef} onScroll={event=>{const output=event.currentTarget;stickToBottom.current=output.scrollHeight-output.scrollTop-output.clientHeight<32}}><HighlightedCode code={preview} language={language} autoDetect live={live}/></pre></div></div>
-}
-
-function WorkspaceDirectoryOutput({entries,content}:{entries:ToolWorkspaceDirectoryEntry[];content:string}){
-	const {t}=useTranslation()
-	const visible=entries.slice(0,toolCollectionPreviewItems),omitted=entries.length-visible.length
-	return <div className="tool-output workspace-directory-output"><span>STDOUT</span><div className="tool-output-frame"><CopyButton value={content}/><div className="tool-directory-list">{visible.length?visible.map(entry=><div className={`tool-directory-entry ${entry.type}`} key={`${entry.type}:${entry.name}`}>{entry.type==='directory'?<FolderOpen size={14}/>:<FileText size={14}/>}<b title={entry.name}>{entry.name}</b><small>{entry.type==='directory'?t('workspace.directory'):formatFileSize(entry.size||0)}</small></div>):<div className="tool-directory-empty">{t('workspace.emptyDirectory')}</div>}{omitted>0&&<div className="tool-directory-omitted">{t('tool.previewItemsOmitted',{count:omitted})}</div>}</div></div></div>
 }
 
 function ShellOutputChunks({chunks,live}:{chunks:JsonRecord[];live:boolean}){
@@ -1540,30 +1469,6 @@ function LazyJSONDetails({value}:{value:JsonRecord}){
 	const [open,setOpen]=useState(false)
 	const formatted=open?JSON.stringify(previewStructuredValue(value),null,2):''
 	return <details className="tool-raw" open={open} onToggle={event=>setOpen(event.currentTarget.open)}><summary>{t('tool.rawJson')}</summary>{open&&<CopyablePre value={()=>JSON.stringify(value,null,2)}><HighlightedCode code={previewText(formatted,toolOutputPreviewChars)} language="json"/></CopyablePre>}</details>
-}
-
-function CompactTable({title,columns,rows}:{title:string;columns:string[];rows:Array<Array<unknown>>}){
-  const visibleRows=rows.slice(0,toolCollectionPreviewItems)
-  if(rows.length>visibleRows.length)visibleRows.push([i18n.t('tool.previewItemsOmitted',{count:rows.length-visibleRows.length})])
-  return <div className="tool-compact-table"><span>{title}</span><div className="tool-table-scroll"><table><thead><tr>{columns.map(column=><th key={column}>{column}</th>)}</tr></thead><tbody>{visibleRows.map((row,index)=><tr key={index}>{row.map((value,column)=><td key={column}>{displayValue(value)}</td>)}</tr>)}</tbody></table></div></div>
-}
-
-function displayValue(value:unknown,depth=0):string{
-  if(value===null||value===undefined||value==='')return'—'
-	if(typeof value==='string')return previewText(value)
-	if(depth>=4)return'…'
-  if(Array.isArray(value)){
-		const visible=value.slice(0,toolCollectionPreviewItems).map(item=>displayValue(item,depth+1))
-		if(value.length>visible.length)visible.push(i18n.t('tool.previewItemsOmitted',{count:value.length-visible.length}))
-		return previewText(visible.join(', '))
-	}
-  const record=jsonRecord(value)
-  if(record){
-		const {entries,truncated}=limitedRecordEntries(record),visible=entries.map(([key,item])=>`${key}=${displayValue(item,depth+1)}`)
-		if(truncated)visible.push(i18n.t('tool.moreItemsOmitted'))
-		return previewText(visible.join(' · '))
-	}
-  return String(value)
 }
 
 function safeToolArgument(value:unknown,key='',depth=0):unknown{
@@ -1669,473 +1574,6 @@ function StructuredArray({label,values}:{label:string;values:unknown[]}){
 function StructuredObject({label,value}:{label:string;value:JsonRecord}){
 	const {entries,truncated}=limitedRecordEntries(value)
   return <section className="tool-object-section"><h4>{label.replaceAll('_',' ')}</h4><dl className="tool-generic-grid">{entries.map(([key,item])=><div key={key}><dt>{key.replaceAll('_',' ')}</dt><dd>{displayValue(item)}</dd></div>)}{truncated&&<div><dt>…</dt><dd>{i18n.t('tool.moreItemsOmitted')}</dd></div>}</dl></section>
-}
-
-function ReviewList({title,items,tone}:{title:string;items?:string[];tone?:string}){
-  if(!items?.length)return null
-  return <div className={`review-list ${tone||''}`}><b>{title}</b><ul>{items.map((item,index)=><li key={`${title}_${index}`}>{item}</li>)}</ul></div>
-}
-
-function CommandExplanationPanel({review}:{review?:CommandReview}){
-	const {t,i18n:instance}=useTranslation()
-  if(!review)return null
-			if(review.status==='pending')return <div className="command-review-panel pending" role="status" aria-live="polite"><div className="command-review-pending"><span className="review-agent-icon"><LoaderCircle className="spin" size={17}/></span><b>{t('approval.reviewWorking')}</b></div></div>
-  const explanation=review.explanation
-	  return <details className={`command-review-panel ${review.status}`}><summary><span className="review-agent-icon"><BrainCircuit size={17}/></span><span><b>{t('approval.explanationAgent')}</b><small>{review.status==='completed'?t('approval.explanationCompleted'):review.status==='degraded'?t('approval.explanationPartial'):t('approval.explanationUnavailable')}</small></span><ChevronRight size={14}/></summary><div className="command-review-body">{review.decision&&<div className={`review-decision ${review.decision}`}><b>{t(`approval.review_${review.decision}`)}</b><span>{review.reason}</span></div>}{explanation&&<section className="review-explanation"><div className="review-section-title"><span>AI</span><div><b>{t('approval.plainExplanation')}</b><small>{explanation.summary}</small></div></div><p>{explanation.mechanism}</p><div className="review-list-grid"><ReviewList title={t('approval.risks')} items={explanation.risks} tone="warn"/></div></section>}{review.errors&&review.errors.length>0&&<div className="review-errors"><b>{t('approval.degradedInfo')}</b>{review.errors.map((item,index)=><code key={index}>{item}</code>)}</div>}<div className="review-meta">{t('common.model')} {review.model||t('common.unavailable')} · {review.reviewed_at?new Date(review.reviewed_at).toLocaleString(localeFor(instance.language)):'—'}</div></div></details>
-}
-
-function ApprovalDialog({
-  approval,
-  pendingCount,
-  hosts,
-  running,
-  stopping,
-  onStop,
-  dismissApproval,
-  onApproved,
-  onNotice,
-}: {
-  approval: Approval;
-  pendingCount: number;
-  hosts: Host[];
-  running: boolean;
-  stopping: boolean;
-  onStop: () => void;
-  dismissApproval: (approvalID: string) => void;
-  onApproved: (result: ApprovalExecutionResult) => void;
-  onNotice: (message: string) => void;
-}) {
-  const { t } = useTranslation();
-  const [note, setNote] = useState("");
-  const [decisionBusy, setDecisionBusy] = useState<
-    "" | "once" | "reject"
-  >("");
-  const [explanationBusy, setExplanationBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [requestExpanded, setRequestExpanded] = useState(false);
-  let request: Record<string, unknown> = {};
-  try {
-    request = JSON.parse(approval.request_json);
-  } catch {
-    request = { request: approval.request_json };
-  }
-  const script = textValue(request.script);
-  const program = fullProgram(request);
-  const change = jsonRecord(request.change);
-  const workspaceID = textValue(request.workspace_id);
-  const filePath =
-    textValue(request.remote_path) || textValue(request.relative_path);
-  const requestMode = textValue(request.mode),
-    relativePath = textValue(request.relative_path),
-    remotePath = textValue(request.remote_path);
-  const searchMatchMode = textValue(request.search_match_mode);
-  const searchMatchModeLabel = searchMatchMode === "literal"
-    ? t("tool.matchModeLiteral")
-    : searchMatchMode === "regex"
-      ? t("tool.matchModeRegex")
-      : searchMatchMode || "—";
-  const workspaceShellBackend = textValue(request.workspace_shell_backend);
-  const workspaceShellApproval = requestMode === "workspace_shell_start";
-  const hostWorkspaceShell =
-    (requestMode === "workspace_shell" || workspaceShellApproval) && workspaceShellBackend === "host";
-  const tunnelApproval = requestMode === "ssh_tunnel_start";
-  const sshShellApproval = requestMode === "ssh_shell_start";
-  const interactiveShellApproval = sshShellApproval || workspaceShellApproval;
-  const fileReadApproval = [
-    "remote_read",
-    "remote_search",
-    "workspace_read",
-    "workspace_search",
-  ].includes(requestMode);
-  const fileSearchApproval = ["remote_search", "workspace_search"].includes(
-    requestMode,
-  );
-  const workspaceUpload = requestMode === "workspace_upload";
-  const workspaceDownload = requestMode === "workspace_download";
-  const workspaceTransfer = workspaceUpload || workspaceDownload;
-  const sshTransfer = requestMode === "ssh_file_transfer";
-  const sourceHostID = textValue(request.source_host_id);
-  const sourcePath = textValue(request.source_path);
-  const elevated = request.elevated === true;
-  const rootExecution = executionPermission(request, hosts, approval.host_id, ...(sshTransfer ? [sourceHostID] : [])) === "root";
-  const actionKind = script
-    ? t("approval.actionScript")
-    : t("approval.actionCommand");
-  const approvalTitle = fileReadApproval
-    ? rootExecution
-      ? t(fileSearchApproval ? "approval.sudoSearchTitle" : "approval.sudoReadTitle")
-      : t(fileSearchApproval ? "approval.searchTitle" : "approval.readTitle")
-    : tunnelApproval
-      ? t("approval.tunnelTitle")
-    : interactiveShellApproval
-      ? t("approval.sshShellTitle")
-    : rootExecution
-    ? filePath
-      ? t("approval.sudoFileTitle")
-      : t("approval.sudoTitle", { kind: actionKind })
-    : tunnelApproval
-    ? t("approval.tunnelLabel")
-    : sshTransfer
-      ? t("approval.transferTitle")
-      : workspaceUpload
-        ? t("approval.uploadTitle")
-      : workspaceDownload
-        ? t("approval.downloadTitle")
-      : hostWorkspaceShell
-        ? t("approval.hostShellTitle")
-        : filePath
-          ? t("approval.fileTitle")
-          : t("approval.executeTitle", { kind: actionKind });
-  const commandLabel = fileReadApproval
-    ? rootExecution
-      ? t(fileSearchApproval ? "approval.rootSearchLabel" : "approval.rootReadLabel")
-      : t(fileSearchApproval ? "approval.searchLabel" : "approval.readLabel")
-    : interactiveShellApproval
-    ? t("approval.sshShellLabel")
-    : sshTransfer
-    ? t("approval.transferLabel")
-    : workspaceUpload
-      ? t("approval.uploadLabel")
-    : workspaceDownload
-      ? t("approval.downloadLabel")
-    : rootExecution
-      ? filePath
-        ? t("approval.rootFileLabel")
-        : t("approval.rootCommandLabel", { kind: actionKind })
-      : filePath
-        ? t("approval.fileLabel")
-        : t("approval.commandLabel", { kind: actionKind });
-  const target = hosts.find((host) => host.id === approval.host_id);
-  const targetHost = target?.name || approval.host_id;
-  const source = hosts.find((host) => host.id === sourceHostID);
-  const sourceHost = source?.name || sourceHostID;
-  const tunnelDirection = textValue(request.direction) || "local";
-  const tunnelLocalHost = textValue(request.local_host) || "127.0.0.1";
-  const tunnelLocalPort = numberValue(request.local_port);
-  const tunnelRemoteHost = textValue(request.remote_host);
-  const tunnelRemotePort = numberValue(request.remote_port);
-  const tunnelOperation = sshTunnelRoute(targetHost,tunnelDirection,tunnelLocalHost,tunnelLocalPort,tunnelRemoteHost,tunnelRemotePort,t('tunnels.automaticPort'));
-  const sshShellOperation = `${targetHost}:${textValue(request.cwd)||'~'} · PTY`;
-	const workspaceShellOperation = `${workspaceID}:${textValue(request.cwd)||'.'} · PTY`;
-  const operation = tunnelApproval
-    ? tunnelOperation
-    : interactiveShellApproval
-    ? workspaceShellApproval ? workspaceShellOperation : sshShellOperation
-    : sshTransfer
-    ? `${sourceHost}:${sourcePath} → ${targetHost}:${remotePath}`
-    : workspaceUpload
-      ? `${workspaceID}:${relativePath} → ${targetHost}:${remotePath}`
-    : workspaceDownload
-      ? `${targetHost}:${remotePath} → ${workspaceID}:${relativePath}`
-    : program ||
-      script ||
-      `${requestMode} ${filePath}${fileSearchApproval ? ` · ${searchMatchModeLabel} pattern=${JSON.stringify(textValue(request.search_pattern))}` : ""}`.trim() ||
-      t("approval.pendingOperation");
-  const targetHostIdentity = [targetHost, target?.id && target.id !== targetHost ? target.id : approval.host_id !== targetHost ? approval.host_id : ''].filter(Boolean).join(' · ')
-  const sourceHostIdentity = [sourceHost, source?.id && source.id !== sourceHost ? source.id : sourceHostID !== sourceHost ? sourceHostID : ''].filter(Boolean).join(' · ')
-  const hostName = workspaceUpload || sshTransfer
-    ? targetHostIdentity
-    : workspaceID
-      ? `Workspace / ${workspaceID}`
-      : targetHostIdentity;
-  const executionIdentity = rootExecution ? "root" : "user";
-  const expectedSHA = textValue(request.expected_sha256),
-    expectedDestinationSHA = textValue(request.expected_destination_sha256),
-    validator = textValue(request.validator);
-  const fileApprovalParameters: Array<Array<unknown>> = fileReadApproval
-    ? [
-        ...(workspaceID
-          ? [["workspace_id", workspaceID]]
-          : [["host_id", approval.host_id]]),
-        ["path", filePath],
-        ...(fileSearchApproval
-          ? [
-              ["match_mode", searchMatchModeLabel],
-              ["pattern", textValue(request.search_pattern)],
-              ["context_lines", numberValue(request.context_lines)],
-            ]
-          : [
-              ...(workspaceID
-                ? []
-                : [["metadata_only", request.metadata_only === true]]),
-              ["max_bytes", numberValue(request.max_bytes)],
-              ["offset_bytes", numberValue(request.offset_bytes)],
-              ["tail_lines", numberValue(request.tail_lines)],
-            ]),
-        ...(workspaceID ? [] : [["elevated", elevated]]),
-      ]
-    : [];
-  const explanationPending = approval.ai_review?.status === "pending";
-  const decide = async () => {
-    setDecisionBusy("once");
-    setError("");
-    try {
-      const result = await api.approve(
-        approval.id,
-        note.trim() || "Reviewed and approved.",
-      );
-      onApproved(result);
-      onNotice(
-        t("approval.approved", {
-          status: t(`statusLabels.${result.status}`, {
-            defaultValue: result.status,
-          }),
-          run: result.run_id,
-        }),
-      );
-      dismissApproval(approval.id);
-    } catch (err) {
-      setError(errorText(err));
-    } finally {
-      setDecisionBusy("");
-    }
-  };
-  const reject = async () => {
-    const instruction = note.trim();
-    if (!instruction) {
-      setError(t("approval.replacementRequired"));
-      return;
-    }
-    setDecisionBusy("reject");
-    setError("");
-    try {
-      await api.reject(approval.id, instruction);
-      onNotice(t("approval.rejected"));
-      dismissApproval(approval.id);
-    } catch (err) {
-      setError(errorText(err));
-    } finally {
-      setDecisionBusy("");
-    }
-  };
-  const retryExplanation = async () => {
-    setExplanationBusy(true);
-    setError("");
-    try {
-      const updated = await api.retryApprovalExplanation(approval.id);
-      const status = updated.ai_review?.status;
-      onNotice(
-        status === "completed"
-          ? t("approval.explanationReady")
-          : t("approval.explanationDegraded"),
-      );
-    } catch (err) {
-      setError(errorText(err));
-    } finally {
-      setExplanationBusy(false);
-    }
-  };
-  const decisionDisabled = !!decisionBusy;
-  return createPortal(
-    <div className="approval-modal-backdrop">
-      <section
-        className={`approval-dialog ${rootExecution ? "elevated" : ""}`}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="approval-dialog-title"
-      >
-        <div className="approval-dialog-head">
-          <div className="approval-dialog-icon">
-            <ShieldAlert size={20} />
-          </div>
-          <div>
-            <span>
-              {t("approval.confirmation", {
-                queue:
-                  pendingCount > 1
-                    ? t("approval.queue", { count: pendingCount })
-                    : t("approval.currentSession"),
-              })}
-            </span>
-            <h2 id="approval-dialog-title">{approvalTitle}</h2>
-          </div>
-        </div>
-        <div className="approval-operation">
-          <span className="approval-command-label">
-            {commandLabel}
-            {rootExecution && (
-              <em>
-                <ShieldAlert size={12} />
-                root
-              </em>
-            )}
-          </span>
-          {rootExecution && (
-            <div className="approval-root-warning">
-              <ShieldAlert size={18} />
-              <div>
-                <b>{t("approval.rootWarning")}</b>
-              </div>
-            </div>
-          )}
-          {filePath && (
-            <div className="approval-file-target">
-              <FileText size={15} />
-              <div>
-                <b>
-                  {workspaceUpload
-                    ? `${workspaceID}:${relativePath} -> ${targetHost}:${remotePath}`
-                    : workspaceDownload
-                      ? `${targetHost}:${remotePath} -> ${workspaceID}:${relativePath}`
-                    : sshTransfer
-                      ? `${sourceHost}:${sourcePath} -> ${targetHost}:${remotePath}`
-                      : filePath}
-                </b>
-                <span>
-                  {change
-                    ? `${t('tool.fileEdit')} · +${numberValue(change.additions)} / -${numberValue(change.deletions)}`
-                    : sshTransfer && expectedSHA
-                    ? `${t("approval.sourceSHA")} · ${expectedSHA}${expectedDestinationSHA ? ` · ${t("approval.destinationSHA")} · ${expectedDestinationSHA}` : ""}`
-                    : (workspaceTransfer && expectedSHA)
-                      ? `Expected SHA256 · ${expectedSHA}`
-                      : ''}
-                  {validator ? ` · Validator ${validator}` : ""}
-                </span>
-              </div>
-            </div>
-          )}
-          {fileApprovalParameters.length > 0 && (
-            <CompactTable
-              title={t("tool.actualParameters")}
-              columns={[t("tool.parameter"), t("tool.value")]}
-              rows={fileApprovalParameters}
-            />
-          )}
-          {change&&textValue(change.diff)?<DiffViewer change={change}/>:<CopyablePre value={script||(program&&operation===program?()=>fullProgram(request,true):operation)} preClassName="approval-command-preview"><HighlightedCode code={previewText(script || `${tunnelApproval||interactiveShellApproval?'':'$ '}${operation}`,toolOutputPreviewChars)} language={script?inferScriptLanguage(script):program?'bash':undefined} autoDetect/></CopyablePre>}
-          <dl>
-            <div>
-              <dt>
-                {workspaceUpload || sshTransfer
-                  ? t("approval.targetHost")
-                  : workspaceID
-                    ? t("common.workspace")
-                    : t("approval.targetHost")}
-              </dt>
-              <dd>{hostName}</dd>
-            </div>
-            {sshTransfer && (
-              <div>
-                <dt>{t("approval.sourceHost")}</dt>
-                <dd>{sourceHostIdentity}</dd>
-              </div>
-            )}
-            {workspaceDownload && (
-              <div>
-                <dt>{t("approval.sourceHost")}</dt>
-                <dd>{targetHostIdentity}</dd>
-              </div>
-            )}
-            <div>
-              <dt>{t("approval.identity")}</dt>
-              <dd>{executionIdentity}</dd>
-            </div>
-            {workspaceShellBackend && (
-              <div>
-                <dt>{t("approval.environment")}</dt>
-                <dd>
-                  {hostWorkspaceShell
-                    ? t("approval.hostShell")
-                    : t("tool.sandbox")}
-                </dd>
-              </div>
-            )}
-            <div>
-              <dt>{t("approval.digest")}</dt>
-              <dd>{approval.request_digest.slice(0, 12)}</dd>
-            </div>
-          </dl>
-          {(hostWorkspaceShell || sshShellApproval) && (
-            <div className="approval-host-shell-warning">
-              <ShieldAlert size={14} />
-              <span>{t(sshShellApproval?"approval.sshShellWarning":"approval.hostShellWarning")}</span>
-            </div>
-          )}
-          {typeof request.reason === "string" && <p>{request.reason}</p>}
-        </div>
-        <CommandExplanationPanel review={approval.ai_review} />
-        <div className="review-retry-row">
-          <button
-            disabled={decisionDisabled || explanationPending || explanationBusy}
-            onClick={retryExplanation}
-          >
-            <RefreshCw
-              className={explanationBusy || explanationPending ? "spin" : ""}
-              size={13}
-            />
-            {explanationPending
-              ? t("approval.reviewWorking")
-              : explanationBusy
-                ? t("approval.retrying")
-                : t("approval.retryExplanation")}
-          </button>
-        </div>
-        <label className="approval-guidance">
-          <span>{t("approval.guidance")}</span>
-          <textarea
-            value={note}
-            maxLength={2000}
-            onChange={(event) => setNote(event.target.value)}
-            autoFocus
-          />
-        </label>
-        {error && (
-          <div className="approval-dialog-error">
-            <ShieldAlert size={14} />
-            {error}
-          </div>
-        )}
-        <details className="approval-request-detail" open={requestExpanded} onToggle={event=>setRequestExpanded(event.currentTarget.open)}>
-          <summary>{t("approval.requestDetails")}</summary>
-          {requestExpanded&&<CopyablePre value={()=>JSON.stringify(request,null,2)}><HighlightedCode code={JSON.stringify(previewStructuredValue(request),null,2)} language="json"/></CopyablePre>}
-        </details>
-        <div className="approval-choice-grid">
-          <button
-            className="allow-once"
-            disabled={decisionDisabled || stopping}
-            onClick={() => decide()}
-          >
-            <Check size={16} />
-            <span>
-              <b>
-                {decisionBusy === "once"
-                  ? t("approval.executing")
-                  : rootExecution
-                    ? t("approval.allowSudo")
-                    : t("approval.allowOnce")}
-              </b>
-            </span>
-          </button>
-          <button
-            className="reject-guidance"
-            disabled={decisionDisabled || stopping || !note.trim()}
-            onClick={reject}
-          >
-            <X size={16} />
-            <span>
-              <b>
-                {decisionBusy === "reject"
-                  ? t("approval.rejecting")
-                  : t("approval.reject")}
-              </b>
-            </span>
-          </button>
-          <button
-            className="stop-agent-run"
-            disabled={decisionDisabled || stopping || !running}
-            onClick={onStop}
-          >
-            <Square size={14} fill="currentColor" />
-            <span>
-              <b>
-                {stopping ? t("approval.stopping") : t("approval.stopAgent")}
-              </b>
-            </span>
-          </button>
-        </div>
-      </section>
-    </div>,
-    document.body,
-  );
 }
 
 function AuditRunDetail({run,req,hosts}:{run:Run;req:JsonRecord;hosts:Host[]}){
@@ -2297,7 +1735,7 @@ function AuditRunsView({runs,hosts,sessions,ready,error,runsHasMore,loadingMore,
 			items.sort((a,b)=>Date.parse(b.started_at)-Date.parse(a.started_at))
 			return{id,title:id===directAuditSessionID?t('audit.direct'):id.startsWith('mcp_sess_')?t('audit.mcpRunGroup'):titles.get(id)||t('audit.missingConversation'),runs:items,latest:items[0]?.started_at,pending:items.filter(run=>run.status==='approval_required').length}
 		}).sort((a,b)=>Date.parse(b.latest||'')-Date.parse(a.latest||''))
-	},[filtered,sessions,t,instance.language])
+	},[filtered,sessions,t])
 	const groupIDs=useMemo(()=>groups.map(group=>group.id),[groups])
 	const disclosure=useAuditGroupDisclosure(groupIDs,filtered.length)
 	const confirmDelete=async()=>{
@@ -2345,6 +1783,8 @@ function MCPActivityView({hosts,refreshKey}:{hosts:Host[];refreshKey:number}){
 	const [selectedID,setSelectedID]=useState('')
 	const [calls,setCalls]=useState<MCPToolCall[]>([])
 	const [outputs,setOutputs]=useState<Record<string,MCPCallOutput>>({})
+	const [callsSessionID,setCallsSessionID]=useState(selectedID)
+	if(callsSessionID!==selectedID){setCallsSessionID(selectedID);setCalls([]);setOutputs({})}
 	const [query,setQuery]=useState('')
 	const [loading,setLoading]=useState(true)
 	const [error,setError]=useState('')
@@ -2358,7 +1798,7 @@ function MCPActivityView({hosts,refreshKey}:{hosts:Host[];refreshKey:number}){
 		return()=>{active=false}
 	},[refreshKey])
 	useEffect(()=>{
-		if(!selectedID){setCalls([]);return}
+		if(!selectedID)return
 		let active=true
 		api.mcpActivity(selectedID).then(snapshot=>{if(active)setCalls(snapshot.calls||[])}).catch(err=>{if(active)setError(errorText(err))})
 		return()=>{active=false}
@@ -2368,7 +1808,7 @@ function MCPActivityView({hosts,refreshKey}:{hosts:Host[];refreshKey:number}){
 		const events=pendingEventsRef.current.splice(0)
 		if(!events.length)return
 		setSessions(current=>{
-			let next=[...current]
+			const next=[...current]
 			for(const event of events){
 				const index=next.findIndex(session=>session.id===event.session_id)
 				if(event.type==='call_started'){
@@ -2383,7 +1823,7 @@ function MCPActivityView({hosts,refreshKey}:{hosts:Host[];refreshKey:number}){
 			return next
 		})
 		setCalls(current=>{
-			let next=[...current]
+			const next=[...current]
 			for(const event of events){
 				if(event.session_id!==selectedIDRef.current)continue
 				const index=next.findIndex(call=>call.id===event.call_id)

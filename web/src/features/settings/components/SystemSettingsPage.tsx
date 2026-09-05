@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from 'react'
+import { FormEvent, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Bot, BrainCircuit, CircleDot, ImagePlus, Minimize2, Power, RefreshCw, ShieldAlert, ShieldCheck, SlidersHorizontal, TerminalSquare } from 'lucide-react'
 import { api } from '../../../api/api'
@@ -35,48 +35,40 @@ export function SystemSettingsPage({settings,providers,proxies,capabilities,mode
 	  const savedCompressionPercent=settings?.context_compression_threshold_percent??70
 	  const savedImageTypes=settings?.chat_image_allowed_types??defaultChatImageTypes
   const savedShellMode=settings?.workspace_shell_mode??(settings?.workspace_shell_platform==='windows'?'host':'sandbox')
-  const [maxIterations,setMaxIterations]=useState(savedValue)
-  const [systemPrompt,setSystemPrompt]=useState(savedPrompt)
-  const [explanationEnabled,setExplanationEnabled]=useState(savedExplanation)
-  const [subagentProvider,setSubagentProvider]=useState(savedSubagentProvider)
-	const [automaticApprovalProvider,setAutomaticApprovalProvider]=useState(savedAutomaticApprovalProvider)
-	  const [subagentTimeout,setSubagentTimeout]=useState(savedSubagentTimeout)
-	  const [compressionEnabled,setCompressionEnabled]=useState(savedCompressionEnabled)
-	  const [compressionPercent,setCompressionPercent]=useState(savedCompressionPercent)
-	  const [imageTypes,setImageTypes]=useState(savedImageTypes)
-  const [shellMode,setShellMode]=useState<WorkspaceShellMode>(savedShellMode)
-	const [iterationsDirty,setIterationsDirty]=useState(false)
-	const [promptDirty,setPromptDirty]=useState(false)
-	const [explanationDirty,setExplanationDirty]=useState(false)
-	const [compressionDirty,setCompressionDirty]=useState(false)
-	const [imagesDirty,setImagesDirty]=useState(false)
-	const [shellDirty,setShellDirty]=useState(false)
+	const [iterationsDraft,setMaxIterations]=useState<number|null>(null)
+	const [promptDraft,setSystemPrompt]=useState<string|null>(null)
+	const [explanationDraft,setExplanationDraft]=useState<{explanationEnabled:boolean;subagentProvider:string;automaticApprovalProvider:string;subagentTimeout:number}|null>(null)
+	const [compressionDraft,setCompressionDraft]=useState<{compressionEnabled:boolean;compressionPercent:number}|null>(null)
+	const [imagesDraft,setImageTypes]=useState<string[]|null>(null)
+	const [shellDraft,setShellMode]=useState<WorkspaceShellMode|null>(null)
 	const [savingSection,setSavingSection]=useState<SystemSettingsSection|''>('')
-	useEffect(()=>{if(!iterationsDirty)setMaxIterations(savedValue)},[savedValue,iterationsDirty])
-	useEffect(()=>{if(!promptDirty)setSystemPrompt(savedPrompt)},[savedPrompt,promptDirty])
-	useEffect(()=>{if(!explanationDirty){setExplanationEnabled(savedExplanation);setSubagentProvider(savedSubagentProvider);setAutomaticApprovalProvider(savedAutomaticApprovalProvider);setSubagentTimeout(savedSubagentTimeout)}},[savedExplanation,savedSubagentProvider,savedAutomaticApprovalProvider,savedSubagentTimeout,explanationDirty])
-	useEffect(()=>{if(!compressionDirty){setCompressionEnabled(savedCompressionEnabled);setCompressionPercent(savedCompressionPercent)}},[savedCompressionEnabled,savedCompressionPercent,compressionDirty])
-	useEffect(()=>{if(!imagesDirty)setImageTypes(savedImageTypes)},[savedImageTypes,imagesDirty])
-	useEffect(()=>{if(!shellDirty)setShellMode(savedShellMode)},[savedShellMode,shellDirty])
-	const update=(value:number)=>{setMaxIterations(Math.max(5,Math.min(100,value||5)));setIterationsDirty(true)}
-	const updateSystemPrompt=(value:string)=>{setSystemPrompt(value);setPromptDirty(true)}
-	const restoreDefaultPrompt=()=>{setSystemPrompt(defaultPrompt);setPromptDirty(true)}
-	const toggleExplanation=(value:boolean)=>{setExplanationEnabled(value);setExplanationDirty(true)}
-	const selectSubagentProvider=(value:string)=>{setSubagentProvider(value);setExplanationDirty(true)}
-	const selectAutomaticApprovalProvider=(value:string)=>{setAutomaticApprovalProvider(value);setExplanationDirty(true)}
-	const updateSubagentTimeout=(value:number)=>{setSubagentTimeout(Math.max(5,Math.min(120,value||5)));setExplanationDirty(true)}
-	const toggleCompression=(value:boolean)=>{setCompressionEnabled(value);setCompressionDirty(true)}
-	const updateCompressionPercent=(value:number)=>{setCompressionPercent(Math.max(50,Math.min(90,value||50)));setCompressionDirty(true)}
-	const toggleImageType=(value:string)=>{setImageTypes(current=>current.includes(value)?current.length===1?current:current.filter(item=>item!==value):[...current,value]);setImagesDirty(true)}
-	const selectShellMode=(value:WorkspaceShellMode)=>{setShellMode(value);setShellDirty(true)}
+	const maxIterations=iterationsDraft??savedValue,systemPrompt=promptDraft??savedPrompt
+	const explanation=explanationDraft??{explanationEnabled:savedExplanation,subagentProvider:savedSubagentProvider,automaticApprovalProvider:savedAutomaticApprovalProvider,subagentTimeout:savedSubagentTimeout}
+	const {explanationEnabled,subagentProvider,automaticApprovalProvider,subagentTimeout}=explanation
+	const compression=compressionDraft??{compressionEnabled:savedCompressionEnabled,compressionPercent:savedCompressionPercent}
+	const {compressionEnabled,compressionPercent}=compression
+	const imageTypes=imagesDraft??savedImageTypes,shellMode=shellDraft??savedShellMode
+	const iterationsDirty=iterationsDraft!==null,promptDirty=promptDraft!==null,explanationDirty=explanationDraft!==null
+	const compressionDirty=compressionDraft!==null,imagesDirty=imagesDraft!==null,shellDirty=shellDraft!==null
+	const update=(value:number)=>setMaxIterations(Math.max(5,Math.min(100,value||5)))
+	const updateSystemPrompt=(value:string)=>setSystemPrompt(value)
+	const restoreDefaultPrompt=()=>setSystemPrompt(defaultPrompt)
+	const toggleExplanation=(value:boolean)=>setExplanationDraft({...explanation,explanationEnabled:value})
+	const selectSubagentProvider=(value:string)=>setExplanationDraft({...explanation,subagentProvider:value})
+	const selectAutomaticApprovalProvider=(value:string)=>setExplanationDraft({...explanation,automaticApprovalProvider:value})
+	const updateSubagentTimeout=(value:number)=>setExplanationDraft({...explanation,subagentTimeout:Math.max(5,Math.min(120,value||5))})
+	const toggleCompression=(value:boolean)=>setCompressionDraft({...compression,compressionEnabled:value})
+	const updateCompressionPercent=(value:number)=>setCompressionDraft({...compression,compressionPercent:Math.max(50,Math.min(90,value||50))})
+	const toggleImageType=(value:string)=>setImageTypes(imageTypes.includes(value)?imageTypes.length===1?imageTypes:imageTypes.filter(item=>item!==value):[...imageTypes,value])
+	const selectShellMode=(value:WorkspaceShellMode)=>setShellMode(value)
 	const discard=(section:SystemSettingsSection)=>{
 		switch(section){
-		case 'iterations':setMaxIterations(savedValue);setIterationsDirty(false);break
-		case 'prompt':setSystemPrompt(savedPrompt);setPromptDirty(false);break
-		case 'explanation':setExplanationEnabled(savedExplanation);setSubagentProvider(savedSubagentProvider);setAutomaticApprovalProvider(savedAutomaticApprovalProvider);setSubagentTimeout(savedSubagentTimeout);setExplanationDirty(false);break
-		case 'compression':setCompressionEnabled(savedCompressionEnabled);setCompressionPercent(savedCompressionPercent);setCompressionDirty(false);break
-		case 'images':setImageTypes(savedImageTypes);setImagesDirty(false);break
-		case 'shell':setShellMode(savedShellMode);setShellDirty(false);break
+		case 'iterations':setMaxIterations(null);break
+		case 'prompt':setSystemPrompt(null);break
+		case 'explanation':setExplanationDraft(null);break
+		case 'compression':setCompressionDraft(null);break
+		case 'images':setImageTypes(null);break
+		case 'shell':setShellMode(null);break
 		}
 	}
 	const save=async(section:SystemSettingsSection)=>{
@@ -91,14 +83,7 @@ export function SystemSettingsPage({settings,providers,proxies,capabilities,mode
 		setSavingSection(section)
 		try{
 			const result=await api.saveSystemSettings(input)
-			switch(section){
-			case 'iterations':setMaxIterations(result.agent_max_iterations);setIterationsDirty(false);break
-			case 'prompt':setSystemPrompt(result.system_prompt);setPromptDirty(false);break
-			case 'explanation':setExplanationEnabled(result.approval_explanations_enabled);setSubagentProvider(result.subagent_model_provider_id);setAutomaticApprovalProvider(result.automatic_approval_model_provider_id);setSubagentTimeout(result.subagent_timeout_seconds);setExplanationDirty(false);break
-			case 'compression':setCompressionEnabled(result.context_compression_enabled);setCompressionPercent(result.context_compression_threshold_percent);setCompressionDirty(false);break
-			case 'images':setImageTypes(result.chat_image_allowed_types);setImagesDirty(false);break
-			case 'shell':setShellMode(result.workspace_shell_mode);setShellDirty(false);break
-			}
+			discard(section)
 			onSettingsChanged(result)
 			notify(t('settings.saved'))
 			if(section==='shell')await refreshCapabilities()

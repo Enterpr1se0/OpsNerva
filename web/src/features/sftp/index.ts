@@ -1,4 +1,5 @@
-export { FileTransferContext, FileTransferProvider, useFileTransferRecord, useSFTPTransfer, useWorkspaceTransfer } from './transfer'
+export { FileTransferProvider } from './transfer'
+export { useFileTransferRecord, useSFTPTransfer, useWorkspaceTransfer } from './useFileTransfer'
 export { SFTPBrowser } from './components/SFTPBrowser'
 export { FileBrowserTabs } from './components/FileBrowserTabs'
 export { FileTransferProgress } from './components/FileTransferProgress'

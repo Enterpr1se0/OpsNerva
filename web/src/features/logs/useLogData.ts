@@ -14,14 +14,18 @@ const logRenderInterval=100
 export function useLogData(level:string,component:string,query:string,live:boolean){
 	const visible=useDocumentVisible()
 	const [data,setData]=useState<LogData>({rows:[],components:[],minimumLevel:'debug',file:''})
-	const [loading,setLoading]=useState(false)
+	const [loading,setLoading]=useState(true)
 	const [error,setError]=useState('')
 	const nextRowID=useRef(0)
 	const reloadRef=useRef<(()=>void)|null>(null)
 	const refresh=useCallback(()=>reloadRef.current?.(),[])
 
+	const queryKey=JSON.stringify([level,component,query,live,visible])
+	const [loadedQuery,setLoadedQuery]=useState(queryKey)
+	if(loadedQuery!==queryKey){setLoadedQuery(queryKey);setLoading(visible);setError('')}
+
 	useEffect(()=>{
-		if(!visible){setLoading(false);return}
+		if(!visible)return
 		let disposed=false
 		let revision=0
 		let timer:number|undefined
@@ -44,7 +48,6 @@ export function useLogData(level:string,component:string,query:string,live:boole
 			const controller=new AbortController()
 			request=controller
 			const startedRevision=revision
-			setLoading(true)
 			try{
 				const value=await api.logs(filters,controller.signal)
 				// An arriving stream event is newer than this HTTP snapshot.
@@ -61,8 +64,7 @@ export function useLogData(level:string,component:string,query:string,live:boole
 				return {...current,rows:[...additions,...current.rows].slice(0,logLimit),components:added.length?[...current.components,...added].sort():current.components}
 			})
 		}
-		reloadRef.current=()=>void load()
-		setError('');setLoading(true)
+		reloadRef.current=()=>{setLoading(true);void load()}
 		let unsubscribe: (()=>void)|undefined
 		if(!live)void load()
 		else unsubscribe=subscribeApplicationEvents<ApplicationLogPayload>('logs',event=>{
