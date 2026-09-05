@@ -1,1 +1,1 @@
-export { DesktopDeveloperToolsPanel } from './components/DesktopDeveloperToolsPanel'
+export { DesktopApplicationPanel } from './components/DesktopApplicationPanel'

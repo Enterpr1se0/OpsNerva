@@ -123,7 +123,7 @@ const zh = {
     subagentProvider: '审批模型',
     activeMain: '主模型', timeout: '超时时间', seconds: '{{count}} 秒',
 	contextCompression: '上下文压缩', autoCompression: '自动压缩', compressionThreshold: '触发阈值（%）', compressionOff: '已关闭',
-		chatImages: '会话图片格式', developerTools: '浏览器开发者工具', openDeveloperTools: '打开开发者工具',
+		chatImages: '会话图片格式', desktopApplication: '桌面应用', lightweightMode: '轻量模式', openDeveloperTools: '打开开发者工具',
     workspaceShell: 'Workspace Shell 执行',
     shellDisabled: '禁用', shellSandbox: 'Bubblewrap 沙盒', shellHost: '宿主机 Shell', shellUnsupported: '当前主机没有可用的 Bubblewrap。',
     shellBackend: 'Workspace Shell', detecting: '检测中', sandbox: '沙盒', sandboxAvailable: 'Bubblewrap · 无网络', unavailableHost: '不可用', hostShell: '宿主机', systemShell: '系统 Shell', fullAuthority: '完整权限', noShell: '没有可用的 Shell', hostWarning: '可访问宿主机文件和网络', sandboxWarning: '沙盒不可用，命令不会转到宿主机执行',
@@ -138,7 +138,7 @@ const zh = {
   },
   mcpServerMode: {
     title: 'MCP Server Mode', endpoint: 'Endpoint', token: '访问令牌', tokenStored: '已保存，重新生成后显示',
-    start: '启动', stop: '停止', rotate: '重新生成令牌', lightweightMode: '轻量模式', activity: '调用记录',
+    start: '启动', stop: '停止', rotate: '重新生成令牌', activity: '调用记录',
     started: 'MCP Server 已启动。', stopped: 'MCP Server 已停止。', endpointCopied: 'Endpoint 已复制。', tokenCopied: '令牌已复制。',
   },
   chat: {
@@ -248,6 +248,7 @@ const zh = {
     emptyTitle: '没有审计记录', noMatch: '没有匹配的审计记录',
   },
   logs: {
+	streamFailed: '日志连接失败',
     search: '搜索消息、ID、主机和状态...', minimumLevel: '级别', component: '组件', allComponents: '全部组件', live: '实时 · 3 秒', paused: '已暂停',
 		export: '导出诊断包',
     entries: '最近 {{count}} 条', file: '日志路径：{{file}}', fileDisabled: '文件日志未启用',

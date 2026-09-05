@@ -123,7 +123,7 @@ const en = {
     subagentProvider: 'Approval model',
     activeMain: 'Main model', timeout: 'Timeout', seconds: '{{count}} seconds',
 	contextCompression: 'Context compression', autoCompression: 'Automatic compression', compressionThreshold: 'Trigger threshold (%)', compressionOff: 'Off',
-	chatImages: 'Chat image formats', developerTools: 'Browser developer tools', openDeveloperTools: 'Open developer tools',
+	chatImages: 'Chat image formats', desktopApplication: 'Desktop app', lightweightMode: 'Lightweight mode', openDeveloperTools: 'Open developer tools',
     workspaceShell: 'Workspace Shell execution',
     shellDisabled: 'Disabled', shellSandbox: 'Bubblewrap sandbox', shellHost: 'Host shell', shellUnsupported: 'Bubblewrap is unavailable on this host.',
     shellBackend: 'Workspace Shell', detecting: 'Detecting', sandbox: 'Sandbox', sandboxAvailable: 'Bubblewrap · no network', unavailableHost: 'Unavailable', hostShell: 'Host', systemShell: 'System Shell', fullAuthority: 'Full access', noShell: 'No Shell available', hostWarning: 'Can access host files and network', sandboxWarning: 'Sandbox unavailable; commands will not run on the host',
@@ -138,7 +138,7 @@ const en = {
   },
   mcpServerMode: {
     title: 'MCP Server Mode', endpoint: 'Endpoint', token: 'Access token', tokenStored: 'Saved; regenerate to display',
-    start: 'Start', stop: 'Stop', rotate: 'Regenerate token', lightweightMode: 'Lightweight mode', activity: 'Activity',
+    start: 'Start', stop: 'Stop', rotate: 'Regenerate token', activity: 'Activity',
     started: 'MCP Server started.', stopped: 'MCP Server stopped.', endpointCopied: 'Endpoint copied.', tokenCopied: 'Token copied.',
   },
   chat: {
@@ -248,6 +248,7 @@ const en = {
     emptyTitle: 'No audit history', noMatch: 'No matching audit records',
   },
   logs: {
+	streamFailed: 'Log stream failed',
     search: 'Search messages, IDs, hosts, status...', minimumLevel: 'Level', component: 'Component', allComponents: 'All components', live: 'Live · 3s', paused: 'Paused',
 		export: 'Export diagnostics',
     entries: '{{count}} recent entries', file: 'Log path: {{file}}', fileDisabled: 'File logging disabled',

@@ -255,13 +255,13 @@ export const api = {
 	  return request<AuditRunDeleteResult>(`/api/v1/audit/runs${suffix}`,{method:'DELETE'})
 	},
   runDetail: (id: string) => request<RunDetail>(`/api/v1/runs/${encodeURIComponent(id)}`),
-  logs: (filters: {level?:string;component?:string;q?:string;limit?:number} = {}) => {
+  logs: (filters: {level?:string;component?:string;q?:string;limit?:number} = {}, signal?:AbortSignal) => {
     const params=new URLSearchParams()
     if(filters.level)params.set('level',filters.level)
     if(filters.component)params.set('component',filters.component)
     if(filters.q)params.set('q',filters.q)
     params.set('limit',String(filters.limit||500))
-    return request<ServerLogResponse>(`/api/v1/logs?${params}`)
+    return request<ServerLogResponse>(`/api/v1/logs?${params}`,{signal})
   },
   chatSessions: () => requestList<ChatSession>('/api/v1/chat/sessions?limit=50'),
 	chatState: (id: string) => request<ChatState>(`/api/v1/chat/${encodeURIComponent(id)}/state`),

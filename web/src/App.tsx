@@ -2,85 +2,48 @@ import { FormEvent, Suspense, createContext, lazy, memo, useCallback, useContext
 import { createPortal, flushSync } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
-import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import '@xterm/xterm/css/xterm.css'
-import {
-  Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronLeft, ChevronRight, CircleDot, Copy, Cpu, Edit3, ExternalLink, Eye, EyeOff, FileText, FolderOpen, FolderOutput, FunctionSquare, History, ImagePlus, KeyRound, Maximize2, Minimize2, Minus, Monitor, Moon, PanelLeftOpen, Sun,
-  Cable, Download, ListChecks, ListPlus, LoaderCircle, LogOut, Plus, Power, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, Square, TerminalSquare, Trash2, UploadCloud, UserRound, X, Zap,
-} from 'lucide-react'
-import { api, chatAttachmentURL, reconnectChatStream, streamChat } from './api/api'
-import { subscribeApplicationEvents, type ApplicationLogPayload } from './api/appEvents'
+import { Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronRight, CircleDot,  Edit3, ExternalLink, FileText, FolderOpen, FunctionSquare, History, ImagePlus, Maximize2,  Minus, Monitor, Moon, PanelLeftOpen, Sun, ListChecks, ListPlus, LoaderCircle, LogOut, Plus, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, Square, TerminalSquare, Trash2, UserRound, X, Zap } from 'lucide-react'
+import { api, reconnectChatStream, streamChat } from './api/api'
+import { subscribeApplicationEvents } from './api/appEvents'
 import { CopyButton, CopyablePre } from './components/CopyButton'
 import { HighlightedCode, inferScriptLanguage, languageFromPath } from './components/HighlightedCode'
-import { AppSelect, ModelCombobox } from './components/Controls'
 import i18n, { localeFor, type SupportedLanguage } from './lib/i18n'
 import { activeLiveTaskStatus, useLiveSSHTasks, type LiveSSHTaskSnapshot, type LiveSSHTaskTarget } from './lib/liveTasks'
-import { appendStreamText, streamTextFrom, streamTextTail, streamTextValue, type StreamText } from './api/streamText'
+import { streamTextTail, type StreamText } from './api/streamText'
 import { PasswordInput } from './components/PasswordInput'
 import { SSHShellStatus, SSHShellTerminal, SSHTunnelStatus, sshShellActive } from './features/ssh'
-import { SettingsDisclosure } from './components/SettingsDisclosure'
-import { ChatWorkspacePanel, SSHWorkspacePage, WorkspaceSettingsPanel } from './features/workspace'
+import { ChatWorkspacePanel, SSHWorkspacePage } from './features/workspace'
 import { useNotifier, NotificationContext, type NotificationSink, type AppNotification } from './lib/notifications'
 import { DestructiveConfirmDialog } from './components/DestructiveConfirmDialog'
 import { FileTransferProvider } from './features/sftp'
 import { auditSessionID, directAuditSessionID, useAuditData, useAuditGroupDisclosure, type AuditView } from './features/audit'
 import { useChatCardDisclosure, type ChatDisclosurePositionHandler } from './features/chat'
-import { DesktopDeveloperToolsPanel } from './features/settings'
-import { useAutoCollapseDetails } from './lib/hooks'
-import { desktopRuntime, errorStatus, errorText, formatFileSize, sshTunnelRoute } from './lib/utils'
-import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult, ApprovalMode, AuditRunDeleteResult, AuthStatus, ChatMessage, ChatQueueMode, ChatSession, ChatSessionDelta, ChatState, ChatTokenUsage, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPActivityEvent, MCPActivitySnapshot, MCPClientSession, MCPServer, MCPServerInput, MCPToolCall, MCPTransport, ModelCatalog, ModelProvider, ModelProviderInput, ModelProviderKind, ModelReasoningEffort, Proxy, ProxyInput, QueuedChatMessage, Run, ServerLogEntry, SSHShell, SSHTunnel, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceShellMode } from './types'
+import {  useDocumentVisible } from './lib/hooks'
+import { desktopRuntime, errorStatus, errorText, formatFileSize, sshTunnelRoute, clientId, compactTokenCount } from './lib/utils'
+import type { AgentEvent, AgentTask, AgentTaskList, Approval, ApprovalExecutionResult,  AuditRunDeleteResult, AuthStatus, ChatQueueMode, ChatSession, ChatSessionDelta, ChatState, ChatTokenUsage, CommandReview, Health, Host, LLMToolCatalog, ManagedSkill, MCPActivityEvent, MCPActivitySnapshot, MCPClientSession, MCPServer, MCPToolCall, ModelProvider,  Proxy, QueuedChatMessage, Run, SSHShell, SSHTunnel, SystemSettings, ToolCapabilities } from './types'
+import { ChatActivityStatus } from './features/chat/ChatActivityStatus'
+import { ComposerControls } from './features/chat/ComposerControls'
+import type { ContextUsage } from './features/chat/types'
+import { insertQueuedMessage, queuedMessageEntries, historyEntries, deactivateReasoning, toolContentStatus, settledTurnEntries, prependHistoryEntries, mergePersistedToolEntries, updateToolRunStatus, agentFrameAffectsEntries, reduceAgentEntryFrames } from './features/chat/chatEntries'
+import { tasksFromToolContent, groupedTaskToolEntries, latestLiveSSHTaskTargets } from './features/chat/taskEntries'
+import { type JsonRecord, toolOutputPreviewChars, toolDiffPreviewChars, toolCollectionPreviewItems, previewText, jsonRecord, limitedRecordEntries, hasRecordEntries, previewStructuredValue, parseRecord, textValue } from './features/tools/payload'
+import { Empty } from './components/PageLayout'
+import { defaultChatImageTypes } from './features/settings/defaults'
+import type { PendingChatImage, ChatEntry, TaskToolEntryGroup, ChatRenderItem, ModelRetryState, ConnectionRetryState } from './features/chat/types'
+import '@xterm/xterm/css/xterm.css'
+const ConfigurationPage=lazy(()=>import('./features/settings/ConfigurationPage').then(module=>({default:module.ConfigurationPage})))
+const ExtensionsPage=lazy(()=>import('./features/extensions/ExtensionsPage').then(module=>({default:module.ExtensionsPage})))
+const LogsPage=lazy(()=>import('./features/logs/LogsPage').then(module=>({default:module.LogsPage})))
 
 type Page = 'chat' | 'ssh' | 'config' | 'extensions' | 'audit' | 'logs'
 const pageVisualOrder:Page[]=['chat','ssh','extensions','audit','logs','config']
-const liveToolOutputBufferChars=128<<10
-type ChatEntryImage = {id:string;name:string;mimeType:string;sizeBytes:number;url?:string}
-const workStatusKeys=['chat.cooking','chat.pondering','chat.brewing','chat.weaving','chat.polishing','chat.crunching'] as const
-type PendingChatImage = {id:string;file:File;url:string}
-type ChatEntry = { id: string; sourceMessageId?:string; persisted?:boolean; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; streamText?:StreamText; contentTruncated?:boolean; contentChars?:number; tool?: string; toolCallId?:string; runId?:string; transient?:boolean; progress?:boolean; startedAt?:number; liveStdout?:string; liveStderr?:string; liveOutput?:string; liveOutputStream?:'stdout'|'stderr'; transferredBytes?:number; transferTotalBytes?:number; images?:ChatEntryImage[]; tokenUsage?:ChatTokenUsage; active?: boolean; lifecycle?:'streaming'|'committed'; status?: 'pending' | 'waiting_for_approval' | 'completed' | 'failed' }
 const emptyChatEntries:ChatEntry[]=[]
 const emptyLiveSSHTaskTargets:readonly LiveSSHTaskTarget[]=[]
-type TaskToolEntryGroup={kind:'task_tool_group';id:string;tool:'TaskCreate'|'TaskUpdate';entries:ChatEntry[]}
-type ChatRenderItem={kind:'entry';entry:ChatEntry}|TaskToolEntryGroup
 const emptyChatRenderItems:ChatRenderItem[]=[]
-type ModelRetryState = {attempt:number;max:number}
 type ActiveChatStream = { id: string; sessionId: string; controller: AbortController }
-type ConnectionRetryState = {attempt:number;readyAt:number}
-type ContextUsage = {tokens:number;window:number}
 type ChatHistoryCursor = {createdAt:string;id:string}
 const MarkdownMessage=lazy(()=>import('./components/MarkdownMessage').then(module=>({default:module.MarkdownMessage})))
-
-function insertQueuedMessage(current:QueuedChatMessage[],item:QueuedChatMessage,position=0){
-	const existingIndex=current.findIndex(existing=>existing.id===item.id)
-	if(existingIndex>=0){
-		const existing=current[existingIndex]
-		const merged={...existing,...item,attachments:item.attachments||existing.attachments,attachment_count:item.attachment_count??existing.attachment_count}
-		if(merged.message===existing.message&&merged.mode===existing.mode&&merged.created_at===existing.created_at&&merged.attachments===existing.attachments&&merged.attachment_count===existing.attachment_count)return current
-		return current.map((candidate,index)=>index===existingIndex?merged:candidate)
-	}
-	const next=[...current]
-	const index=position>0?Math.min(position-1,next.length):next.length
-	next.splice(index,0,item)
-	return next
-}
-
-function queuedMessageEntries(messages:QueuedChatMessage[],imageFallback:(count:number)=>string):ChatEntry[]{
-	return messages.map(item=>{
-		const attachmentCount=item.attachments?.length||item.attachment_count||0
-		return{
-			id:`queued_${item.id}`,kind:'user',content:item.message||(attachmentCount?imageFallback(attachmentCount):''),
-			images:item.attachments?.map(image=>({id:image.id,name:image.name,mimeType:image.mime_type,sizeBytes:image.size_bytes})),
-		}
-	})
-}
-
-function historyEntries(messages:ChatMessage[],sessionID:string):ChatEntry[]{
-	return messages.map((item,index)=>{
-		const kind=item.role==='assistant_progress'?'assistant':item.role
-		const toolStatus=item.tool_status||(kind==='tool'?toolContentStatus(item.content):'')
-		return{id:item.tool_call_id?`tool_${item.tool_call_id}`:item.id||`history_${index}_${item.created_at}`,sourceMessageId:item.id,persisted:true,kind,content:item.content,contentTruncated:item.content_truncated,contentChars:item.content_chars,tool:item.tool_name,toolCallId:item.tool_call_id,runId:item.run_id,transient:kind==='tool'&&!settledToolStatus(toolStatus),progress:item.role==='assistant_progress',startedAt:kind==='tool'?Date.parse(item.created_at):undefined,status:item.status,lifecycle:item.role==='assistant'||item.role==='assistant_progress'?'committed':undefined,images:item.attachments?.map(image=>({id:image.id,name:image.name,mimeType:image.mime_type,sizeBytes:image.size_bytes,url:chatAttachmentURL(sessionID,image.id)})),tokenUsage:item.token_usage}
-	})
-}
 
 function newChatSessionID(){return `session_${clientId().replace(/[^A-Za-z0-9]/g,'')}`}
 function reconnectDelay(attempt:number){return attempt<=1?0:Math.min(10_000,500*2**Math.min(attempt-2,5))}
@@ -94,159 +57,10 @@ function waitForReconnect(delay:number,signal:AbortSignal){
 	})
 }
 
-function materializeStreamText(entry:ChatEntry):ChatEntry{
-	if(!entry.streamText)return entry
-	const{streamText,...rest}=entry
-	return{...rest,content:streamTextValue(streamText)}
-}
-
-function deactivateReasoning(entry:ChatEntry):ChatEntry{
-	if(entry.kind!=='reasoning'||(!entry.active&&!entry.streamText))return entry
-	return{...materializeStreamText(entry),active:false}
-}
-
-function compactTokenCount(value:number){
-	if(value<1000)return String(value)
-	if(value<1_000_000)return `${Number((value/1000).toFixed(value<10_000?1:0))}K`
-	return `${Number((value/1_000_000).toFixed(value<10_000_000?1:0))}M`
-}
-
 function contextWindowForSession(tokens:number,window:number,fallback:number){
 	return tokens>0?window:(window||fallback)
 }
 
-function ContextUsageRing({usage}:{usage:ContextUsage}){
-	const {t,i18n:instance}=useTranslation()
-	const known=usage.window>0
-	const percent=known?Math.min(100,Math.max(0,Math.round(usage.tokens/usage.window*100))):0
-	const label=t(known?'chat.contextUsage':'chat.contextUsageUnknown',{used:usage.tokens.toLocaleString(localeFor(instance.language)),limit:usage.window.toLocaleString(localeFor(instance.language))})
-	return <span className={`context-usage-ring ${percent>=90?'danger':percent>=70?'warn':''}`} role={known?'meter':'status'} aria-label={label} aria-valuemin={known?0:undefined} aria-valuemax={known?usage.window:undefined} aria-valuenow={known?usage.tokens:undefined} title={label}>
-		<svg viewBox="0 0 36 36" aria-hidden="true"><circle className="context-usage-track" cx="18" cy="18" r="15.5"/><circle className="context-usage-value" cx="18" cy="18" r="15.5" pathLength="100" strokeDasharray={`${percent} 100`}/></svg>
-	</span>
-}
-
-function startAssistantLifecycle(entries:ChatEntry[],messageID:string):ChatEntry[]{
-	if(!messageID)return entries
-	const existing=entries.find(item=>item.id===messageID)
-	if(existing)return entries.map(item=>item.id===messageID&&item.lifecycle!=='committed'?{...item,lifecycle:'streaming' as const}:deactivateReasoning(item))
-	return[...entries.map(deactivateReasoning),{id:messageID,kind:'assistant' as const,content:'',lifecycle:'streaming' as const}]
-}
-
-function appendAssistantDelta(entries:ChatEntry[],messageID:string,content:string):ChatEntry[]{
-	if(!messageID||!content)return entries
-	const existing=entries.find(item=>item.id===messageID)
-	if(existing?.lifecycle==='committed')return entries
-	if(existing)return entries.map(item=>item.id===messageID?{...item,content:'',streamText:appendStreamText(item.streamText||streamTextFrom(item.content),content),lifecycle:'streaming' as const}:deactivateReasoning(item))
-	return[...entries.map(deactivateReasoning),{id:messageID,kind:'assistant' as const,content:'',streamText:streamTextFrom(content),lifecycle:'streaming' as const}]
-}
-
-function commitAssistantLifecycle(entries:ChatEntry[],messageID:string,progress=false){
-	if(!messageID)return entries
-	return entries.flatMap(item=>{
-		if(item.id!==messageID)return[item]
-		const committed=materializeStreamText(item)
-		return committed.content.trim()?[{...committed,progress,lifecycle:'committed' as const}]:[]
-	})
-}
-
-function bindTurnUser(entries:ChatEntry[],userMessageID:string,clientUserEntryID:string){
-	if(!userMessageID||entries.some(item=>item.kind==='user'&&item.sourceMessageId===userMessageID))return entries
-	let index=clientUserEntryID?entries.findIndex(item=>item.kind==='user'&&item.id===clientUserEntryID&&(item.status==='pending'||item.status==='waiting_for_approval')):-1
-	if(index<0)for(let current=entries.length-1;current>=0;current--){if(entries[current].kind==='user'&&(entries[current].status==='pending'||entries[current].status==='waiting_for_approval')){index=current;break}}
-	return index<0?entries:entries.map((item,current)=>current===index?{...item,sourceMessageId:userMessageID}:item)
-}
-
-function updateTurnUserStatus(entries:ChatEntry[],status:'pending'|'waiting_for_approval'|'completed'|'failed',userMessageID:string|undefined,clientUserEntryID:string){
-	let index=userMessageID?entries.findIndex(item=>item.kind==='user'&&item.sourceMessageId===userMessageID):-1
-	if(index<0&&!userMessageID&&clientUserEntryID)index=entries.findIndex(item=>item.kind==='user'&&item.id===clientUserEntryID&&(item.status==='pending'||item.status==='waiting_for_approval'))
-	if(index<0&&!userMessageID)for(let current=entries.length-1;current>=0;current--){if(entries[current].kind==='user'&&(entries[current].status==='pending'||entries[current].status==='waiting_for_approval')){index=current;break}}
-	return index<0||entries[index].status===status?entries:entries.map((item,current)=>current===index?{...item,status}:item)
-}
-
-function resetAssistantLifecycle(entries:ChatEntry[],messageID:string){
-	if(!messageID)return entries
-	return entries.filter(item=>item.id!==messageID)
-}
-
-function toolContentWithStatus(content:string,status:string,runID?:string){
-	try{
-		const payload=JSON.parse(content)
-		if(payload&&typeof payload==='object'&&!Array.isArray(payload))return JSON.stringify({...payload,status,...(runID?{run_id:runID}:{})})
-	}catch{/* keep malformed tool output visible */}
-	return JSON.stringify({status,...(runID?{run_id:runID}:{}),value:content})
-}
-
-function toolContentRunID(content:string){
-	const payload=parseRecord(content),result=jsonRecord(payload.result),task=jsonRecord(payload.task)
-	return textValue(payload.run_id)||textValue(result?.run_id)||textValue(task?.run_id)
-}
-
-function toolContentStatus(content:string){
-	const payload=parseRecord(content)
-	return textValue(payload.status)||textValue(jsonRecord(payload.result)?.status)||textValue(jsonRecord(payload.task)?.status)
-}
-
-function settledToolStatus(status:string){return['completed','partial','failed','interrupted','rejected','denied','expired','unknown'].includes(status)}
-
-function toolEntryRunID(item:ChatEntry){
-	return item.kind==='tool'?item.runId||toolContentRunID(item.content):''
-}
-
-function updateToolStatusByRunID(entries:ChatEntry[],status:string,runID?:string){
-	if(!runID)return entries
-	return entries.map(item=>item.kind==='tool'&&item.transient&&toolEntryRunID(item)===runID?{...item,content:toolContentWithStatus(item.content,status,runID),runId:runID}:item)
-}
-
-
-function settledTurnEntries(messages:ChatMessage[],sessionID:string,current:ChatEntry[],active:boolean){
-	const persisted=historyEntries(messages,sessionID)
-	const persistedCalls=new Set(persisted.filter(item=>item.kind==='tool').map(item=>item.toolCallId).filter(Boolean))
-	const persistedMessageIDs=new Set(persisted.map(item=>item.sourceMessageId).filter(Boolean))
-	const older=current.filter(item=>item.persisted&&item.sourceMessageId&&!persistedMessageIDs.has(item.sourceMessageId))
-	let latestUser=-1
-	for(let index=messages.length-1;index>=0;index--){if(messages[index].role==='user'){latestUser=index;break}}
-	const latestTurnCompleted=latestUser>=0&&messages.slice(latestUser+1).some(item=>item.role==='assistant'&&item.status==='completed')
-	const keepErrors=active||!latestTurnCompleted
-	return[
-		...older,
-		...persisted,
-		...current.filter(item=>item.kind==='error'?keepErrors:item.kind==='tool'&&item.transient&&(!item.toolCallId||!persistedCalls.has(item.toolCallId))),
-	]
-}
-
-function prependHistoryEntries(messages:ChatMessage[],sessionID:string,current:ChatEntry[]){
-	const older=historyEntries(messages,sessionID)
-	const currentMessageIDs=new Set(current.map(item=>item.sourceMessageId).filter(Boolean))
-	return[...older.filter(item=>!item.sourceMessageId||!currentMessageIDs.has(item.sourceMessageId)),...current]
-}
-
-function mergePersistedToolEntries(messages:ChatMessage[],sessionID:string,current:ChatEntry[]){
-	const persisted=historyEntries(messages,sessionID).filter(item=>item.kind==='tool'&&item.toolCallId)
-	const byCallID=new Map(persisted.map(item=>[item.toolCallId!,item]))
-	const matched=new Set<string>()
-	let changed=false
-	const merged=current.map(item=>{
-		if(item.kind!=='tool'||!item.toolCallId)return item
-		const next=byCallID.get(item.toolCallId)
-		if(!next)return item
-		matched.add(item.toolCallId)
-		if(item.content===next.content&&item.runId===next.runId&&item.tool===next.tool&&item.transient===next.transient)return item
-		changed=true
-		return{...item,...next,startedAt:next.startedAt||item.startedAt,liveStdout:item.liveStdout,liveStderr:item.liveStderr,liveOutput:item.liveOutput,liveOutputStream:item.liveOutputStream,transferredBytes:item.transferredBytes,transferTotalBytes:item.transferTotalBytes}
-	})
-	const missing=persisted.filter(item=>!matched.has(item.toolCallId!))
-	return changed||missing.length?[...merged,...missing]:current
-}
-
-function updateToolRunStatus(entries:ChatEntry[],runID:string,status:string){
-	if(!runID)return entries
-	return entries.map(item=>{
-		if(item.kind!=='tool')return item
-		const itemRunID=toolEntryRunID(item),currentStatus=toolContentStatus(item.content)
-		if(itemRunID===runID&&status==='in_progress'&&!item.transient&&settledToolStatus(currentStatus))return item
-		return itemRunID===runID?{...item,runId:runID,content:toolContentWithStatus(item.content,status),transient:status==='in_progress'||status==='approval_required'}:item
-	})
-}
 
 function workspaceShellStartedByTool(content:string):SSHShell|null{
 	const payload=parseRecord(content)
@@ -259,212 +73,6 @@ function workspaceShellStartedByTool(content:string):SSHShell|null{
 function topbarShell(shell:SSHShell){
 	return shell.kind==='workspace'?shell.surface==='workspace_agent':shell.surface!=='workspace'
 }
-
-function appendToolOutput(entries:ChatEntry[],frame:AgentEvent){
-	const runID=frame.run_id||''
-	const callID=frame.tool_call_id||''
-	let index=callID?entries.findIndex(item=>item.kind==='tool'&&item.toolCallId===callID):-1
-	if(index<0&&runID){
-		index=entries.findIndex(item=>item.kind==='tool'&&toolEntryRunID(item)===runID)
-	}
-	if(index<0)return entries
-	const status=frame.status==='running'?'in_progress':frame.status||'in_progress'
-	return entries.map((item,itemIndex)=>{
-		if(itemIndex!==index)return item
-		const currentStatus=toolContentStatus(item.content)
-		if(!item.transient&&status==='in_progress'&&settledToolStatus(currentStatus))return item
-		const content=currentStatus===status&&(!runID||item.runId===runID)?item.content:toolContentWithStatus(item.content,status,runID)
-		const chunk=frame.content||''
-		const outputStream=frame.stream==='stdout'||frame.stream==='stderr'?frame.stream:undefined
-		const liveOutput=outputStream&&chunk?`${item.liveOutput||''}${chunk}`.slice(-16_384):item.liveOutput
-		return {
-			...item,
-			content,
-			tool:frame.tool_name||item.tool,
-			toolCallId:callID||item.toolCallId,
-			runId:runID||item.runId,
-			liveStdout:frame.stream==='stdout'?appendBoundedOutput(item.liveStdout,chunk):item.liveStdout,
-			liveStderr:frame.stream==='stderr'?appendBoundedOutput(item.liveStderr,chunk):item.liveStderr,
-			liveOutput,
-			liveOutputStream:outputStream&&chunk?outputStream:item.liveOutputStream,
-			transferredBytes:frame.stream==='progress'&&typeof frame.transferred_bytes==='number'?frame.transferred_bytes:item.transferredBytes,
-			transferTotalBytes:frame.stream==='progress'&&typeof frame.total_bytes==='number'?frame.total_bytes:item.transferTotalBytes,
-			transient:status==='in_progress'||status==='approval_required',
-		}
-	})
-}
-
-function appendBoundedOutput(current:string|undefined,chunk:string){
-	if(!chunk)return current||''
-	if(chunk.length>=liveToolOutputBufferChars)return chunk.slice(-liveToolOutputBufferChars)
-	const existing=current||''
-	const keep=Math.max(0,liveToolOutputBufferChars-chunk.length)
-	return existing.slice(-keep)+chunk
-}
-
-function appendReasoningDelta(entries:ChatEntry[],frame:AgentEvent){
-	if(!frame.content)return entries
-	const reasoningID=`reasoning_${frame.segment_id||'current'}`
-	const existing=entries.find(item=>item.id===reasoningID)
-	if(existing)return entries.map(item=>item.id===reasoningID?{
-		...item,content:'',streamText:appendStreamText(item.streamText||streamTextFrom(item.content),frame.content!),active:true,
-	}:item)
-	const entry:ChatEntry={id:reasoningID,kind:'reasoning',content:'',streamText:streamTextFrom(frame.content),active:true}
-	return[...entries.map(deactivateReasoning),entry]
-}
-
-function upsertToolEntry(entries:ChatEntry[],frame:AgentEvent){
-	if(!frame.content)return entries
-	const callID=frame.tool_call_id||''
-	const runID=frame.run_id||toolContentRunID(frame.content)
-	let index=callID?entries.findIndex(item=>item.kind==='tool'&&item.toolCallId===callID):-1
-	if(index<0&&runID)index=entries.findIndex(item=>item.kind==='tool'&&toolEntryRunID(item)===runID)
-	const transient=frame.status==='in_progress'||frame.status==='approval_required'
-	if(index>=0){
-		const current=entries[index]
-		if(transient&&!current.transient&&settledToolStatus(toolContentStatus(current.content)))return entries
-		return entries.map((item,itemIndex)=>itemIndex===index?{
-			...item,content:frame.content!,tool:frame.tool_name||item.tool,toolCallId:callID||item.toolCallId,runId:runID||item.runId,
-			liveStdout:transient?item.liveStdout:undefined,liveStderr:transient?item.liveStderr:undefined,transient,
-		}:item)
-	}
-	const entry:ChatEntry={
-		id:callID?`tool_${callID}`:clientId(),kind:'tool',content:frame.content,tool:frame.tool_name,toolCallId:callID||undefined,
-		runId:runID||undefined,transient,startedAt:Date.now(),
-	}
-	return[...entries.map(deactivateReasoning),entry]
-}
-
-type AgentEntryFrameOptions={
-	userEntryID:string
-	queuedImages:(count:number)=>string
-	stopped:string
-	agentError:string
-}
-
-const agentEntryFrameTypes=new Set([
-		'queue_started','turn_done','turn_steered','approval','approval_paused','approval_resuming','tool_output','token_usage','reasoning',
-		'reasoning_reset','tool','message_start','message','message_commit','message_reset','done','interrupted','model_error','error',
-	])
-
-function agentFrameAffectsEntries(frame:AgentEvent){
-	return!!frame.user_message_id||agentEntryFrameTypes.has(frame.type)
-}
-
-function reduceAgentEntryFrames(entries:ChatEntry[],frames:readonly AgentEvent[],options:AgentEntryFrameOptions){
-	let next=entries
-	for(const frame of frames){
-		if(frame.user_message_id)next=bindTurnUser(next,frame.user_message_id,options.userEntryID)
-		switch(frame.type){
-			case'queue_started':
-				if(frame.message_id){
-					const entry:ChatEntry={id:`queued_${frame.message_id}`,kind:'user',content:frame.content||(frame.attachment_count?options.queuedImages(frame.attachment_count):''),status:'pending'}
-					next=[...next.map(deactivateReasoning),entry]
-				}
-				break
-			case'turn_done':
-			case'turn_steered':
-				next=updateTurnUserStatus(next.map(deactivateReasoning),'completed',frame.user_message_id,options.userEntryID)
-				break
-			case'approval':
-			case'approval_paused':
-				next=updateToolStatusByRunID(updateTurnUserStatus(next,'waiting_for_approval',frame.user_message_id,options.userEntryID),'approval_required',frame.run_id)
-				break
-			case'approval_resuming':
-				next=updateToolStatusByRunID(updateTurnUserStatus(next,'pending',frame.user_message_id,options.userEntryID),'in_progress',frame.run_id)
-				break
-			case'tool_output':
-				next=appendToolOutput(next,frame)
-				break
-			case'token_usage':
-				if(frame.message_id&&frame.total_tokens){
-					const usage:ChatTokenUsage={input_tokens:frame.input_tokens||0,output_tokens:frame.output_tokens||0,total_tokens:frame.total_tokens}
-					next=next.map(item=>item.id===frame.message_id?{...item,tokenUsage:usage}:item)
-				}
-				break
-			case'reasoning':
-				next=appendReasoningDelta(next,frame)
-				break
-			case'reasoning_reset':
-				if(frame.segment_id){const reasoningID=`reasoning_${frame.segment_id}`;next=next.filter(item=>item.id!==reasoningID)}
-				break
-			case'tool':
-				next=upsertToolEntry(next,frame)
-				break
-			case'message_start':
-				if(frame.message_id)next=startAssistantLifecycle(next,frame.message_id)
-				break
-			case'message':
-				if(frame.message_id&&frame.content)next=appendAssistantDelta(next,frame.message_id,frame.content)
-				break
-			case'message_commit':
-				if(frame.message_id)next=commitAssistantLifecycle(next,frame.message_id,frame.status==='progress')
-				break
-			case'message_reset':
-				if(frame.message_id)next=resetAssistantLifecycle(next,frame.message_id)
-				break
-			case'done':
-				next=updateTurnUserStatus(next,'completed',frame.user_message_id,options.userEntryID)
-				break
-			case'interrupted':
-				next=[...updateTurnUserStatus(next.map(deactivateReasoning),'failed',frame.user_message_id,options.userEntryID),{id:clientId(),kind:'assistant',content:frame.content||options.stopped,lifecycle:'committed'}]
-				break
-			case'model_error':
-			case'error':
-				next=[...updateTurnUserStatus(next,'failed',frame.user_message_id,options.userEntryID),{id:clientId(),kind:'error',content:frame.error||options.agentError}]
-				break
-		}
-	}
-	return next
-}
-
-function tasksFromToolContent(content:string):AgentTaskList|undefined{
-  try{const value=JSON.parse(content) as {tasks?:AgentTaskList};return value.tasks&&Array.isArray(value.tasks.items)?value.tasks:undefined}catch{return undefined}
-}
-
-function taskToolOperation(entry:ChatEntry):TaskToolEntryGroup['tool']|''{
-	return entry.kind==='tool'&&(entry.tool==='TaskCreate'||entry.tool==='TaskUpdate')?entry.tool:''
-}
-
-function groupedTaskToolEntries(entries:ChatEntry[]):ChatRenderItem[]{
-	let turn=0
-	const groups=new Map<string,ChatEntry[]>()
-	for(const entry of entries){
-		if(entry.kind==='user')turn++
-		const tool=taskToolOperation(entry)
-		if(!tool)continue
-		const key=`${turn}:${tool}`
-		groups.set(key,[...(groups.get(key)||[]),entry])
-	}
-	const hidden=new Set<string>()
-	const groupedAt=new Map<string,TaskToolEntryGroup>()
-	for(const items of groups.values()){
-		if(items.length<2)continue
-		for(const entry of items.slice(0,-1))hidden.add(entry.id)
-		const last=items.at(-1)!
-		groupedAt.set(last.id,{kind:'task_tool_group',id:`task_group_${items[0].id}`,tool:taskToolOperation(last) as TaskToolEntryGroup['tool'],entries:items})
-	}
-	const result:ChatRenderItem[]=[]
-	for(const entry of entries){
-		if(hidden.has(entry.id))continue
-		const group=groupedAt.get(entry.id)
-		result.push(group||{kind:'entry',entry})
-	}
-	return result
-}
-
-let clientIdCounter = 0
-function clientId() {
-  try {
-    if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID()
-    const random = new Uint32Array(2)
-    globalThis.crypto?.getRandomValues(random)
-    if (random[0] || random[1]) return `client_${random[0].toString(36)}${random[1].toString(36)}`
-  } catch { /* insecure or legacy browser: rendering keys do not require cryptographic randomness */ }
-  clientIdCounter += 1
-  return `client_${Date.now().toString(36)}_${clientIdCounter.toString(36)}_${Math.random().toString(36).slice(2)}`
-}
-
 
 function keepEquivalent<T>(current:T,next:T){return JSON.stringify(current)===JSON.stringify(next)?current:next}
 function applyLifecycleDelta<T extends{id:string}>(current:T[],value:T,removed=false){
@@ -482,7 +90,6 @@ function keepEquivalentHealth(current:Health|null,next:Health){
 }
 
 const newSessionMarker = '__new__'
-const defaultChatImageTypes=['image/png','image/jpeg','image/webp','image/gif']
 const desktopWindow=desktopRuntime?getCurrentWindow():null
 function rememberSession(id: string) { try { localStorage.setItem('opsnerva.activeSession', id) } catch { /* storage may be disabled */ } }
 function recalledSession() { try { return localStorage.getItem('opsnerva.activeSession') || '' } catch { return '' } }
@@ -688,10 +295,6 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 		document.addEventListener('contextmenu',handleContextMenu)
 		return()=>document.removeEventListener('contextmenu',handleContextMenu)
 	},[])
-	useEffect(()=>{
-		if(!desktopRuntime||!settings)return
-		void invoke('set_tray_mode',{enabled:settings.mcp_http_enabled}).catch(()=>{})
-	},[settings?.mcp_http_enabled])
 	useLayoutEffect(()=>applyColorTheme(colorTheme),[colorTheme])
 	useEffect(()=>rememberThemePreference(themePreference),[themePreference])
 	useEffect(()=>{
@@ -886,10 +489,12 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 				hosts={hosts} shells={sshShells.filter(shell=>shell.kind!=='workspace'&&shell.surface==='workspace')}
 				onCreated={rememberSSHShell} refresh={refreshConnections} onError={reportError}
 			/>}
+		<Suspense fallback={<div className="panel" role="status">{t('common.loading')}</div>}>
 		{page === 'config' && <ConfigurationPage hosts={hosts} providers={providers} proxies={proxies} settings={settings} capabilities={capabilities} health={health} refreshModels={refreshModels} refreshHosts={refreshHosts} refreshProxies={refreshProxies} refreshCapabilities={refreshCapabilities} refreshHealth={refreshHealth} onSettingsChanged={setSettings} onOpenMCPActivity={()=>{setAuditView('mcp');navigate('audit')}}/>}
 		{page === 'extensions' && <ExtensionsPage skills={skills} mcpServers={mcpServers} toolCatalog={toolCatalog} refreshSkills={refreshSkills} refreshMCPServers={refreshMCPServers} refreshToolCatalog={refreshToolCatalog} onToolCatalogChanged={setToolCatalog}/>}
 		{page === 'audit' && <AuditPage view={auditView} onViewChange={setAuditView} mcpRefreshKey={mcpActivityRefresh} runs={audit.runs} hosts={hosts} sessions={audit.sessions} ready={audit.ready} error={audit.error} runsHasMore={audit.runsHasMore} loadingMore={audit.loadingMore} onLoadMoreRuns={audit.loadMore} onDeleteRuns={audit.deleteRuns}/>}
         {page === 'logs' && <LogsPage/>}
+		</Suspense>
       </section>
 	      {selectedShell&&<SSHShellTerminal
 			key={selectedShell.id}
@@ -927,130 +532,6 @@ function ThemeSwitch({preference,onChange}:{preference:ThemePreference;onChange:
 }
 
 
-function ApprovalModeStatus({settings,onChanged,onError}:{settings:SystemSettings|null;onChanged:(settings:SystemSettings)=>void;onError:(message:string)=>void}){
-	const {t}=useTranslation()
-	const mode=settings?.approval_mode??'manual'
-	const [open,setOpen]=useState(false)
-	const [busy,setBusy]=useState(false)
-	const [confirmFullAccess,setConfirmFullAccess]=useState(false)
-	const detailsRef=useAutoCollapseDetails(open,()=>setOpen(false))
-	const apply=async(next:ApprovalMode)=>{
-		if(!settings||next===mode){setOpen(false);return}
-		setBusy(true)
-		try{
-			const result=await api.saveSystemSettings({agent_max_iterations:settings.agent_max_iterations,approval_mode:next})
-			onChanged(result)
-			setOpen(false)
-		}catch(err){onError(errorText(err))}
-		finally{setBusy(false)}
-	}
-	const select=(next:ApprovalMode)=>{
-		if(next==='full_access'&&mode!=='full_access'){setOpen(false);setConfirmFullAccess(true);return}
-		void apply(next)
-	}
-	return <>
-		<details ref={detailsRef} className={`approval-mode-status ${mode}`} open={open} onToggle={event=>setOpen(event.currentTarget.open)}>
-			<summary title={t('settings.approvalMode')} onClick={event=>{if(busy)event.preventDefault()}}>{busy?<LoaderCircle className="spin" size={13}/>:<ShieldCheck size={13}/>}<span>{t(`settings.approvalMode_${mode}`)}</span><ChevronRight size={12}/></summary>
-			<div className="approval-mode-menu">
-				{(['manual','auto','full_access'] as ApprovalMode[]).map(value=><button type="button" className={value===mode?'active':''} disabled={busy||!settings} onClick={()=>select(value)} key={value}><span>{t(`settings.approvalMode_${value}`)}</span>{value===mode&&<Check size={13}/>}</button>)}
-			</div>
-		</details>
-		{confirmFullAccess&&<FullAccessConfirmDialog onCancel={()=>setConfirmFullAccess(false)} onConfirm={()=>{setConfirmFullAccess(false);void apply('full_access')}}/>}
-	</>
-}
-
-function hostInputWithAgentState(host:Host,enabled:boolean):HostInput{
-	return {
-		id:host.id,name:host.name,address:host.address,port:host.port,user:host.user,agent_enabled:enabled,
-		auth_type:host.auth_type,private_key:'',known_hosts_file:host.known_hosts_file||'',proxy_jump_host_id:host.proxy_jump_host_id||'',proxy_id:host.proxy_id||'',
-		password:'',sudo_mode:host.sudo_mode,sudo_password:'',
-	}
-}
-
-function hostSupportsRoot(host:Host){return host.user.trim().toLowerCase()==='root'||host.sudo_mode==='nopasswd'||host.sudo_mode==='password'&&host.has_sudo_password}
-function ComposerHostSelector({hosts,disabled,rootDisabled,onChanged,onError}:{hosts:Host[];disabled:boolean;rootDisabled:boolean;onChanged:(host:Host)=>void;onError:(message:string)=>void}){
-	const {t}=useTranslation()
-	const [open,setOpen]=useState(false)
-	const [busy,setBusy]=useState('')
-	const [rootBusy,setRootBusy]=useState('')
-	const detailsRef=useAutoCollapseDetails(open,()=>setOpen(false))
-	const activeHosts=hosts.filter(host=>host.agent_enabled)
-	const names=activeHosts.map(host=>host.name).join(', ')
-	const label=activeHosts.length?t('chat.hostsCount',{count:activeHosts.length,names}):t('chat.noHosts')
-	const toggle=async(host:Host)=>{
-		if(disabled||busy)return
-		setBusy(host.id)
-		try{onChanged(await api.saveHost(hostInputWithAgentState(host,!host.agent_enabled)))}
-		catch(err){onError(errorText(err))}
-		finally{setBusy('')}
-	}
-	const toggleRoot=async(host:Host)=>{
-		if(rootDisabled||rootBusy||!hostSupportsRoot(host))return
-		setRootBusy(host.id)
-		try{onChanged(await api.setHostAgentRootAccess(host.id,!host.agent_root_enabled))}catch(err){onError(errorText(err))}
-		finally{setRootBusy('')}
-	}
-	return <details ref={detailsRef} className="composer-selector composer-hosts" open={open} onToggle={event=>setOpen(event.currentTarget.open)}>
-		<summary title={t('chat.switchHosts')} aria-label={t('chat.switchHosts')}><Server size={13}/><span>{label}</span>{activeHosts.some(host=>host.agent_root_enabled)&&<ShieldAlert size={12}/>}<ChevronRight size={11}/></summary>
-		<div className="composer-selector-menu composer-host-menu">
-			{hosts.map(host=>{const rootAvailable=hostSupportsRoot(host),rootLabel=rootAvailable?`${t('chat.rootAccess')} · ${t(host.agent_root_enabled?'common.enabled':'common.disabled')}`:`${t('chat.rootAccess')} · ${t('common.unavailable')}`;return <div className="composer-host-option" key={host.id}><button type="button" className={host.agent_enabled?'active':''} disabled={disabled||!!busy} onClick={()=>void toggle(host)}><span><Server size={13}/><b>{host.name}</b></span>{busy===host.id?<LoaderCircle className="spin" size={13}/>:<em>{t(host.agent_enabled?'common.disable':'common.enable')}</em>}</button><button type="button" className={`composer-host-root ${host.agent_root_enabled?'active':''}`} disabled={rootDisabled||!rootAvailable||!!rootBusy&&rootBusy!==host.id} onClick={()=>void toggleRoot(host)} title={rootLabel} aria-label={`${host.name} · ${rootLabel}`}>{rootBusy===host.id?<LoaderCircle className="spin" size={13}/>:<ShieldAlert size={13}/>}</button></div>})}
-			{!hosts.length&&<span className="composer-selector-empty">{t('chat.noHosts')}</span>}
-		</div>
-	</details>
-}
-
-function ComposerModelSelector({providers,fallbackModel,disabled,onChanged,onError}:{providers:ModelProvider[];fallbackModel?:string;disabled:boolean;onChanged:(provider:ModelProvider)=>void;onError:(message:string)=>void}){
-	const {t}=useTranslation()
-	const [open,setOpen]=useState(false)
-	const [busy,setBusy]=useState('')
-	const detailsRef=useAutoCollapseDetails(open,()=>setOpen(false))
-	const active=providers.find(provider=>provider.active)
-	const label=active?.model||fallbackModel||t('chat.noModel')
-	const activate=async(provider:ModelProvider)=>{
-		if(disabled||busy||provider.active){setOpen(false);return}
-		setBusy(provider.id)
-		try{const selected=await api.activateModelProvider(provider.id);onChanged(selected);setOpen(false)}
-		catch(err){onError(errorText(err))}
-		finally{setBusy('')}
-	}
-	return <details ref={detailsRef} className="composer-selector composer-model" open={open} onToggle={event=>setOpen(event.currentTarget.open)}>
-		<summary title={t('chat.switchModel')} aria-label={t('chat.switchModel')}><Cpu size={13}/><span>{label}</span><ChevronRight size={11}/></summary>
-		<div className="composer-selector-menu composer-model-menu">
-			{providers.map(provider=><button type="button" className={provider.active?'active':''} disabled={disabled||!!busy} onClick={()=>void activate(provider)} key={provider.id}><span><b>{provider.name}</b><small>{provider.model}</small></span>{busy===provider.id?<LoaderCircle className="spin" size={13}/>:provider.active?<Check size={13}/>:null}</button>)}
-			{!providers.length&&<span className="composer-selector-empty">{t('chat.noModel')}</span>}
-		</div>
-	</details>
-}
-
-const reasoningEfforts:ModelReasoningEffort[]=['low','medium','high','xhigh','max']
-
-function ComposerReasoningSelector({providers,disabled,onChanged,onError}:{providers:ModelProvider[];disabled:boolean;onChanged:(provider:ModelProvider)=>void;onError:(message:string)=>void}){
-	const {t}=useTranslation()
-	const [open,setOpen]=useState(false)
-	const [busy,setBusy]=useState(false)
-	const detailsRef=useAutoCollapseDetails(open,()=>setOpen(false))
-	const active=providers.find(provider=>provider.active)
-	const current=active?.reasoning_effort||''
-	const apply=async(reasoningEffort:ModelReasoningEffort)=>{
-		if(!active||disabled||busy||reasoningEffort===current){setOpen(false);return}
-		setBusy(true)
-		try{
-			const updated=await api.saveModelProvider({
-				id:active.id,name:active.name,kind:active.kind,base_url:active.base_url||'',model:active.model,context_window:active.context_window||null,
-				reasoning_effort:reasoningEffort,api_key:'',proxy_id:active.proxy_id||'',user_agent:active.user_agent||'',
-			})
-			onChanged(updated)
-			setOpen(false)
-		}catch(err){onError(errorText(err))}
-		finally{setBusy(false)}
-	}
-	return <details ref={detailsRef} className="composer-selector composer-reasoning" open={open} onToggle={event=>setOpen(event.currentTarget.open)}>
-		<summary title={t('models.reasoningEffort')} aria-label={t('models.reasoningEffort')}>{busy?<LoaderCircle className="spin" size={13}/>:<BrainCircuit size={13}/>}<span>{current||'—'}</span><ChevronRight size={11}/></summary>
-		<div className="composer-selector-menu composer-reasoning-menu">
-			{reasoningEfforts.map(value=><button type="button" className={value===current?'active':''} disabled={!active||disabled||busy} onClick={()=>void apply(value)} key={value}><span><b>{value}</b></span>{value===current&&<Check size={13}/>}</button>)}
-		</div>
-	</details>
-}
 
 function applyChatSessionDelta(current:ChatSession[],delta:ChatSessionDelta){
 	const removed=new Set(delta.removed_ids||[])
@@ -1072,496 +553,6 @@ function SessionRenameDialog({session,busy,error,onCancel,onConfirm}:{session:Ch
 
 
 
-function FullAccessConfirmDialog({onCancel,onConfirm}:{onCancel:()=>void;onConfirm:()=>void}){
-	const {t}=useTranslation()
-	return createPortal(<div className="destructive-dialog-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget)onCancel()}}><section className="destructive-dialog panel" role="dialog" aria-modal="true" aria-labelledby="full-access-dialog-title"><header><ShieldAlert size={21}/><h2 id="full-access-dialog-title">{t('settings.fullAccessTitle')}</h2></header><footer><button type="button" autoFocus onClick={onCancel}>{t('common.cancel')}</button><button type="button" className="danger" onClick={onConfirm}><ShieldAlert size={14}/>{t('common.enable')}</button></footer></section></div>,document.body)
-}
-
-type ConfigurationSection = 'models' | 'hosts' | 'proxies' | 'system'
-
-function ConfigurationEditorPage({icon,title,busy,onBack,children}:{icon:React.ReactNode;title:string;busy?:boolean;onBack:()=>void;children:React.ReactNode}){
-	const {t}=useTranslation()
-	return <div className="configuration-editor-page">
-		<button type="button" className="configuration-editor-back" disabled={busy} onClick={onBack}><ChevronLeft size={16}/>{t('config.backToList')}</button>
-		<header className="configuration-editor-header panel"><div>{icon}</div><span><small>{t('config.editor')}</small><h2>{title}</h2></span></header>
-		{children}
-	</div>
-}
-
-function ConfigurationPage({hosts,providers,proxies,settings,capabilities,health,refreshModels,refreshHosts,refreshProxies,refreshCapabilities,refreshHealth,onSettingsChanged,onOpenMCPActivity}:{hosts:Host[];providers:ModelProvider[];proxies:Proxy[];settings:SystemSettings|null;capabilities:ToolCapabilities;health:Health|null;refreshModels:()=>Promise<void>;refreshHosts:()=>Promise<void>;refreshProxies:()=>Promise<void>;refreshCapabilities:()=>Promise<void>;refreshHealth:()=>Promise<void>;onSettingsChanged:(settings:SystemSettings)=>void;onOpenMCPActivity:()=>void}) {
-  const {t}=useTranslation()
-  const [section,setSection]=useState<ConfigurationSection>('models')
-  const [showAddresses,setShowAddresses]=useState(false)
-  const tabs:[ConfigurationSection,React.ReactNode,string,string][]=[
-    ['models',<Cpu size={17}/>, t('config.tabs.models'), t('config.configured',{count:providers.length})],
-    ['hosts',<Server size={17}/>, t('config.tabs.hosts'), t('config.registered',{count:hosts.length})],
-    ['proxies',<Cable size={17}/>, t('config.tabs.proxies'), t('config.configured',{count:proxies.length})],
-    ['system',<SlidersHorizontal size={17}/>, t('config.tabs.system'), t('config.maxIterations',{count:settings?.agent_max_iterations??50})],
-	  ]
-	  return <div className="configuration-center page-stack">
-	    <div className="section-tabs-row"><div className="configuration-tabs" role="tablist" aria-label={t('config.sections')}>{tabs.map(([id,icon,label,meta])=><button type="button" role="tab" aria-selected={section===id} className={section===id?'active':''} onClick={()=>setSection(id)} key={id}>{icon}<span><b>{label}</b><small>{meta}</small></span><ChevronRight size={15}/></button>)}</div></div>
-    <div className="configuration-content" role="tabpanel">
-	  {section==='models'&&(
-		<ModelsPage providers={providers} proxies={proxies} showAddresses={showAddresses} onToggleAddresses={()=>setShowAddresses(value=>!value)} refresh={refreshModels}/>
-	  )}
-	  {section==='hosts'&&(
-		<HostsPage hosts={hosts} proxies={proxies} showAddresses={showAddresses} onToggleAddresses={()=>setShowAddresses(value=>!value)} refresh={refreshHosts}/>
-	  )}
-	  {section==='proxies'&&(
-		<ProxiesPage proxies={proxies} showAddresses={showAddresses} onToggleAddresses={()=>setShowAddresses(value=>!value)} refresh={refreshProxies}/>
-	  )}
-	  {section==='system'&&<SystemSettingsPage settings={settings} providers={providers} proxies={proxies} capabilities={capabilities} modelStatus={health?.model} refreshModels={refreshModels} refreshHosts={refreshHosts} refreshProxies={refreshProxies} refreshCapabilities={refreshCapabilities} refreshHealth={refreshHealth} onSettingsChanged={onSettingsChanged} onOpenMCPActivity={onOpenMCPActivity}/>}
-    </div>
-  </div>
-}
-
-function AddressVisibilityButton({visible,onToggle}:{visible:boolean;onToggle:()=>void}){
-	const {t}=useTranslation()
-	const label=t(visible?'config.hideAddresses':'config.showAddresses')
-	return <button type="button" className={`icon-button configuration-address-toggle ${visible?'active':''}`} aria-label={label} title={label} onClick={onToggle}>{visible?<EyeOff size={17}/>:<Eye size={17}/>}</button>
-}
-
-function FloatingPageActions({children}:{children:React.ReactNode}){
-	return createPortal(<div className="floating-page-actions">{children}</div>,document.body)
-}
-
-type ExtensionSection = 'skills' | 'mcp' | 'tools'
-
-function ExtensionsPage({skills,mcpServers,toolCatalog,refreshSkills,refreshMCPServers,refreshToolCatalog,onToolCatalogChanged}:{skills:ManagedSkill[];mcpServers:MCPServer[];toolCatalog:LLMToolCatalog|null;refreshSkills:()=>Promise<void>;refreshMCPServers:()=>Promise<void>;refreshToolCatalog:()=>Promise<void>;onToolCatalogChanged:(catalog:LLMToolCatalog)=>void}){
-	const {t}=useTranslation()
-		const [section,setSection]=useState<ExtensionSection>('skills')
-		const enabledSkills=skills.filter(skill=>skill.enabled).length
-		const readyMCP=mcpServers.filter(server=>server.status==='ready').length
-		const tabs:[ExtensionSection,React.ReactNode,string,string][]=[
-		['skills',<BookOpen size={17}/>, t('extensions.tabs.skills'), t('extensions.enabledRatio',{enabled:enabledSkills,total:skills.length})],
-		['mcp',<Zap size={17}/>, t('extensions.tabs.mcp'), t('extensions.readyRatio',{ready:readyMCP,total:mcpServers.length})],
-		['tools',<FunctionSquare size={17}/>, t('extensions.tabs.tools'), t('extensions.loaded',{count:toolCatalog?.count??0})],
-		]
-		return <div className="extensions-center page-stack">
-			<div className="section-tabs-row"><div className="extension-tabs configuration-tabs" role="tablist" aria-label={t('extensions.sections')}>{tabs.map(([id,icon,label,meta])=><button type="button" role="tab" aria-selected={section===id} className={section===id?'active':''} onClick={()=>setSection(id)} key={id}>{icon}<span><b>{label}</b><small>{meta}</small></span><ChevronRight size={15}/></button>)}</div></div>
-		<div className="configuration-content" role="tabpanel">
-			{section==='skills'&&<SkillsPage skills={skills} refreshSkills={refreshSkills} refreshToolCatalog={refreshToolCatalog} onToolCatalogChanged={onToolCatalogChanged}/>}
-			{section==='mcp'&&<MCPServersPage servers={mcpServers} refreshServers={refreshMCPServers} refreshToolCatalog={refreshToolCatalog}/>}
-			{section==='tools'&&<LLMToolsPage catalog={toolCatalog} refresh={refreshToolCatalog} onCatalogChanged={onToolCatalogChanged}/>}
-		</div>
-	</div>
-}
-
-type MCPFormState = {
-	id:string;name:string;transport:MCPTransport;command:string;argsText:string;cwd:string;url:string;envText:string;headersText:string;enabled:boolean;clearEnv:boolean;clearHeaders:boolean
-}
-
-const mcpImportExample=JSON.stringify({mcpServers:{'cloudflare-api':{url:'https://mcp.cloudflare.com/mcp'}}},null,2)
-
-function mcpStringMap(value:unknown,serverName:string,field:string){
-	if(value===undefined)return undefined
-	if(!value||typeof value!=='object'||Array.isArray(value))throw new Error(i18n.t('mcp.invalidField',{name:serverName,field}))
-	const result:Record<string,string>={}
-	for(const [name,content] of Object.entries(value)){
-		if(typeof content!=='string')throw new Error(i18n.t('mcp.invalidField',{name:serverName,field}))
-		result[name]=content
-	}
-	return result
-}
-
-function parseMCPImport(value:string):MCPServerInput[]{
-	let parsed:unknown
-	try{parsed=JSON.parse(value)}catch{throw new Error(i18n.t('mcp.invalidConfig'))}
-	if(!parsed||typeof parsed!=='object'||Array.isArray(parsed))throw new Error(i18n.t('mcp.invalidConfig'))
-	const root=(parsed as Record<string,unknown>).mcpServers
-	if(!root||typeof root!=='object'||Array.isArray(root)||!Object.keys(root).length)throw new Error(i18n.t('mcp.invalidConfig'))
-	return Object.entries(root).map(([rawName,value])=>{
-		const name=rawName.trim()
-		if(!name||!value||typeof value!=='object'||Array.isArray(value))throw new Error(i18n.t('mcp.invalidEntry',{name:rawName||'?'}))
-		const entry=value as Record<string,unknown>
-		const url=typeof entry.url==='string'?entry.url.trim():''
-		const command=typeof entry.command==='string'?entry.command.trim():''
-		if((url?1:0)+(command?1:0)!==1)throw new Error(i18n.t('mcp.invalidEntry',{name}))
-		if(entry.args!==undefined&&(!Array.isArray(entry.args)||entry.args.some(item=>typeof item!=='string')))throw new Error(i18n.t('mcp.invalidField',{name,field:'args'}))
-		if(entry.cwd!==undefined&&typeof entry.cwd!=='string')throw new Error(i18n.t('mcp.invalidField',{name,field:'cwd'}))
-		if(entry.disabled!==undefined&&typeof entry.disabled!=='boolean')throw new Error(i18n.t('mcp.invalidField',{name,field:'disabled'}))
-		if(entry.enabled!==undefined&&typeof entry.enabled!=='boolean')throw new Error(i18n.t('mcp.invalidField',{name,field:'enabled'}))
-		return {
-			name,
-			transport:url?'streamable_http':'stdio',
-			command,
-			args:Array.isArray(entry.args)?entry.args as string[]:[],
-			cwd:typeof entry.cwd==='string'?entry.cwd.trim():'',
-			url,
-			env:mcpStringMap(entry.env,name,'env'),
-			headers:mcpStringMap(entry.headers,name,'headers'),
-			enabled:typeof entry.disabled==='boolean'?!entry.disabled:typeof entry.enabled==='boolean'?entry.enabled:true,
-		}
-	})
-}
-
-function parseMCPPairs(value:string,kind:'env'|'header'){
-	const result:Record<string,string>={}
-	for(const raw of value.split(/\r?\n/)){
-		const line=raw.trim();if(!line)continue
-		const separator=kind==='env'?line.indexOf('='):line.indexOf(':')
-		if(separator<1)throw new Error(i18n.t(kind==='env'?'mcp.invalidEnv':'mcp.invalidHeader',{line}))
-		const name=line.slice(0,separator).trim(),content=line.slice(separator+1).trim()
-		if(!name)throw new Error(i18n.t('mcp.invalidName',{kind}))
-		result[name]=content
-	}
-	return result
-}
-
-function MCPServersPage({servers,refreshServers,refreshToolCatalog}:{servers:MCPServer[];refreshServers:()=>Promise<void>;refreshToolCatalog:()=>Promise<void>}){
-	const {t,i18n:instance}=useTranslation()
-	const notify=useNotifier()
-	const [form,setForm]=useState<MCPFormState|null>(null)
-	const [importConfig,setImportConfig]=useState<string|null>(null)
-	const [busy,setBusy]=useState('')
-	const [error,setError]=useState('')
-	const [deleteCandidate,setDeleteCandidate]=useState<MCPServer|null>(null)
-	const [authorizing,setAuthorizing]=useState('')
-	const refresh=async()=>{await Promise.all([refreshServers(),refreshToolCatalog()])}
-	const openCreate=()=>{setForm(null);setImportConfig('');setError('')}
-	const closeCreate=()=>{if(busy==='import')return;setImportConfig(null);setError('')}
-	const openEdit=(server:MCPServer)=>{setImportConfig(null);setForm({id:server.id,name:server.name,transport:server.transport,command:server.command||'',argsText:(server.args||[]).join('\n'),cwd:server.cwd||'',url:server.url||'',envText:'',headersText:'',enabled:server.enabled,clearEnv:false,clearHeaders:false});setError('')}
-	const importServers=async(event:FormEvent)=>{event.preventDefault();if(importConfig===null)return;setBusy('import');setError('');let imported=0;try{
-		const inputs=parseMCPImport(importConfig)
-		const existingNames=new Set(servers.map(server=>server.name))
-		const duplicate=inputs.find(input=>existingNames.has(input.name))
-		if(duplicate)throw new Error(t('mcp.nameExists',{name:duplicate.name}))
-		for(const input of inputs){await api.saveMCPServer(input);imported++}
-		setImportConfig(null);notify(t('mcp.imported',{count:imported}));await refresh()
-	}catch(err){if(imported)await refresh();setError(imported?t('mcp.importPartial',{count:imported,message:errorText(err)}):errorText(err))}finally{setBusy('')}}
-	const save=async(event:FormEvent)=>{event.preventDefault();if(!form)return;const requiredField=!form.name.trim()?t('mcp.displayName'):form.transport==='stdio'&&!form.command.trim()?t('mcp.command'):form.transport==='streamable_http'&&!form.url.trim()?t('mcp.endpoint'):'';if(requiredField){setError(`${requiredField}: ${t('common.required')}`);return}setBusy('save');setError('');try{
-		const input:MCPServerInput={id:form.id,name:form.name.trim(),transport:form.transport,command:form.transport==='stdio'?form.command.trim():'',args:form.transport==='stdio'?form.argsText.split(/\r?\n/).map(item=>item.trim()).filter(Boolean):[],cwd:form.transport==='stdio'?form.cwd.trim():'',url:form.transport==='streamable_http'?form.url.trim():'',enabled:form.enabled}
-		if(form.envText.trim()||form.clearEnv)input.env=form.clearEnv?{}:parseMCPPairs(form.envText,'env')
-		if(form.headersText.trim()||form.clearHeaders)input.headers=form.clearHeaders?{}:parseMCPPairs(form.headersText,'header')
-			const saved=await api.saveMCPServer(input);setForm(null);notify(`${t('mcp.saved',{name:saved.name,status:t(`statusLabels.${saved.status}`,{defaultValue:saved.status})})}${saved.last_error?` · ${saved.last_error}`:''}`);await refresh()
-	}catch(err){setError(errorText(err))}finally{setBusy('')}}
-	const test=async(server:MCPServer)=>{setBusy(`test-${server.id}`);setError('');try{const result=await api.testMCPServer(server.id);notify(t('mcp.healthy',{count:result.tool_count,latency:result.latency_ms}))}catch(err){setError(errorText(err))}finally{setBusy('')}}
-	const toggle=async(server:MCPServer)=>{setBusy(`toggle-${server.id}`);setError('');try{const result=await api.setMCPServerEnabled(server.id,!server.enabled);notify(`${t('mcp.toggled',{name:result.name,state:result.enabled?t('common.enabled'):t('common.disabled'),status:t(`statusLabels.${result.status}`,{defaultValue:result.status})})}${result.last_error?` · ${result.last_error}`:''}`);await refresh()}catch(err){setError(errorText(err))}finally{setBusy('')}}
-	const retry=async(server:MCPServer)=>{setBusy(`retry-${server.id}`);setError('');try{const result=await api.retryMCPServer(server.id);notify(t('mcp.reconnected',{name:result.name,count:result.tool_count}));await refresh()}catch(err){setError(errorText(err));await refresh()}finally{setBusy('')}}
-	const authorize=async(server:MCPServer)=>{
-		let popup:Window|null=null
-		if(!desktopRuntime){popup=window.open('about:blank','_blank');if(popup)popup.opener=null}
-		setBusy(`oauth-start-${server.id}`);setError('')
-		try{
-			const result=await api.startMCPOAuth(server.id)
-			if(desktopRuntime)await invoke('open_external_url',{url:result.authorization_url})
-			else if(popup)popup.location.href=result.authorization_url
-			else throw new Error(t('mcp.popupBlocked'))
-			setAuthorizing(server.id);setBusy('')
-			for(let attempt=0;attempt<400;attempt++){
-				await new Promise(resolve=>window.setTimeout(resolve,1500))
-				const current=(await api.mcpServers()).find(item=>item.id===server.id)
-				if(current?.status==='ready'&&current.oauth_configured){notify(t('mcp.authorized',{name:server.name}));await refresh();return}
-				if(current?.status==='error'){setError(current.last_error||t('mcp.authorizationFailed'));await refresh();return}
-			}
-			setError(t('mcp.authorizationExpired'))
-		}catch(err){popup?.close();setError(errorText(err))}finally{setBusy('');setAuthorizing('')}
-	}
-	const clearOAuth=async(server:MCPServer)=>{setBusy(`oauth-clear-${server.id}`);setError('');try{await api.clearMCPOAuth(server.id);notify(t('mcp.authorizationCleared',{name:server.name}));await refresh()}catch(err){setError(errorText(err))}finally{setBusy('')}}
-	const remove=async()=>{if(!deleteCandidate)return;const server=deleteCandidate;setBusy(`delete-${server.id}`);setError('');try{await api.deleteMCPServer(server.id);notify(t('mcp.deleted',{name:server.name}));await refresh()}catch(err){setError(errorText(err))}finally{setBusy('');setDeleteCandidate(null)}}
-		return <div className="mcp-page page-stack has-floating-actions">
-			{importConfig===null&&!form&&<FloatingPageActions><button className="primary" onClick={openCreate}><Plus size={15}/>{t('mcp.add')}</button></FloatingPageActions>}
-		{error&&importConfig===null&&<div className="skill-error"><ShieldAlert size={15}/>{error}<button onClick={()=>setError('')}><X size={14}/></button></div>}
-		{importConfig!==null&&createPortal(<div className="connection-dialog-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget)closeCreate()}}><form className="mcp-form mcp-import-form extension-dialog panel" role="dialog" aria-modal="true" aria-labelledby="mcp-import-title" onSubmit={importServers}><header><div><Zap size={19}/><span><h3 id="mcp-import-title">{t('mcp.importConfig')}</h3></span></div><button type="button" disabled={busy==='import'} onClick={closeCreate} title={t('common.close')}><X size={15}/></button></header><div className="mcp-import-body"><textarea autoFocus spellCheck={false} aria-label={t('mcp.config')} value={importConfig} onChange={event=>setImportConfig(event.target.value)} placeholder={mcpImportExample}/></div>{error&&<div className="connection-dialog-error" role="alert"><ShieldAlert size={14}/><span>{error}</span></div>}<footer><span className="mcp-form-spacer"/><button type="button" disabled={busy==='import'} onClick={closeCreate}>{t('common.cancel')}</button><button className="primary" disabled={busy==='import'||!importConfig.trim()}>{busy==='import'?<LoaderCircle className="spin" size={14}/>:<Plus size={14}/>} {busy==='import'?t('mcp.importing'):t('mcp.import')}</button></footer></form></div>,document.body)}
-		{form&&<form className="mcp-form panel" noValidate onSubmit={save}><header><div><Zap size={19}/><span><h3>{form.name||t('mcp.server')}</h3></span></div><button type="button" onClick={()=>setForm(null)} title={t('common.close')}><X size={15}/></button></header><div className="mcp-form-grid"><label><span>{t('mcp.displayName')}</span><input value={form.name} onChange={event=>setForm({...form,name:event.target.value})}/></label><label><span>{t('mcp.transport')}</span><AppSelect value={form.transport} ariaLabel={t('mcp.transport')} onChange={value=>setForm({...form,transport:value as MCPTransport})} options={[{value:'stdio',label:t('mcp.localProcess')},{value:'streamable_http',label:'Streamable HTTP'}]}/></label>{form.transport==='stdio'?<><label><span>{t('mcp.command')}</span><input value={form.command} onChange={event=>setForm({...form,command:event.target.value})}/></label><label><span>{t('mcp.cwd')}</span><input value={form.cwd} onChange={event=>setForm({...form,cwd:event.target.value})}/></label><label className="mcp-wide"><span>{t('mcp.args')}</span><textarea value={form.argsText} onChange={event=>setForm({...form,argsText:event.target.value})}/></label></>:<label className="mcp-wide"><span>{t('mcp.endpoint')}</span><input value={form.url} onChange={event=>setForm({...form,url:event.target.value})}/></label>}<label className="mcp-wide"><span>{t('mcp.env')}</span><textarea value={form.envText} onChange={event=>setForm({...form,envText:event.target.value,clearEnv:false})} placeholder={t('mcp.preserve')}/><small><label><input type="checkbox" checked={form.clearEnv} onChange={event=>setForm({...form,clearEnv:event.target.checked,envText:event.target.checked?'':form.envText})}/> {t('mcp.clearEnv')}</label></small></label><label className="mcp-wide"><span>{t('mcp.headers')}</span><textarea value={form.headersText} onChange={event=>setForm({...form,headersText:event.target.value,clearHeaders:false})} placeholder={t('mcp.preserve')}/><small><label><input type="checkbox" checked={form.clearHeaders} onChange={event=>setForm({...form,clearHeaders:event.target.checked,headersText:event.target.checked?'':form.headersText})}/> {t('mcp.clearHeaders')}</label></small></label></div><footer><label className="mcp-enable-on-save"><input type="checkbox" checked={form.enabled} onChange={event=>setForm({...form,enabled:event.target.checked})}/><i/><span><b>{t('mcp.enableAfterSave')}</b></span></label><button type="button" onClick={()=>setForm(null)}>{t('common.cancel')}</button><button className="primary" disabled={busy==='save'}>{busy==='save'?<LoaderCircle className="spin" size={14}/>:<Save size={14}/>} {busy==='save'?t('common.saving'):t('mcp.saveServer')}</button></footer></form>}
-		<div className="mcp-grid">{servers.map(server=><article className={`mcp-card panel ${server.status}`} key={server.id}><header><div className="mcp-card-icon"><Zap size={19}/></div><span><h3>{server.name}</h3><code>{server.transport==='stdio'?server.command:server.url}</code></span><em className={server.status}><CircleDot size={9}/>{t(`statusLabels.${server.status}`,{defaultValue:server.status})}</em></header><dl><div><dt>{t('mcp.discoveredTools')}</dt><dd>{server.tool_count}</dd></div><div><dt>{t('mcp.secrets')}</dt><dd>{server.oauth_configured?t('mcp.oauth'):t('mcp.configuredSecrets',{count:(server.env_keys?.length||0)+(server.header_keys?.length||0)})}</dd></div><div><dt>{t('mcp.lastConnected')}</dt><dd>{server.connected_at?new Date(server.connected_at).toLocaleString(localeFor(instance.language)):'—'}</dd></div></dl>{server.last_error&&<div className="mcp-card-error"><ShieldAlert size={13}/><span>{server.last_error}</span></div>}<div className="mcp-actions"><button onClick={()=>void test(server)} disabled={!!busy||authorizing===server.id}><Activity size={13}/>{busy===`test-${server.id}`?t('common.testing'):t('common.test')}</button><button onClick={()=>openEdit(server)} disabled={!!busy||authorizing===server.id}><Edit3 size={13}/>{t('common.edit')}</button>{server.transport==='streamable_http'&&(server.status==='error'||server.oauth_configured)&&<button onClick={()=>void authorize(server)} disabled={!!busy||!!authorizing}><KeyRound size={13}/>{authorizing===server.id?t('mcp.authorizing'):server.oauth_configured?t('mcp.reauthorize'):t('mcp.authorize')}</button>}{server.oauth_configured&&<button title={t('mcp.clearAuthorization')} onClick={()=>void clearOAuth(server)} disabled={!!busy||!!authorizing}><LogOut size={13}/></button>}{server.enabled&&server.status!=='ready'&&authorizing!==server.id&&<button onClick={()=>void retry(server)} disabled={!!busy}><RefreshCw className={busy===`retry-${server.id}`?'spin':''} size={13}/>{t('common.retry')}</button>}<button className={server.enabled?'disable':'enable'} onClick={()=>void toggle(server)} disabled={!!busy||authorizing===server.id}>{busy===`toggle-${server.id}`?<LoaderCircle className="spin" size={13}/>:server.enabled?<X size={13}/>:<Check size={13}/>} {server.enabled?t('common.disable'):t('common.enable')}</button><button className="danger" title={t('common.delete')} onClick={()=>setDeleteCandidate(server)} disabled={!!busy||authorizing===server.id}><Trash2 size={13}/></button></div>{server.tools?.length?<details className="mcp-tools"><summary>{t('mcp.modelTools',{count:server.tools.length})} <ChevronRight size={13}/></summary><div>{server.tools.map(item=><section key={item.exposed_name}><code>{item.exposed_name}</code><span>{t('mcp.remote')} · {item.name}</span><p>{item.description}</p></section>)}</div></details>:null}</article>)}</div>
-		{!servers.length&&<Empty icon={<Zap/>} title={t('mcp.emptyTitle')}/>}
-		{deleteCandidate&&<DestructiveConfirmDialog title={t('mcp.deleteTitle',{name:deleteCandidate.name})} busy={busy===`delete-${deleteCandidate.id}`} onCancel={()=>setDeleteCandidate(null)} onConfirm={()=>void remove()}/>}
-	</div>
-}
-
-type ToolParameterView = {name:string;type:string;description:string;required:boolean}
-
-function toolCategoryLabel(value:string){return i18n.t(`toolCategories.${value}`,{defaultValue:value})}
-function toolGuardLabel(value:LLMToolGuard){return i18n.t(`toolGuards.${value}`,{defaultValue:value})}
-
-function schemaRecord(value:unknown):Record<string,unknown>{return value!==null&&typeof value==='object'&&!Array.isArray(value)?value as Record<string,unknown>:{}}
-function schemaType(value:unknown){if(Array.isArray(value))return value.map(String).join(' | ');return typeof value==='string'?value:'any'}
-function toolParameters(tool?:LLMToolDescriptor):ToolParameterView[]{
-	if(!tool)return[]
-	const schema=schemaRecord(tool.input_schema)
-	const properties=schemaRecord(schema.properties)
-	const required=new Set(Array.isArray(schema.required)?schema.required.map(String):[])
-	return Object.entries(properties).map(([name,value])=>{const field=schemaRecord(value);return{name,type:schemaType(field.type),description:typeof field.description==='string'?field.description:'',required:required.has(name)}})
-}
-
-function LLMToolsPage({catalog,refresh,onCatalogChanged}:{catalog:LLMToolCatalog|null;refresh:()=>Promise<void>;onCatalogChanged:(catalog:LLMToolCatalog)=>void}){
-	const {t}=useTranslation()
-	const [query,setQuery]=useState('')
-	const [category,setCategory]=useState('all')
-	const [selectedName,setSelectedName]=useState('')
-	const [refreshing,setRefreshing]=useState(false)
-	const [busyName,setBusyName]=useState('')
-	const [error,setError]=useState('')
-	const tools=catalog?.tools||[]
-	const categories=useMemo(()=>Array.from(new Set(tools.map(tool=>tool.category))),[tools])
-	const filtered=useMemo(()=>{const needle=query.trim().toLowerCase();return tools.filter(tool=>(category==='all'||tool.category===category)&&(!needle||`${tool.name} ${tool.description} ${tool.category}`.toLowerCase().includes(needle)))},[tools,query,category])
-	const selected=filtered.find(tool=>tool.name===selectedName)||filtered[0]
-	const parameters=toolParameters(selected)
-	const refreshCatalog=async()=>{setRefreshing(true);try{await refresh()}finally{setRefreshing(false)}}
-	const setEnabled=async(tool:LLMToolDescriptor)=>{setBusyName(tool.name);setError('');try{onCatalogChanged(await api.setLLMToolEnabled(tool.name,!tool.enabled))}catch(err){setError(errorText(err))}finally{setBusyName('')}}
-
-	return <div className="llm-tools-page page-stack">
-		{error&&<div className="tool-function-error"><ShieldAlert size={15}/><span>{error}</span><button onClick={()=>setError('')} title={t('common.dismiss')}><X size={14}/></button></div>}
-		<div className="tool-catalog-toolbar panel"><label><Search size={15}/><input value={query} onChange={event=>setQuery(event.target.value)} placeholder={t('tools.searchPlaceholder')}/></label><AppSelect value={category} ariaLabel={t('tools.category')} onChange={setCategory} options={[{value:'all',label:t('tools.allCategories',{count:tools.length})},...categories.map(value=>({value,label:`${toolCategoryLabel(value)} · ${tools.filter(tool=>tool.category===value).length}`}))]}/><span>{t('tools.visible',{count:filtered.length})}</span><button className="tool-catalog-refresh" onClick={refreshCatalog} disabled={refreshing} title={t('tools.refreshSnapshot')}><RefreshCw className={refreshing?'spin':''} size={14}/><span>{refreshing?t('common.refreshing'):t('tools.refreshSnapshot')}</span></button></div>
-		{!catalog?<div className="tool-catalog-loading panel"><LoaderCircle className="spin" size={20}/>{t('tools.loadingSnapshot')}</div>:!catalog.loaded?<Empty icon={<FunctionSquare/>} title={t('tools.runtimeMissing')} text={t('tools.runtimeMissingText')}/>:<div className="tool-catalog-browser">
-			<section className="tool-function-list panel">{filtered.length?filtered.map(tool=>{const count=toolParameters(tool).length;return <button className={`${selected?.name===tool.name?'active':''} ${tool.enabled?'':'disabled'}`} onClick={()=>setSelectedName(tool.name)} key={tool.name}><div className="tool-function-icon"><Braces size={16}/></div><span><code>{tool.name}</code><p>{tool.description}</p><small><em>{toolCategoryLabel(tool.category)}</em><i className={tool.guard}>{toolGuardLabel(tool.guard)}</i>{!tool.enabled&&<i className="disabled">{t('tools.disabled')}</i>}</small></span><b>{count}<small>{t('tools.argsUnit')}</small></b><ChevronRight size={14}/></button>}):<div className="tool-filter-empty"><Search size={20}/><b>{t('tools.noMatch')}</b></div>}</section>
-			<aside className={`tool-function-inspector panel ${selected?.enabled?'':'disabled'}`}>{selected?<><header><div className="tool-function-icon"><FunctionSquare size={18}/></div><span><small>{t('tools.functionDetail')}</small><code>{selected.name}</code></span><div className="tool-function-controls"><em className={selected.guard}>{toolGuardLabel(selected.guard)}</em><button className={selected.enabled?'enabled':''} role="switch" aria-checked={selected.enabled} onClick={()=>void setEnabled(selected)} disabled={busyName===selected.name} title={selected.enabled?t('tools.disableFunction'):t('tools.enableFunction')}>{busyName===selected.name?<LoaderCircle className="spin" size={14}/>:<Power size={14}/>}<span>{selected.enabled?t('common.enabled'):t('common.disabled')}</span></button></div></header><p className="tool-function-description">{selected.description}</p><dl className="tool-function-meta"><div><dt>{t('tools.category')}</dt><dd>{toolCategoryLabel(selected.category)}</dd></div><div><dt>{t('common.arguments')}</dt><dd>{parameters.length}</dd></div><div><dt>{t('tools.safetyGate')}</dt><dd>{toolGuardLabel(selected.guard)}</dd></div></dl><section className="tool-parameter-list"><h3>{t('tools.inputParameters')} <span>{t('tools.requiredCount',{count:parameters.filter(item=>item.required).length})}</span></h3>{parameters.length?parameters.map(parameter=><div key={parameter.name}><code>{parameter.name}</code><em>{parameter.type}</em>{parameter.required&&<b>{t('common.required')}</b>}{parameter.description&&<p>{parameter.description}</p>}</div>):<p className="tool-no-arguments">{t('tools.noArguments')}</p>}</section><details className="tool-schema-raw"><summary>{t('tools.rawSchema')} <ChevronRight size={13}/></summary><CopyablePre><HighlightedCode code={JSON.stringify(selected.input_schema,null,2)} language="json"/></CopyablePre></details></>:<div className="tool-inspector-empty"><Braces size={26}/></div>}</aside>
-		</div>}
-	</div>
-}
-
-function SkillsPage({skills,refreshSkills,refreshToolCatalog,onToolCatalogChanged}:{skills:ManagedSkill[];refreshSkills:()=>Promise<void>;refreshToolCatalog:()=>Promise<void>;onToolCatalogChanged:(catalog:LLMToolCatalog)=>void}){
-	const {t,i18n:instance}=useTranslation()
-	const notify=useNotifier()
-	const [query,setQuery]=useState('')
-	const [selectedName,setSelectedName]=useState(()=>skills[0]?.name||'')
-	const [selected,setSelected]=useState<ManagedSkill|null>(null)
-	const [draft,setDraft]=useState('')
-	const [loading,setLoading]=useState(()=>skills.length>0)
-	const [saving,setSaving]=useState(false)
-	const [uploading,setUploading]=useState(false)
-	const [reloading,setReloading]=useState(false)
-	const [uploadOpen,setUploadOpen]=useState(false)
-	const [uploadName,setUploadName]=useState('')
-	const [uploadFile,setUploadFile]=useState<File|null>(null)
-	const [deleteName,setDeleteName]=useState('')
-	const [deleting,setDeleting]=useState(false)
-	const [toggling,setToggling]=useState(false)
-	const [error,setError]=useState('')
-	const filtered=useMemo(()=>{const needle=query.trim().toLowerCase();return skills.filter(skill=>!needle||`${skill.name} ${skill.summary}`.toLowerCase().includes(needle))},[skills,query])
-	useEffect(()=>{if(!skills.length){setSelectedName('');setSelected(null);setDraft('');return}if(!selectedName||!skills.some(skill=>skill.name===selectedName))setSelectedName(skills[0].name)},[skills,selectedName])
-	useEffect(()=>{if(!selectedName)return;let cancelled=false;setLoading(true);setError('');api.skill(selectedName).then(skill=>{if(cancelled)return;setSelected(skill);setDraft(skill.content||'')}).catch(err=>{if(!cancelled)setError(errorText(err))}).finally(()=>{if(!cancelled)setLoading(false)});return()=>{cancelled=true}},[selectedName])
-	const dirty=!!selected&&draft!==selected.content
-	const markdownUpload=!!uploadFile&&/\.(?:md|markdown)$/i.test(uploadFile.name)
-	const selectFile=(file:File|null)=>{setUploadFile(file);if(file&&/\.(?:md|markdown)$/i.test(file.name)&&!uploadName){const base=file.name.replace(/\.(markdown|md)$/i,'').replace(/[^A-Za-z0-9_.-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,64);setUploadName(base)}else if(file)setUploadName('')}
-	const openUpload=()=>{setUploadOpen(true);setError('')}
-	const closeUpload=()=>{if(uploading)return;setUploadOpen(false);setUploadName('');setUploadFile(null);setError('')}
-	const upload=async(event:FormEvent)=>{event.preventDefault();if(!uploadFile)return;if(markdownUpload&&!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(uploadName.trim())){setError(t('skills.invalidName'));return}setUploading(true);setError('');try{const results=await api.uploadSkill(uploadName.trim(),uploadFile);const result=results[0]!;await Promise.all([refreshSkills(),refreshToolCatalog()]);setSelectedName(result.name);setSelected(result);setDraft(result.content||'');setUploadOpen(false);setUploadName('');setUploadFile(null);notify(t(results.length===1?'skills.uploaded':'skills.uploadedMany',{name:result.name,count:results.length}))}catch(err){setError(errorText(err))}finally{setUploading(false)}}
-	const save=async()=>{if(!selected)return;setSaving(true);setError('');try{const result=await api.saveSkill(selected.name,draft);setSelected(result);setDraft(result.content||'');await refreshSkills();notify(t('skills.saved',{name:result.name}))}catch(err){setError(errorText(err))}finally{setSaving(false)}}
-	const permanentlyDelete=async()=>{if(!deleteName)return;setDeleting(true);setError('');try{await api.deleteSkill(deleteName);setDeleteName('');setSelectedName('');setSelected(null);setDraft('');await refreshSkills();notify(t('skills.deleted',{name:deleteName}))}catch(err){setError(errorText(err))}finally{setDeleting(false)}}
-	const toggleEnabled=async()=>{if(!selected)return;setToggling(true);setError('');try{const result=await api.setSkillEnabled(selected.name,!selected.enabled);setSelected(result);setDraft(result.content||draft);await refreshSkills();notify(t(result.enabled?'skills.toggledEnabled':'skills.toggledDisabled',{name:result.name}))}catch(err){setError(errorText(err))}finally{setToggling(false)}}
-	const reload=async()=>{setReloading(true);setError('');try{onToolCatalogChanged(await api.reloadSkills());await refreshSkills();notify(t('skills.reloaded'))}catch(err){setError(errorText(err))}finally{setReloading(false)}}
-
-	return <div className="skills-page page-stack has-floating-actions">
-			<FloatingPageActions><button onClick={()=>void reload()} disabled={reloading}><RefreshCw className={reloading?'spin':''} size={15}/>{reloading?t('common.refreshing'):t('skills.reload')}</button><button className="primary" onClick={openUpload}><UploadCloud size={15}/>{t('skills.uploadSkill')}</button></FloatingPageActions>
-		{error&&!uploadOpen&&<div className="skill-error"><ShieldAlert size={15}/>{error}<button onClick={()=>setError('')}><X size={14}/></button></div>}
-		{uploadOpen&&createPortal(<div className="connection-dialog-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget)closeUpload()}}><form className="connection-dialog compact panel skill-upload-panel skill-upload-dialog" role="dialog" aria-modal="true" aria-labelledby="skill-upload-title" noValidate onSubmit={upload}><header><span><UploadCloud size={19}/><span><h2 id="skill-upload-title">{t('skills.uploadPackage')}</h2></span></span><button type="button" disabled={uploading} onClick={closeUpload} title={t('common.close')}><X size={15}/></button></header><div className="skill-upload-dialog-body">{markdownUpload&&<label><span>{t('skills.skillName')}</span><input value={uploadName} onChange={event=>setUploadName(event.target.value)} autoFocus/></label>}<label className="skill-file-picker"><FileText size={15}/><span><b>{uploadFile?.name||t('skills.choosePackage')}</b><small>{uploadFile?formatFileSize(uploadFile.size):t('skills.maxPackage')}</small></span><input type="file" accept=".md,.markdown,.zip,.7z,text/markdown,application/zip,application/x-7z-compressed" onChange={event=>selectFile(event.target.files?.[0]||null)}/></label></div>{error&&<div className="connection-dialog-error" role="alert"><ShieldAlert size={14}/><span>{error}</span></div>}<footer><button type="button" disabled={uploading} onClick={closeUpload}>{t('common.cancel')}</button><button className="primary" disabled={uploading||!uploadFile||(markdownUpload&&!uploadName.trim())}>{uploading?<LoaderCircle className="spin" size={14}/>:<UploadCloud size={14}/>} {uploading?t('common.uploading'):t('skills.uploadActivate')}</button></footer></form></div>,document.body)}
-		<div className="skill-manager-layout">
-			<section className="skill-list-panel panel"><label className="skill-search"><Search size={14}/><input value={query} onChange={event=>setQuery(event.target.value)} placeholder={t('skills.search')}/></label><div className="skill-list">{filtered.length?filtered.map(skill=><button className={`${selectedName===skill.name?'active':''} ${skill.enabled?'':'disabled'}`} onClick={()=>setSelectedName(skill.name)} key={skill.name}><div className="skill-card-icon"><BookOpen size={16}/></div><span><code>{skill.name}</code>{skill.summary&&<p>{skill.summary}</p>}<small><em className={skill.enabled?'enabled':'disabled'}>{skill.enabled?t('common.enabled'):t('common.disabled')}</em>{skill.file_count||1} {t('common.files')} · {formatFileSize(skill.size_bytes||0)}{skill.updated_at?` · ${new Date(skill.updated_at).toLocaleDateString(localeFor(instance.language))}`:''}</small></span><ChevronRight size={14}/></button>):<div className="skill-list-empty"><BookOpen size={23}/><b>{skills.length?t('skills.noMatch'):t('skills.noneInstalled')}</b></div>}</div></section>
-				<section className="skill-editor panel">{loading?<div className="skill-editor-state"><LoaderCircle className="spin" size={21}/>{t('skills.loading')}</div>:selected?<><header><div><BookOpen size={17}/><span><small>{t('skills.managed')} · {selected.enabled?t('common.enabled'):t('common.disabled')}</small><code>{selected.name}</code></span></div><section><button className={selected.enabled?'skill-disable':'skill-enable'} disabled={toggling} onClick={toggleEnabled}>{toggling?<LoaderCircle className="spin" size={13}/>:selected.enabled?<X size={13}/>:<Check size={13}/>} {selected.enabled?t('common.disable'):t('common.enable')}</button><button disabled={!dirty||saving} onClick={save}>{saving?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {saving?t('common.saving'):t('skills.saveChanges')}</button><button className="danger" onClick={()=>setDeleteName(selected.name)}><Trash2 size={13}/>{t('common.delete')}</button></section></header><div className="skill-editor-meta"><span><b>SHA256</b><code title={selected.content_sha256}>{selected.content_sha256?.slice(0,16)||'—'}</code></span><span><b>{t('common.files')}</b><code>{selected.file_count||1}</code></span><span><b>{t('common.size')}</b><code>{formatFileSize(selected.size_bytes||0)}</code></span><span><b>{t('common.updated')}</b><code>{selected.updated_at?new Date(selected.updated_at).toLocaleString(localeFor(instance.language)):'—'}</code></span></div><div className="skill-editor-split"><label><span>SKILL.md</span><textarea value={draft} spellCheck={false} onChange={event=>setDraft(event.target.value)}/></label><section><span>{t('skills.livePreview')}</span><div className="markdown-body"><Suspense fallback={draft||t('skills.emptySkill')}><MarkdownMessage content={draft||t('skills.emptySkill')} scope="skills"/></Suspense></div></section></div></>:<div className="skill-editor-state"><BookOpen size={25}/><b>{t('skills.select')}</b></div>}</section>
-		</div>
-		{deleteName&&<DestructiveConfirmDialog title={t('skills.deleteTitle',{name:deleteName})} busy={deleting} onCancel={()=>setDeleteName('')} onConfirm={()=>void permanentlyDelete()}/>}
-	</div>
-}
-
-
-function SettingsSectionFooter({dirty,busy,saving,onDiscard}:{dirty:boolean;busy:boolean;saving:boolean;onDiscard:()=>void}){
-	const {t}=useTranslation()
-	return <footer className="settings-section-footer"><button type="button" disabled={!dirty||busy} onClick={onDiscard}>{t('settings.discard')}</button><button type="submit" className="primary" disabled={!dirty||busy}>{saving?t('settings.applying'):t('settings.apply')}</button></footer>
-}
-
-type SystemSettingsSection='iterations'|'prompt'|'explanation'|'compression'|'images'|'shell'
-
-function ConfigurationTransferSettings({refreshModels,refreshHosts,refreshProxies,refreshCapabilities,refreshHealth}:{refreshModels:()=>Promise<void>;refreshHosts:()=>Promise<void>;refreshProxies:()=>Promise<void>;refreshCapabilities:()=>Promise<void>;refreshHealth:()=>Promise<void>}){
-	const {t}=useTranslation()
-	const notify=useNotifier()
-	const [busy,setBusy]=useState<'export'|'import'|''>('')
-	const [dialog,setDialog]=useState<'export'|'import'|null>(null)
-	const [importFile,setImportFile]=useState<File|null>(null)
-	const [password,setPassword]=useState('')
-	const [confirmPassword,setConfirmPassword]=useState('')
-	const [error,setError]=useState('')
-	const openDialog=(mode:'export'|'import')=>{setDialog(mode);setImportFile(null);setPassword('');setConfirmPassword('');setError('')}
-	const closeDialog=()=>{if(busy)return;setDialog(null);setImportFile(null);setPassword('');setConfirmPassword('');setError('')}
-	const exportConfiguration=async(event:FormEvent)=>{event.preventDefault();if(busy)return;if(password!==confirmPassword){setError(t('config.passwordMismatch'));return}setBusy('export');setError('');try{const result=await api.exportConfiguration(password);const url=URL.createObjectURL(result.blob);const anchor=document.createElement('a');anchor.href=url;anchor.download=result.filename;document.body.appendChild(anchor);anchor.click();anchor.remove();window.setTimeout(()=>URL.revokeObjectURL(url),1000);notify(t('config.exported'));setDialog(null);setPassword('');setConfirmPassword('')}catch(err){setError(errorText(err))}finally{setBusy('')}}
-	const importConfiguration=async(event:FormEvent)=>{event.preventDefault();if(!importFile||busy)return;setBusy('import');setError('');try{const result=await api.importConfiguration(importFile,password);await Promise.all([refreshModels(),refreshHosts(),refreshProxies(),refreshCapabilities(),refreshHealth()]);notify(t('config.imported',{models:result.model_providers,hosts:result.hosts,proxies:result.proxies}));setDialog(null);setImportFile(null);setPassword('')}catch(err){setError(errorText(err))}finally{setBusy('')}}
-	return <>
-		<SettingsDisclosure className="configuration-transfer-settings" icon={<FolderOutput size={18}/>} title={t('config.transfer')}>
-			<div className="settings-action-row"><button type="button" onClick={()=>openDialog('import')}><UploadCloud size={15}/>{t('config.import')}</button><button type="button" className="primary" onClick={()=>openDialog('export')}><Download size={15}/>{t('config.export')}</button></div>
-		</SettingsDisclosure>
-		{dialog==='export'&&createPortal(<div className="configuration-transfer-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget)closeDialog()}}><form className="configuration-transfer-dialog panel" role="dialog" aria-modal="true" aria-labelledby="configuration-export-title" onSubmit={exportConfiguration}><header><Download size={20}/><h2 id="configuration-export-title">{t('config.exportTitle')}</h2></header><label><span>{t('config.encryptionPassword')}</span><PasswordInput autoFocus autoComplete="new-password" minLength={8} maxLength={1024} value={password} onChange={event=>{setPassword(event.target.value);setError('')}}/></label><label><span>{t('config.confirmPassword')}</span><PasswordInput autoComplete="new-password" minLength={8} maxLength={1024} value={confirmPassword} onChange={event=>{setConfirmPassword(event.target.value);setError('')}}/></label>{error&&<div className="configuration-transfer-error" role="alert"><ShieldAlert size={14}/>{error}</div>}<footer><button type="button" disabled={busy==='export'} onClick={closeDialog}>{t('common.cancel')}</button><button className="primary" disabled={busy==='export'||password.length<8||confirmPassword.length<8}>{busy==='export'?<LoaderCircle className="spin" size={14}/>:<Download size={14}/>} {busy==='export'?t('config.exporting'):t('config.export')}</button></footer></form></div>,document.body)}
-		{dialog==='import'&&createPortal(<div className="configuration-transfer-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget)closeDialog()}}><form className="configuration-transfer-dialog panel" role="dialog" aria-modal="true" aria-labelledby="configuration-import-title" onSubmit={importConfiguration}><header><UploadCloud size={20}/><h2 id="configuration-import-title">{t('config.importTitle')}</h2></header><label className="configuration-import-file"><span>{t('config.package')}</span><input type="file" accept=".opsnerva-config,application/vnd.opsnerva.configuration" onChange={event=>{setImportFile(event.target.files?.[0]||null);setError('')}}/><b>{importFile?.name||t('config.choosePackage')}</b></label><label><span>{t('config.encryptionPassword')}</span><PasswordInput autoFocus autoComplete="off" minLength={8} maxLength={1024} value={password} onChange={event=>{setPassword(event.target.value);setError('')}}/></label>{error&&<div className="configuration-transfer-error" role="alert"><ShieldAlert size={14}/>{error}</div>}<footer><button type="button" disabled={busy==='import'} onClick={closeDialog}>{t('common.cancel')}</button><button className="primary" disabled={!importFile||busy==='import'||password.length<8}>{busy==='import'?<LoaderCircle className="spin" size={14}/>:<UploadCloud size={14}/>} {busy==='import'?t('config.importing'):t('config.import')}</button></footer></form></div>,document.body)}
-	</>
-}
-
-function SystemSettingsPage({settings,providers,proxies,capabilities,modelStatus,refreshModels,refreshHosts,refreshProxies,refreshCapabilities,refreshHealth,onSettingsChanged,onOpenMCPActivity}:{settings:SystemSettings|null;providers:ModelProvider[];proxies:Proxy[];capabilities:ToolCapabilities;modelStatus?:Health['model'];refreshModels:()=>Promise<void>;refreshHosts:()=>Promise<void>;refreshProxies:()=>Promise<void>;refreshCapabilities:()=>Promise<void>;refreshHealth:()=>Promise<void>;onSettingsChanged:(settings:SystemSettings)=>void;onOpenMCPActivity:()=>void}) {
-  const {t}=useTranslation()
-	const notify=useNotifier()
-  const savedValue=settings?.agent_max_iterations??50
-  const savedPrompt=settings?.system_prompt??''
-	const defaultPrompt=settings?.default_system_prompt??''
-  const savedExplanation=settings?.approval_explanations_enabled??true
-	  const savedSubagentProvider=settings?.subagent_model_provider_id??''
-	  const savedAutomaticApprovalProvider=settings?.automatic_approval_model_provider_id??''
-	  const savedSubagentTimeout=settings?.subagent_timeout_seconds??30
-	  const savedCompressionEnabled=settings?.context_compression_enabled??true
-	  const savedCompressionPercent=settings?.context_compression_threshold_percent??70
-	  const savedImageTypes=settings?.chat_image_allowed_types??defaultChatImageTypes
-  const savedShellMode=settings?.workspace_shell_mode??(settings?.workspace_shell_platform==='windows'?'host':'sandbox')
-  const [maxIterations,setMaxIterations]=useState(savedValue)
-  const [systemPrompt,setSystemPrompt]=useState(savedPrompt)
-  const [explanationEnabled,setExplanationEnabled]=useState(savedExplanation)
-  const [subagentProvider,setSubagentProvider]=useState(savedSubagentProvider)
-	const [automaticApprovalProvider,setAutomaticApprovalProvider]=useState(savedAutomaticApprovalProvider)
-	  const [subagentTimeout,setSubagentTimeout]=useState(savedSubagentTimeout)
-	  const [compressionEnabled,setCompressionEnabled]=useState(savedCompressionEnabled)
-	  const [compressionPercent,setCompressionPercent]=useState(savedCompressionPercent)
-	  const [imageTypes,setImageTypes]=useState(savedImageTypes)
-  const [shellMode,setShellMode]=useState<WorkspaceShellMode>(savedShellMode)
-	const [iterationsDirty,setIterationsDirty]=useState(false)
-	const [promptDirty,setPromptDirty]=useState(false)
-	const [explanationDirty,setExplanationDirty]=useState(false)
-	const [compressionDirty,setCompressionDirty]=useState(false)
-	const [imagesDirty,setImagesDirty]=useState(false)
-	const [shellDirty,setShellDirty]=useState(false)
-	const [savingSection,setSavingSection]=useState<SystemSettingsSection|''>('')
-	useEffect(()=>{if(!iterationsDirty)setMaxIterations(savedValue)},[savedValue,iterationsDirty])
-	useEffect(()=>{if(!promptDirty)setSystemPrompt(savedPrompt)},[savedPrompt,promptDirty])
-	useEffect(()=>{if(!explanationDirty){setExplanationEnabled(savedExplanation);setSubagentProvider(savedSubagentProvider);setAutomaticApprovalProvider(savedAutomaticApprovalProvider);setSubagentTimeout(savedSubagentTimeout)}},[savedExplanation,savedSubagentProvider,savedAutomaticApprovalProvider,savedSubagentTimeout,explanationDirty])
-	useEffect(()=>{if(!compressionDirty){setCompressionEnabled(savedCompressionEnabled);setCompressionPercent(savedCompressionPercent)}},[savedCompressionEnabled,savedCompressionPercent,compressionDirty])
-	useEffect(()=>{if(!imagesDirty)setImageTypes(savedImageTypes)},[savedImageTypes,imagesDirty])
-	useEffect(()=>{if(!shellDirty)setShellMode(savedShellMode)},[savedShellMode,shellDirty])
-	const update=(value:number)=>{setMaxIterations(Math.max(5,Math.min(100,value||5)));setIterationsDirty(true)}
-	const updateSystemPrompt=(value:string)=>{setSystemPrompt(value);setPromptDirty(true)}
-	const restoreDefaultPrompt=()=>{setSystemPrompt(defaultPrompt);setPromptDirty(true)}
-	const toggleExplanation=(value:boolean)=>{setExplanationEnabled(value);setExplanationDirty(true)}
-	const selectSubagentProvider=(value:string)=>{setSubagentProvider(value);setExplanationDirty(true)}
-	const selectAutomaticApprovalProvider=(value:string)=>{setAutomaticApprovalProvider(value);setExplanationDirty(true)}
-	const updateSubagentTimeout=(value:number)=>{setSubagentTimeout(Math.max(5,Math.min(120,value||5)));setExplanationDirty(true)}
-	const toggleCompression=(value:boolean)=>{setCompressionEnabled(value);setCompressionDirty(true)}
-	const updateCompressionPercent=(value:number)=>{setCompressionPercent(Math.max(50,Math.min(90,value||50)));setCompressionDirty(true)}
-	const toggleImageType=(value:string)=>{setImageTypes(current=>current.includes(value)?current.length===1?current:current.filter(item=>item!==value):[...current,value]);setImagesDirty(true)}
-	const selectShellMode=(value:WorkspaceShellMode)=>{setShellMode(value);setShellDirty(true)}
-	const discard=(section:SystemSettingsSection)=>{
-		switch(section){
-		case 'iterations':setMaxIterations(savedValue);setIterationsDirty(false);break
-		case 'prompt':setSystemPrompt(savedPrompt);setPromptDirty(false);break
-		case 'explanation':setExplanationEnabled(savedExplanation);setSubagentProvider(savedSubagentProvider);setAutomaticApprovalProvider(savedAutomaticApprovalProvider);setSubagentTimeout(savedSubagentTimeout);setExplanationDirty(false);break
-		case 'compression':setCompressionEnabled(savedCompressionEnabled);setCompressionPercent(savedCompressionPercent);setCompressionDirty(false);break
-		case 'images':setImageTypes(savedImageTypes);setImagesDirty(false);break
-		case 'shell':setShellMode(savedShellMode);setShellDirty(false);break
-		}
-	}
-	const save=async(section:SystemSettingsSection)=>{
-		const input:SystemSettingsInput={agent_max_iterations:section==='iterations'?maxIterations:savedValue}
-		switch(section){
-		case 'prompt':input.system_prompt=systemPrompt;break
-		case 'explanation':input.approval_explanations_enabled=explanationEnabled;input.subagent_model_provider_id=subagentProvider;input.automatic_approval_model_provider_id=automaticApprovalProvider;input.subagent_timeout_seconds=subagentTimeout;break
-		case 'compression':input.context_compression_enabled=compressionEnabled;input.context_compression_threshold_percent=compressionPercent;break
-		case 'images':input.chat_image_allowed_types=imageTypes;break
-		case 'shell':input.workspace_shell_mode=shellMode;break
-		}
-		setSavingSection(section)
-		try{
-			const result=await api.saveSystemSettings(input)
-			switch(section){
-			case 'iterations':setMaxIterations(result.agent_max_iterations);setIterationsDirty(false);break
-			case 'prompt':setSystemPrompt(result.system_prompt);setPromptDirty(false);break
-			case 'explanation':setExplanationEnabled(result.approval_explanations_enabled);setSubagentProvider(result.subagent_model_provider_id);setAutomaticApprovalProvider(result.automatic_approval_model_provider_id);setSubagentTimeout(result.subagent_timeout_seconds);setExplanationDirty(false);break
-			case 'compression':setCompressionEnabled(result.context_compression_enabled);setCompressionPercent(result.context_compression_threshold_percent);setCompressionDirty(false);break
-			case 'images':setImageTypes(result.chat_image_allowed_types);setImagesDirty(false);break
-			case 'shell':setShellMode(result.workspace_shell_mode);setShellDirty(false);break
-			}
-			onSettingsChanged(result)
-			notify(t('settings.saved'))
-			if(section==='shell')await refreshCapabilities()
-			else if(section==='explanation')await refreshHealth()
-		}catch(err){notify(errorText(err),'error')}finally{setSavingSection('')}
-	}
-	const submit=(section:SystemSettingsSection)=>(event:FormEvent)=>{event.preventDefault();void save(section)}
-	const busy=!!savingSection
-  return <div className="system-settings page-stack">
-
-		<div className="settings-form">
-			<ConfigurationTransferSettings refreshModels={refreshModels} refreshHosts={refreshHosts} refreshProxies={refreshProxies} refreshCapabilities={refreshCapabilities} refreshHealth={refreshHealth}/>
-			<SettingsDisclosure icon={<SlidersHorizontal size={18}/>} title={t('settings.maxIterations')} meta={<strong>{maxIterations}</strong>}>
-				<form onSubmit={submit('iterations')}><div className="iteration-editor"><input aria-label={t('settings.maxIterations')} type="range" min="5" max="100" step="1" value={maxIterations} onChange={event=>update(Number(event.target.value))}/><label><span>{t('settings.rounds')}</span><input type="number" min="5" max="100" value={maxIterations} onChange={event=>update(Number(event.target.value))}/></label></div><div className="iteration-presets"><span>{t('settings.quickPresets')}</span>{[20,50,100].map(value=><button type="button" className={maxIterations===value?'active':''} onClick={()=>update(value)} key={value}><b>{value}</b></button>)}</div><SettingsSectionFooter dirty={iterationsDirty} busy={busy} saving={savingSection==='iterations'} onDiscard={()=>discard('iterations')}/></form>
-			</SettingsDisclosure>
-			<SettingsDisclosure icon={<Minimize2 size={18}/>} title={t('settings.contextCompression')} meta={compressionEnabled?`${compressionPercent}%`:t('settings.compressionOff')}>
-				<form onSubmit={submit('compression')}><div className="subagent-settings"><label className="subagent-toggle"><span><b>{t('settings.autoCompression')}</b></span><input type="checkbox" checked={compressionEnabled} onChange={event=>toggleCompression(event.target.checked)}/><i/></label><div className="iteration-editor"><input aria-label={t('settings.compressionThreshold')} type="range" min="50" max="90" step="5" value={compressionPercent} disabled={!compressionEnabled} onChange={event=>updateCompressionPercent(Number(event.target.value))}/><label><span>{t('settings.compressionThreshold')}</span><input type="number" min="50" max="90" step="5" value={compressionPercent} disabled={!compressionEnabled} onChange={event=>updateCompressionPercent(Number(event.target.value))}/></label></div></div><SettingsSectionFooter dirty={compressionDirty} busy={busy} saving={savingSection==='compression'} onDiscard={()=>discard('compression')}/></form>
-			</SettingsDisclosure>
-			<SettingsDisclosure icon={<Bot size={18}/>} title={t('settings.systemPrompt')} meta={systemPrompt.length?t('settings.systemPromptCharacters',{count:systemPrompt.length}):undefined}>
-				<form onSubmit={submit('prompt')}><div className="system-prompt-actions"><button type="button" disabled={systemPrompt===defaultPrompt} onClick={restoreDefaultPrompt}><RefreshCw size={13}/>{t('settings.restoreDefaultPrompt')}</button></div><textarea className="system-prompt-input" aria-label={t('settings.systemPrompt')} spellCheck={false} value={systemPrompt} onChange={event=>updateSystemPrompt(event.target.value)}/><small className="system-prompt-count">{systemPrompt.length?t('settings.systemPromptCharacters',{count:systemPrompt.length}):t('settings.emptySystemPrompt')}</small><SettingsSectionFooter dirty={promptDirty} busy={busy} saving={savingSection==='prompt'} onDiscard={()=>discard('prompt')}/></form>
-			</SettingsDisclosure>
-			<SettingsDisclosure icon={<BrainCircuit size={18}/>} title={t('settings.explanationSection')} meta={<><span className={modelStatus?.approval_agent_available?'ready':'offline'}><CircleDot size={9}/>{t('settings.explanationAgent')} · {modelStatus?.approval_agent_available?t('settings.runnerReady'):t('settings.modelUnavailable')}</span><span className={modelStatus?.automatic_approval_agent_available?'ready':'offline'}><CircleDot size={9}/>Auto · {modelStatus?.automatic_approval_agent_available?t('settings.runnerReady'):t('settings.modelUnavailable')}</span></>}>
-				<form onSubmit={submit('explanation')}><div className="subagent-settings"><label className="subagent-toggle"><span><b>{t('settings.commandAgent')}</b></span><input type="checkbox" checked={explanationEnabled} onChange={event=>toggleExplanation(event.target.checked)}/><i/></label><div className="subagent-config-grid"><label><span><b>{t('settings.commandAgent')}</b></span><AppSelect value={subagentProvider} ariaLabel={t('settings.commandAgent')} onChange={selectSubagentProvider} options={[{value:'',label:t('settings.followMain')},...providers.map(provider=>({value:provider.id,label:`${provider.name} · ${provider.model}`}))]}/></label><label><span><b>{t('settings.automaticApprovalAgent')}</b></span><AppSelect value={automaticApprovalProvider} ariaLabel={t('settings.automaticApprovalAgent')} onChange={selectAutomaticApprovalProvider} options={[{value:'',label:t('settings.followMain')},...providers.map(provider=>({value:provider.id,label:`${provider.name} · ${provider.model}`}))]}/></label><label><span><b>{t('settings.requestTimeout')}</b></span><div className="subagent-timeout-input"><input aria-label={t('settings.timeout')} type="number" min="5" max="120" step="1" value={subagentTimeout} onChange={event=>updateSubagentTimeout(Number(event.target.value))}/><em>{t('settings.seconds',{count:subagentTimeout})}</em></div></label></div>{modelStatus?.approval_error&&<div className="subagent-runtime-error"><ShieldAlert size={14}/><span>{modelStatus.approval_error}</span></div>}{modelStatus?.automatic_approval_error&&<div className="subagent-runtime-error"><ShieldAlert size={14}/><span>{modelStatus.automatic_approval_error}</span></div>}</div><SettingsSectionFooter dirty={explanationDirty} busy={busy} saving={savingSection==='explanation'} onDiscard={()=>discard('explanation')}/></form>
-			</SettingsDisclosure>
-			<SettingsDisclosure icon={<ImagePlus size={18}/>} title={t('settings.chatImages')} meta={imageTypes.map(value=>value.replace('image/','').toUpperCase()).join(' · ')}>
-				<form onSubmit={submit('images')}><div className="chat-image-formats">{[['image/png','PNG'],['image/jpeg','JPEG'],['image/webp','WebP'],['image/gif','GIF']].map(([value,label])=><label className={imageTypes.includes(value)?'active':''} key={value}><input type="checkbox" checked={imageTypes.includes(value)} disabled={imageTypes.length===1&&imageTypes.includes(value)} onChange={()=>toggleImageType(value)}/><span>{label}</span></label>)}</div><SettingsSectionFooter dirty={imagesDirty} busy={busy} saving={savingSection==='images'} onDiscard={()=>discard('images')}/></form>
-			</SettingsDisclosure>
-			<SettingsDisclosure icon={<TerminalSquare size={18}/>} title={t('settings.shellBackend')} meta={settings?.workspace_shell_platform||t('settings.detecting')}>
-				<form onSubmit={submit('shell')}><div className="workspace-shell-modes" role="group" aria-label={t('settings.shellBackend')}><button type="button" className={shellMode==='sandbox'?'active':''} disabled={!settings?.workspace_sandbox_available} onClick={()=>selectShellMode('sandbox')}><ShieldCheck size={16}/><span><b>{t('settings.sandbox')}</b><small>{settings?.workspace_sandbox_available?t('settings.sandboxAvailable'):t('settings.unavailableHost')}</small></span></button><button type="button" className={`${shellMode==='host'?'active ':''}host`} disabled={!settings?.workspace_host_shell_available} onClick={()=>selectShellMode('host')}><TerminalSquare size={16}/><span><b>{t('settings.hostShell')}</b><small>{settings?.workspace_host_shell_available?`${settings.workspace_shell_name||t('settings.systemShell')} · ${t('settings.fullAuthority')}`:t('settings.noShell')}</small></span></button><button type="button" className={shellMode==='disabled'?'active':''} onClick={()=>selectShellMode('disabled')}><Power size={16}/><span><b>{t('settings.shellDisabled')}</b></span></button></div>{shellMode==='host'&&<div className="workspace-shell-warning"><ShieldAlert size={15}/><b>{t('settings.hostWarning')}</b></div>}{shellMode==='sandbox'&&!settings?.workspace_sandbox_available&&<div className="workspace-shell-warning"><ShieldAlert size={15}/><b>{t('settings.sandboxWarning')}</b></div>}<SettingsSectionFooter dirty={shellDirty} busy={busy} saving={savingSection==='shell'} onDiscard={()=>discard('shell')}/></form>
-			</SettingsDisclosure>
-			<WorkspaceSettingsPanel workspaces={capabilities.workspaces} refresh={refreshCapabilities} onNotify={notify}/>
-			<MCPServerModePanel settings={settings} onChanged={onSettingsChanged} onOpenActivity={onOpenMCPActivity}/>
-			<WebSearchSettingsPanel proxies={proxies}/>
-			{desktopRuntime&&<DesktopDeveloperToolsPanel/>}
-		</div>
-  </div>
-}
-
-const defaultWebSearchInput:WebSearchSettingsInput={enabled:false,base_url:'https://api.tavily.com',api_key:'',proxy_id:'',timeout_seconds:20,max_results:10}
-
-function MCPServerModePanel({settings,onChanged,onOpenActivity}:{settings:SystemSettings|null;onChanged:(settings:SystemSettings)=>void;onOpenActivity:()=>void}){
-	const {t}=useTranslation()
-	const notify=useNotifier()
-	const [busy,setBusy]=useState<'start'|'stop'|'rotate'|''>(''),[token,setToken]=useState('')
-	const enabled=!!settings?.mcp_http_enabled
-	const endpoint=`${window.location.origin}/mcp`
-	useEffect(()=>{if(!enabled)setToken('')},[enabled])
-	const update=async(nextEnabled:boolean,rotate=false)=>{
-		if(!settings)return
-		setBusy(rotate?'rotate':nextEnabled?'start':'stop')
-		try{
-			const result=await api.saveSystemSettings({
-				agent_max_iterations:settings.agent_max_iterations,
-				mcp_http_enabled:nextEnabled,
-				rotate_mcp_http_token:rotate,
-			})
-			setToken(result.mcp_http_token||'')
-			onChanged(result)
-			notify(t(nextEnabled?'mcpServerMode.started':'mcpServerMode.stopped'))
-			if(desktopRuntime)await invoke('set_tray_mode',{enabled:result.mcp_http_enabled}).catch(()=>{})
-		}catch(err){notify(errorText(err),'error')}finally{setBusy('')}
-	}
-	const copy=async(value:string,message:string)=>{
-		try{await navigator.clipboard.writeText(value);notify(message)}
-		catch(err){notify(errorText(err),'error')}
-	}
-	const enterLightweightMode=async()=>{
-		try{await invoke('enter_lightweight_mode')}
-		catch(err){notify(errorText(err),'error')}
-	}
-	return <SettingsDisclosure className="mcp-server-mode" icon={<Braces size={18}/>} title={t('mcpServerMode.title')} meta={enabled?t('common.enabled'):t('common.disabled')}>
-		<div className="mcp-server-mode-fields">
-			<label><span>{t('mcpServerMode.endpoint')}</span><div><input readOnly value={endpoint}/><button type="button" title={t('common.copy')} onClick={()=>void copy(endpoint,t('mcpServerMode.endpointCopied'))}><Copy size={13}/></button></div></label>
-			{enabled&&<label><span>{t('mcpServerMode.token')}</span><div><input readOnly type={token?'text':'password'} value={token||'••••••••••••••••'} /><button type="button" disabled={!token} title={t('common.copy')} onClick={()=>void copy(token,t('mcpServerMode.tokenCopied'))}><Copy size={13}/></button></div>{!token&&settings?.mcp_http_token_configured&&<small>{t('mcpServerMode.tokenStored')}</small>}</label>}
-		</div>
-		<footer>
-			<button type="button" onClick={onOpenActivity}><Activity size={13}/>{t('mcpServerMode.activity')}</button>
-			{enabled&&desktopRuntime&&<button type="button" disabled={!!busy} onClick={()=>void enterLightweightMode()}><Minimize2 size={13}/>{t('mcpServerMode.lightweightMode')}</button>}
-			{enabled&&<button type="button" disabled={!!busy} onClick={()=>void update(true,true)}>{busy==='rotate'?<LoaderCircle className="spin" size={13}/>:<RefreshCw size={13}/>} {t('mcpServerMode.rotate')}</button>}
-			<button type="button" className={enabled?'danger':'primary'} disabled={!!busy||!settings} onClick={()=>void update(!enabled)}>{busy?<LoaderCircle className="spin" size={13}/>:<Power size={13}/>} {t(enabled?'mcpServerMode.stop':'mcpServerMode.start')}</button>
-		</footer>
-	</SettingsDisclosure>
-}
-
-function WebSearchSettingsPanel({proxies}:{proxies:Proxy[]}){
-	const {t}=useTranslation()
-	const notify=useNotifier()
-	const [stored,setStored]=useState<WebSearchSettings|null>(null),[input,setInput]=useState<WebSearchSettingsInput>(defaultWebSearchInput)
-	const [loading,setLoading]=useState(true),[busy,setBusy]=useState(''),[dirty,setDirty]=useState(false)
-	const hasEffectiveAPIKey=!!input.api_key?.trim()||!!stored?.has_api_key&&!input.clear_api_key
-	const applyStored=(value:WebSearchSettings)=>{setStored(value);setInput({enabled:value.enabled,base_url:value.base_url,api_key:'',proxy_id:value.proxy_id||'',timeout_seconds:value.timeout_seconds,max_results:value.max_results});setDirty(false)}
-	useEffect(()=>{let active=true;api.webSearchSettings().then(value=>{if(active)applyStored(value)}).catch(err=>{if(active)notify(errorText(err),'error')}).finally(()=>{if(active)setLoading(false)});return()=>{active=false}},[])
-	const update=<K extends keyof WebSearchSettingsInput>(key:K,value:WebSearchSettingsInput[K])=>{setInput(current=>({...current,[key]:value}));setDirty(true)}
-	const save=async()=>{setBusy('save');try{const value=await api.saveWebSearchSettings(input);applyStored(value);notify(t('webSearch.saved'))}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
-	const test=async()=>{setBusy('test');try{const result=await api.testWebSearch();notify(t('webSearch.testPassed',{count:result.results.length,latency:`${(result.response_time||0).toFixed(2)}s`,id:result.request_id||'—'}))}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
-	const clearKey=()=>{setInput(current=>({...current,enabled:false,api_key:'',clear_api_key:true}));setDirty(true)}
-	if(loading)return <SettingsDisclosure className="web-search-settings" icon={<Search size={18}/>} title={t('webSearch.title')} meta={t('common.loading')}><div className="settings-loading"><LoaderCircle className="spin" size={16}/>{t('common.loading')}</div></SettingsDisclosure>
-	return <SettingsDisclosure className="web-search-settings" icon={<Search size={18}/>} title={t('webSearch.title')} meta={input.enabled?t('common.enabled'):t('common.disabled')}><label className="web-search-toggle"><span>{t('webSearch.title')}</span><input type="checkbox" checked={input.enabled} onChange={event=>update('enabled',event.target.checked)}/><i/><b>{input.enabled?t('common.enabled'):t('common.disabled')}</b></label><div className="web-search-grid"><label><span>{t('webSearch.baseURL')}</span><input value={input.base_url} onChange={event=>update('base_url',event.target.value)} placeholder="https://api.tavily.com"/></label><label><span>{t('webSearch.apiKey')}</span><PasswordInput value={input.api_key||''} onChange={event=>update('api_key',event.target.value)} placeholder={stored?.has_api_key?t('webSearch.savedSecret'):''}/></label><label><span>{t('common.proxy')}</span><AppSelect value={input.proxy_id||''} ariaLabel={t('common.proxy')} onChange={value=>update('proxy_id',value)} options={[{value:'',label:t('common.direct')},...proxies.map(proxy=>({value:proxy.id,label:`${proxy.name} · ${proxy.url}`}))]}/></label><label><span>{t('webSearch.timeout')}</span><input type="number" min="5" max="120" value={input.timeout_seconds} onChange={event=>update('timeout_seconds',Number(event.target.value))}/></label><label><span>{t('webSearch.maxResults')}</span><input type="number" min="1" max="20" value={input.max_results} onChange={event=>update('max_results',Number(event.target.value))}/></label></div><footer><div>{stored?.has_api_key&&<button type="button" className="danger" onClick={clearKey}>{t('webSearch.clearKey')}</button>}</div><button type="button" disabled={busy!==''||dirty||!stored?.enabled||!stored.has_api_key} onClick={()=>void test()}>{busy==='test'?<LoaderCircle className="spin" size={13}/>:<Search size={13}/>} {t('common.test')}</button><button type="button" className="primary" disabled={busy!==''||!dirty||input.enabled&&!hasEffectiveAPIKey} onClick={()=>void save()}>{busy==='save'?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {t('common.save')}</button></footer></SettingsDisclosure>
-}
 
 function Nav({ active, icon, label, count, warn, onClick }: {active:boolean;icon:React.ReactNode;label:string;count?:number;warn?:boolean;onClick:()=>void}) {
   return <button className={`nav-item ${active ? 'active' : ''}`} onClick={onClick} title={label} aria-label={label} aria-current={active?'page':undefined}>{icon}<span>{label}</span>{count !== undefined && <em className={warn ? 'warn' : ''}>{count}</em>}</button>
@@ -1584,7 +575,7 @@ const PersistentPageBoundary=memo(function PersistentPageBoundary({visible,child
 },(previous,next)=>!previous.visible&&!next.visible)
 
 function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, workspaceShells, capabilities, settings, imageTypes, agentAvailable, modelName, contextWindow, refreshConnections, dismissApproval, onCreateWorkspaceShell, onOpenWorkspaceShell, onWorkspaceShellStarted, onSettingsChanged, onHostChanged, onModelChanged, sidebarTarget, onSessionDeleted, onError }: {visible:boolean;onActivate:()=>void;hosts:Host[];providers:ModelProvider[];approvals:Approval[];runs:Run[];workspaceShells:SSHShell[];capabilities:ToolCapabilities;settings:SystemSettings|null;imageTypes:string[];agentAvailable:boolean;modelName?:string;contextWindow:number;refreshConnections:()=>Promise<void>;dismissApproval:(approvalID:string)=>void;onCreateWorkspaceShell:(workspaceID:string)=>Promise<void>;onOpenWorkspaceShell:(shell:SSHShell)=>void;onWorkspaceShellStarted:(shell:SSHShell)=>void;onSettingsChanged:(settings:SystemSettings)=>void;onHostChanged:(host:Host)=>void;onModelChanged:(provider:ModelProvider)=>void;sidebarTarget:HTMLDivElement|null;onSessionDeleted:(sessionID:string)=>void;onError:(message:string)=>void}) {
-		const {t,i18n:instance}=useTranslation()
+		const {t}=useTranslation()
 		const notify=useNotifier()
 		const activeContextWindow=contextWindow
   const [entries, setEntries] = useState<ChatEntry[]>([])
@@ -1613,8 +604,6 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	const [compressingContext,setCompressingContext]=useState(false)
 	const [modelRetry,setModelRetry]=useState<ModelRetryState|null>(null)
 	const [connectionRetry,setConnectionRetry]=useState<ConnectionRetryState|null>(null)
-	const [retryClock,setRetryClock]=useState(0)
-	const [workStatusIndex,setWorkStatusIndex]=useState(0)
 		const [contextUsage,setContextUsage]=useState<ContextUsage>({tokens:0,window:activeContextWindow})
 		useEffect(()=>setContextUsage(current=>current.tokens===0?{...current,window:activeContextWindow}:current),[activeContextWindow])
   const [tasks,setTasks]=useState<AgentTaskList|null>(null)
@@ -1645,8 +634,6 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	const queueingMessage=queueingMode!==null
 	const toolsRunning=useMemo(()=>running?false:entries.some(item=>item.kind==='tool'&&item.transient),[entries,running])
 	const liveSSHTaskTargets=useMemo(()=>visible?latestLiveSSHTaskTargets(entries):emptyLiveSSHTaskTargets,[entries,visible])
-	const liveSSHTasks=useLiveSSHTasks(visible,sessionId,liveSSHTaskTargets)
-	const liveSSHTaskOwnerByEntryID=useMemo(()=>new Map(liveSSHTaskTargets.map(target=>[target.entryID,target.taskID])),[liveSSHTaskTargets])
 	const conversationEntries=useMemo(()=>visible?[...entries,...queuedMessageEntries(queuedMessages,count=>t('chat.queuedImages',{count}))]:emptyChatEntries,[entries,queuedMessages,t,visible])
 	const renderEntries=useMemo(()=>visible?groupedTaskToolEntries(conversationEntries):emptyChatRenderItems,[conversationEntries,visible])
 	const latestConversationEntryID=conversationEntries.at(-1)?.id||''
@@ -1661,20 +648,9 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 	},[entries,sessionBusy,visible])
 	const selectedWorkspace=capabilities.workspaces.find(workspace=>workspace.id===workspaceID)||capabilities.workspaces[0]
 	useEffect(()=>{sessionIDRef.current=sessionId},[sessionId])
-	useEffect(()=>{
-		if(!visible||!sessionBusy&&!toolsRunning){setWorkStatusIndex(0);return}
-		const timer=window.setInterval(()=>setWorkStatusIndex(current=>(current+1)%workStatusKeys.length),2600)
-		return()=>window.clearInterval(timer)
-	},[sessionBusy,toolsRunning,visible])
 	useEffect(()=>{if(!sessionId)setContextUsage({tokens:0,window:activeContextWindow})},[activeContextWindow,sessionId])
 	useEffect(()=>{if(!selectedWorkspace)return;if(workspaceID!==selectedWorkspace.id)setWorkspaceID(selectedWorkspace.id);rememberWorkspace(selectedWorkspace.id)},[selectedWorkspace,workspaceID])
 	useEffect(()=>{if(!tasks)setTasksExpanded(false);else setTasksExpanded(true)},[tasks?.session_id,!!tasks])
-	useEffect(()=>{
-		if(!visible||!connectionRetry)return
-		setRetryClock(Date.now())
-		const timer=window.setInterval(()=>setRetryClock(Date.now()),1000)
-		return()=>window.clearInterval(timer)
-	},[connectionRetry,visible])
 	useEffect(()=>()=>{sessionLoadRef.current='';const stream=activeStreamRef.current;activeStreamRef.current=null;stream?.controller.abort();window.cancelAnimationFrame(disclosureScrollFrame.current);window.cancelAnimationFrame(autoScrollFrame.current);activeChatDisclosures.current.clear();messagesRef.current?.classList.remove('chat-disclosure-active')},[])
 	useEffect(()=>()=>{for(const url of imageURLsRef.current)URL.revokeObjectURL(url);imageURLsRef.current.clear()},[])
 	const addImages=(files:File[])=>{const accepted=files.filter(file=>imageTypes.includes(file.type));if(accepted.length!==files.length)setImageNotice(t('chat.imageTypeRejected'));if(!accepted.length)return;const next=accepted.map(file=>{const url=URL.createObjectURL(file);imageURLsRef.current.add(url);return{id:clientId(),file,url}});setPendingImages(current=>[...current,...next])}
@@ -1907,7 +883,6 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 				attempt++
 				const delay=reconnectDelay(attempt)
 				const now=Date.now()
-				setRetryClock(now)
 				setConnectionRetry({attempt,readyAt:now+delay})
 				try{
 					await waitForReconnect(delay,controller.signal)
@@ -2058,7 +1033,7 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 		}catch(err){setEntries(old=>[...old,{id:clientId(),kind:'error',content:t('chat.stopFailed',{message:errorText(err)})}])}
 		finally{if(!requested)setStopping(false)}
   }
-	const compressContext=async()=>{
+	const compressContext=useCallback(async()=>{
 		if(!sessionId||sessionBusy||loadingSession||compressingContext)return
 		setCompressingContext(true)
 		try{
@@ -2067,16 +1042,9 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			notify(t('chat.contextCompressed',{before:compactTokenCount(result.before_tokens),after:compactTokenCount(result.after_tokens)}))
 		}catch(err){notify(errorText(err),'error')}
 		finally{setCompressingContext(false)}
-	}
-	const modelRetryLabel=modelRetry?t('chat.retryingModel',{
-	  attempt:modelRetry.attempt,
-	  max:modelRetry.max,
-  }):''
-	const connectionRetryDelay=connectionRetry?Math.max(0,Math.ceil((connectionRetry.readyAt-retryClock)/1000)):0
-	const connectionRetryLabel=connectionRetry?t('chat.reconnecting',{attempt:connectionRetry.attempt,delay:connectionRetryDelay}):''
+	},[sessionId,sessionBusy,loadingSession,compressingContext,notify,t])
 	const composerEmpty=!message.trim()&&!pendingImages.length
 	const showComposerStop=(sessionBusy||toolsRunning)&&composerEmpty
-	const workStatusLabel=stopping?t('chat.stopping'):connectionRetryLabel||modelRetryLabel||t(workStatusKeys[workStatusIndex])
 	const setWorkspaceCollapsed=useCallback((collapsed:boolean)=>{
 		rememberWorkspacePanelCollapsed(collapsed)
 		setWorkspacePanelCollapsed(collapsed)
@@ -2094,18 +1062,14 @@ function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, work
 			<div className="messages" ref={messagesRef} onScroll={trackUserScroll} onWheel={pauseLatestOnWheel} onTouchMove={pauseLatestOnTouch}>
 				{historyHasMore&&<button type="button" className="chat-history-more" disabled={loadingOlderMessages} onClick={()=>void loadOlderMessages()}>{loadingOlderMessages?<LoaderCircle className="spin" size={13}/>:<History size={13}/>} {t('chat.loadEarlier')}</button>}
 				{conversationEntries.length === 0 && <div className="empty-chat"><div className="radar"><Activity size={35}/></div><h2>{t('chat.emptyTitle')}</h2></div>}
-				{renderEntries.map(item=>{
-					if(item.kind==='task_tool_group')return <TaskToolGroupCard key={item.id} group={item} onDisclosure={preserveChatDisclosurePosition}/>
-					const liveTaskID=liveSSHTaskOwnerByEntryID.get(item.entry.id)
-					return <ChatBubble key={item.entry.id} sessionID={sessionId} entry={item.entry} showActions={item.entry.id===latestCompletedAssistantEntryID} runs={runs} hosts={hosts} liveSSHTaskOwner={!!liveTaskID} liveSSHTask={liveTaskID?liveSSHTasks.get(liveTaskID):undefined} onDisclosure={preserveChatDisclosurePosition}/>
-				})}
-				{(sessionBusy||toolsRunning)&&<div className={`model-activity ${stopping?'stopping':''}`} role="status" aria-live="polite"><span className="model-activity-mark" aria-hidden="true">✻</span><b key={stopping||connectionRetry||modelRetry?'priority':workStatusIndex}>{workStatusLabel}</b></div>}
+				<ChatEntryList items={renderEntries} sessionID={sessionId} visible={pageVisible} targets={liveSSHTaskTargets} actionEntryID={latestCompletedAssistantEntryID} runs={runs} hosts={hosts} onDisclosure={preserveChatDisclosurePosition}/>
+				{(sessionBusy||toolsRunning)&&<ChatActivityStatus visible={pageVisible} stopping={stopping} connectionRetry={connectionRetry} modelRetry={modelRetry}/>}
 				{conversationEntries.length>0&&<div className="chat-scroll-anchor" aria-hidden="true"/>}
 			</div>
 			{tasks&&tasksExpanded&&<SessionTaskItems rows={taskRows}/>}
 		</div>
 		  <form className="composer" onSubmit={submit}>
-			  <div className="context-line"><ApprovalModeStatus settings={settings} onChanged={onSettingsChanged} onError={onError}/><ComposerHostSelector hosts={hosts} disabled={sessionBusy} rootDisabled={!!loadingSession||workspaceSwitching} onChanged={onHostChanged} onError={onError}/><div className="composer-model-controls"><button type="button" className="context-compress-button" disabled={!sessionId||sessionBusy||!!loadingSession||compressingContext} onClick={()=>void compressContext()} title={t('chat.compressContext')} aria-label={t('chat.compressContext')}>{compressingContext?<LoaderCircle className="spin" size={13}/>:<Minimize2 size={13}/>}</button><ContextUsageRing usage={contextUsage}/><ComposerReasoningSelector providers={providers} disabled={sessionBusy} onChanged={onModelChanged} onError={onError}/><ComposerModelSelector providers={providers} fallbackModel={modelName} disabled={sessionBusy} onChanged={onModelChanged} onError={onError}/></div></div>
+			  <ComposerControls sessionId={sessionId} sessionBusy={sessionBusy} loadingSession={!!loadingSession} workspaceSwitching={workspaceSwitching} compressingContext={compressingContext} settings={settings} hosts={hosts} providers={providers} modelName={modelName} contextUsage={contextUsage} onSettingsChanged={onSettingsChanged} onHostChanged={onHostChanged} onModelChanged={onModelChanged} onError={onError} onCompress={compressContext}/>
 			  {pendingImages.length>0&&<div className="composer-images">{pendingImages.map(image=><div key={image.id}><img src={image.url} alt={image.file.name}/><span title={image.file.name}>{image.file.name}</span><button type="button" onClick={()=>removePendingImage(image.id)} title={t('chat.removeImage')}><X size={11}/></button></div>)}</div>}
 			  {imageNotice&&<div className="composer-image-notice">{imageNotice}<button type="button" onClick={()=>setImageNotice('')}><X size={11}/></button></div>}
 			  <div className="input-row"><label className="image-attach-button" title={t('chat.addImages')}><ImagePlus size={18}/><input key={imageInputKey} type="file" accept={imageTypes.join(',')} multiple disabled={!agentAvailable||stopping||workspaceSwitching||!!loadingSession} onChange={event=>addImages(Array.from(event.target.files||[]))}/></label><textarea value={message} onChange={(event) => setMessage(event.target.value)} onPaste={event=>{const files=Array.from(event.clipboardData.files).filter(file=>file.type.startsWith('image/'));if(files.length)addImages(files)}} placeholder={!agentAvailable?t('chat.configureModel'):loadingSession?t('chat.loadingConversation'):sessionBusy?t('chat.steerPlaceholder'):t('chat.prompt')} disabled={!agentAvailable||stopping||workspaceSwitching||!!loadingSession} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }}/><div className="composer-send-actions">{sessionBusy&&!composerEmpty&&<button type="button" className="composer-followup-button" onClick={()=>submitMessage('followup')} disabled={!agentAvailable||stopping||queueingMessage||workspaceSwitching||!!loadingSession} title={t('chat.queueMessage')}>{queueingMode==='followup'?<LoaderCircle className="spin" size={16}/>:<><ListPlus size={16}/><span>{t('chat.followup')}</span></>}</button>}{showComposerStop?<button type="button" className="composer-stop-button" onClick={()=>void stopAgent()} disabled={stopping||!(activeStreamRef.current?.sessionId||sessionId)} title={t('chat.stopTitle')} aria-label={t('chat.stopTitle')}><Square size={15} fill="currentColor"/></button>:<button className={sessionBusy?'composer-steer-button':''} aria-label={t(sessionBusy?'chat.steerMessage':'common.next')} title={sessionBusy?t('chat.steerMessage'):undefined} disabled={!agentAvailable || stopping || queueingMessage || workspaceSwitching || !!loadingSession || composerEmpty}>{queueingMode==='steering'?<LoaderCircle className="spin" size={18}/>:sessionBusy?<><Zap size={16}/><span>{t('chat.steering')}</span></>:<Send size={18}/>}</button>}</div></div>
@@ -2145,6 +1109,17 @@ const StreamingTextNodes=memo(function StreamingTextNodes({value}:{value:StreamT
 	return <>{value.blocks.map((block,index)=><span key={index}>{block}</span>)}{value.tail&&<span key="tail">{value.tail}</span>}</>
 })
 
+const ChatEntryList=memo(function ChatEntryList({items,sessionID,visible,targets,actionEntryID,runs,hosts,onDisclosure}:{items:ChatRenderItem[];sessionID:string;visible:boolean;targets:readonly LiveSSHTaskTarget[];actionEntryID:string;runs:Run[];hosts:Host[];onDisclosure:ChatDisclosurePositionHandler}){
+	const documentVisible=useDocumentVisible()
+	const liveSSHTasks=useLiveSSHTasks(visible&&documentVisible,sessionID,targets)
+	const owners=useMemo(()=>new Map(targets.map(target=>[target.entryID,target.taskID])),[targets])
+	return <>{items.map(item=>{
+		if(item.kind==='task_tool_group')return <TaskToolGroupCard key={item.id} group={item} onDisclosure={onDisclosure}/>
+		const taskID=owners.get(item.entry.id)
+		return <ChatBubble key={item.entry.id} sessionID={sessionID} entry={item.entry} showActions={item.entry.id===actionEntryID} runs={runs} hosts={hosts} liveSSHTaskOwner={!!taskID} liveSSHTask={taskID?liveSSHTasks.get(taskID):undefined} onDisclosure={onDisclosure}/>
+	})}</>
+})
+
 const ChatBubble=memo(function ChatBubble({ sessionID, entry, showActions, runs, hosts, liveSSHTaskOwner, liveSSHTask, onDisclosure }: {sessionID:string;entry:ChatEntry;showActions:boolean;runs:Run[];hosts:Host[];liveSSHTaskOwner:boolean;liveSSHTask?:LiveSSHTaskSnapshot;onDisclosure:ChatDisclosurePositionHandler}) {
 	const {t}=useTranslation()
   if (entry.kind === 'tool') return <ToolEventCard sessionID={sessionID} entry={entry} runs={runs} hosts={hosts} liveSSHTaskOwner={liveSSHTaskOwner} currentLiveSSHTask={liveSSHTask} onDisclosure={onDisclosure}/>
@@ -2178,17 +1153,6 @@ function ReasoningCard({content,streamText,active,onDisclosure}:{content:string;
   </details>
 }
 
-type JsonRecord = Record<string,unknown>
-const toolValuePreviewChars=8<<10
-const toolOutputPreviewChars=128<<10
-const toolDiffPreviewChars=128<<10
-const toolCollectionPreviewItems=100
-const toolStructuredParseChars=512<<10
-function previewText(value:string,limit=toolValuePreviewChars){
-	if(value.length<=limit)return value
-	const edge=Math.max(1,Math.floor(limit/2))
-	return `${value.slice(0,edge)}\n… ${i18n.t('tool.previewOmitted',{count:value.length-edge*2})} …\n${value.slice(-edge)}`
-}
 function toolLabel(value:string){return i18n.t(`toolNames.${value}`,{defaultValue:value})}
 function toolSummaryIcon(name:string|undefined){
 	if(name?.startsWith('Task'))return <ListChecks size={15}/>
@@ -2201,63 +1165,8 @@ function toolSummaryIcon(name:string|undefined){
 	if(name?.startsWith('ssh_'))return name==='ssh_exec'||name==='ssh_run_script'||name==='ssh_shell'?<TerminalSquare size={15}/>:<Server size={15}/>
 	return <FunctionSquare size={15}/>
 }
-function jsonRecord(value:unknown):JsonRecord|undefined{return value!==null&&typeof value==='object'&&!Array.isArray(value)?value as JsonRecord:undefined}
-function limitedRecordEntries(value:JsonRecord,limit=toolCollectionPreviewItems){
-	const entries:Array<[string,unknown]>=[]
-	let truncated=false
-	for(const key in value){
-		if(!Object.prototype.hasOwnProperty.call(value,key))continue
-		if(entries.length>=limit){truncated=true;break}
-		entries.push([key,value[key]])
-	}
-	return{entries,truncated}
-}
-function hasRecordEntries(value:JsonRecord){for(const key in value)if(Object.prototype.hasOwnProperty.call(value,key))return true;return false}
-const liveSSHTaskTargetCache=new WeakMap<ChatEntry,LiveSSHTaskTarget|null>()
-function liveSSHTaskTarget(entry:ChatEntry){
-	if(liveSSHTaskTargetCache.has(entry))return liveSSHTaskTargetCache.get(entry)||undefined
-	let target:LiveSSHTaskTarget|undefined
-	if(entry.kind==='tool'&&entry.tool==='ssh_task'){
-		const payload=parseRecord(entry.content),result=jsonRecord(payload.result),display=jsonRecord(payload._display),argumentsValue=jsonRecord(display?.arguments)
-		if(textValue(argumentsValue?.action)==='status'){
-			const taskID=textValue(payload.task_id)||textValue(result?.task_id)||textValue(argumentsValue?.task_id)
-			if(taskID)target={entryID:entry.id,taskID,status:textValue(payload.status)||textValue(result?.status)}
-		}
-	}
-	liveSSHTaskTargetCache.set(entry,target||null)
-	return target
-}
-function latestLiveSSHTaskTargets(entries:ChatEntry[]){
-	const latest=new Map<string,LiveSSHTaskTarget>()
-	for(const entry of entries){const target=liveSSHTaskTarget(entry);if(target)latest.set(target.taskID,target)}
-	return[...latest.values()]
-}
-function previewStructuredValue(value:unknown,depth=0):unknown{
-	if(typeof value==='string')return previewText(value)
-	if(value===null||typeof value!=='object')return value
-	if(depth>=4)return'…'
-	if(Array.isArray(value)){
-		const visible=value.slice(0,toolCollectionPreviewItems).map(item=>previewStructuredValue(item,depth+1))
-		if(value.length>visible.length)visible.push(i18n.t('tool.previewItemsOmitted',{count:value.length-visible.length}))
-		return visible
-	}
-	const {entries,truncated}=limitedRecordEntries(value as JsonRecord)
-	const result=Object.fromEntries(entries.map(([key,item])=>[key,previewStructuredValue(item,depth+1)]))
-	if(truncated)result['…']=i18n.t('tool.moreItemsOmitted')
-	return result
-}
-function parseRecord(value:string):JsonRecord{
-	if(value.length>toolStructuredParseChars){
-		const envelope=value.slice(0,toolValuePreviewChars)
-		const runID=envelope.match(/"run_id"\s*:\s*"([^"\\]+)"/)?.[1]
-		const status=envelope.match(/"status"\s*:\s*"([^"\\]+)"/)?.[1]
-		return{...(runID?{run_id:runID}:{}),...(status?{status}:{}),output_limited:true,original_chars:value.length,preview:previewText(value,toolOutputPreviewChars)}
-	}
-	try{const parsed=JSON.parse(value);return jsonRecord(parsed)||{value:parsed}}catch{return{value:previewText(value,toolOutputPreviewChars)}}
-}
 function requestFromRun(run?:Run):JsonRecord|undefined{if(!run)return;try{return jsonRecord(JSON.parse(run.request_json))}catch{return}}
 function runAutoApproved(run?:Run){return run?.ai_review?.kind==='automatic_approval'&&run.ai_review.status==='completed'&&run.ai_review.decision==='allow'}
-function textValue(value:unknown){return typeof value==='string'?value:''}
 function shellArg(value:string){return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value)?value:JSON.stringify(value)}
 function fullProgram(request:JsonRecord,full=false){
 	const program=full?textValue(request.program):previewText(textValue(request.program))
@@ -2393,7 +1302,7 @@ function ToolEventCard({sessionID,entry:initialEntry,runs,hosts,liveSSHTaskOwner
 	const [detailError,setDetailError]=useState('')
 	const entry=fullContent?{...initialEntry,content:fullContent,contentTruncated:false}:initialEntry
 	useEffect(()=>{setFullContent('');setLoadingDetail(false);setDetailError('')},[initialEntry.sourceMessageId])
-	const storedPayload=parseRecord(entry.content)
+	const storedPayload=useMemo(()=>parseRecord(entry.content),[entry.content,t])
 	const storedDisplay=jsonRecord(storedPayload._display)
 	const storedToolArguments=jsonRecord(storedDisplay?.arguments)
 	const sshTaskOperation=entry.tool==='ssh_task'
@@ -2796,7 +1705,7 @@ function ApprovalDialog({
   onApproved: (result: ApprovalExecutionResult) => void;
   onNotice: (message: string) => void;
 }) {
-  const { t, i18n: instance } = useTranslation();
+  const { t } = useTranslation();
   const [note, setNote] = useState("");
   const [decisionBusy, setDecisionBusy] = useState<
     "" | "once" | "reject"
@@ -3229,173 +2138,6 @@ function ApprovalDialog({
   );
 }
 
-const maxPrivateKeyBytes = 1 << 20;
-const emptyHostForm: HostInput = {
-  name: "",
-  address: "",
-  port: 22,
-  user: "",
-  agent_enabled: true,
-  auth_type: "agent",
-  private_key: "",
-  known_hosts_file: "",
-  proxy_jump_host_id: "",
-  proxy_id: "",
-  password: "",
-  sudo_mode: "none",
-  sudo_password: "",
-};
-function authLabel(value:HostAuthType){return i18n.t(value==='agent'?'hosts.authAgent':value==='key'?'hosts.authKey':'hosts.authPassword')}
-function sudoLabel(value:HostSudoMode){return i18n.t(value==='none'?'hosts.sudoNone':value==='nopasswd'?'hosts.sudoNopasswd':'hosts.sudoPassword')}
-
-function HostsPage({ hosts, proxies, showAddresses, onToggleAddresses, refresh }: {hosts:Host[];proxies:Proxy[];showAddresses:boolean;onToggleAddresses:()=>void;refresh:()=>Promise<void>}) {
-	const {t}=useTranslation()
-	const notify=useNotifier()
-  const [showForm, setShowForm] = useState(false); const [saving,setSaving]=useState(false);const [deletingHost,setDeletingHost]=useState('')
-	const [accessBusy,setAccessBusy]=useState('')
-	const [deleteCandidate,setDeleteCandidate]=useState<Host|null>(null)
-  const [form, setForm] = useState<HostInput>(emptyHostForm)
-	const [formErrors,setFormErrors]=useState<Partial<Record<'name'|'address'|'port'|'user'|'password'|'sudo_password',string>>>({})
-	const [privateKeyName,setPrivateKeyName]=useState(''),[privateKeyError,setPrivateKeyError]=useState(''),[existingPrivateKey,setExistingPrivateKey]=useState(false),[privateKeyInputKey,setPrivateKeyInputKey]=useState(0)
-	const [hostKeys,setHostKeys]=useState<Record<string,{fingerprint:string;algorithm?:string;trusted:boolean}>>({}),[hostKeyErrors,setHostKeyErrors]=useState<Record<string,string>>({}),[hostKeyBusy,setHostKeyBusy]=useState('')
-  const editing=!!form.id
-	const resetPrivateKey=()=>{setPrivateKeyName('');setPrivateKeyError('');setExistingPrivateKey(false);setPrivateKeyInputKey(value=>value+1)}
-	const updateHostForm=<K extends keyof HostInput>(field:K,value:HostInput[K])=>{setForm(current=>({...current,[field]:value}));setFormErrors(current=>{if(!current[field as keyof typeof current])return current;const next={...current};delete next[field as keyof typeof next];return next})}
-	const openCreate=()=>{setForm(emptyHostForm);setFormErrors({});resetPrivateKey();setShowForm(true)}
-	const openEdit=(host:Host)=>{setForm({id:host.id,name:host.name,address:host.address,port:host.port,user:host.user,agent_enabled:host.agent_enabled,auth_type:host.auth_type||'agent',private_key:'',known_hosts_file:host.known_hosts_file||'',proxy_jump_host_id:host.proxy_jump_host_id||'',proxy_id:host.proxy_id||'',password:'',sudo_mode:host.sudo_mode||'none',sudo_password:''});setFormErrors({});setPrivateKeyName('');setPrivateKeyError('');setExistingPrivateKey(host.auth_type==='key'&&host.has_private_key);setPrivateKeyInputKey(value=>value+1);setShowForm(true)}
-	const setAuthType=(auth_type:HostAuthType)=>{setFormErrors(current=>({...current,password:''}));setForm(current=>({...current,auth_type,password:'',private_key:auth_type==='key'?current.private_key:''}));if(auth_type!=='key'){setPrivateKeyName('');setPrivateKeyError('');setPrivateKeyInputKey(value=>value+1)}}
-	const choosePrivateKey=async(event:React.ChangeEvent<HTMLInputElement>)=>{const selected=event.target.files?.[0];setPrivateKeyError('');if(!selected){setPrivateKeyName('');setForm(current=>({...current,private_key:''}));return}if(selected.size<=0||selected.size>maxPrivateKeyBytes){setPrivateKeyName('');setForm(current=>({...current,private_key:''}));setPrivateKeyError(t('hosts.keySizeError'));return}try{const content=await selected.text();setPrivateKeyName(selected.name);setForm(current=>({...current,private_key:content}))}catch(err){setPrivateKeyName('');setForm(current=>({...current,private_key:''}));setPrivateKeyError(errorText(err))}}
-	const missingPrivateKey=form.auth_type==='key'&&!form.private_key&&!existingPrivateKey
-	const scan = async (host:Host) => {setHostKeyBusy(`scan-${host.id}`);setHostKeyErrors(current=>({...current,[host.id]:''}));try{const key=await api.scanKey(host.id);setHostKeys(current=>({...current,[host.id]:key}))}catch(err){setHostKeyErrors(current=>({...current,[host.id]:errorText(err)}))}finally{setHostKeyBusy('')}}
-	const trust = async (host:Host) => {const key=hostKeys[host.id];if(!key||key.trusted)return;setHostKeyBusy(`trust-${host.id}`);setHostKeyErrors(current=>({...current,[host.id]:''}));try{const trusted=await api.trustKey(host.id,key.fingerprint);setHostKeys(current=>({...current,[host.id]:{...trusted,trusted:true}}));notify(t('hosts.trusted',{fingerprint:trusted.fingerprint}))}catch(err){setHostKeyErrors(current=>({...current,[host.id]:errorText(err)}))}finally{setHostKeyBusy('')}}
-	const validateHost=()=>{const errors:typeof formErrors={};if(!form.name.trim())errors.name=t('common.required');if(!form.address.trim())errors.address=t('common.required');if(!Number.isInteger(form.port)||form.port<1||form.port>65535)errors.port=t('hosts.portRange');if(!form.user.trim())errors.user=t('common.required');if(!editing&&form.auth_type==='password'&&!form.password)errors.password=t('common.required');if(!editing&&form.sudo_mode==='password'&&!form.sudo_password)errors.sudo_password=t('common.required');setFormErrors(errors);return !Object.keys(errors).length&&!missingPrivateKey&&!privateKeyError}
-	const save = async (event:FormEvent) => { event.preventDefault(); if(!validateHost())return;setSaving(true); try { const saved=await api.saveHost({...form,name:form.name.trim(),address:form.address.trim(),user:form.user.trim()}); setShowForm(false); setForm(emptyHostForm);setFormErrors({});resetPrivateKey();setHostKeys(current=>{const next={...current};delete next[saved.id];return next});setHostKeyErrors(current=>{const next={...current};delete next[saved.id];return next}); notify(t('hosts.saved',{name:saved.name,action:editing?t('hosts.updated'):t('hosts.registered')})); await refresh();void scan(saved) } catch(err){notify(errorText(err),'error')} finally{setSaving(false)} }
-	const toggleAgent=async(host:Host)=>{if(accessBusy)return;setAccessBusy(`agent-${host.id}`);try{await api.saveHost(hostInputWithAgentState(host,!host.agent_enabled));await refresh()}catch(err){notify(errorText(err),'error')}finally{setAccessBusy('')}}
-	const toggleRoot=async(host:Host)=>{if(accessBusy||!hostSupportsRoot(host))return;setAccessBusy(`root-${host.id}`);try{await api.setHostAgentRootAccess(host.id,!host.agent_root_enabled);await refresh()}catch(err){notify(errorText(err),'error')}finally{setAccessBusy('')}}
-  const probe = async (host:Host) => { try { const info = await api.probe(host.id); notify(`${host.name}: ${Object.values(info).join(' · ')}`) } catch(err){notify(errorText(err),'error')} }
-	const remove=async()=>{const host=deleteCandidate;if(!host)return;setDeletingHost(host.id);try{await api.deleteHost(host.id);notify(t('hosts.deleted',{name:host.name}));await refresh()}catch(err){notify(errorText(err),'error')}finally{setDeletingHost('');setDeleteCandidate(null)}}
-		return <div className="page-stack has-floating-actions">{!showForm&&<FloatingPageActions><AddressVisibilityButton visible={showAddresses} onToggle={onToggleAddresses}/><button className="primary" onClick={openCreate}><Plus size={16}/>{t('hosts.add')}</button></FloatingPageActions>}
-		{showForm && <ConfigurationEditorPage icon={<Server size={22}/>} title={editing?t('hosts.editTitle'):t('hosts.createTitle')} busy={saving} onBack={()=>setShowForm(false)}><form className="host-form configuration-editor-form panel" noValidate onSubmit={save}><div className="form-grid host-fields">
-	  <label className={formErrors.name?'invalid':''}><span>{t('hosts.name')}</span><input value={form.name} aria-invalid={!!formErrors.name} onChange={event=>updateHostForm('name',event.target.value)}/>{formErrors.name&&<small className="form-field-error">{formErrors.name}</small>}</label>
-	  <label className={formErrors.address?'invalid':''}><span>{t('hosts.address')}</span><input value={form.address} aria-invalid={!!formErrors.address} onChange={event=>updateHostForm('address',event.target.value)}/>{formErrors.address&&<small className="form-field-error">{formErrors.address}</small>}</label>
-	  <label className={formErrors.port?'invalid':''}><span>{t('hosts.port')}</span><input inputMode="numeric" value={form.port||''} aria-invalid={!!formErrors.port} onChange={event=>{const value=event.target.value.replace(/\D/g,'').slice(0,5);updateHostForm('port',value?Number(value):0)}}/>{formErrors.port&&<small className="form-field-error">{formErrors.port}</small>}</label>
-	  <label className={formErrors.user?'invalid':''}><span>{t('hosts.user')}</span><input value={form.user} aria-invalid={!!formErrors.user} onChange={event=>updateHostForm('user',event.target.value)}/>{formErrors.user&&<small className="form-field-error">{formErrors.user}</small>}</label>
-	  <label className="host-agent-toggle"><span>Agent</span><input type="checkbox" checked={form.agent_enabled} onChange={event=>setForm({...form,agent_enabled:event.target.checked})}/><i/></label>
-	  <label><span>{t('hosts.authentication')}</span><AppSelect value={form.auth_type} ariaLabel={t('hosts.authentication')} onChange={value=>setAuthType(value as HostAuthType)} options={(['agent','key','password'] as HostAuthType[]).map(mode=>({value:mode,label:authLabel(mode)}))}/></label>
-	  {form.auth_type==='password'&&<label className={formErrors.password?'invalid':''}><span>{t('hosts.sshPassword')}</span><PasswordInput autoComplete="new-password" value={form.password} aria-invalid={!!formErrors.password} onChange={event=>updateHostForm('password',event.target.value)} placeholder={editing?t('hosts.keepPassword'):t('common.required')}/>{formErrors.password&&<small className="form-field-error">{formErrors.password}</small>}</label>}
-	  {form.auth_type==='key'&&<div className="private-key-field"><span>{t('hosts.privateKey')}</span><label className={`private-key-picker ${privateKeyError||missingPrivateKey?'invalid':''}`} title={privateKeyName||t('hosts.chooseKey')}><UploadCloud size={15}/><span><b>{privateKeyName||(existingPrivateKey?t('hosts.storedKey'):t('hosts.choosePrivateKey'))}</b>{!privateKeyName&&!existingPrivateKey&&<small>{t('hosts.keyLimit')}</small>}</span><input key={privateKeyInputKey} type="file" onChange={event=>void choosePrivateKey(event)}/></label>{(privateKeyError||missingPrivateKey)&&<small className="private-key-error">{privateKeyError||t('hosts.keyRequired')}</small>}</div>}
-	  <label><span>{t('hosts.proxyJump')}</span><AppSelect value={form.proxy_jump_host_id} ariaLabel={t('hosts.proxyJump')} onChange={value=>updateHostForm('proxy_jump_host_id',value)} options={[{value:'',label:t('hosts.direct')},...hosts.filter(host=>host.id!==form.id).map(host=>({value:host.id,label:`${host.name} · ${host.user}@${host.address}:${host.port}`}))]}/></label>
-	  <label><span>{t('common.proxy')}</span><AppSelect value={form.proxy_id} ariaLabel={t('common.proxy')} onChange={value=>updateHostForm('proxy_id',value)} options={[{value:'',label:t('hosts.direct')},...proxies.filter(proxy=>proxy.ssh_compatible).map(proxy=>({value:proxy.id,label:`${proxy.name} · ${proxy.url}`}))]}/></label>
-	  <label><span>{t('hosts.knownHosts')}</span><input value={form.known_hosts_file} onChange={event=>setForm({...form,known_hosts_file:event.target.value})} placeholder={t('hosts.useDefault')}/></label>
-	  <label><span>{t('hosts.sudoPolicy')}</span><AppSelect value={form.sudo_mode} ariaLabel={t('hosts.sudoPolicy')} onChange={value=>{setFormErrors(current=>({...current,sudo_password:''}));setForm({...form,sudo_mode:value as HostSudoMode,sudo_password:''})}} options={(['none','nopasswd','password'] as HostSudoMode[]).map(mode=>({value:mode,label:sudoLabel(mode)}))}/></label>
-	  {form.sudo_mode==='password'&&<label className={formErrors.sudo_password?'invalid':''}><span>{t('hosts.sudoPasswordLabel')}</span><PasswordInput autoComplete="new-password" value={form.sudo_password} aria-invalid={!!formErrors.sudo_password} onChange={event=>updateHostForm('sudo_password',event.target.value)} placeholder={editing?t('hosts.keepPassword'):t('common.required')}/>{formErrors.sudo_password&&<small className="form-field-error">{formErrors.sudo_password}</small>}</label>}
-		</div><div className="form-actions"><button type="button" onClick={()=>setShowForm(false)}>{t('common.cancel')}</button><button className="primary" disabled={saving||!!privateKeyError||missingPrivateKey}>{saving?t('common.saving'):editing?t('hosts.update'):t('hosts.save')}</button></div></form></ConfigurationEditorPage>}
-		{!showForm&&<div className="host-grid">{hosts.map(host=>{const key=hostKeys[host.id]||host.host_key,keyError=hostKeyErrors[host.id],scanning=hostKeyBusy===`scan-${host.id}`,trusting=hostKeyBusy===`trust-${host.id}`,proxy=proxies.find(item=>item.id===host.proxy_id),rootAvailable=hostSupportsRoot(host),agentLabel=`${t('common.agent')} · ${t(host.agent_enabled?'common.enabled':'common.disabled')}`,rootLabel=rootAvailable?`${t('chat.rootAccess')} · ${t(host.agent_root_enabled?'common.enabled':'common.disabled')}`:`${t('chat.rootAccess')} · ${t('common.unavailable')}`;return <article className="host-card panel" key={host.id}><div className="host-top"><div className="server-glyph"><Server size={22}/></div><div><h3>{host.name}</h3><span>{`${host.user}@${showAddresses?host.address:'••••••'}:${host.port}`}</span></div><div className="host-top-states"><button type="button" className={`host-agent-state ${host.agent_enabled?'active':''}`} disabled={!!accessBusy} aria-label={agentLabel} aria-pressed={host.agent_enabled} title={agentLabel} onClick={()=>void toggleAgent(host)}>{accessBusy===`agent-${host.id}`?<LoaderCircle className="spin" size={13}/>:<Bot size={13}/>}</button><button type="button" className={`host-root-state ${host.agent_root_enabled?'active':''}`} disabled={!!accessBusy||!rootAvailable} aria-label={rootLabel} aria-pressed={host.agent_root_enabled} title={rootLabel} onClick={()=>void toggleRoot(host)}>{accessBusy===`root-${host.id}`?<LoaderCircle className="spin" size={13}/>:<ShieldAlert size={13}/>}</button><span className={`host-key-state ${key?.trusted?'trusted':key?'untrusted':'unchecked'}`}>{scanning?t('hosts.checkingKey'):key?.trusted?t('hosts.trustedKey'):key?t('hosts.untrustedKey'):t('hosts.uncheckedKey')}</span></div></div><dl><div><dt>{t('hosts.authentication')}</dt><dd>{authLabel(host.auth_type||'agent')}</dd></div>{proxy&&<div><dt>{t('hosts.proxy')}</dt><dd title={showAddresses?proxy.url:undefined}>{proxy.name}</dd></div>}<div><dt>{t('hosts.sudoPolicy')}</dt><dd>{sudoLabel(host.sudo_mode||'none')}</dd></div><div><dt>{t('hosts.hostId')}</dt><dd>{host.id}</dd></div></dl>{(key||keyError)&&<div className={`host-key-review ${key?.trusted?'trusted':'untrusted'}`}>{key&&<><div><KeyRound size={14}/><span><b>{key.algorithm||t('hosts.hostKey')}</b><code title={key.fingerprint}>{key.fingerprint}</code></span></div>{!key.trusted&&<button className="trust" disabled={trusting} onClick={()=>void trust(host)}>{trusting?<LoaderCircle className="spin" size={13}/>:<ShieldCheck size={13}/>} {trusting?t('hosts.trustingKey'):t('hosts.trustKey')}</button>}</>}{keyError&&<span className="host-key-error">{keyError}</span>}</div>}<div className="card-actions"><button onClick={()=>void probe(host)}><Activity size={15}/>{t('hosts.probe')}</button><button disabled={scanning||trusting} onClick={()=>void scan(host)}>{scanning?<LoaderCircle className="spin" size={15}/>:<KeyRound size={15}/>} {t('hosts.checkKey')}</button><button onClick={()=>openEdit(host)}><Edit3 size={15}/>{t('common.edit')}</button><button className="danger" disabled={deletingHost===host.id} title={t('common.delete')} onClick={()=>setDeleteCandidate(host)}>{deletingHost===host.id?<LoaderCircle className="spin" size={15}/>:<Trash2 size={15}/>}</button></div></article>})}</div>}
-	{!showForm&&!hosts.length && <Empty icon={<Server/>} title={t('hosts.emptyTitle')}/>}
-	{deleteCandidate&&<DestructiveConfirmDialog title={t('hosts.deleteTitle',{name:deleteCandidate.name})} busy={deletingHost===deleteCandidate.id} onCancel={()=>setDeleteCandidate(null)} onConfirm={()=>void remove()}/>}
-  </div>
-}
-
-const emptyProxyForm:ProxyInput={name:'',url:'',username:'',password:''}
-
-function ProxiesPage({proxies,showAddresses,onToggleAddresses,refresh}:{proxies:Proxy[];showAddresses:boolean;onToggleAddresses:()=>void;refresh:()=>Promise<void>}){
-	const {t,i18n:instance}=useTranslation()
-	const notify=useNotifier()
-	const [form,setForm]=useState<ProxyInput>(emptyProxyForm)
-	const [showForm,setShowForm]=useState(false)
-	const [busy,setBusy]=useState('')
-	const [formErrors,setFormErrors]=useState<Partial<Record<'name'|'url',string>>>({})
-	const [deleteCandidate,setDeleteCandidate]=useState<Proxy|null>(null)
-	const editing=!!form.id
-	const editingProxy=proxies.find(proxy=>proxy.id===form.id)
-	const preservesPassword=!!editingProxy?.has_password&&form.username===(editingProxy.username||'')&&!form.clear_password
-	const updateProxyForm=<K extends keyof ProxyInput>(field:K,value:ProxyInput[K])=>{setForm(current=>({...current,[field]:value}));setFormErrors(current=>{if(!current[field as keyof typeof current])return current;const next={...current};delete next[field as keyof typeof next];return next})}
-	const openCreate=()=>{setForm(emptyProxyForm);setFormErrors({});setShowForm(true)}
-	const openEdit=(proxy:Proxy)=>{setForm({id:proxy.id,name:proxy.name,url:proxy.url,username:proxy.username||'',password:''});setFormErrors({});setShowForm(true)}
-	const validateProxy=()=>{const errors:typeof formErrors={};if(!form.name.trim())errors.name=t('common.required');if(!form.url.trim())errors.url=t('common.required');else try{const url=new URL(form.url);if(!url.hostname)errors.url=t('proxies.invalidUrl')}catch{errors.url=t('proxies.invalidUrl')}setFormErrors(errors);return !Object.keys(errors).length}
-	const save=async(event:FormEvent)=>{event.preventDefault();if(!validateProxy())return;setBusy('save');try{const saved=await api.saveProxy({...form,name:form.name.trim(),url:form.url.trim()});notify(t('proxies.saved',{name:saved.name}));setForm(emptyProxyForm);setFormErrors({});setShowForm(false);await refresh()}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
-	const test=async(proxy:Proxy)=>{setBusy(`test-${proxy.id}`);try{const result=await api.testProxy(proxy.id);notify(t('proxies.testPassed',{name:proxy.name,status:result.status_code||0,latency:result.latency_ms}))}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
-	const remove=async()=>{const proxy=deleteCandidate;if(!proxy)return;setBusy(`delete-${proxy.id}`);try{await api.deleteProxy(proxy.id);notify(t('proxies.deleted',{name:proxy.name}));if(form.id===proxy.id){setForm(emptyProxyForm);setShowForm(false)}await refresh()}catch(err){notify(errorText(err),'error')}finally{setBusy('');setDeleteCandidate(null)}}
-	return <div className="page-stack has-floating-actions">
-		{!showForm&&<FloatingPageActions><AddressVisibilityButton visible={showAddresses} onToggle={onToggleAddresses}/><button className="primary" onClick={openCreate}><Plus size={16}/>{t('proxies.add')}</button></FloatingPageActions>}
-		{showForm&&<ConfigurationEditorPage icon={<Cable size={22}/>} title={editing?t('proxies.editTitle'):t('proxies.createTitle')} busy={busy==='save'} onBack={()=>setShowForm(false)}><form className="proxy-form configuration-editor-form panel" noValidate onSubmit={save}><div className="form-grid proxy-fields"><label className={formErrors.name?'invalid':''}><span>{t('proxies.name')}</span><input value={form.name} maxLength={128} aria-invalid={!!formErrors.name} onChange={event=>updateProxyForm('name',event.target.value)}/>{formErrors.name&&<small className="form-field-error">{formErrors.name}</small>}</label><label className={`proxy-address-field ${formErrors.url?'invalid':''}`}><span>{t('proxies.url')}</span><input value={form.url} aria-invalid={!!formErrors.url} onChange={event=>updateProxyForm('url',event.target.value)} placeholder="socks5://127.0.0.1:1080"/>{formErrors.url&&<small className="form-field-error">{formErrors.url}</small>}</label><label><span>{t('proxies.username')}</span><input autoComplete="off" value={form.username} onChange={event=>setForm({...form,username:event.target.value,password:event.target.value?form.password:'',clear_password:false})}/></label><label><span>{t('proxies.password')}</span><PasswordInput autoComplete="new-password" value={form.password} disabled={!form.username} onChange={event=>setForm({...form,password:event.target.value,clear_password:false})} placeholder={preservesPassword?t('proxies.keepPassword'):''}/>{preservesPassword&&<small><button type="button" onClick={()=>setForm({...form,password:'',clear_password:true})}>{t('proxies.clearPassword')}</button></small>}</label></div><div className="form-actions"><button type="button" onClick={()=>setShowForm(false)}>{t('common.cancel')}</button><button className="primary" disabled={busy==='save'}>{busy==='save'?t('common.saving'):t('common.save')}</button></div></form></ConfigurationEditorPage>}
-		{!showForm&&<div className="proxy-grid">{proxies.map(proxy=><article className="proxy-card panel" key={proxy.id}><div className="proxy-card-head"><div><Cable size={20}/></div><span><h3>{proxy.name}</h3><code>{showAddresses?proxy.url:'••••••'}</code></span>{proxy.ssh_compatible&&<em>SSH</em>}</div><dl><div><dt>{t('proxies.authentication')}</dt><dd>{proxy.username?`${proxy.username}${proxy.has_password?` · ${t('proxies.passwordSaved')}`:''}`:t('proxies.noAuthentication')}</dd></div><div><dt>{t('common.updated')}</dt><dd>{new Date(proxy.updated_at).toLocaleString(localeFor(instance.language))}</dd></div></dl><div className="card-actions"><button disabled={!!busy} onClick={()=>void test(proxy)}>{busy===`test-${proxy.id}`?<LoaderCircle className="spin" size={14}/>:<Activity size={14}/>} {t('common.test')}</button><button disabled={!!busy} onClick={()=>openEdit(proxy)}><Edit3 size={14}/>{t('common.edit')}</button><button className="danger" disabled={!!busy} title={t('common.delete')} onClick={()=>setDeleteCandidate(proxy)}><Trash2 size={14}/></button></div></article>)}</div>}
-		{!showForm&&!proxies.length&&<Empty icon={<Cable/>} title={t('proxies.emptyTitle')}/>}
-		{deleteCandidate&&<DestructiveConfirmDialog title={t('proxies.deleteTitle',{name:deleteCandidate.name})} busy={busy===`delete-${deleteCandidate.id}`} onCancel={()=>setDeleteCandidate(null)} onConfirm={()=>void remove()}/>}
-	</div>
-}
-
-const emptyProviderForm: ModelProviderInput = {name:'',kind:'openai',base_url:'',model:'gpt-4o-mini',context_window:null,reasoning_effort:'',api_key:'',proxy_id:'',user_agent:''}
-const providerLabels: Record<ModelProviderKind,string> = {
-  openai: 'OpenAI', deepseek: 'DeepSeek', anthropic: 'Anthropic', openai_compatible: 'OpenAI-compatible', ollama: 'Ollama',
-}
-const providerDefaults: Record<ModelProviderKind,Pick<ModelProviderInput,'base_url'|'model'>> = {
-  openai: {base_url:'',model:'gpt-4o-mini'},
-  deepseek: {base_url:'https://api.deepseek.com',model:'deepseek-v4-flash'},
-  anthropic: {base_url:'https://api.anthropic.com',model:'claude-opus-4-8'},
-  openai_compatible: {base_url:'',model:''},
-  ollama: {base_url:'http://127.0.0.1:11434/v1',model:''},
-}
-
-function ModelsPage({providers,proxies,showAddresses,onToggleAddresses,refresh}:{providers:ModelProvider[];proxies:Proxy[];showAddresses:boolean;onToggleAddresses:()=>void;refresh:()=>Promise<void>}) {
-	const {t,i18n:instance}=useTranslation()
-	const notify=useNotifier()
-  const [showForm,setShowForm]=useState(false)
-	  const [form,setForm]=useState<ModelProviderInput>(emptyProviderForm)
-	  const [busy,setBusy]=useState('')
-	  const [testing,setTesting]=useState<Set<string>>(()=>new Set())
-		const [deleteCandidate,setDeleteCandidate]=useState<ModelProvider|null>(null)
-  const [catalog,setCatalog]=useState<ModelCatalog|null>(null)
-  const [discovering,setDiscovering]=useState(false)
-	const [formErrors,setFormErrors]=useState<Partial<Record<'name'|'model'|'context_window',string>>>({})
-  const editing=!!form.id
-
-	const updateForm=<K extends keyof ModelProviderInput>(field:K,value:ModelProviderInput[K])=>{setForm(current=>({...current,[field]:value}));setFormErrors(current=>{if(!current[field as keyof typeof current])return current;const next={...current};delete next[field as keyof typeof next];return next})}
-  const openCreate=()=>{setForm(emptyProviderForm);setCatalog(null);setFormErrors({});setShowForm(true)}
-	const openEdit=(provider:ModelProvider)=>{setForm({id:provider.id,name:provider.name,kind:provider.kind,base_url:provider.base_url||'',model:provider.model,context_window:provider.context_window||null,reasoning_effort:provider.reasoning_effort||'',api_key:'',proxy_id:provider.proxy_id||'',user_agent:provider.user_agent||''});setCatalog(null);setFormErrors({});setShowForm(true)}
-	const changeKind=(kind:ModelProviderKind)=>{setCatalog(null);setFormErrors({});setForm({...form,kind,context_window:null,...providerDefaults[kind]})}
-	const discover=async()=>{setDiscovering(true);try{const {name:_name,model:_model,context_window:_contextWindow,reasoning_effort:_reasoningEffort,...payload}=form;const result=await api.discoverModels(payload);setCatalog(result);setForm(current=>({...current,model:result.models.includes(current.model)?current.model:''}));notify(t('models.found',{count:result.count}))}catch(err){setCatalog(null);notify(errorText(err),'error')}finally{setDiscovering(false)}}
-	const selectedMetadata=catalog?.metadata?.[form.model]
-		const setTestRunning=(key:string,running:boolean)=>setTesting(current=>{const next=new Set(current);if(running)next.add(key);else next.delete(key);return next})
-		const testForm=async()=>{const key='form';setTestRunning(key,true);try{const {name:_name,context_window:_contextWindow,...payload}=form;const result=await api.testModelConfiguration(payload);notify(t('models.healthy',{name:result.model,response:result.response,latency:result.latency_ms}))}catch(err){notify(errorText(err),'error')}finally{setTestRunning(key,false)}}
-	const validate=()=>{const errors:typeof formErrors={};if(!form.name.trim())errors.name=t('common.required');if(!form.model.trim())errors.model=t('common.required');if(form.context_window!==null&&(form.context_window<1024||form.context_window>10_000_000))errors.context_window=t('models.contextRange');setFormErrors(errors);return !Object.keys(errors).length}
-	const save=async(event:FormEvent)=>{event.preventDefault();if(!validate())return;setBusy('save');try{const saved=await api.saveModelProvider({...form,name:form.name.trim(),model:form.model.trim(),context_window:form.context_window??0});notify(t('models.saved',{name:saved.name}));setShowForm(false);setForm(emptyProviderForm);setFormErrors({});await refresh()}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
-	const activate=async(provider:ModelProvider)=>{setBusy(provider.id);try{await api.activateModelProvider(provider.id);notify(t('models.activated',{name:provider.name}));await refresh()}catch(err){notify(errorText(err),'error')}finally{setBusy('')}}
-		const test=async(provider:ModelProvider)=>{setTestRunning(provider.id,true);try{const result=await api.testModelProvider(provider.id);notify(t('models.healthy',{name:provider.name,response:result.response,latency:result.latency_ms}))}catch(err){notify(errorText(err),'error')}finally{setTestRunning(provider.id,false)}}
-	const remove=async()=>{const provider=deleteCandidate;if(!provider)return;setBusy(`delete-${provider.id}`);try{await api.deleteModelProvider(provider.id);notify(t('models.deleted',{name:provider.name}));await refresh()}catch(err){notify(errorText(err),'error')}finally{setBusy('');setDeleteCandidate(null)}}
-
-  return <div className="page-stack has-floating-actions">
-	{!showForm&&<FloatingPageActions><AddressVisibilityButton visible={showAddresses} onToggle={onToggleAddresses}/><button className="primary" onClick={openCreate}><Plus size={16}/>{t('models.add')}</button></FloatingPageActions>}
-    {showForm&&<ConfigurationEditorPage icon={<Cpu size={22}/>} title={editing?t('models.editTitle'):t('models.newTitle')} busy={!!busy} onBack={()=>setShowForm(false)}><form className="model-form configuration-editor-form panel" noValidate onSubmit={save}>
-      <div className="form-grid model-fields">
-		<label className={formErrors.name?'invalid':''}><span>{t('models.displayName')}</span><input value={form.name} aria-invalid={!!formErrors.name} onChange={event=>updateForm('name',event.target.value)}/>{formErrors.name&&<small className="form-field-error">{formErrors.name}</small>}</label>
-		<label><span>{t('models.providerType')}</span><AppSelect value={form.kind} ariaLabel={t('models.providerType')} onChange={value=>changeKind(value as ModelProviderKind)} options={(Object.keys(providerLabels) as ModelProviderKind[]).map(kind=>({value:kind,label:providerLabels[kind]}))}/></label>
-		<label className={`model-id-field ${formErrors.model?'invalid':''}`}><span className="field-title"><span>{t('models.modelId')}</span><button type="button" onClick={discover} disabled={discovering}><RefreshCw size={12}/>{discovering?t('models.fetching'):t('models.fetchModels')}</button></span><ModelCombobox value={form.model} models={catalog?.models||[]} metadata={catalog?.metadata} onChange={value=>updateForm('model',value)} placeholder={t('models.modelPlaceholder')} ariaLabel={t('models.modelId')} invalid={!!formErrors.model}/>{formErrors.model&&<small className="form-field-error">{formErrors.model}</small>}</label>
-			<label><span>{t('models.reasoningEffort')}</span><AppSelect value={form.reasoning_effort||'—'} ariaLabel={t('models.reasoningEffort')} onChange={value=>updateForm('reasoning_effort',value as ModelProviderInput['reasoning_effort'])} options={reasoningEfforts.map(value=>({value,label:value}))}/></label>
-			<label className={formErrors.context_window?'invalid':''}><span>{t('models.contextWindow')}</span><input inputMode="numeric" value={form.context_window??''} aria-invalid={!!formErrors.context_window} onChange={event=>{const value=event.target.value.replace(/\D/g,'').slice(0,8);updateForm('context_window',value?Number(value):null)}} placeholder={selectedMetadata?.context_window?compactTokenCount(selectedMetadata.context_window):t('models.contextAuto')}/>{formErrors.context_window&&<small className="form-field-error">{formErrors.context_window}</small>}</label>
-			<label><span>{t('models.apiKey')}</span><PasswordInput autoComplete="new-password" value={form.api_key} onChange={event=>{setCatalog(null);setForm({...form,api_key:event.target.value})}} placeholder={editing?t('models.keepKey'):''}/></label>
-			<label className="base-url-field"><span>{t('models.baseUrl')}</span><input value={form.base_url} onChange={event=>{setCatalog(null);setForm({...form,base_url:event.target.value})}} placeholder={form.kind==='openai'?t('models.officialEndpoint'):''}/></label>
-			<label><span>{t('models.userAgent')}</span><input value={form.user_agent} onChange={event=>{setCatalog(null);setForm({...form,user_agent:event.target.value})}} placeholder={t('models.userAgentHint')}/></label>
-			<label className="proxy-select-field"><span>{t('common.proxy')}</span><AppSelect value={form.proxy_id} ariaLabel={t('common.proxy')} onChange={value=>{setCatalog(null);updateForm('proxy_id',value)}} options={[{value:'',label:t('common.direct')},...proxies.map(proxy=>({value:proxy.id,label:`${proxy.name} · ${proxy.url}`}))]}/></label>
-      </div>
-		  <div className="form-actions"><button type="button" onClick={()=>setShowForm(false)}>{t('common.cancel')}</button><button type="button" className="test-config" onClick={testForm} disabled={!!busy||testing.has('form')||!form.model}><Activity size={14}/>{testing.has('form')?t('models.sendingHello'):t('models.testModel')}</button><button className="primary" disabled={!!busy}>{busy==='save'?t('common.saving'):t('models.saveProvider')}</button></div>
-    </form></ConfigurationEditorPage>}
-    {!showForm&&<div className="model-grid">{providers.map(provider=>{const proxy=proxies.find(item=>item.id===provider.proxy_id);const contextWindow=provider.context_window||provider.resolved_context_window||0;return <article className={`model-card panel ${provider.active?'active':''}`} key={provider.id}>
-	  <div className="model-card-head"><div className="provider-glyph"><Cpu size={21}/></div><div><h3>{provider.name}</h3><span>{providerLabels[provider.kind]}</span></div>{provider.active&&<em><Zap size={12}/>{t('models.active')}</em>}</div>
-      <div className="model-name">{provider.model}</div>
-	  <dl><div><dt>{t('models.endpoint')}</dt><dd>{provider.base_url?(showAddresses?provider.base_url:'••••••'):t('models.providerDefault')}</dd></div><div><dt>{t('models.contextWindow')}</dt><dd>{contextWindow?compactTokenCount(contextWindow):t('models.contextAuto')}</dd></div><div><dt>{t('models.proxy')}</dt><dd title={showAddresses?proxy?.url:undefined}>{proxy?.name||t('models.noProxy')}</dd></div>{provider.user_agent&&<div><dt>{t('models.userAgent')}</dt><dd>{provider.user_agent}</dd></div>}<div><dt>{t('models.credential')}</dt><dd>{provider.has_api_key?t('models.encryptedKey'):t('models.noApiKey')}</dd></div><div><dt>{t('common.updated')}</dt><dd>{new Date(provider.updated_at).toLocaleString(localeFor(instance.language))}</dd></div></dl>
-		  <div className="model-actions"><button onClick={()=>test(provider)} disabled={!!busy||testing.has(provider.id)}><Activity size={14}/>{testing.has(provider.id)?t('common.testing'):t('common.test')}</button><button onClick={()=>openEdit(provider)} disabled={!!busy}><Edit3 size={14}/>{t('common.edit')}</button>{!provider.active&&<button className="use-model" onClick={()=>activate(provider)} disabled={!!busy}><Zap size={14}/>{busy===provider.id?t('models.switching'):t('models.useModel')}</button>}<button className="danger" title={t('common.delete')} onClick={()=>setDeleteCandidate(provider)} disabled={!!busy}><Trash2 size={14}/></button></div>
-    </article>})}</div>}
-		{!showForm&&!providers.length&&<Empty icon={<Cpu/>} title={t('models.emptyTitle')}/>}
-		{deleteCandidate&&<DestructiveConfirmDialog
-			title={t('models.deleteTitle',{name:deleteCandidate.name})}
-			busy={busy===`delete-${deleteCandidate.id}`}
-			onCancel={()=>setDeleteCandidate(null)}
-			onConfirm={()=>void remove()}
-		/>}
-  </div>
-}
-
 function AuditRunDetail({run,req,hosts}:{run:Run;req:JsonRecord;hosts:Host[]}){
 	const {t}=useTranslation()
 	const [requestExpanded,setRequestExpanded]=useState(false)
@@ -3721,67 +2463,6 @@ function MCPRunEvidence({runID,hosts}:{runID:string;hosts:Host[]}){
 	return <details className="mcp-run-evidence" onToggle={event=>{if(event.currentTarget.open)void load()}}><summary><History size={14}/><span>{t('audit.runEvidence')}</span><code>{runID}</code><ChevronRight size={14}/></summary><div>{loading?<div className="audit-loading" role="status"><LoaderCircle className="spin" size={14}/><span>{t('common.loading')}</span></div>:error?<div className="inline-error">{error}</div>:detail&&<AuditRunDetail run={detail} req={requestFromRun(detail)||{request:detail.request_json}} hosts={hosts}/>}</div></details>
 }
 
-function logFieldValue(value:unknown){
-  if(value===null||value===undefined)return'—'
-  if(typeof value==='object')return JSON.stringify(value)
-  return String(value)
-}
 
-function LogsPage(){
-	const {t,i18n:instance}=useTranslation()
-  const [entries,setEntries]=useState<ServerLogEntry[]>([])
-  const [components,setComponents]=useState<string[]>([])
-  const [minimumLevel,setMinimumLevel]=useState('debug')
-  const [logFile,setLogFile]=useState('')
-  const [level,setLevel]=useState('debug')
-  const [component,setComponent]=useState('')
-  const [query,setQuery]=useState('')
-  const [live,setLive]=useState(true)
-  const [loading,setLoading]=useState(false)
-  const [logError,setLogError]=useState('')
-  const refreshLogs=useCallback(async(silent=false)=>{
-    if(!silent)setLoading(true)
-    try{const result=await api.logs({level,component,q:query,limit:500});setEntries(result.entries||[]);setComponents(result.components||[]);setMinimumLevel(result.minimum_level||'debug');setLogFile(result.file||'');setLogError('')}
-    catch(err){setLogError(errorText(err))}
-    finally{if(!silent)setLoading(false)}
-  },[level,component,query])
-  useEffect(()=>{
-	if(!live){void refreshLogs();return}
-	setLoading(true)
-	return subscribeApplicationEvents<ApplicationLogPayload>('logs',event=>{
-		if(event.type==='error'){setLogError(event.error||'Live log stream failed');setLoading(false);return}
-		if(event.type!=='event'||!event.data)return
-		const result=event.data
-		setEntries(current=>event.mode==='delta'?[...(result.entries||[]),...current].slice(0,500):result.entries||[])
-		if(event.mode==='snapshot'){
-			setComponents(result.components||[]);setMinimumLevel(result.minimum_level||'debug');setLogFile(result.file||'')
-		}else{
-			setComponents(current=>{const added=(result.entries||[]).map(entry=>entry.component).filter((value):value is string=>!!value&&!current.includes(value));return added.length?[...current,...new Set(added)].sort():current})
-		}
-		setLogError('');setLoading(false)
-	},{logs:{level,component,q:query,limit:500}})
-  },[component,level,live,query,refreshLogs])
-  return <div className="logs-page page-stack">
-    <div className="logs-toolbar panel">
-	  <div className="search-box"><Search size={16}/><input value={query} onChange={event=>setQuery(event.target.value)} placeholder={t('logs.search')}/></div>
-	  <label><span>{t('logs.minimumLevel')}</span><AppSelect value={level} ariaLabel={t('logs.minimumLevel')} onChange={setLevel} options={['debug','info','warn','error'].map(value=>({value,label:value==='error'?'Error':`${value[0].toUpperCase()}${value.slice(1)}+`}))}/></label>
-	  <label><span>{t('logs.component')}</span><AppSelect value={component} ariaLabel={t('logs.component')} onChange={setComponent} options={[{value:'',label:t('logs.allComponents')},...components.map(value=>({value,label:value}))]}/></label>
-	  <button className={`live-toggle ${live?'active':''}`} onClick={()=>setLive(value=>!value)}><CircleDot size={13}/>{live?t('logs.live'):t('logs.paused')}</button>
-	  <button className="log-refresh" onClick={()=>void refreshLogs()} disabled={loading}><RefreshCw size={14} className={loading?'spin':''}/>{loading?t('common.loading'):t('common.refresh')}</button>
-	  <a className="log-export" href="/api/v1/logs/export" download><Download size={14}/>{t('logs.export')}</a>
-    </div>
-	<div className="logs-meta"><span>{t('logs.entries',{count:entries.length})}</span><span>{logFile?t('logs.file',{file:logFile}):t('logs.fileDisabled')}</span></div>
-	{minimumLevel!=='debug'&&level==='debug'&&<div className="log-hint"><ShieldAlert size={15}/><span>{t('logs.debugHint')}</span></div>}
-    {logError&&<div className="history-error panel">{logError}</div>}
-    <div className="log-stream panel">
-	  <div className="log-row log-head"><span>{t('logs.columns.time')}</span><span>{t('logs.columns.level')}</span><span>{t('logs.columns.component')}</span><span>{t('logs.columns.event')}</span></div>
-	  {entries.map((entry,index)=><div className={`log-row log-entry ${entry.level}`} key={`${entry.time}_${index}`}><time>{new Date(entry.time).toLocaleTimeString(localeFor(instance.language),{hour12:false,fractionalSecondDigits:3})}</time><span><i className={`log-level ${entry.level}`}>{entry.level}</i></span><code className="log-component">{entry.component||t('logs.general')}</code><div className="log-event"><b>{entry.message}</b>{entry.fields&&Object.keys(entry.fields).length>0&&<div className="log-fields">{Object.entries(entry.fields).map(([key,value])=><span key={key}><em>{key}</em><code title={logFieldValue(value)}>{logFieldValue(value)}</code></span>)}</div>}</div></div>)}
-		  {!entries.length&&!logError&&<Empty icon={<FileText/>} title={t('logs.emptyTitle')}/>}
-    </div>
-  </div>
-}
-
-function Empty({icon,title,text}:{icon:React.ReactNode;title:string;text?:string}){return <div className="empty-state"><div>{icon}</div><h2>{title}</h2>{text&&<p>{text}</p>}</div>}
-function pretty(value:string){try{return JSON.stringify(JSON.parse(value),null,2)}catch{return value}}
 
 export default App
