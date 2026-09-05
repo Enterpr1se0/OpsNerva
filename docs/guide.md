@@ -34,15 +34,15 @@ flowchart LR
 
 ### 桌面 App
 
-桌面版适用于 Windows 和 Linux。Tauri 会启动内置 Go sidecar，等待本地服务就绪后再显示主界面；再次启动只会聚焦已有窗口。后端仅监听随机的 `127.0.0.1` 端口。启用 MCP Server Mode 后，关闭窗口会隐藏到托盘，“轻量模式”会销毁窗口和 WebView，sidecar 与 MCP Endpoint 继续运行；通过托盘图标或菜单重新创建窗口，选择“退出”才会结束服务。未启用 MCP Server Mode 时关闭窗口会直接退出。
+桌面版适用于 Windows 和 Linux。Tauri 会启动内置 Go sidecar，等待本地服务就绪后再显示主界面；再次启动只会聚焦已有窗口。后端仅监听随机的 `127.0.0.1` 端口。关闭窗口会隐藏到托盘；可从设置或托盘右键菜单进入“轻量模式”，销毁窗口和 WebView，同时保持 sidecar 及已启用的 MCP Endpoint 运行。通过托盘图标或菜单可重新创建窗口，选择“退出”才会结束服务。
 
 首次启动会在安装目录创建 `config.yaml`、`data/` 和 `workspace/`，然后直接进入 App。
 
 从源码构建需要 Go 1.26+、Node.js 22.13+ 和 Rust stable。Windows 生成 NSIS 安装包：
 
 ```powershell
-npm --prefix web install
-npm --prefix web run desktop:build
+pnpm --dir web install --frozen-lockfile
+pnpm --dir web run desktop:build
 ```
 
 Linux 还需要 Tauri 的 WebKitGTK 系统依赖。Ubuntu 22.04 可使用：
@@ -50,8 +50,8 @@ Linux 还需要 Tauri 的 WebKitGTK 系统依赖。Ubuntu 22.04 可使用：
 ```bash
 sudo apt-get update
 sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev patchelf
-npm --prefix web install
-npm --prefix web run desktop:build
+pnpm --dir web install --frozen-lockfile
+pnpm --dir web run desktop:build
 ```
 
 产物分别位于 `web/src-tauri/target/release/bundle/nsis/` 和 `web/src-tauri/target/release/bundle/{appimage,deb}/`。推送 `v*` 标签会构建 Windows x64 与 Linux x64 安装包并自动发布到 GitHub Release；手动运行 `Desktop packages` 工作流也会生成相同安装包（仅上传 workflow artifacts）。
@@ -59,7 +59,7 @@ npm --prefix web run desktop:build
 桌面开发模式：
 
 ```bash
-npm --prefix web run desktop:dev
+pnpm --dir web run desktop:dev
 ```
 
 ### 服务端 / Docker
@@ -82,7 +82,7 @@ docker run --rm -e OPSNERVA_LISTEN=0.0.0.0 -p 127.0.0.1:8080:8080 \
 
 - Git
 - Go 1.26+
-- Node.js 22.13+（包含 npm）
+- Node.js 22.13+ 与 pnpm 11
 - 一个支持 Tool Calling 的 OpenAI 兼容模型
 
 Linux / macOS 的快捷构建命令还需要 `make`。内置 SSH 不依赖系统中的 `ssh` 命令。Bubblewrap 仅用于 Linux 上的 Workspace Shell 沙箱，不影响服务启动和 SSH 功能。
@@ -105,8 +105,8 @@ Windows 不需要安装 `make`：
 ```powershell
 git clone https://github.com/Enterpr1se0/opsnerva.git
 Set-Location opsnerva
-npm --prefix web install
-npm --prefix web run build
+pnpm --dir web install --frozen-lockfile
+pnpm --dir web run build
 New-Item -ItemType Directory -Force bin | Out-Null
 go build -buildvcs=false -trimpath -ldflags="-s -w" -o bin/opsnerva.exe ./cmd/opsnerva
 .\bin\opsnerva.exe

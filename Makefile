@@ -4,13 +4,13 @@ dev-api: build-web
 	go run ./cmd/opsnerva serve
 
 dev-web:
-	npm --prefix web run dev
+	pnpm --dir web run dev
 
 build: build-go
 
 build-web:
-	npm --prefix web install
-	npm --prefix web run build
+	pnpm --dir web install --frozen-lockfile
+	pnpm --dir web run build
 
 build-go: build-web
 	mkdir -p bin

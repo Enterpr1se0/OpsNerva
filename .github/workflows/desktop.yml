@@ -77,11 +77,13 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - uses: actions/setup-node@v6
+      - uses: pnpm/setup@v2
         with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
+          package-json-file: web/package.json
+          runtime: node@22
+          cache: true
+          cache-dependency-path: web/pnpm-lock.yaml
+          install: false
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -96,11 +98,11 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev patchelf
 
       - name: Install web dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
         working-directory: web
 
       - name: Build web frontend
-        run: npm run build
+        run: pnpm run build
         working-directory: web
 
       - name: Test Go backend
@@ -112,7 +114,7 @@ jobs:
         run: go test ./... -run '^$'
 
       - name: Build desktop package
-        run: npm run desktop:build
+        run: pnpm run desktop:build
         working-directory: web
 
       - name: Build server binary

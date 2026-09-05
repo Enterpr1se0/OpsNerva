@@ -26,7 +26,7 @@ make clean     # rm -rf bin
 
 - Run a single Go package's tests: `go test ./internal/service/...` — or call `run` from an editor in Go.
 - Run one Go test by name: `go test ./internal/security/ -run TestRedact`.
-- Web type-check/build (no test framework exists; `npm run build` runs `tsc --noEmit` + `vite build`): `npm --prefix web run build`. During dev: `npm --prefix web run dev`.
+- Web type-check/build (no test framework exists; `pnpm run build` runs `tsc --noEmit` + `vite build`): `pnpm --dir web run build`. During dev: `pnpm --dir web run dev`.
 - Running the app: `./bin/opsnerva serve` (serves embedded frontend on `:8080`). Standalone commands: `host add|list|probe|scan-key|trust|delete`, `exec`, `approval`, `audit`, `chat`, `mcp`, `version`. No args = quick-start that creates `config.yaml`/`data/`/`workspace/` next to the binary.
 - Desktop builds: **never compile, test, or build Rust/Tauri locally** (see AGENTS.md). The Go backend and web build are validated locally; Tauri packaging is validated only via the `.github/workflows/desktop.yml` GitHub Actions run.
 

@@ -4,9 +4,9 @@
   "version": "0.3.1",
   "identifier": "io.opsnerva.desktop",
   "build": {
-    "beforeDevCommand": "npm run build && npm run desktop:prepare && npm run dev",
+    "beforeDevCommand": "pnpm run build && pnpm run desktop:prepare && pnpm run dev",
     "devUrl": "http://localhost:5173/desktop.html",
-    "beforeBuildCommand": "npm run build && npm run desktop:prepare",
+    "beforeBuildCommand": "pnpm run build && pnpm run desktop:prepare",
     "frontendDist": "../dist"
   },
   "app": {

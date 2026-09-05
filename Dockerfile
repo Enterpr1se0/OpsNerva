@@ -1,9 +1,10 @@
 FROM node:26-alpine AS web
 WORKDIR /src/web
-COPY web/package.json web/package-lock.json ./
-RUN npm ci
+RUN npm install --global pnpm@11.22.0
+COPY web/package.json web/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
 COPY web/ ./
-RUN npm run build
+RUN pnpm run build
 
 FROM golang:1.26-bookworm AS backend
 WORKDIR /src
