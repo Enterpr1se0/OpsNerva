@@ -67,3 +67,16 @@ export function displayValue(value:unknown,depth=0):string{
 	}
   return String(value)
 }
+
+export function recordTableRows(value:JsonRecord){
+	const {entries,truncated}=limitedRecordEntries(value,toolCollectionPreviewItems-1)
+	const rows:Array<Array<unknown>>=entries.map(([key,item])=>[key,item])
+	if(truncated)rows.push(['…',i18n.t('tool.moreItemsOmitted')])
+	return rows
+}
+
+export function recordArray(value:unknown,fromEnd=false){
+	if(!Array.isArray(value))return[]
+	const selected=fromEnd?value.slice(-toolCollectionPreviewItems):value.slice(0,toolCollectionPreviewItems)
+	return selected.map(jsonRecord).filter((item):item is JsonRecord=>!!item)
+}

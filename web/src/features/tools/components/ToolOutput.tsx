@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { FileText, FolderOpen } from 'lucide-react'
-import { CopyButton } from '../../../components/CopyButton'
+import { CopyButton, CopyablePre } from '../../../components/CopyButton'
 import { HighlightedCode } from '../../../components/HighlightedCode'
 import { formatFileSize } from '../../../lib/utils'
-import { jsonRecord, previewText, textValue, toolCollectionPreviewItems, toolOutputPreviewChars } from '../payload'
+import { jsonRecord, numberValue, previewStructuredValue, previewText, textValue, toolCollectionPreviewItems, toolOutputPreviewChars, type JsonRecord } from '../payload'
 
 type ToolWorkspaceDirectoryEntry={name:string;type:'file'|'directory';size?:number}
 function parseWorkspaceDirectoryOutput(value:string):ToolWorkspaceDirectoryEntry[]|undefined{
@@ -39,4 +39,20 @@ export function WorkspaceDirectoryOutput({content,label,live}:{content:string;la
 	if(entries===undefined)return <ToolOutputPanel kind="stdout" label={label} content={content} live={live}/>
 	const visible=entries.slice(0,toolCollectionPreviewItems),omitted=entries.length-visible.length
 	return <div className="tool-output workspace-directory-output"><span>STDOUT</span><div className="tool-output-frame"><CopyButton value={content}/><div className="tool-directory-list">{visible.length?visible.map(entry=><div className={`tool-directory-entry ${entry.type}`} key={`${entry.type}:${entry.name}`}>{entry.type==='directory'?<FolderOpen size={14}/>:<FileText size={14}/>}<b title={entry.name}>{entry.name}</b><small>{entry.type==='directory'?t('workspace.directory'):formatFileSize(entry.size||0)}</small></div>):<div className="tool-directory-empty">{t('workspace.emptyDirectory')}</div>}{omitted>0&&<div className="tool-directory-omitted">{t('tool.previewItemsOmitted',{count:omitted})}</div>}</div></div></div>
+}
+
+export function LazyJSONDetails({value}:{value:JsonRecord}){
+	const {t}=useTranslation()
+	const [open,setOpen]=useState(false)
+	const formatted=open?JSON.stringify(previewStructuredValue(value),null,2):''
+	return <details className="tool-raw" open={open} onToggle={event=>setOpen(event.currentTarget.open)}><summary>{t('tool.rawJson')}</summary>{open&&<CopyablePre value={()=>JSON.stringify(value,null,2)}><HighlightedCode code={previewText(formatted,toolOutputPreviewChars)} language="json"/></CopyablePre>}</details>
+}
+
+export function ShellOutputChunks({chunks,live}:{chunks:JsonRecord[];live:boolean}){
+	const {t}=useTranslation()
+	const visible=chunks.slice(-toolCollectionPreviewItems)
+	return <div className="shell-output-chunks">{visible.map((chunk,index)=>{
+		const stream=textValue(chunk.stream)==='stderr'?'stderr':'stdout'
+		return <ToolOutputPanel key={`${numberValue(chunk.first_sequence)||numberValue(chunk.sequence)}_${index}`} kind={stream} label={stream==='stderr'?t('tool.stderrResult'):'STDOUT'} content={textValue(chunk.content)} live={live}/>
+	})}</div>
 }
