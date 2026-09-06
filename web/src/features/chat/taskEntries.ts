@@ -1,5 +1,5 @@
 import { type LiveSSHTaskTarget } from '../../lib/liveTasks'
-import type { AgentTaskList } from '../../types'
+import type { AgentTask, AgentTaskList } from '../../types'
 import { type ChatEntry, type TaskToolEntryGroup, type ChatRenderItem } from './types'
 import { jsonRecord, parseRecord, textValue } from '../tools/payload'
 
@@ -58,4 +58,11 @@ export function latestLiveSSHTaskTargets(entries:ChatEntry[]){
 	const latest=new Map<string,LiveSSHTaskTarget>()
 	for(const entry of entries){const target=liveSSHTaskTarget(entry);if(target)latest.set(target.taskID,target)}
 	return[...latest.values()]
+}
+
+export type SessionTaskRow={task:AgentTask;blockers:string[];status:AgentTask['status']|'blocked'}
+
+export function buildSessionTaskRows(tasks:AgentTaskList):SessionTaskRow[]{
+	const completed=new Set(tasks.items.filter(task=>task.status==='completed').map(task=>task.id))
+	return tasks.items.map(task=>{const blockers=task.blocked_by.filter(id=>!completed.has(id));return{task,blockers,status:task.status==='pending'&&blockers.length?'blocked':task.status}})
 }

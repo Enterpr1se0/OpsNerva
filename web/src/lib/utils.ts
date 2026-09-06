@@ -40,3 +40,5 @@ export function clientId() {
   clientIdCounter += 1
   return `client_${Date.now().toString(36)}_${clientIdCounter.toString(36)}_${Math.random().toString(36).slice(2)}`
 }
+
+export function keepEquivalent<T>(current:T,next:T){return JSON.stringify(current)===JSON.stringify(next)?current:next}
