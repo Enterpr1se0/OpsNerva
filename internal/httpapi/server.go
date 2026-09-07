@@ -139,6 +139,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/v1/workspaces/{id}", s.deleteWorkspace)
 	s.mux.HandleFunc("GET /api/v1/workspaces/{id}/files", s.listWorkspaceFiles)
 	s.mux.HandleFunc("POST /api/v1/workspaces/{id}/files", s.uploadWorkspaceFile)
+	s.mux.HandleFunc("POST /api/v1/workspaces/{id}/directories", s.createWorkspaceDirectory)
 	s.mux.HandleFunc("PUT /api/v1/workspaces/{id}/files", s.saveWorkspaceTextFile)
 	s.mux.HandleFunc("DELETE /api/v1/workspaces/{id}/files", s.deleteWorkspaceEntry)
 	s.mux.HandleFunc("GET /api/v1/workspaces/{id}/preview", s.previewWorkspaceFile)
@@ -617,28 +618,6 @@ func (s *Server) deleteWorkspaceEntry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
-}
-
-func (s *Server) uploadWorkspaceFile(w http.ResponseWriter, r *http.Request) {
-	result, err := s.service.UploadWorkspaceFile(
-		r.Context(),
-		r.PathValue("id"),
-		r.URL.Query().Get("path"),
-		r.URL.Query().Get("filename"),
-		r.Body,
-		actor(r),
-	)
-	if err != nil {
-		status := http.StatusBadRequest
-		if errors.Is(err, store.ErrNotFound) {
-			status = http.StatusNotFound
-		} else if strings.Contains(err.Error(), "already exists") {
-			status = http.StatusConflict
-		}
-		writeErrorStatus(w, err, status)
-		return
-	}
-	writeJSON(w, http.StatusCreated, result)
 }
 
 func (s *Server) workspaceFileEvents(w http.ResponseWriter, r *http.Request) {

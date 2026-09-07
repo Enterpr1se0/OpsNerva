@@ -192,6 +192,7 @@ export const api = {
 	previewWorkspaceFile: (workspaceId:string,path:string) => request<WorkspaceFilePreview>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/preview?path=${encodeURIComponent(path)}`),
 	saveWorkspaceTextFile: (workspaceId:string,path:string,content:string) => request<WorkspaceUploadResult>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files`,{method:'PUT',body:JSON.stringify({path,content})}),
 	uploadWorkspaceFile: (workspaceId:string,file:File,path:string,options:TransferOptions={}) => {const query=new URLSearchParams({path,filename:file.name});return uploadJSON<WorkspaceUploadResult>('POST',`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files?${query}`,file,file.type||'application/octet-stream',{...options,totalBytes:file.size})},
+	createWorkspaceDirectory: (workspaceId:string,path:string,signal?:AbortSignal) => request<void>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/directories`,{method:'POST',body:JSON.stringify({path}),signal}),
 	deleteWorkspaceEntry: (workspaceId:string,path:string) => request<WorkspaceDeleteResult>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files?path=${encodeURIComponent(path)}`,{method:'DELETE'}),
   saveSystemSettings: (settings: SystemSettingsInput) => request<SystemSettings>('/api/v1/settings', { method: 'PUT', body: JSON.stringify(settings) }),
   webSearchSettings: () => request<WebSearchSettings>('/api/v1/web-search/settings'),

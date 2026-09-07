@@ -28,7 +28,6 @@ import (
 	"github.com/Enterpr1se0/opsnerva/internal/ids"
 	"github.com/Enterpr1se0/opsnerva/internal/sshx"
 	"github.com/Enterpr1se0/opsnerva/internal/store"
-	"github.com/Enterpr1se0/opsnerva/internal/transfer"
 )
 
 type WorkspaceCapability struct {
@@ -748,98 +747,6 @@ func (s *Service) deleteWorkspaceEntry(ctx context.Context, workspace config.Wor
 	}
 	s.audit(ctx, "", eventType, actor, map[string]any{
 		"workspace_id": workspace.ID, "path": normalizedPath, "type": entryType, "size": size, "sha256": result.SHA256, "permanent": true,
-	})
-	return result, nil
-}
-
-func (s *Service) UploadWorkspaceFile(ctx context.Context, workspaceID, targetPath, originalFilename string, source io.Reader, actor string) (WorkspaceUploadResult, error) {
-	workspace, ok := s.workspaceByID(workspaceID)
-	if !ok {
-		return WorkspaceUploadResult{}, fmt.Errorf("workspace %q not found", workspaceID)
-	}
-	return s.storeWorkspaceFile(ctx, workspace, targetPath, originalFilename, source, "", "workspace_file_uploaded", actor, 0, nil)
-}
-
-func (s *Service) validateWorkspaceFileDestination(workspace config.Workspace, targetPath, originalFilename string) (string, string, error) {
-	if workspace.Access != "read_write" {
-		return "", "", fmt.Errorf("workspace %q is read_only", workspace.ID)
-	}
-	targetPath = strings.TrimSpace(targetPath)
-	if targetPath == "" {
-		targetPath = filepath.Base(strings.ReplaceAll(originalFilename, "\\", "/"))
-	}
-	if targetPath == "" || targetPath == "." || len(targetPath) > 1024 {
-		return "", "", fmt.Errorf("invalid workspace destination path")
-	}
-	target, err := s.resolveWorkspacePath(workspace, targetPath, true)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return "", "", fmt.Errorf("workspace destination parent directory does not exist")
-		}
-		return "", "", err
-	}
-	if _, err := os.Lstat(target); err == nil {
-		return "", "", fmt.Errorf("workspace file already exists; choose a new path instead of overwriting it")
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", "", err
-	}
-	parent := filepath.Dir(target)
-	parentInfo, err := os.Stat(parent)
-	if err != nil || !parentInfo.IsDir() {
-		return "", "", fmt.Errorf("workspace destination parent directory does not exist")
-	}
-	return targetPath, target, nil
-}
-
-func (s *Service) storeWorkspaceFile(ctx context.Context, workspace config.Workspace, targetPath, originalFilename string, source io.Reader, expectedSHA256, eventType, actor string, total int64, progress transfer.Reporter) (WorkspaceUploadResult, error) {
-	targetPath, target, err := s.validateWorkspaceFileDestination(workspace, targetPath, originalFilename)
-	if err != nil {
-		return WorkspaceUploadResult{}, err
-	}
-	parent := filepath.Dir(target)
-	temporary, err := os.CreateTemp(parent, ".opsnerva-upload-*")
-	if err != nil {
-		return WorkspaceUploadResult{}, err
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	digest := sha256.New()
-	progressWriter := transfer.NewWriter(io.MultiWriter(temporary, digest), total, progress)
-	written, copyErr := io.Copy(progressWriter, source)
-	progressWriter.Finish()
-	if copyErr != nil {
-		temporary.Close()
-		return WorkspaceUploadResult{}, copyErr
-	}
-	actualSHA256 := hex.EncodeToString(digest.Sum(nil))
-	if expectedSHA256 != "" && actualSHA256 != expectedSHA256 {
-		temporary.Close()
-		return WorkspaceUploadResult{}, fmt.Errorf("remote download source version conflict: expected SHA256 %s, got %s", expectedSHA256, actualSHA256)
-	}
-	if err := temporary.Chmod(0o644); err != nil {
-		temporary.Close()
-		return WorkspaceUploadResult{}, err
-	}
-	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return WorkspaceUploadResult{}, err
-	}
-	if err := temporary.Close(); err != nil {
-		return WorkspaceUploadResult{}, err
-	}
-	if err := os.Link(temporaryPath, target); err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return WorkspaceUploadResult{}, fmt.Errorf("workspace file already exists; choose a new path instead of overwriting it")
-		}
-		return WorkspaceUploadResult{}, err
-	}
-	if err := syncLocalDirectory(parent); err != nil {
-		_ = os.Remove(target)
-		return WorkspaceUploadResult{}, err
-	}
-	result := WorkspaceUploadResult{WorkspaceID: workspace.ID, Path: targetPath, Size: written, SHA256: actualSHA256}
-	s.audit(ctx, "", eventType, actor, map[string]any{
-		"workspace_id": workspace.ID, "path": targetPath, "size": written, "sha256": result.SHA256,
 	})
 	return result, nil
 }

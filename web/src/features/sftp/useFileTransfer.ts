@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useSyncExternalStore } from 'react'
 import type { SFTPFileEntry } from '../../types'
-import type { FileTransferManager, WorkspaceTransferItem } from './types'
+import type { FileTransferManager, WorkspaceTransferSource } from './types'
 import { emptyFileTransferRecord, sftpTransferKey, workspaceTransferKey } from './utils'
 
 export const FileTransferContext=createContext<FileTransferManager|null>(null)
@@ -24,5 +24,5 @@ export function useWorkspaceTransfer(workspaceID:string,active=true){
 	const key=workspaceTransferKey(workspaceID)
 	const record=useFileTransferRecord(manager,key,active)
 	if(!manager)throw new Error('FileTransferProvider is missing')
-	return{...record,upload:(items:WorkspaceTransferItem[])=>manager.uploadWorkspace(workspaceID,items),download:(path:string,name:string,size:number)=>manager.downloadWorkspace(workspaceID,path,name,size),cancel:()=>manager.cancel(key)}
+	return{...record,upload:(source:WorkspaceTransferSource)=>manager.uploadWorkspace(workspaceID,source),download:(path:string,name:string,size:number)=>manager.downloadWorkspace(workspaceID,path,name,size),cancel:()=>manager.cancel(key)}
 }

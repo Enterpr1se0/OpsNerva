@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Enterpr1se0/opsnerva/internal/config"
@@ -20,7 +21,7 @@ import (
 	"github.com/Enterpr1se0/opsnerva/internal/store"
 )
 
-func TestWorkspaceUploadStreamsRawRequestBody(t *testing.T) {
+func TestWorkspaceFolderUploadStreamsRawRequestBody(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
 	workspaceRoot := t.TempDir()
@@ -39,15 +40,22 @@ func TestWorkspaceUploadStreamsRawRequestBody(t *testing.T) {
 	if err := svc.InitializeWorkspaces(ctx, workspaceRoot); err != nil {
 		t.Fatal(err)
 	}
-	directory := filepath.Join(workspaceRoot, "default", "imports")
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		t.Fatal(err)
-	}
-
 	server := httptest.NewServer(New(svc, nil, Options{}).Handler())
 	defer server.Close()
+	for _, path := range []string{"imports", "imports/nested", "imports/empty", "imports/nested"} {
+		response, err := server.Client().Post(server.URL+"/api/v1/workspaces/default/directories", "application/json", strings.NewReader(`{"path":"`+path+`"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		if response.StatusCode != http.StatusNoContent {
+			t.Fatalf("create directory %q: status = %d, body = %s", path, response.StatusCode, body)
+		}
+	}
+	directory := filepath.Join(workspaceRoot, "default", "imports", "nested")
 	content := []byte{'W', 0, 'S', 0xff}
-	request, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/workspaces/default/files?path=imports%2Farchive.bin&filename=source.bin", bytes.NewReader(content))
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/workspaces/default/files?path=imports%2Fnested%2Farchive.bin&filename=source.bin", bytes.NewReader(content))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,12 +74,16 @@ func TestWorkspaceUploadStreamsRawRequestBody(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantSHA := fmt.Sprintf("%x", sha256.Sum256(content))
-	if result.Path != "imports/archive.bin" || result.Size != int64(len(content)) || result.SHA256 != wantSHA {
+	if result.Path != "imports/nested/archive.bin" || result.Size != int64(len(content)) || result.SHA256 != wantSHA {
 		t.Fatalf("unexpected upload result: %#v", result)
 	}
 	stored, err := os.ReadFile(filepath.Join(directory, "archive.bin"))
 	if err != nil || !bytes.Equal(stored, content) {
 		t.Fatalf("uploaded content = %v, err=%v", stored, err)
+	}
+	entries, err := os.ReadDir(filepath.Join(workspaceRoot, "default", "imports", "empty"))
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("empty upload directory = %v, err = %v", entries, err)
 	}
 }
 

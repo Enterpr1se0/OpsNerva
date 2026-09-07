@@ -5,7 +5,7 @@ import { useNotifier } from '../../lib/notifications'
 import { errorText } from '../../lib/utils'
 import { SFTPOverwriteDialog } from './components/SFTPOverwriteDialog'
 import type { SFTPFileEntry } from '../../types'
-import type { ActiveFileTransfer, FileTransferManager, FileTransferRecord, SFTPOverwriteCandidate, WorkspaceTransferItem } from './types'
+import type { ActiveFileTransfer, FileTransferManager, FileTransferRecord, SFTPOverwriteCandidate, WorkspaceTransferSource } from './types'
 import { emptyFileTransferRecord, isAbortError, remoteChildPath, sftpTransferKey, workspaceTransferKey } from './utils'
 
 import { FileTransferContext } from './useFileTransfer'
@@ -96,33 +96,49 @@ export function FileTransferProvider({children}:{children:ReactNode}){
 		if(conflict)void runSFTPUpload(hostID,conflict.directory,[{file:conflict.file,path:conflict.path}],true)
 	},[runSFTPUpload])
 	const dismissConflict=useCallback((hostID:string)=>updateRecord(sftpTransferKey(hostID),current=>({...current,conflict:null})),[updateRecord])
-	const uploadWorkspace=useCallback((workspaceID:string,items:WorkspaceTransferItem[])=>{
+	const uploadWorkspace=useCallback((workspaceID:string,source:WorkspaceTransferSource)=>{
 		const key=workspaceTransferKey(workspaceID)
-		if(!workspaceID||!items.length||controllers.current.has(key))return false
+		if(!workspaceID||Array.isArray(source)&&!source.length||controllers.current.has(key))return false
+		const controller=begin(key,{operation:'upload',name:t('workspace.readingUpload'),loaded:0,total:0})
+		if(!controller)return false
 		void (async()=>{
-			const total=items.reduce((sum,item)=>sum+item.file.size,0)
-			const controller=begin(key,{operation:'upload',name:items[0].file.name,loaded:0,total,index:1,count:items.length})
-			if(!controller)return
 			let completedBytes=0
 			let uploaded=0
-			const failures:Array<{name:string;message:string}>=[]
-			for(let index=0;index<items.length;index++){
-				const item=items[index]
-				updateRecord(key,current=>({...current,active:{operation:'upload',name:item.file.name,loaded:completedBytes,total,index:index+1,count:items.length}}))
-				try{
-					await api.uploadWorkspaceFile(workspaceID,item.file,item.path,{signal:controller.signal,onProgress:progress=>updateRecord(key,current=>({...current,active:current.active?{...current.active,loaded:completedBytes+progress.loaded,total}:null}))})
-					uploaded+=1;completedBytes+=item.file.size
-				}catch(err){
-					if(isAbortError(err))break
-					failures.push({name:item.file.name,message:errorText(err)})
+			let failed=0
+			let firstFailure=''
+			const failedDirectories=new Map<string,string>()
+			try{
+				const items=typeof source==='function'?await source(controller.signal):source
+				const total=items.reduce((sum,item)=>sum+(item.type==='file'?item.file.size:0),0)
+				for(let index=0;index<items.length;index++){
+					controller.signal.throwIfAborted()
+					const item=items[index]
+					try{
+						const parent=item.path.split('/').slice(0,-1).join('/')
+						const parentError=failedDirectories.get(parent)
+						if(parentError)throw new Error(parentError)
+						updateRecord(key,current=>({...current,active:{operation:'upload',name:item.path,loaded:completedBytes,total,index:index+1,count:items.length}}))
+						if(item.type==='directory'){
+							await api.createWorkspaceDirectory(workspaceID,item.path,controller.signal)
+						}else{
+							await api.uploadWorkspaceFile(workspaceID,item.file,item.path,{signal:controller.signal,onProgress:progress=>updateRecord(key,current=>({...current,active:current.active?{...current.active,loaded:completedBytes+progress.loaded,total}:null}))})
+							completedBytes+=item.file.size
+						}
+						uploaded+=1
+					}catch(err){
+						if(isAbortError(err))throw err
+						const message=errorText(err)
+						if(item.type==='directory')failedDirectories.set(item.path,message)
+						failed+=1
+						if(!firstFailure)firstFailure=`${item.path}: ${message}`
+					}
 				}
-			}
-			finish(key,controller,uploaded>0)
-			if(controller.signal.aborted)return
-			if(failures.length===1&&items.length===1)notify(failures[0].message,'error')
-			else if(failures.length)notify(t('workspace.uploadPartial',{uploaded,failed:failures.length,message:`${failures[0].name}: ${failures[0].message}`}),'error')
-			else if(items.length===1)notify(t('workspace.uploaded',{path:items[0].path}))
-			else notify(t('workspace.uploadedFiles',{count:uploaded}))
+				if(controller.signal.aborted)return
+				if(failed)notify(t('workspace.uploadPartial',{uploaded,failed,message:firstFailure}),'error')
+				else if(items.length===1)notify(t('workspace.uploaded',{path:items[0].path}))
+				else if(items.length)notify(t('workspace.uploadedEntries',{count:uploaded}))
+			}catch(err){if(!isAbortError(err))notify(errorText(err),'error')}
+			finally{finish(key,controller,uploaded>0)}
 		})()
 		return true
 	},[begin,finish,notify,t,updateRecord])

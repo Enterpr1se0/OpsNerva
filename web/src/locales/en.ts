@@ -164,10 +164,11 @@ const en = {
     settingsCreated: 'Workspace {{id}} added.', settingsUpdated: 'Workspace {{id}} updated.', settingsRemoved: 'Workspace {{id}} removed.', removeTitle: 'Delete Workspace “{{id}}”?',
     relativePath: 'Relative upload path', cancelUpload: 'Cancel upload', previewFile: 'Preview file', openDirectory: 'Open directory', revealDirectory: 'Show in file manager', deleteEntry: 'Delete {{type}}',
     emptyDirectory: 'Empty directory',
+    uploadFolder: 'Upload folder', readingUpload: 'Reading files…', dropEntriesHere: 'Drop files or folders to upload', uploadedEntries: 'Uploaded {{count}} items',
     uploaded: 'Uploaded · {{path}}', saved: 'Saved · {{path}}', deleted: 'Deleted permanently · {{type}}',
     deleteTitle: 'Delete "{{path}}"?', closePreview: 'Close preview', binary: 'Binary file', previewTooLarge: 'File is too large to preview. Download it instead.',
     uploadTo: 'Upload to Workspace {{id}}', uploadedShort: 'Uploaded', uploadFailed: 'Upload failed', dropFilesHere: 'Drop files to upload',
-    uploadingFiles: 'Uploading {{count}} files...', uploadedFiles: 'Uploaded {{count}} files', uploadPartial: 'Uploaded {{uploaded}}; {{failed}} failed: {{message}}',
+    uploadPartial: 'Uploaded {{uploaded}}; {{failed}} failed: {{message}}',
     file: 'file', directory: 'directory',
   },
   agentTasks: {

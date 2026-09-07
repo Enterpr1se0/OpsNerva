@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { invoke } from '@tauri-apps/api/core'
-import { Download, FileText, FolderOpen, FolderOutput, LoaderCircle, PanelLeftClose, RefreshCw, TerminalSquare, Trash2, UploadCloud, X } from 'lucide-react'
+import { Download, FileText, FolderOpen, FolderOutput, FolderUp, LoaderCircle, PanelLeftClose, RefreshCw, TerminalSquare, Trash2, UploadCloud, X } from 'lucide-react'
 import { api, workspaceFileEventsURL } from '../../../api/api'
 import { AppSelect } from '../../../components/Controls'
 import { DestructiveConfirmDialog } from '../../../components/DestructiveConfirmDialog'
@@ -11,6 +11,7 @@ import { sshShellActive } from '../../../features/ssh'
 import { desktopRuntime, errorText, formatFileSize } from '../../../lib/utils'
 import type { Host, SSHShell, WorkspaceCapability, WorkspaceFilePreview } from '../../../types'
 import { workspaceChildPath } from '../utils'
+import { workspaceUploadDrop, workspaceUploadFiles } from '../upload'
 import type { WorkspaceDeleteCandidate, WorkspaceNotice } from '../types'
 
 export const ChatWorkspacePanel=memo(function ChatWorkspacePanel({active,mode,onModeChange,workspaces,workspaceID,hosts,sftpHostID,onSFTPHostChange,shells,switching,disabled,bound,onSelect,onCreateShell,onOpenShell,onCollapse}:{active:boolean;mode:FileBrowserMode;onModeChange:(mode:FileBrowserMode)=>void;workspaces:WorkspaceCapability[];workspaceID:string;hosts:Host[];sftpHostID:string;onSFTPHostChange:(id:string)=>void;shells:SSHShell[];switching:boolean;disabled:boolean;bound:boolean;onSelect:(id:string)=>void|Promise<void>;onCreateShell:(workspaceID:string)=>Promise<void>;onOpenShell:(shell:SSHShell)=>void;onCollapse:()=>void}){
@@ -78,18 +79,26 @@ export const ChatWorkspacePanel=memo(function ChatWorkspacePanel({active,mode,on
 	const upload=()=>{
 		if(!workspace||!file||!target.trim()||transfer)return
 		setNotice(null)
-		startUpload([{file,path:target.trim()}])
+		startUpload([{type:'file',file,path:target.trim()}])
 	}
-	const uploadDropped=(files:File[])=>{
-		if(!workspace||workspace.access!=='read_write'||uploading||transfer||!files.length)return
+	const chooseFolder=(event:React.ChangeEvent<HTMLInputElement>)=>{
+		const files=Array.from(event.currentTarget.files||[])
+		event.currentTarget.value=''
+		if(!workspace||workspace.access!=='read_write'||transfer||!files.length)return
 		setNotice(null)
-		startUpload(files.map(dropped=>({file:dropped,path:workspaceChildPath(path,dropped.name)})))
+		if(startUpload(workspaceUploadFiles(files,path))){setFile(null);setTarget('')}
 	}
 	const acceptsFiles=(event:React.DragEvent<HTMLElement>)=>workspace?.access==='read_write'&&Array.from(event.dataTransfer.types).includes('Files')
 	const dragEnter=(event:React.DragEvent<HTMLElement>)=>{if(!acceptsFiles(event))return;event.preventDefault();event.stopPropagation();setDragging(true)}
 	const dragOver=(event:React.DragEvent<HTMLElement>)=>{if(!acceptsFiles(event))return;event.preventDefault();event.stopPropagation();event.dataTransfer.dropEffect=uploading||transfer?'none':'copy'}
 	const dragLeave=(event:React.DragEvent<HTMLElement>)=>{if(workspace?.access!=='read_write')return;event.preventDefault();event.stopPropagation();if(event.relatedTarget instanceof Node&&event.currentTarget.contains(event.relatedTarget))return;setDragging(false)}
-	const drop=(event:React.DragEvent<HTMLElement>)=>{if(!acceptsFiles(event))return;event.preventDefault();event.stopPropagation();setDragging(false);if(!uploading&&!transfer)void uploadDropped(Array.from(event.dataTransfer.files))}
+	const drop=(event:React.DragEvent<HTMLElement>)=>{
+		if(!acceptsFiles(event))return
+		event.preventDefault();event.stopPropagation();setDragging(false)
+		if(transfer)return
+		setNotice(null)
+		if(startUpload(workspaceUploadDrop(event.dataTransfer,path))){setFile(null);setTarget('')}
+	}
 	const openEntry=async(name:string,type:'file'|'directory')=>{
 		const next=workspaceChildPath(path,name)
 		if(type==='directory'){setPath(next);return}
@@ -140,12 +149,12 @@ export const ChatWorkspacePanel=memo(function ChatWorkspacePanel({active,mode,on
 		<aside className={`workspace-browser-panel panel ${dragging?'dragging':''}`} onDragEnter={dragEnter} onDragOver={dragOver} onDragLeave={dragLeave} onDrop={drop}>
 			<div className="panel-header"><FileBrowserTabs mode={mode} onChange={onModeChange}/><div className="workspace-panel-actions"><button type="button" onClick={onCollapse} title={t('workspace.collapsePanel')} aria-label={t('workspace.collapsePanel')}><PanelLeftClose size={14}/></button></div></div>
 			<div className="workspace-summary"><div className="chat-workspace-head"><div className="chat-workspace-selector"><AppSelect className="workspace-switch-select" value={workspace.id} disabled={workspaces.length<2||disabled||switching} ariaLabel={t('workspace.switchWorkspace')} onChange={onSelect} options={workspaces.map(item=>({value:item.id,label:item.id}))}/>{(switching||bound)&&<small>{switching?t('workspace.switching'):t('workspace.boundToConversation')}</small>}</div><div className="chat-workspace-head-actions"><em className={workspace.access}>{workspace.access==='read_write'?t('workspace.readWrite'):t('workspace.readOnly')}</em><button type="button" disabled={!workspace.shell||startingShell} onClick={()=>void createShell()} title={t('workspace.newTerminal')} aria-label={t('workspace.newTerminal')}>{startingShell?<LoaderCircle className="spin" size={14}/>:<TerminalSquare size={14}/>}</button></div></div>{activeShells.length>0&&<div className="workspace-shell-sessions">{activeShells.map(shell=><button type="button" onClick={()=>onOpenShell(shell)} title={shell.id} key={shell.id}><i className={shell.status}/><b>{t(shell.surface==='workspace_agent'?'workspace.agent':'workspace.operator')}</b><code>{shell.cwd||'.'}</code></button>)}</div>}</div>
-			<div className="workspace-path-row"><button onClick={up} disabled={path==='.'} title={t('workspace.parent')}>‹</button><code title={path}>{path}</code>{workspace.access==='read_write'&&<label className={transfer?'disabled':''} title={t('workspace.uploadFile')}><UploadCloud size={14}/><input key={inputKey} type="file" disabled={!!transfer} onChange={choose}/></label>}<button onClick={()=>synchronize(true)} title={t('workspace.refreshFiles')}><RefreshCw size={12}/></button></div>
+			<div className="workspace-path-row"><button onClick={up} disabled={path==='.'} title={t('workspace.parent')}>‹</button><code title={path}>{path}</code>{workspace.access==='read_write'&&<><label className={transfer?'disabled':''} title={t('workspace.uploadFile')}><UploadCloud size={14}/><input key={inputKey} type="file" disabled={!!transfer} aria-label={t('workspace.uploadFile')} onChange={choose}/></label><label className={transfer?'disabled':''} title={t('workspace.uploadFolder')}><FolderUp size={14}/><input type="file" multiple ref={element=>{element?.setAttribute('webkitdirectory','')}} disabled={!!transfer} aria-label={t('workspace.uploadFolder')} onChange={chooseFolder}/></label></>}<button onClick={()=>synchronize(true)} title={t('workspace.refreshFiles')}><RefreshCw size={12}/></button></div>
 			{file&&<div className="chat-upload-row"><input value={target} disabled={uploading} onChange={event=>setTarget(event.target.value)} aria-label={t('workspace.relativePath')}/><button onClick={upload} disabled={uploading||!target.trim()}>{uploading?'...':t('common.upload')}</button><button onClick={()=>{if(uploading){cancel();return}setFile(null);setTarget('');setInputKey(value=>value+1)}} title={t('workspace.cancelUpload')}><X size={11}/></button></div>}
 			{transfer&&<FileTransferProgress transfer={transfer} onCancel={cancel}/>}
 			<div className="workspace-file-list">{loading?<span className="workspace-files-state"><LoaderCircle className="spin" size={13}/>{t('common.loading')}</span>:error?<span className="workspace-files-state error">{error}</span>:entries.length?entries.map(entry=>{const fullPath=workspaceChildPath(path,entry.name);return <div className="workspace-file-row" key={`${entry.type}:${entry.name}`}><button className="workspace-file-open" onClick={()=>void openEntry(entry.name,entry.type)} title={entry.type==='file'?t('workspace.previewFile'):t('workspace.openDirectory')}>{previewLoading===fullPath?<LoaderCircle className="spin" size={13}/>:entry.type==='directory'?<FolderOpen size={13}/>:<FileText size={13}/>}<span>{entry.name}</span>{entry.type==='file'&&<small>{formatFileSize(entry.size??0)}</small>}</button>{(entry.type==='file'||desktopRuntime&&entry.type==='directory'||workspace.access==='read_write')&&<div className="workspace-file-actions">{entry.type==='file'&&<button className="workspace-file-download" disabled={!!transfer} onClick={()=>void download(fullPath,entry.name,entry.size??0)} title={t('common.download')}><Download size={12}/></button>}{desktopRuntime&&entry.type==='directory'&&<button className="workspace-file-reveal" onClick={()=>void revealDirectory(fullPath)} title={t('workspace.revealDirectory')}><FolderOutput size={12}/></button>}{workspace.access==='read_write'&&<button className="workspace-file-delete" onClick={()=>requestEntryRemoval(entry.name,entry.type)} disabled={deleting===fullPath||!!transfer} title={t('workspace.deleteEntry',{type:t(`workspace.${entry.type}`)})}><Trash2 size={12}/></button>}</div>}</div>}):<span className="workspace-files-state">{t('workspace.emptyDirectory')}</span>}</div>
 			{notice&&<div className={`chat-workspace-notice ${notice.kind}`}>{notice.text}</div>}
-			{dragging&&<div className="workspace-drop-overlay"><UploadCloud size={27}/><b>{t('workspace.dropFilesHere')}</b><span>{path}</span></div>}
+			{dragging&&<div className="workspace-drop-overlay"><UploadCloud size={27}/><b>{t('workspace.dropEntriesHere')}</b><span>{path}</span></div>}
 		</aside>
 		{preview&&<TextFileEditor path={preview.path} meta={`${formatFileSize(preview.size)} · SHA-256 ${preview.sha256}${preview.truncated?` · ${t('common.truncated')}`:''}`} content={preview.content||''} binary={preview.binary} editable={workspace.access==='read_write'&&!preview.truncated} onClose={()=>setPreview(null)} onSave={savePreview} onDownload={()=>void download(preview.path,preview.path.split('/').at(-1)||'download',preview.size)}/>}
 		{deleteCandidate&&<DestructiveConfirmDialog title={t('workspace.deleteTitle',{path:`${deleteCandidate.workspaceID}:${deleteCandidate.path}`})} busy={deleting===deleteCandidate.path} onCancel={()=>setDeleteCandidate(null)} onConfirm={()=>void removeEntry()}/>}

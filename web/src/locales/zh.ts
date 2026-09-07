@@ -164,10 +164,11 @@ const zh = {
     settingsCreated: 'Workspace {{id}} 已新增。', settingsUpdated: 'Workspace {{id}} 已更新。', settingsRemoved: 'Workspace {{id}} 已移除。', removeTitle: '删除 Workspace“{{id}}”？',
     relativePath: '相对上传路径', cancelUpload: '取消上传', previewFile: '预览文件', openDirectory: '打开目录', revealDirectory: '在文件管理器中打开', deleteEntry: '删除{{type}}',
     emptyDirectory: '目录为空',
+    uploadFolder: '上传文件夹', readingUpload: '正在读取文件…', dropEntriesHere: '释放以上传文件或文件夹', uploadedEntries: '已上传 {{count}} 项',
     uploaded: '已上传 · {{path}}', saved: '已保存 · {{path}}', deleted: '已彻底删除 · {{type}}',
     deleteTitle: '删除“{{path}}”？', closePreview: '关闭预览', binary: '二进制文件', previewTooLarge: '文件过大，无法预览，请下载后查看。',
     uploadTo: '上传到 Workspace {{id}}', uploadedShort: '已上传', uploadFailed: '上传失败', dropFilesHere: '释放以上传文件',
-    uploadingFiles: '正在上传 {{count}} 个文件...', uploadedFiles: '已上传 {{count}} 个文件', uploadPartial: '已上传 {{uploaded}} 个，{{failed}} 个失败：{{message}}',
+    uploadPartial: '已上传 {{uploaded}} 项，{{failed}} 项失败：{{message}}',
     file: '文件', directory: '目录',
   },
   agentTasks: {
