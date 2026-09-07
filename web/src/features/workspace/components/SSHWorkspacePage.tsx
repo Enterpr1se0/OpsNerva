@@ -7,7 +7,7 @@ import { SFTPBrowser } from '../../../features/sftp'
 import { errorText, errorStatus } from '../../../lib/utils'
 import type { Host, SSHShell } from '../../../types'
 
-export function SSHWorkspacePage({hosts,shells,onCreated,refresh,onError}:{hosts:Host[];shells:SSHShell[];onCreated:(shell:SSHShell)=>void;refresh:()=>Promise<void>;onError:(message:string)=>void}){
+export function SSHWorkspacePage({hosts,shells,onCreated,onReconnected,refresh,onError}:{hosts:Host[];shells:SSHShell[];onCreated:(shell:SSHShell)=>void;onReconnected:(previousID:string,shell:SSHShell)=>void;refresh:()=>Promise<void>;onError:(message:string)=>void}){
 	const {t}=useTranslation()
 	const [selectedShellID,setSelectedShellID]=useState(shells[0]?.id||'')
 	const [creating,setCreating]=useState(false)
@@ -63,7 +63,7 @@ export function SSHWorkspacePage({hosts,shells,onCreated,refresh,onError}:{hosts
 				<button type="button" className="ssh-new-terminal" onClick={()=>setCreating(true)}><Plus size={14}/> {t('sshWorkspace.newTerminal')}</button>
 			</header>
 			<div className="ssh-terminal-stage">
-				{selectedShell?<SSHShellTerminal key={selectedShell.id} initialShell={selectedShell} embedded onClose={()=>setSelectedShellID('')} onChanged={()=>void refresh()} onError={onError}/>:<div className="ssh-terminal-empty"><TerminalSquare size={32}/><b>{t('sshWorkspace.noTerminal')}</b><button type="button" className="primary" onClick={()=>setCreating(true)}><Plus size={14}/> {t('sshWorkspace.newTerminal')}</button></div>}
+				{selectedShell?<SSHShellTerminal key={selectedShell.id} initialShell={selectedShell} embedded onClose={()=>setSelectedShellID('')} onChanged={()=>void refresh()} onReconnected={(previousID,shell)=>{onReconnected(previousID,shell);setSelectedShellID(shell.id)}} onError={onError}/>:<div className="ssh-terminal-empty"><TerminalSquare size={32}/><b>{t('sshWorkspace.noTerminal')}</b><button type="button" className="primary" onClick={()=>setCreating(true)}><Plus size={14}/> {t('sshWorkspace.newTerminal')}</button></div>}
 			</div>
 		</section>
 		{creating&&<SSHShellCreateDialog hosts={hosts} surface="workspace" onCancel={()=>setCreating(false)} onCreated={created}/>}

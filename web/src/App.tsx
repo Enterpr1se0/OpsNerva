@@ -7,7 +7,7 @@ import { api } from './api/api'
 import { subscribeApplicationEvents } from './api/appEvents'
 import type { SupportedLanguage } from './lib/i18n'
 import { PasswordInput } from './components/PasswordInput'
-import { SSHShellStatus, SSHShellTerminal, SSHTunnelStatus, sshShellActive } from './features/ssh'
+import { SSHShellStatus, SSHShellTerminal, SSHTunnelStatus, sshShellActive, sshShellCanReconnect, mergeSSHShellSnapshot } from './features/ssh'
 import { SSHWorkspacePage } from './features/workspace'
 import { NotificationContext, type NotificationSink, type AppNotification } from './lib/notifications'
 import { FileTransferProvider } from './features/sftp'
@@ -167,7 +167,7 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 		if(connectionRefreshRef.current)return connectionRefreshRef.current
 		const task=Promise.allSettled([api.sshTunnels(),api.sshShells()]).then(([tunnels,shells])=>{
 			if(tunnels.status==='fulfilled')setSSHTunnels(current=>keepEquivalent(current,tunnels.value.tunnels||[]))
-			if(shells.status==='fulfilled')setSSHShells(current=>keepEquivalent(current,shells.value.shells||[]))
+			if(shells.status==='fulfilled')setSSHShells(current=>mergeSSHShellSnapshot(current,shells.value.shells||[]))
 		})
 		connectionRefreshRef.current=task
 		void task.finally(()=>{if(connectionRefreshRef.current===task)connectionRefreshRef.current=null})
@@ -237,11 +237,15 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 		if(event.type!=='event'||!event.data)return
 		if(event.mode==='delta'){
 			if(event.data.tunnel)setSSHTunnels(current=>applyLifecycleDelta(current,event.data!.tunnel!,event.data!.removed))
-			if(event.data.shell)setSSHShells(current=>applyLifecycleDelta(current,event.data!.shell!,event.data!.removed))
+			if(event.data.shell){
+				const shell=event.data.shell
+				setSSHShells(current=>applyLifecycleDelta(current,shell,event.data!.removed&&(!sshShellCanReconnect(shell)||!current.some(item=>item.id===shell.id))))
+				setSelectedShell(current=>current?.id===shell.id?shell:current)
+			}
 			return
 		}
 		setSSHTunnels(current=>keepEquivalent(current,event.data!.tunnels||[]))
-		setSSHShells(current=>keepEquivalent(current,event.data!.shells||[]))
+		setSSHShells(current=>mergeSSHShellSnapshot(current,event.data!.shells||[]))
 	}),[])
 	useEffect(()=>subscribeApplicationEvents<Approval[]>('approvals',event=>{
 		if(event.type==='error'&&event.error){notify(event.error,'error');return}
@@ -335,6 +339,10 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 		rememberSSHShell(shell)
 		setSelectedShell(shell)
 	},[rememberSSHShell])
+	const replaceSSHShell=useCallback((previousID:string,shell:SSHShell)=>{
+		setSSHShells(current=>[...current.filter(item=>item.id!==previousID&&item.id!==shell.id),shell])
+		setSelectedShell(current=>current?.id===previousID?shell:current)
+	},[])
 	const closeSSHShell=async(id:string)=>{
 		const dismiss=()=>{
 			setSSHShells(current=>current.filter(item=>item.id!==id))
@@ -387,7 +395,7 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
     <main>
 	      <header className="topbar"><div><h1 ref={pageTitleRef}>{title}</h1></div><div className="top-actions">
 		<SSHTunnelStatus tunnels={sshTunnels} hosts={hosts} open={openConnectionPanel==='tunnel'} onOpenChange={open=>setOpenConnectionPanel(current=>open?'tunnel':current==='tunnel'?null:current)} onStop={stopSSHTunnel} onCreated={registerSSHTunnel} onUpdated={replaceSSHTunnel} onRefresh={()=>void refreshConnections()}/>
-		<SSHShellStatus shells={topbarShells} hosts={hosts} open={openConnectionPanel==='shell'} onOpenChange={open=>setOpenConnectionPanel(current=>open?'shell':current==='shell'?null:current)} onOpen={shell=>{setOpenConnectionPanel(null);setSelectedShell(shell)}} onClose={closeSSHShell} onCreated={registerSSHShell}/>
+		<SSHShellStatus shells={topbarShells} hosts={hosts} open={openConnectionPanel==='shell'} onOpenChange={open=>setOpenConnectionPanel(current=>open?'shell':current==='shell'?null:current)} onOpen={shell=>{setOpenConnectionPanel(null);setSelectedShell(shell)}} onClose={closeSSHShell} onCreated={registerSSHShell} onReconnected={replaceSSHShell}/>
         <LanguageSwitch/>
 		<ThemeSwitch preference={themePreference} onChange={setThemePreference}/>
         <span className={`status ${health?.status === 'ok' ? 'online' : ''}`}><CircleDot size={14}/>{health?.status === 'ok' ? t('shell.online') : t('shell.disconnected')}</span>
@@ -405,7 +413,7 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 			/>
 			{page === 'ssh' && <SSHWorkspacePage
 				hosts={hosts} shells={sshShells.filter(shell=>shell.kind!=='workspace'&&shell.surface==='workspace')}
-				onCreated={rememberSSHShell} refresh={refreshConnections} onError={reportError}
+				onCreated={rememberSSHShell} onReconnected={replaceSSHShell} refresh={refreshConnections} onError={reportError}
 			/>}
 		<Suspense fallback={<div className="panel" role="status">{t('common.loading')}</div>}>
 		{page === 'config' && <ConfigurationPage hosts={hosts} providers={providers} proxies={proxies} settings={settings} capabilities={capabilities} health={health} refreshModels={refreshModels} refreshHosts={refreshHosts} refreshProxies={refreshProxies} refreshCapabilities={refreshCapabilities} refreshHealth={refreshHealth} onSettingsChanged={setSettings} onOpenMCPActivity={()=>{setAuditView('mcp');navigate('audit')}}/>}
@@ -416,11 +424,12 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
       </section>
 	      {selectedShell&&<SSHShellTerminal
 			key={selectedShell.id}
-			initialShell={selectedShell}
+			initialShell={sshShells.find(shell=>shell.id===selectedShell.id)||selectedShell}
 			relatedShells={selectedShell.kind==='workspace'?sshShells.filter(shell=>shell.kind==='workspace'&&shell.workspace_id===selectedShell.workspace_id&&sshShellActive(shell.status)):[]}
 			onSelect={setSelectedShell}
 			onClose={()=>setSelectedShell(null)}
 			onChanged={()=>void refreshConnections()}
+			onReconnected={replaceSSHShell}
 			onError={reportError}
 		/>}
     </main>

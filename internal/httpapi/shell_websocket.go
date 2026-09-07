@@ -33,6 +33,7 @@ type sshShellWebSocketCommand struct {
 type sshShellWebSocketEvent struct {
 	Type  string               `json:"type"`
 	Event domain.SSHShellEvent `json:"event,omitempty"`
+	Shell *domain.SSHShell     `json:"shell,omitempty"`
 	Error string               `json:"error,omitempty"`
 }
 
@@ -101,7 +102,9 @@ func (s *Server) serveSSHShellWebSocket(connection *websocket.Conn, request *htt
 	}
 	snapshot, snapshotErr := s.service.GetSSHShellSnapshot(ctx, request.PathValue("id"), "", after, 0, false, "", "")
 	if snapshotErr != nil {
-		if !errors.Is(snapshotErr, context.Canceled) && !errors.Is(snapshotErr, store.ErrNotFound) {
+		if errors.Is(snapshotErr, store.ErrNotFound) {
+			_ = websocket.JSON.Send(connection, sshShellWebSocketEvent{Type: "unavailable"})
+		} else if !errors.Is(snapshotErr, context.Canceled) {
 			_ = websocket.JSON.Send(connection, sshShellWebSocketEvent{Type: "error", Error: snapshotErr.Error()})
 		}
 		return
@@ -110,6 +113,10 @@ func (s *Server) serveSSHShellWebSocket(connection *websocket.Conn, request *htt
 		return
 	}
 	if !shellHTTPStatusActive(snapshot.Shell.Status) {
+		_ = websocket.JSON.Send(connection, sshShellWebSocketEvent{Type: "ended", Shell: &snapshot.Shell})
+		return
+	}
+	if err := websocket.JSON.Send(connection, sshShellWebSocketEvent{Type: "ready", Shell: &snapshot.Shell}); err != nil {
 		return
 	}
 	if liveEvents == nil {

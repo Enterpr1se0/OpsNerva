@@ -1,16 +1,28 @@
 import { FormEvent, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
-import { ChevronRight, LoaderCircle, Plus, Power, ShieldAlert, TerminalSquare, X } from 'lucide-react'
+import { ChevronRight, LoaderCircle, Plus, Power, RotateCw, ShieldAlert, TerminalSquare, X } from 'lucide-react'
 import type { Host, SSHShell } from '../../../types'
 import { api } from '../../../api/api'
 import { AppSelect } from '../../../components/Controls'
 import { errorText } from '../../../lib/utils'
 import { useAutoCollapseDetails } from '../../../lib/hooks'
+import { sshShellCanReconnect, reconnectOperatorShell } from '../shellState'
+import { useNotifier } from '../../../lib/notifications'
 
-export function SSHShellStatus({shells,hosts,open,onOpenChange,onOpen,onClose,onCreated}:{shells:SSHShell[];hosts:Host[];open:boolean;onOpenChange:(open:boolean)=>void;onOpen:(shell:SSHShell)=>void;onClose:(id:string)=>Promise<void>;onCreated:(shell:SSHShell)=>void}){
+export function SSHShellStatus({shells,hosts,open,onOpenChange,onOpen,onClose,onCreated,onReconnected}:{shells:SSHShell[];hosts:Host[];open:boolean;onOpenChange:(open:boolean)=>void;onOpen:(shell:SSHShell)=>void;onClose:(id:string)=>Promise<void>;onCreated:(shell:SSHShell)=>void;onReconnected:(previousID:string,shell:SSHShell)=>void}){
 	const {t}=useTranslation()
 	const [creating,setCreating]=useState(false)
+	const [retrying,setRetrying]=useState('')
+	const retryingRef=useRef(false)
+	const notify=useNotifier()
+	const retry=async(shell:SSHShell)=>{
+		if(retryingRef.current)return
+		retryingRef.current=true;setRetrying(shell.id)
+		try{onReconnected(shell.id,await reconnectOperatorShell(shell))}
+		catch(err){notify(errorText(err),'error')}
+		finally{retryingRef.current=false;setRetrying('')}
+	}
 	const closingShellIDsRef=useRef(new Set<string>())
 	const [closingShellIDs,setClosingShellIDs]=useState<Set<string>>(new Set())
 	const detailsRef=useAutoCollapseDetails(open,()=>onOpenChange(false))
@@ -36,7 +48,8 @@ export function SSHShellStatus({shells,hosts,open,onOpenChange,onOpen,onClose,on
 							<small>{shell.cwd||(shell.kind==='workspace'?'.':'~')}</small>
 							<ChevronRight size={14}/>
 						</button>
-						<button type="button" className="ssh-shell-quick-close" disabled={closing} onClick={()=>void close(shell.id)} title={t('sshShell.closeSession')} aria-label={t('sshShell.closeSession')}>{closing?<LoaderCircle className="spin" size={12}/>:<Power size={13}/>}</button>
+						{sshShellCanReconnect(shell)&&<button type="button" className="ssh-shell-quick-retry" disabled={closing||retrying===shell.id} onClick={()=>void retry(shell)} title={t('sshShell.reconnect')} aria-label={t('sshShell.reconnect')}>{retrying===shell.id?<LoaderCircle className="spin" size={12}/>:<RotateCw size={13}/>}</button>}
+						<button type="button" className="ssh-shell-quick-close" disabled={closing||retrying===shell.id} onClick={()=>void close(shell.id)} title={t('sshShell.closeSession')} aria-label={t('sshShell.closeSession')}>{closing?<LoaderCircle className="spin" size={12}/>:<Power size={13}/>}</button>
 					</section>})}
 					{!shells.length&&<div className="ssh-shell-empty">{hosts.length?t('sshShell.empty'):t('connections.noHosts')}</div>}
 				</div>

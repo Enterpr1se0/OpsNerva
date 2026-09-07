@@ -4,3 +4,4 @@ export { SSHShellCreateDialog, SSHShellStatus } from './components/SSHShellStatu
 export { SSHShellTerminal } from './components/SSHShellTerminal'
 export { SSHTunnelEditorDialog, SSHTunnelStatus } from './components/SSHTunnelStatus'
 export * from './utils'
+export * from './shellState'

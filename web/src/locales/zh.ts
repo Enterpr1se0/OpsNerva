@@ -36,7 +36,7 @@ const zh = {
     toolActions: { start: '开启', input: '输入', output: '输出', list: '列表', interrupt: '中断', close: '关闭' },
     sendSensitive: '私密发送', interrupt: 'Ctrl+C', closeSession: '关闭会话',
     create: '新建 Shell', start: '打开终端', starting: '正在连接...',
-    streamEnded: 'Shell 输出连接已结束，请重新打开终端。',
+    streamEnded: 'Shell 输出连接已断开，请重连。', reconnect: '重连',
     termination: { requested_close: '已主动关闭', service_stopped: '服务停止', remote_exit: '远端 Shell 已退出', remote_signal: '远端信号终止', connection_lost: 'SSH 连接异常断开', process_exit: '进程已退出', process_signal: '进程被终止', process_lost: '进程异常断开', start_failed: 'Shell 启动失败' },
   },
   sshWorkspace: {

@@ -36,7 +36,7 @@ const en = {
     toolActions: { start: 'Open', input: 'Input', output: 'Output', list: 'List', interrupt: 'Interrupt', close: 'Close' },
     sendSensitive: 'Send privately', interrupt: 'Ctrl+C', closeSession: 'Close session',
     create: 'New shell', start: 'Open terminal', starting: 'Connecting...',
-    streamEnded: 'The shell output connection ended. Reopen the terminal to reconnect.',
+    streamEnded: 'Shell output disconnected. Reconnect to continue.', reconnect: 'Reconnect',
     termination: { requested_close: 'Closed by request', service_stopped: 'Service stopped', remote_exit: 'Remote shell exited', remote_signal: 'Stopped by remote signal', connection_lost: 'SSH connection lost', process_exit: 'Process exited', process_signal: 'Process stopped', process_lost: 'Process disconnected', start_failed: 'Shell start failed' },
   },
   sshWorkspace: {
