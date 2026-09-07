@@ -161,6 +161,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/hosts/{id}/sftp/directories", s.createSFTPDirectory)
 	s.mux.HandleFunc("GET /api/v1/ssh-tunnels", s.listSSHTunnels)
 	s.mux.HandleFunc("POST /api/v1/ssh-tunnels", s.startSSHTunnel)
+	s.mux.HandleFunc("POST /api/v1/ssh-tunnels/{id}/retry", s.retrySSHTunnel)
 	s.mux.HandleFunc("PUT /api/v1/ssh-tunnels/{id}", s.updateSSHTunnel)
 	s.mux.HandleFunc("DELETE /api/v1/ssh-tunnels/{id}", s.stopSSHTunnel)
 	s.mux.HandleFunc("GET /api/v1/ssh-shells", s.listSSHShells)

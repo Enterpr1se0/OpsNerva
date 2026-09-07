@@ -213,6 +213,7 @@ export const api = {
   startSSHTunnel: (input:SSHTunnelStartInput) => request<SSHTunnel>('/api/v1/ssh-tunnels', { method:'POST', body:JSON.stringify(input) }),
   updateSSHTunnel: (id:string,input:SSHTunnelUpdateInput) => request<SSHTunnel>(`/api/v1/ssh-tunnels/${encodeURIComponent(id)}`, { method:'PUT', body:JSON.stringify(input) }),
   stopSSHTunnel: (id:string) => request<SSHTunnel>(`/api/v1/ssh-tunnels/${encodeURIComponent(id)}`, { method:'DELETE' }),
+  retrySSHTunnel: (id:string) => request<void>(`/api/v1/ssh-tunnels/${encodeURIComponent(id)}/retry`, { method:'POST', body:'{}' }),
   sshShells: (sessionId='') => request<SSHShellList>(`/api/v1/ssh-shells?session_id=${encodeURIComponent(sessionId)}`),
   startSSHShell: (input:SSHShellStartInput) => request<SSHShell>('/api/v1/ssh-shells', { method:'POST', body:JSON.stringify(input) }),
   sshShell: (id:string,after=0,coalesce=false) => request<SSHShellSnapshot>(`/api/v1/ssh-shells/${encodeURIComponent(id)}?after=${after}&coalesce=${coalesce}`),

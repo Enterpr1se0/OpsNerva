@@ -23,10 +23,7 @@ import (
 )
 
 const (
-	sshTunnelDefaultHost             = "127.0.0.1"
-	sshTunnelReconnectInitialDelay   = time.Second
-	sshTunnelReconnectMaximumDelay   = 30 * time.Second
-	sshTunnelReconnectAttemptTimeout = 30 * time.Second
+	sshTunnelDefaultHost = "127.0.0.1"
 )
 
 var (
@@ -39,6 +36,7 @@ type sshTunnelState struct {
 	tunnel          domain.SSHTunnel
 	ctx             context.Context
 	cancel          context.CancelFunc
+	retry           chan struct{}
 	runtimeMu       sync.Mutex
 	runtime         *sshTunnelRuntime
 	stopped         bool
@@ -409,7 +407,7 @@ func (s *Service) createSSHTunnel(ctx context.Context, host domain.Host, connect
 			RemoteHost: req.TunnelRemoteHost, RemotePort: remotePort,
 			Status: "running", ProxyUsed: proxyUsed, StartedAt: time.Now().UTC(),
 		},
-		ctx: tunnelCtx, cancel: cancelTunnel, openConnections: make(map[net.Conn]struct{}),
+		ctx: tunnelCtx, cancel: cancelTunnel, retry: make(chan struct{}, 1), openConnections: make(map[net.Conn]struct{}),
 	}
 	if !state.installRuntime(runtime) {
 		runtime.close()
@@ -569,126 +567,6 @@ func (s *Service) serveSSHTunnelRuntime(state *sshTunnelState, runtime *sshTunne
 	case err := <-clientErrors:
 		return err
 	}
-}
-
-func (s *Service) reconnectSSHTunnel(state *sshTunnelState) *sshTunnelRuntime {
-	transport, ok := s.transport.(sshx.TunnelTransport)
-	if !ok {
-		return nil
-	}
-	for attempt := 1; ; attempt++ {
-		delay := sshTunnelReconnectDelay(attempt)
-		s.tunnelMu.Lock()
-		current, exists := s.tunnels[state.tunnel.ID]
-		if !exists || current != state || state.tunnel.Status != "retrying" {
-			s.tunnelMu.Unlock()
-			return nil
-		}
-		state.tunnel.ReconnectAttempt = attempt
-		snapshot := tunnelSnapshot(state)
-		s.tunnelMu.Unlock()
-		s.publishTunnelState(snapshot, false)
-
-		timer := time.NewTimer(delay)
-		select {
-		case <-state.ctx.Done():
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-			return nil
-		case <-timer.C:
-		}
-
-		attemptCtx, cancelAttempt := context.WithTimeout(state.ctx, sshTunnelReconnectAttemptTimeout)
-		host, err := s.store.GetHost(attemptCtx, snapshot.HostID)
-		var connection sshx.ConnectionSpec
-		if err == nil {
-			connection, _, err = s.resolveSSHConnection(attemptCtx, host)
-		}
-		if err == nil {
-			connection, err = s.hydrateSSHConnection(connection, false)
-		}
-		var runtime *sshTunnelRuntime
-		var localPort, remotePort int
-		if err == nil {
-			req := domain.ExecRequest{
-				Mode: domain.ExecSSHTunnelStart, TunnelDirection: snapshot.Direction,
-				TunnelLocalHost: snapshot.LocalHost, TunnelLocalPort: snapshot.LocalPort,
-				TunnelRemoteHost: snapshot.RemoteHost, TunnelRemotePort: snapshot.RemotePort,
-			}
-			runtime, localPort, remotePort, err = openSSHTunnelRuntime(attemptCtx, state.ctx, transport, connection, req)
-		}
-		cancelAttempt()
-		if state.ctx.Err() != nil {
-			if runtime != nil {
-				runtime.close()
-			}
-			return nil
-		}
-		if err != nil {
-			failure := s.redactor.Redact(err.Error())
-			s.tunnelMu.Lock()
-			if current := s.tunnels[state.tunnel.ID]; current == state && state.tunnel.Status == "retrying" {
-				state.tunnel.Error = failure
-			}
-			failedAttempt := tunnelSnapshot(state)
-			s.tunnelMu.Unlock()
-			s.publishTunnelState(failedAttempt, false)
-			observability.FromContext(context.Background()).WarnContext(context.Background(), "SSH tunnel reconnect failed",
-				"component", "ssh_tunnel", "tunnel_id", state.tunnel.ID, "host_id", state.tunnel.HostID,
-				"attempt", attempt, "attempt_delay", delay, "error", failure)
-			continue
-		}
-		if !state.installRuntime(runtime) {
-			runtime.close()
-			return nil
-		}
-
-		var reconnected domain.SSHTunnel
-		s.tunnelMu.Lock()
-		current, exists = s.tunnels[state.tunnel.ID]
-		connected := exists && current == state && state.tunnel.Status == "retrying" && state.ctx.Err() == nil
-		if connected {
-			state.tunnel.HostName = host.Name
-			state.tunnel.LocalPort = localPort
-			state.tunnel.RemotePort = remotePort
-			state.tunnel.ProxyUsed = connection.Target.ProxyURL != "" || len(connection.Jumps) > 0
-			state.tunnel.Status = "running"
-			state.tunnel.Error = ""
-			state.tunnel.ReconnectAttempt = 0
-			reconnected = state.tunnel
-		}
-		s.tunnelMu.Unlock()
-		if !connected {
-			state.closeRuntime(runtime)
-			return nil
-		}
-		s.publishTunnelState(reconnected, false)
-
-		observability.FromContext(context.Background()).InfoContext(context.Background(), "SSH tunnel reconnected",
-			"component", "ssh_tunnel", "tunnel_id", reconnected.ID, "host_id", reconnected.HostID,
-			"attempt", attempt, "direction", reconnected.Direction,
-			"local_host", reconnected.LocalHost, "local_port", localPort,
-			"remote_host", reconnected.RemoteHost, "remote_port", remotePort)
-		return runtime
-	}
-}
-
-func sshTunnelReconnectDelay(attempt int) time.Duration {
-	if attempt < 1 {
-		attempt = 1
-	}
-	delay := sshTunnelReconnectInitialDelay
-	for index := 1; index < attempt && delay < sshTunnelReconnectMaximumDelay; index++ {
-		delay *= 2
-	}
-	if delay > sshTunnelReconnectMaximumDelay {
-		return sshTunnelReconnectMaximumDelay
-	}
-	return delay
 }
 
 func (s *Service) acceptSSHTunnelConnections(ctx context.Context, state *sshTunnelState, runtime *sshTunnelRuntime) error {
