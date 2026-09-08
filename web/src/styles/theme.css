@@ -1,7 +1,9 @@
 @layer base, light, syntax, interaction, editor;
 
 @import './styles.css' layer(base);
+@import './sftp-feedback.css' layer(base);
 @import './light-theme.css' layer(light);
 @import './syntax-highlight.css' layer(syntax);
 @import './app-interactions.css' layer(interaction);
+@import './virtual-file-list.css' layer(interaction);
 @import './code-editor.css' layer(editor);

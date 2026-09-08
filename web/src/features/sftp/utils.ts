@@ -1,4 +1,4 @@
-import type { FileTransferRecord, SFTPTextEncoding } from './types'
+import type { SFTPTextEncoding } from './types'
 
 export const maxFilePreviewBytes=1<<20
 
@@ -6,7 +6,6 @@ export function isAbortError(error:unknown){return error instanceof DOMException
 
 export const sftpTransferKey=(hostID:string)=>`sftp:${hostID}`
 export const workspaceTransferKey=(workspaceID:string)=>`workspace:${workspaceID}`
-export const emptyFileTransferRecord:FileTransferRecord={active:null,conflict:null,uploadVersion:0}
 
 export function remoteChildPath(parent:string,name:string){return parent==='/'?`/${name}`:`${parent}/${name}`}
 export function remoteParentPath(value:string){if(!value||value==='/')return '/';const parts=value.split('/').filter(Boolean);parts.pop();return `/${parts.join('/')}`}

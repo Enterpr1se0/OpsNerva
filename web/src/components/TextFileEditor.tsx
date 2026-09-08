@@ -34,7 +34,7 @@ function TextFileEditorDialog({path,meta,content,binary=false,editable=false,onC
 	const [error,setError]=useState('')
 	const save=async()=>{
 		const editor=editorRef.current
-		if(!onSave||saving||!editor)return
+		if(!editable||!onSave||saving||!editor)return
 		const draft=editor.getValue()
 		if(draft===content){setDirty(false);return}
 		setSaving(true);setError('')
@@ -57,7 +57,7 @@ function TextFileEditorDialog({path,meta,content,binary=false,editable=false,onC
 			{binary?<div className="workspace-binary-preview"><FileText size={30}/><b>{t('workspace.binary')}</b></div>:editing?<Suspense fallback={<div className="code-text-editor-loading"><LoaderCircle className="spin" size={18}/></div>}><CodeTextEditor ref={editorRef} initialValue={content} language={language} ariaLabel={path} onDirtyChange={setDirty} autoFocus/></Suspense>:<pre><HighlightedCode code={content} language={language} autoDetect/></pre>}
 			{editing&&<footer className="text-file-footer">
 				{error&&<span>{error}</span>}
-				<div><button type="button" disabled={saving} onClick={()=>{setDirty(false);setError('');setEditing(false)}}>{t('common.cancel')}</button><button type="button" className="primary" disabled={saving||!dirty} onClick={()=>void save()}>{saving?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {saving?t('common.saving'):t('common.save')}</button></div>
+				<div><button type="button" disabled={saving} onClick={()=>{setDirty(false);setError('');setEditing(false)}}>{t('common.cancel')}</button><button type="button" className="primary" disabled={saving||!dirty||!editable} onClick={()=>void save()}>{saving?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {saving?t('common.saving'):t('common.save')}</button></div>
 			</footer>}
 		</section>
 	</div>,document.body)

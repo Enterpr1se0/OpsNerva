@@ -80,7 +80,13 @@ Host 后端直接以服务账户执行，拥有宿主机文件系统与网络权
 
 内置实现使用 `golang.org/x/crypto/ssh`、`knownhosts` 和 `github.com/pkg/sftp`。密码只作为进程内 AuthMethod；Keyboard Interactive 只回答一次无回显的密码提示。Unix Agent 连接 `SSH_AUTH_SOCK`，Windows Agent 通过 named pipe 连接系统 OpenSSH Agent。Web/CLI 上传的未加密 OpenSSH 格式私钥限制为 1 MiB，使用 AES-256-GCM 写入 `private_key_cipher`，对外只返回 `has_private_key` 并只在内存解析；不接受或保存宿主机私钥路径。主机只保存共享 `proxy_id`，连接时解析 SOCKS5、SOCKS5H 或 HTTP CONNECT 参数；代理密码只在内存解密。ProxyJump 只能引用注册主机，逐跳验证 host key、检测环路并限制最大深度；与网络代理组合时，代理只负责连接第一台跳板机。
 
-内置实现通过未认证握手扫描协商出的 host key，信任时重新扫描并精确比较 SHA256 指纹，再以 `0600` 追加和同步 known_hosts。未知 key 与 key mismatch 均关闭失败。命令和 SFTP 每次建立独立连接，连接/命令取消会关闭完整跳板链；15 秒 keepalive 连续超时会断开。
+内置实现通过未认证握手扫描协商出的 host key，信任时重新扫描并精确比较 SHA256 指纹，再以 `0600` 追加和同步 known_hosts。未知 key 与 key mismatch 均关闭失败。命令和主机间文件传输建立独立连接；操作端 SFTP 文件浏览器按连接配置池化完整的 SSH 连接及 SFTP 会话，每组最多 2 个，空闲 2 分钟后回收。每次操作独占一个池单元，满池等待响应请求取消；归还后解除旧请求的取消绑定。取消或连接故障先关闭该单元最外层 SSH 连接，解除子系统初始化与文件操作阻塞，不影响另一单元；失效单元不再复用，不自动重放文件操作。15 秒 keepalive 连续超时会断开。
+
+文件浏览器目录读取在切换目录、离开页面或窗口隐藏时取消，重新激活后核对目录。删除成功直接移除本地列表条目，不额外等待全量目录刷新；失败或取消后重新读取相关目录以核对部分删除。操作端删除通过原 DELETE 接口返回 202 任务，服务端独立持有生命周期，切页或 HTTP 断开不取消任务；取消使用 POST `/api/v1/sftp-deletions/{id}/cancel`。同一主机只允许一个活动删除任务，全局最多 8 个；内存仅保留最近 64 台主机的最后结果，不持久化、不进入 Agent 会话或审计。递归扫描逐目录发现文件，以 8 个 worker 有界并发删除，目录按层级从深到浅删除；子项失败时跳过祖先目录，保留已确认删除、失败、跳过计数和首个错误。`sftp_deletions` 通过现有应用 WebSocket 初始/重连快照和带 revision 的 delta 推送，过程更新最多每 200ms 一次，无轮询；前端列表只订阅活动状态转换，小卡片单独订阅进度。
+
+SFTP 与 Workspace 文件列表共享固定行高的虚拟列表，仅挂载视口及上下各 6 行，并额外保留当前焦点行；支持方向键、Home/End、PageUp/PageDown 与跨窗口 Tab 导航。SFTP 只格式化可见行时间，复用 `Intl.DateTimeFormat`，虚拟行不播放入场动画。上传/下载状态仓库按主机或 Workspace 原地更新记录，开始、结束与上传完成版本独立发布；字节进度只通知进度组件，每 200ms 合并一次，最后一个可见订阅离开即清除待刷新定时器，任务本身继续。Workspace 目录监听不依赖预览状态，读取中到达的失效事件合并为一次后续读取；页面、窗口隐藏或侧栏折叠时取消目录/预览读取并关闭监听，恢复可见后重新核对。
+
+下载封装保留 `io.WriterTo`，上传显式使用并发写入，单文件请求并发设为 32；上传先完整写入临时文件再提交，失败后释放原租约，用独立的 5 秒清理上下文删除临时文件，避免满池清理死锁。`component=sftp` 的请求诊断记录池等待、连接获取、SFTP 初始化、目录读取、实际删除与租约归还的分段耗时，通过 `request_id` 关联 HTTP 总耗时，不写入审计；成功删除记录为 INFO，慢操作（至少 2 秒）或失败为 WARN，快速读取及请求取消为 DEBUG。
 
 双后端到内置单后端的升级是显式破坏性迁移。检测到旧 `transport_backend`、`config_alias`、自由格式 `proxy_jump` 或 `identity_file` 列时，Store 会清理旧主机及依赖的 runs、approvals、tasks，再删除这些列，不保留运行时兼容分支。废弃的 `file_operations` 表会在启动迁移时直接删除。
 

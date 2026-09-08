@@ -1,0 +1,5 @@
+.virtual-file-list { overflow-anchor: none; }
+.virtual-file-content { position: relative; min-width: 0; }
+.virtual-file-row { position: absolute; left: 0; right: 0; }
+.virtual-file-row > :is(.sftp-row,.workspace-file-row) { height: 100%; animation: none; }
+.virtual-file-list:focus-visible { outline: 1px solid var(--green); outline-offset: -1px; }

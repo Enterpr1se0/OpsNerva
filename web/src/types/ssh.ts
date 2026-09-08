@@ -176,3 +176,23 @@ export interface SFTPMutationResult {
   host_id: string
   entry: SFTPFileEntry
 }
+
+export interface SFTPDeletion {
+  id: string
+  host_id: string
+  path: string
+  status: 'running' | 'stopping' | 'completed' | 'failed' | 'cancelled'
+  revision: number
+  progress: {
+    discovered: number
+    removed: number
+    failed: number
+    skipped: number
+    current_path?: string
+    first_error?: string
+    scan_complete: boolean
+    root_removed: boolean
+  }
+  error?: string
+  updated_at: string
+}

@@ -43,8 +43,10 @@ const en = {
     newTerminal: 'New terminal', noTerminal: 'No terminal is open', remotePath: 'Remote path', hostCount: '{{count}} hosts',
     cpu: 'CPU', memory: 'Memory', network: 'Network', disk: 'Disk', uptime: 'Uptime',
     newDirectory: 'New directory', rename: 'Rename', name: 'Name',
-    uploaded: '{{count}} file(s) uploaded', directoryCreated: 'Directory created', renamed: 'Renamed', deleted: 'Deleted', saved: 'Saved · {{path}}',
+    uploaded: '{{count}} file(s) uploaded', directoryCreated: 'Directory created', renamed: 'Renamed', saved: 'Saved · {{path}}',
     deleteTitle: 'Delete “{{name}}”?',
+    deleteProgress: 'Removed {{removed}} / found {{discovered}} · failed {{failed}} · skipped {{skipped}}',
+    deletionBusy: 'A deletion is running on this host. Wait for it to finish or cancel it.',
     overwriteTitle: 'File already exists', overwrite: 'Overwrite',
   },
   config: {

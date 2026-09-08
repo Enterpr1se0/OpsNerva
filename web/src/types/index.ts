@@ -1,4 +1,4 @@
-export type { HostAuthType, HostSudoMode, HostKey, Host, HostInput, SSHTunnel, SSHTunnelList, SSHTunnelStartInput, SSHTunnelUpdateInput, SSHShell, SSHShellEvent, SSHShellSnapshot, SSHShellList, SSHHostStatus, SSHShellStartInput, SSHShellUsage, SFTPFileEntry, SFTPFileList, SFTPMutationResult } from './ssh'
+export type { HostAuthType, HostSudoMode, HostKey, Host, HostInput, SSHTunnel, SSHTunnelList, SSHTunnelStartInput, SSHTunnelUpdateInput, SSHShell, SSHShellEvent, SSHShellSnapshot, SSHShellList, SSHHostStatus, SSHShellStartInput, SSHShellUsage, SFTPFileEntry, SFTPFileList, SFTPMutationResult, SFTPDeletion } from './ssh'
 export type { Approval, ApprovalExecutionResult, Run, CommandExplanation, CommandReview, ServerLogEntry, ServerLogResponse, RunSearchPage, AuditRunDeleteResult, RunDetail } from './audit'
 export type { ChatQueueMode, ChatTokenUsage, ChatSession, ChatSessionDelta, ChatToolCallStatus, ChatAttachment, ChatMessage, ChatMessagePage, ChatToolCall, ChatState, QueuedChatMessage, ChatContextSummary, ChatContextCompressionResult } from './chat'
 export type { AgentEvent, AgentTask, AgentTaskList } from './agent'

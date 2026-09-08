@@ -6,37 +6,29 @@ import { errorText } from '../../lib/utils'
 import { SFTPOverwriteDialog } from './components/SFTPOverwriteDialog'
 import type { SFTPFileEntry } from '../../types'
 import type { ActiveFileTransfer, FileTransferManager, FileTransferRecord, SFTPOverwriteCandidate, WorkspaceTransferSource } from './types'
-import { emptyFileTransferRecord, isAbortError, remoteChildPath, sftpTransferKey, workspaceTransferKey } from './utils'
+import { isAbortError, remoteChildPath, sftpTransferKey, workspaceTransferKey } from './utils'
+import { FileTransferStore } from './transferStore'
 
 import { FileTransferContext } from './useFileTransfer'
+import { useSFTPDeletionManager } from './useSFTPDeletion'
 
 export function FileTransferProvider({children}:{children:ReactNode}){
+	const deletions=useSFTPDeletionManager()
 	const {t}=useTranslation()
 	const notify=useNotifier()
 	const [conflicts,setConflicts]=useState<ReadonlyMap<string,FileTransferRecord>>(()=>new Map())
-	const recordsRef=useRef<ReadonlyMap<string,FileTransferRecord>>(new Map())
-	const subscribersRef=useRef(new Map<string,Set<()=>void>>())
-	const record=useCallback((key:string)=>recordsRef.current.get(key)||emptyFileTransferRecord,[])
-	const subscribe=useCallback((key:string,listener:()=>void)=>{
-		let subscribers=subscribersRef.current.get(key)
-		if(!subscribers){subscribers=new Set();subscribersRef.current.set(key,subscribers)}
-		subscribers.add(listener)
-		return()=>{subscribers!.delete(listener);if(!subscribers!.size)subscribersRef.current.delete(key)}
-	},[])
+	const [store]=useState(()=>new FileTransferStore())
 	const controllers=useRef(new Map<string,AbortController>())
 	const updateRecord=useCallback((key:string,update:(current:FileTransferRecord)=>FileTransferRecord)=>{
-		const next=new Map(recordsRef.current)
-		const current=next.get(key)||emptyFileTransferRecord
+		const current=store.record(key)
 		const updated=update(current)
-		next.set(key,updated)
-		recordsRef.current=next
+		store.set(key,updated)
 		if(current.conflict!==updated.conflict||updated.conflict&&!!current.active!==!!updated.active)setConflicts(current=>{
 			const next=new Map(current)
 			if(updated.conflict)next.set(key,updated);else next.delete(key)
 			return next
 		})
-		for(const listener of subscribersRef.current.get(key)||[])listener()
-	},[])
+	},[store])
 	const begin=useCallback((key:string,transfer:ActiveFileTransfer)=>{
 		if(controllers.current.has(key))return null
 		const controller=new AbortController()
@@ -92,9 +84,9 @@ export function FileTransferProvider({children}:{children:ReactNode}){
 		finally{finish(key,controller)}
 	},[begin,finish,notify,updateRecord])
 	const overwrite=useCallback((hostID:string)=>{
-		const conflict=recordsRef.current.get(sftpTransferKey(hostID))?.conflict
+		const conflict=store.record(sftpTransferKey(hostID)).conflict
 		if(conflict)void runSFTPUpload(hostID,conflict.directory,[{file:conflict.file,path:conflict.path}],true)
-	},[runSFTPUpload])
+	},[runSFTPUpload,store])
 	const dismissConflict=useCallback((hostID:string)=>updateRecord(sftpTransferKey(hostID),current=>({...current,conflict:null})),[updateRecord])
 	const uploadWorkspace=useCallback((workspaceID:string,source:WorkspaceTransferSource)=>{
 		const key=workspaceTransferKey(workspaceID)
@@ -152,7 +144,7 @@ export function FileTransferProvider({children}:{children:ReactNode}){
 		finally{finish(key,controller)}
 	},[begin,finish,notify,updateRecord])
 	const cancel=useCallback((key:string)=>controllers.current.get(key)?.abort(),[])
-	useEffect(()=>()=>{for(const controller of controllers.current.values())controller.abort();controllers.current.clear();subscribersRef.current.clear()},[])
-	const value=useMemo<FileTransferManager>(()=>({record,subscribe,uploadSFTP,downloadSFTP,uploadWorkspace,downloadWorkspace,cancel}),[cancel,downloadSFTP,downloadWorkspace,record,subscribe,uploadSFTP,uploadWorkspace])
+	useEffect(()=>()=>{for(const controller of controllers.current.values())controller.abort();controllers.current.clear();store.dispose()},[store])
+	const value=useMemo<FileTransferManager>(()=>({deletions,store,uploadSFTP,downloadSFTP,uploadWorkspace,downloadWorkspace,cancel}),[deletions,store,cancel,downloadSFTP,downloadWorkspace,uploadSFTP,uploadWorkspace])
 	return <FileTransferContext.Provider value={value}><>{children}{[...conflicts].map(([key,record])=>record.conflict&&<SFTPOverwriteDialog key={key} path={record.conflict.path} busy={!!record.active} onCancel={()=>dismissConflict(key.slice(5))} onConfirm={()=>overwrite(key.slice(5))}/>)}</></FileTransferContext.Provider>
 }

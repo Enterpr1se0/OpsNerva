@@ -1,5 +1,6 @@
 import type { AgentEvent, Approval, ApprovalExecutionResult, AuditRunDeleteResult, AuthStatus, ChatContextCompressionResult, ChatMessage, ChatMessagePage, ChatQueueMode, ChatSession, ChatState, ConfigurationImportResult, Health, Host, HostInput, LLMToolCatalog, ManagedSkill, MCPActivitySnapshot, MCPOAuthStart, MCPServer, MCPServerInput, MCPTestResult, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestJob, ModelTestResult, Proxy, ProxyInput, ProxyTestResult, QueuedChatMessage, Run, RunDetail, RunSearchPage, ServerLogResponse, SFTPFileList, SFTPMutationResult, SSHHostStatus, SSHShell, SSHShellList, SSHShellSnapshot, SSHShellStartInput, SSHTunnel, SSHTunnelList, SSHTunnelStartInput, SSHTunnelUpdateInput, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchResponse, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceInput, WorkspaceUploadResult } from '../types'
 import {subscribeApplicationEvents} from './appEvents'
+import type { SFTPDeletion } from '../types'
 
 export type TransferProgress={loaded:number;total:number}
 export type TransferOptions={signal?:AbortSignal;onProgress?:(progress:TransferProgress)=>void;totalBytes?:number}
@@ -16,6 +17,7 @@ function transferError(status:number,statusText:string,response:unknown,authHead
 }
 
 function uploadJSON<T>(method:string,url:string,body:Blob,contentType:string,options:TransferOptions={}):Promise<T>{
+	options.signal?.throwIfAborted()
 	return new Promise((resolve,reject)=>{
 		const xhr=new XMLHttpRequest()
 		xhr.open(method,url)
@@ -34,6 +36,7 @@ function uploadJSON<T>(method:string,url:string,body:Blob,contentType:string,opt
 }
 
 export function downloadFile(url:string,filename:string,options:TransferOptions={}):Promise<void>{
+	options.signal?.throwIfAborted()
 	const picker=(window as unknown as{showSaveFilePicker?:SaveFilePicker}).showSaveFilePicker?.bind(window)
 	if(picker)return downloadFileStream(url,filename,options,picker)
 	return new Promise((resolve,reject)=>{
@@ -188,8 +191,8 @@ export const api = {
 	createWorkspace: (workspace:WorkspaceInput) => request<WorkspaceCapability>('/api/v1/workspaces',{method:'POST',body:JSON.stringify(workspace)}),
 	updateWorkspace: (id:string,workspace:WorkspaceInput) => request<WorkspaceCapability>(`/api/v1/workspaces/${encodeURIComponent(id)}`,{method:'PUT',body:JSON.stringify(workspace)}),
 	deleteWorkspace: (id:string) => request<void>(`/api/v1/workspaces/${encodeURIComponent(id)}`,{method:'DELETE'}),
-	workspaceFiles: (workspaceId:string,path='.') => request<WorkspaceFileList>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files?path=${encodeURIComponent(path)}`),
-	previewWorkspaceFile: (workspaceId:string,path:string) => request<WorkspaceFilePreview>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/preview?path=${encodeURIComponent(path)}`),
+	workspaceFiles: (workspaceId:string,path='.',signal?:AbortSignal) => request<WorkspaceFileList>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files?path=${encodeURIComponent(path)}`,{signal}),
+	previewWorkspaceFile: (workspaceId:string,path:string,signal?:AbortSignal) => request<WorkspaceFilePreview>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/preview?path=${encodeURIComponent(path)}`,{signal}),
 	saveWorkspaceTextFile: (workspaceId:string,path:string,content:string) => request<WorkspaceUploadResult>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files`,{method:'PUT',body:JSON.stringify({path,content})}),
 	uploadWorkspaceFile: (workspaceId:string,file:File,path:string,options:TransferOptions={}) => {const query=new URLSearchParams({path,filename:file.name});return uploadJSON<WorkspaceUploadResult>('POST',`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files?${query}`,file,file.type||'application/octet-stream',{...options,totalBytes:file.size})},
 	createWorkspaceDirectory: (workspaceId:string,path:string,signal?:AbortSignal) => request<void>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/directories`,{method:'POST',body:JSON.stringify({path}),signal}),
@@ -223,9 +226,9 @@ export const api = {
   resizeSSHShell: (id:string,cols:number,rows:number) => request<SSHShell>(`/api/v1/ssh-shells/${encodeURIComponent(id)}/resize`, { method:'POST', body:JSON.stringify({cols,rows}) }),
   interruptSSHShell: (id:string) => request<SSHShell>(`/api/v1/ssh-shells/${encodeURIComponent(id)}/interrupt`, { method:'POST', body:'{}' }),
   closeSSHShell: (id:string) => request<SSHShell>(`/api/v1/ssh-shells/${encodeURIComponent(id)}`, { method:'DELETE' }),
-  sftpEntries: (hostId:string,path='') => request<SFTPFileList>(`/api/v1/hosts/${encodeURIComponent(hostId)}/sftp/entries?path=${encodeURIComponent(path)}`),
-  sftpFile: async(hostId:string,path:string) => {
-		const response=await fetch(sftpDownloadURL(hostId,path),{credentials:'same-origin',headers:{Accept:'application/octet-stream'}})
+  sftpEntries: (hostId:string,path='',signal?:AbortSignal) => request<SFTPFileList>(`/api/v1/hosts/${encodeURIComponent(hostId)}/sftp/entries?path=${encodeURIComponent(path)}`,{signal}),
+  sftpFile: async(hostId:string,path:string,signal?:AbortSignal) => {
+		const response=await fetch(sftpDownloadURL(hostId,path),{credentials:'same-origin',headers:{Accept:'application/octet-stream'},signal})
 		if(!response.ok)throw await responseError(response)
 		return response.arrayBuffer()
 	},
@@ -233,7 +236,8 @@ export const api = {
   uploadSFTPTextFile: (hostId:string,path:string,content:string,encoding:'utf-8'|'utf-16le'|'utf-16be'|'gb18030') => request<SFTPMutationResult>(`/api/v1/hosts/${encodeURIComponent(hostId)}/sftp/files?path=${encodeURIComponent(path)}&overwrite=true&encoding=${encodeURIComponent(encoding)}`, { method:'PUT', body:content, headers:{'Content-Type':'text/plain;charset=utf-8'} }),
   createSFTPDirectory: (hostId:string,path:string) => request<SFTPMutationResult>(`/api/v1/hosts/${encodeURIComponent(hostId)}/sftp/directories`, { method:'POST', body:JSON.stringify({path}) }),
   renameSFTPEntry: (hostId:string,sourcePath:string,destinationPath:string) => request<SFTPMutationResult>(`/api/v1/hosts/${encodeURIComponent(hostId)}/sftp/entries`, { method:'PATCH', body:JSON.stringify({source_path:sourcePath,destination_path:destinationPath}) }),
-  deleteSFTPEntry: (hostId:string,path:string,recursive=false) => request<SFTPMutationResult>(`/api/v1/hosts/${encodeURIComponent(hostId)}/sftp/entries?path=${encodeURIComponent(path)}&recursive=${recursive}`, { method:'DELETE' }),
+  deleteSFTPEntry: (hostId:string,path:string,recursive=false) => request<SFTPDeletion>(`/api/v1/hosts/${encodeURIComponent(hostId)}/sftp/entries?path=${encodeURIComponent(path)}&recursive=${recursive}`, { method:'DELETE' }),
+  cancelSFTPDeletion: (id:string) => request<SFTPDeletion>(`/api/v1/sftp-deletions/${encodeURIComponent(id)}/cancel`, { method:'POST' }),
   saveHost: (host: HostInput) => request<Host>('/api/v1/hosts', { method: 'POST', body: JSON.stringify(host) }),
   setHostAgentRootAccess: (id:string,enabled:boolean) => request<Host>(`/api/v1/hosts/${encodeURIComponent(id)}/agent-root`, { method:'PUT', body:JSON.stringify({enabled}) }),
   deleteHost: (id: string) => request<void>(`/api/v1/hosts/${id}`, { method: 'DELETE' }),

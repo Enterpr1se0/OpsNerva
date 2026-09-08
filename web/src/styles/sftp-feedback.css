@@ -1,0 +1,44 @@
+.sftp-feedback {
+  min-width: 0;
+  min-height: 0;
+  max-height: min(220px, 35vh);
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+
+.sftp-feedback:empty { display: none; }
+
+.sftp-deletion-status {
+  margin: 6px 10px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: var(--text-caption);
+}
+
+.sftp-deletion-status > div {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-bottom: 4px;
+}
+
+.sftp-deletion-status b {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.sftp-deletion-status > div > :not(b) { flex: 0 0 auto; }
+.sftp-deletion-status.completed > div > svg { color: var(--green); }
+.sftp-deletion-status.failed > div > svg, .sftp-deletion-status p { color: var(--red); }
+.sftp-deletion-status p { margin: 4px 0 0; }
+.sftp-deletion-status small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sftp-deletion-status button { display: grid; place-items: center; padding: 2px; border: 0; background: transparent; color: inherit; font: inherit; }
+.sftp-deletion-status button:disabled { opacity: .5; cursor: default; }

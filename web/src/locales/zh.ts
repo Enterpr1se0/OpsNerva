@@ -43,8 +43,10 @@ const zh = {
     newTerminal: '新建终端', noTerminal: '没有打开的终端', remotePath: '远程路径', hostCount: '{{count}} 台主机',
     cpu: 'CPU', memory: '内存', network: '网络', disk: '硬盘', uptime: '在线',
     newDirectory: '新建目录', rename: '重命名', name: '名称',
-    uploaded: '已上传 {{count}} 个文件', directoryCreated: '目录已创建', renamed: '已重命名', deleted: '已删除', saved: '已保存 · {{path}}',
+    uploaded: '已上传 {{count}} 个文件', directoryCreated: '目录已创建', renamed: '已重命名', saved: '已保存 · {{path}}',
     deleteTitle: '删除“{{name}}”？',
+    deleteProgress: '已删除 {{removed}} / 已发现 {{discovered}} · 失败 {{failed}} · 跳过 {{skipped}}',
+    deletionBusy: '此主机正在删除文件，请等待完成或取消删除。',
     overwriteTitle: '文件已存在', overwrite: '覆盖',
   },
   config: {
