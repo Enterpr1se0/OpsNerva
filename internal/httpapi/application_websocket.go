@@ -312,6 +312,13 @@ func (s *Server) serveApplicationWebSocket(connection *websocket.Conn, request *
 				}
 				continue
 			}
+			if event.SFTPDeletion != nil {
+				payload, err := json.Marshal(event.SFTPDeletion)
+				if err == nil && send(event.Topic, "delta", payload) != nil {
+					return
+				}
+				continue
+			}
 			if event.Topic == service.StateTopicAudit && event.Audit != nil {
 				payload, err := json.Marshal(newApplicationAuditEvent(*event.Audit))
 				if err == nil && send(event.Topic, "delta", payload) != nil {
@@ -589,6 +596,8 @@ func (s *Server) applicationTopicSnapshotCached(ctx context.Context, topic strin
 func (s *Server) applicationTopicSnapshot(ctx context.Context, topic string, subscription applicationWebSocketSubscription) ([]byte, error) {
 	var value any
 	switch topic {
+	case "sftp_deletions":
+		value = s.service.ListSFTPDeletions()
 	case "connections":
 		tunnels := s.service.ListSSHTunnels()
 		shells, err := s.service.ListSSHShells(ctx, "", true, "", "")

@@ -8,11 +8,12 @@ import (
 )
 
 const (
-	StateTopicConnections = "connections"
-	StateTopicApprovals   = "approvals"
-	StateTopicSessions    = "sessions"
-	StateTopicChatState   = "chat_state"
-	StateTopicAudit       = "audit"
+	StateTopicConnections   = "connections"
+	StateTopicApprovals     = "approvals"
+	StateTopicSessions      = "sessions"
+	StateTopicChatState     = "chat_state"
+	StateTopicAudit         = "audit"
+	StateTopicSFTPDeletions = "sftp_deletions"
 )
 
 type ConnectionStateDelta struct {
@@ -22,10 +23,11 @@ type ConnectionStateDelta struct {
 }
 
 type StateEvent struct {
-	Topic      string                `json:"topic"`
-	SessionID  string                `json:"session_id,omitempty"`
-	Connection *ConnectionStateDelta `json:"connection,omitempty"`
-	Audit      *domain.AuditEvent    `json:"audit,omitempty"`
+	Topic        string                `json:"topic"`
+	SessionID    string                `json:"session_id,omitempty"`
+	Connection   *ConnectionStateDelta `json:"connection,omitempty"`
+	Audit        *domain.AuditEvent    `json:"audit,omitempty"`
+	SFTPDeletion *SFTPDeletion         `json:"sftp_deletion,omitempty"`
 }
 
 type stateSubscriber struct {

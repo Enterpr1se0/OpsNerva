@@ -69,7 +69,7 @@ func TestApplicationWebSocketSubscribesThroughRequestLogger(t *testing.T) {
 }
 
 func TestApplicationControlTopicsAreEventDriven(t *testing.T) {
-	for _, topic := range []string{"approvals", "sessions", "chat_state", "audit"} {
+	for _, topic := range []string{"approvals", "sessions", "chat_state", "audit", "sftp_deletions"} {
 		if _, sampled := applicationSampleIntervals[topic]; sampled {
 			t.Errorf("control topic %q still has a polling interval", topic)
 		}

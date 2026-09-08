@@ -147,7 +147,7 @@ func (*workspaceDownloadTransport) RenameSFTPEntry(context.Context, sshx.Connect
 	return sshx.SFTPFileEntry{}, errors.New("not implemented")
 }
 
-func (*workspaceDownloadTransport) RemoveSFTPEntry(context.Context, sshx.ConnectionSpec, string, bool) (sshx.SFTPFileEntry, error) {
+func (*workspaceDownloadTransport) RemoveSFTPEntry(context.Context, sshx.ConnectionSpec, string, bool, func(sshx.SFTPDeleteProgress)) (sshx.SFTPFileEntry, error) {
 	return sshx.SFTPFileEntry{}, errors.New("not implemented")
 }
 

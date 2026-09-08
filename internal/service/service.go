@@ -91,6 +91,9 @@ type Service struct {
 	stateEventMu            sync.RWMutex
 	stateSubscribers        map[uint64]*stateSubscriber
 	stateSubscriberID       uint64
+	sftpDeletionMu          sync.Mutex
+	sftpDeletions           map[string]*sftpDeletionState
+	sftpDeletionSequence    uint64
 	unsubscribeStoreChanges func()
 	tunnelMu                sync.RWMutex
 	tunnels                 map[string]*sshTunnelState

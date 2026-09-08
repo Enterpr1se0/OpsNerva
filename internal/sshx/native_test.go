@@ -35,6 +35,7 @@ type testSSHServer struct {
 	root             string
 	allowedPublicKey ssh.PublicKey
 	wg               sync.WaitGroup
+	sftpHandler      func(ssh.Channel, *ssh.Request)
 }
 
 type shellInputBuffer struct {
@@ -73,7 +74,7 @@ func TestNativeShellInterruptWritesPTYControlByte(t *testing.T) {
 	}
 }
 
-func startTestSSHServer(t *testing.T, password string) *testSSHServer {
+func startTestSSHServer(t *testing.T, password string, options ...func(*testSSHServer)) *testSSHServer {
 	t.Helper()
 	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -88,6 +89,9 @@ func startTestSSHServer(t *testing.T, password string) *testSSHServer {
 		t.Fatal(err)
 	}
 	server := &testSSHServer{listener: listener, signer: signer, password: password, root: t.TempDir()}
+	for _, option := range options {
+		option(server)
+	}
 	server.wg.Add(1)
 	go server.serve()
 	t.Cleanup(func() {
@@ -253,6 +257,10 @@ func (s *testSSHServer) handleSession(channel ssh.Channel, requests <-chan *ssh.
 			if err := ssh.Unmarshal(request.Payload, &payload); err != nil || payload.Name != "sftp" {
 				_ = request.Reply(false, nil)
 				continue
+			}
+			if s.sftpHandler != nil {
+				s.sftpHandler(channel, request)
+				return
 			}
 			_ = request.Reply(true, nil)
 			server, err := sftp.NewServer(channel)
@@ -421,11 +429,14 @@ func TestNativeSFTPFileManagerOperations(t *testing.T) {
 	}
 	poolKey := sftpConnectionKey(connection)
 	transport.sftpPoolMu.Lock()
-	pooledEntry := transport.sftpPool[poolKey]
-	pooledReady := pooledEntry != nil && pooledEntry.client != nil && pooledEntry.refs == 0
+	var pooledEntry *sftpSession
+	for session := range transport.sftpPool[poolKey].sessions {
+		pooledEntry = session
+	}
+	pooledReady := pooledEntry != nil && pooledEntry.client != nil && !pooledEntry.busy
 	transport.sftpPoolMu.Unlock()
 	if !pooledReady {
-		t.Fatalf("SFTP base connection was not retained after the first operation: %#v", pooledEntry)
+		t.Fatalf("SFTP session was not retained after the first operation: %#v", pooledEntry)
 	}
 
 	filePath := directory + "/hello.txt"
@@ -438,10 +449,10 @@ func TestNativeSFTPFileManagerOperations(t *testing.T) {
 		t.Fatalf("unexpected uploaded entry: %#v", uploaded)
 	}
 	transport.sftpPoolMu.Lock()
-	reusedEntry := transport.sftpPool[poolKey]
+	_, reused := transport.sftpPool[poolKey].sessions[pooledEntry]
 	transport.sftpPoolMu.Unlock()
-	if reusedEntry != pooledEntry {
-		t.Fatal("sequential SFTP operations did not reuse the base SSH connection")
+	if !reused {
+		t.Fatal("sequential SFTP operations did not reuse the SFTP session")
 	}
 	if _, err := transport.UploadSFTPFile(context.Background(), connection, filePath, strings.NewReader("conflict"), false); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("upload conflict was not rejected: %v", err)
@@ -496,10 +507,10 @@ func TestNativeSFTPFileManagerOperations(t *testing.T) {
 	if renamed.Path != renamedPath || renamed.Name != "renamed.txt" {
 		t.Fatalf("unexpected renamed entry: %#v", renamed)
 	}
-	if _, err := transport.RemoveSFTPEntry(context.Background(), connection, renamedPath, false); err != nil {
+	if _, err := transport.RemoveSFTPEntry(context.Background(), connection, renamedPath, false, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := transport.RemoveSFTPEntry(context.Background(), connection, directory, true); err != nil {
+	if _, err := transport.RemoveSFTPEntry(context.Background(), connection, directory, true, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(directoryLocal); !os.IsNotExist(err) {
@@ -546,7 +557,7 @@ func TestNativeSFTPCancelledUploadRemovesTemporaryFile(t *testing.T) {
 	for time.Now().Before(deadline) {
 		transport.sftpPoolMu.Lock()
 		entry := transport.sftpPool[poolKey]
-		closed = entry != nil && entry.refs == 0
+		closed = entry == nil || len(entry.sessions) == 0
 		transport.sftpPoolMu.Unlock()
 		if closed {
 			break

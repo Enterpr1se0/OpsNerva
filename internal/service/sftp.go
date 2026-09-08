@@ -52,15 +52,6 @@ func (s *Service) RenameOperatorSFTPEntry(ctx context.Context, hostID, sourcePat
 	return sshx.SFTPMutationResult{HostID: connection.Target.ID, Entry: entry}, err
 }
 
-func (s *Service) RemoveOperatorSFTPEntry(ctx context.Context, hostID, remotePath string, recursive bool) (sshx.SFTPMutationResult, error) {
-	transport, connection, err := s.operatorSFTP(ctx, hostID)
-	if err != nil {
-		return sshx.SFTPMutationResult{}, err
-	}
-	entry, err := transport.RemoveSFTPEntry(ctx, connection, remotePath, recursive)
-	return sshx.SFTPMutationResult{HostID: connection.Target.ID, Entry: entry}, err
-}
-
 func (s *Service) operatorSFTP(ctx context.Context, hostID string) (sshx.SFTPTransport, sshx.ConnectionSpec, error) {
 	hostID = strings.TrimSpace(hostID)
 	if hostID == "" {

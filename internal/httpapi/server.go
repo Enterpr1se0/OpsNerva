@@ -157,6 +157,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/hosts/{id}/sftp/entries", s.listSFTPEntries)
 	s.mux.HandleFunc("PATCH /api/v1/hosts/{id}/sftp/entries", s.renameSFTPEntry)
 	s.mux.HandleFunc("DELETE /api/v1/hosts/{id}/sftp/entries", s.deleteSFTPEntry)
+	s.mux.HandleFunc("POST /api/v1/sftp-deletions/{id}/cancel", s.cancelSFTPDeletion)
 	s.mux.HandleFunc("GET /api/v1/hosts/{id}/sftp/files", s.downloadSFTPFile)
 	s.mux.HandleFunc("PUT /api/v1/hosts/{id}/sftp/files", s.uploadSFTPFile)
 	s.mux.HandleFunc("POST /api/v1/hosts/{id}/sftp/directories", s.createSFTPDirectory)
@@ -1462,16 +1463,6 @@ func (s *Server) renameSFTPEntry(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusConflict
 		}
 		writeErrorStatus(w, err, status)
-		return
-	}
-	writeJSON(w, http.StatusOK, result)
-}
-
-func (s *Server) deleteSFTPEntry(w http.ResponseWriter, r *http.Request) {
-	recursive, _ := strconv.ParseBool(r.URL.Query().Get("recursive"))
-	result, err := s.service.RemoveOperatorSFTPEntry(r.Context(), r.PathValue("id"), r.URL.Query().Get("path"), recursive)
-	if err != nil {
-		writeErrorStatus(w, err, http.StatusBadRequest)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)

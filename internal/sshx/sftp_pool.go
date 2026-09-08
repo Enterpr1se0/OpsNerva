@@ -8,22 +8,36 @@ import (
 	"errors"
 	"hash"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	"github.com/pkg/sftp"
 )
 
-const sftpConnectionIdleTimeout = 30 * time.Second
+const (
+	// One transfer and one interactive directory operation can run independently.
+	sftpSessionsPerConnection = 2
+	sftpConnectionIdleTimeout = 2 * time.Minute
+	sftpRequestsPerFile       = 32
+)
 
-type sftpPoolEntry struct {
-	key       string
-	client    *nativeClient
-	ready     chan struct{}
-	readyOnce sync.Once
-	refs      int
-	stale     bool
+type sftpHostPool struct {
+	key      string
+	sessions map[*sftpSession]struct{}
+	changed  chan struct{}
+}
+
+// A pooled session owns its entire SSH chain. It is leased exclusively, so
+// canceling a blocked subsystem/file operation cannot abort another request.
+type sftpSession struct {
+	pool      *sftpHostPool
+	ctx       context.Context
+	cancel    context.CancelFunc
+	done      chan struct{}
+	client    *sftp.Client
+	busy      bool
 	idleTimer *time.Timer
+	lastUsed  time.Time
 }
 
 func sftpConnectionKey(connection ConnectionSpec) string {
@@ -65,110 +79,103 @@ func writeSFTPKeyField(target hash.Hash, value []byte) {
 	_, _ = target.Write(value)
 }
 
-func (t *NativeSSHTransport) acquireSFTPConnection(ctx context.Context, connection ConnectionSpec) (*sftpPoolEntry, error) {
+func (pool *sftpHostPool) notify() {
+	close(pool.changed)
+	pool.changed = make(chan struct{})
+}
+
+func (t *NativeSSHTransport) acquireSFTPSession(ctx context.Context, connection ConnectionSpec) (*sftpSession, bool, error) {
 	key := sftpConnectionKey(connection)
 	for {
 		t.sftpPoolMu.Lock()
+		if err := ctx.Err(); err != nil {
+			t.sftpPoolMu.Unlock()
+			return nil, false, err
+		}
 		if t.sftpPoolDone {
 			t.sftpPoolMu.Unlock()
-			return nil, errors.New("SSH transport is closed")
+			return nil, false, errors.New("SSH transport is closed")
 		}
-		if t.sftpPool == nil {
-			t.sftpPool = make(map[string]*sftpPoolEntry)
+		pool := t.sftpPool[key]
+		if pool == nil {
+			pool = &sftpHostPool{key: key, sessions: make(map[*sftpSession]struct{}), changed: make(chan struct{})}
+			t.sftpPool[key] = pool
 		}
-		entry := t.sftpPool[key]
-		if entry == nil {
-			entry = &sftpPoolEntry{key: key, ready: make(chan struct{})}
-			t.sftpPool[key] = entry
-			t.sftpPoolMu.Unlock()
-			client, err := t.connect(ctx, connection, nil, false)
-			t.sftpPoolMu.Lock()
-			if err != nil {
-				if t.sftpPool[key] == entry {
-					delete(t.sftpPool, key)
+		for session := range pool.sessions {
+			if !session.busy && session.ctx.Err() == nil {
+				session.busy = true
+				if session.idleTimer != nil {
+					session.idleTimer.Stop()
+					session.idleTimer = nil
 				}
-				entry.readyOnce.Do(func() { close(entry.ready) })
 				t.sftpPoolMu.Unlock()
-				return nil, err
-			}
-			if t.sftpPoolDone || t.sftpPool[key] != entry {
-				entry.readyOnce.Do(func() { close(entry.ready) })
-				t.sftpPoolMu.Unlock()
-				_ = client.Close()
-				return nil, errors.New("SSH transport is closed")
-			}
-			entry.client = client
-			entry.refs = 1
-			entry.readyOnce.Do(func() { close(entry.ready) })
-			t.sftpPoolMu.Unlock()
-			return entry, nil
-		}
-		if entry.client == nil {
-			ready := entry.ready
-			t.sftpPoolMu.Unlock()
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-ready:
-				continue
+				return session, false, nil
 			}
 		}
-		if entry.stale {
-			delete(t.sftpPool, key)
+		if len(pool.sessions) < sftpSessionsPerConnection {
+			lifetime, cancel := context.WithCancel(context.WithoutCancel(ctx))
+			session := &sftpSession{pool: pool, ctx: lifetime, cancel: cancel, done: make(chan struct{}), busy: true}
+			pool.sessions[session] = struct{}{}
 			t.sftpPoolMu.Unlock()
-			continue
+			return session, true, nil
 		}
-		if entry.idleTimer != nil {
-			entry.idleTimer.Stop()
-			entry.idleTimer = nil
-		}
-		entry.refs++
+		changed := pool.changed
 		t.sftpPoolMu.Unlock()
-		return entry, nil
+		select {
+		case <-ctx.Done():
+			return nil, false, ctx.Err()
+		case <-changed:
+		}
 	}
 }
 
-func (t *NativeSSHTransport) releaseSFTPConnection(entry *sftpPoolEntry, stale bool) {
-	if entry == nil {
+func (t *NativeSSHTransport) releaseSFTPSession(session *sftpSession) {
+	t.sftpPoolMu.Lock()
+	defer t.sftpPoolMu.Unlock()
+	if session.ctx.Err() != nil || t.sftpPoolDone {
 		return
 	}
-	var closeClient *nativeClient
+	session.busy = false
+	session.lastUsed = time.Now()
+	session.idleTimer = time.AfterFunc(sftpConnectionIdleTimeout, func() { t.expireSFTPSession(session) })
+	session.pool.notify()
+}
+
+func (t *NativeSSHTransport) expireSFTPSession(session *sftpSession) {
 	t.sftpPoolMu.Lock()
-	if entry.refs > 0 {
-		entry.refs--
-	}
-	if stale {
-		entry.stale = true
-		if t.sftpPool[entry.key] == entry {
-			delete(t.sftpPool, entry.key)
-		}
-	}
-	if entry.refs == 0 {
-		if entry.stale {
-			closeClient = entry.client
-		} else if entry.idleTimer == nil {
-			entry.idleTimer = time.AfterFunc(sftpConnectionIdleTimeout, func() {
-				t.expireSFTPConnection(entry)
-			})
-		}
-	}
-	t.sftpPoolMu.Unlock()
-	if closeClient != nil {
-		_ = closeClient.Close()
+	defer t.sftpPoolMu.Unlock()
+	// A timer that already fired may race with a checkout and a later return.
+	if !session.busy && time.Since(session.lastUsed) >= sftpConnectionIdleTimeout {
+		session.cancel()
 	}
 }
 
-func (t *NativeSSHTransport) expireSFTPConnection(entry *sftpPoolEntry) {
-	var closeClient *nativeClient
+func (t *NativeSSHTransport) forgetSFTPSession(session *sftpSession) {
 	t.sftpPoolMu.Lock()
-	entry.idleTimer = nil
-	if entry.refs == 0 && t.sftpPool[entry.key] == entry {
-		delete(t.sftpPool, entry.key)
-		entry.stale = true
-		closeClient = entry.client
+	defer t.sftpPoolMu.Unlock()
+	if session.idleTimer != nil {
+		session.idleTimer.Stop()
+	}
+	delete(session.pool.sessions, session)
+	if len(session.pool.sessions) == 0 && t.sftpPool[session.pool.key] == session.pool {
+		delete(t.sftpPool, session.pool.key)
+	}
+	session.pool.notify()
+}
+
+func (t *NativeSSHTransport) closeSFTPPool() {
+	t.sftpPoolMu.Lock()
+	t.sftpPoolDone = true
+	var sessions []*sftpSession
+	for _, pool := range t.sftpPool {
+		for session := range pool.sessions {
+			session.cancel()
+			sessions = append(sessions, session)
+		}
+		pool.notify()
 	}
 	t.sftpPoolMu.Unlock()
-	if closeClient != nil {
-		_ = closeClient.Close()
+	for _, session := range sessions {
+		<-session.done
 	}
 }

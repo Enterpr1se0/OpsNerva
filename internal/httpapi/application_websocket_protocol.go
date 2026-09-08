@@ -24,11 +24,12 @@ var applicationSampleIntervals = map[string]time.Duration{
 }
 
 var applicationStateTopics = map[string]struct{}{
-	service.StateTopicConnections: {},
-	service.StateTopicApprovals:   {},
-	service.StateTopicSessions:    {},
-	service.StateTopicChatState:   {},
-	service.StateTopicAudit:       {},
+	service.StateTopicConnections:   {},
+	service.StateTopicApprovals:     {},
+	service.StateTopicSessions:      {},
+	service.StateTopicChatState:     {},
+	service.StateTopicAudit:         {},
+	service.StateTopicSFTPDeletions: {},
 }
 
 var applicationPushTopics = map[string]struct{}{
