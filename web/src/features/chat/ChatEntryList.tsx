@@ -7,7 +7,7 @@ import { useDocumentVisible } from '../../lib/hooks'
 import i18n, { localeFor } from '../../lib/i18n'
 import { useLiveSSHTasks, type LiveSSHTaskSnapshot, type LiveSSHTaskTarget } from '../../lib/liveTasks'
 import { compactTokenCount, formatFileSize } from '../../lib/utils'
-import type { ChatTokenUsage, Host, Run } from '../../types'
+import type { ChatTokenUsage, Host } from '../../types'
 import { ToolEventCard } from '../tools/components/ToolEventCard'
 import { TaskToolGroupCard } from './TaskToolGroupCard'
 import type { ChatEntry, ChatRenderItem } from './types'
@@ -19,20 +19,20 @@ const StreamingTextNodes=memo(function StreamingTextNodes({value}:{value:StreamT
 	return <>{value.blocks.map((block,index)=><span key={index}>{block}</span>)}{value.tail&&<span key="tail">{value.tail}</span>}</>
 })
 
-export const ChatEntryList=memo(function ChatEntryList({items,sessionID,visible,targets,actionEntryID,runs,hosts,onDisclosure}:{items:ChatRenderItem[];sessionID:string;visible:boolean;targets:readonly LiveSSHTaskTarget[];actionEntryID:string;runs:Run[];hosts:Host[];onDisclosure:ChatDisclosurePositionHandler}){
+export const ChatEntryList=memo(function ChatEntryList({items,sessionID,visible,targets,actionEntryID,hosts,onDisclosure}:{items:ChatRenderItem[];sessionID:string;visible:boolean;targets:readonly LiveSSHTaskTarget[];actionEntryID:string;hosts:Host[];onDisclosure:ChatDisclosurePositionHandler}){
 	const documentVisible=useDocumentVisible()
 	const liveSSHTasks=useLiveSSHTasks(visible&&documentVisible,sessionID,targets)
 	const owners=useMemo(()=>new Map(targets.map(target=>[target.entryID,target.taskID])),[targets])
 	return <>{items.map(item=>{
 		if(item.kind==='task_tool_group')return <TaskToolGroupCard key={item.id} group={item} onDisclosure={onDisclosure}/>
 		const taskID=owners.get(item.entry.id)
-		return <ChatBubble key={item.entry.id} sessionID={sessionID} entry={item.entry} showActions={item.entry.id===actionEntryID} runs={runs} hosts={hosts} liveSSHTaskOwner={!!taskID} liveSSHTask={taskID?liveSSHTasks.get(taskID):undefined} onDisclosure={onDisclosure}/>
+		return <ChatBubble key={item.entry.id} sessionID={sessionID} entry={item.entry} showActions={item.entry.id===actionEntryID} hosts={hosts} liveSSHTaskOwner={!!taskID} liveSSHTask={taskID?liveSSHTasks.get(taskID):undefined} onDisclosure={onDisclosure}/>
 	})}</>
 })
 
-const ChatBubble=memo(function ChatBubble({ sessionID, entry, showActions, runs, hosts, liveSSHTaskOwner, liveSSHTask, onDisclosure }: {sessionID:string;entry:ChatEntry;showActions:boolean;runs:Run[];hosts:Host[];liveSSHTaskOwner:boolean;liveSSHTask?:LiveSSHTaskSnapshot;onDisclosure:ChatDisclosurePositionHandler}) {
+const ChatBubble=memo(function ChatBubble({ sessionID, entry, showActions, hosts, liveSSHTaskOwner, liveSSHTask, onDisclosure }: {sessionID:string;entry:ChatEntry;showActions:boolean;hosts:Host[];liveSSHTaskOwner:boolean;liveSSHTask?:LiveSSHTaskSnapshot;onDisclosure:ChatDisclosurePositionHandler}) {
 	const {t}=useTranslation()
-  if (entry.kind === 'tool') return <ToolEventCard sessionID={sessionID} entry={entry} runs={runs} hosts={hosts} liveSSHTaskOwner={liveSSHTaskOwner} currentLiveSSHTask={liveSSHTask} onDisclosure={onDisclosure}/>
+  if (entry.kind === 'tool') return <ToolEventCard sessionID={sessionID} entry={entry} hosts={hosts} liveSSHTaskOwner={liveSSHTaskOwner} currentLiveSSHTask={liveSSHTask} onDisclosure={onDisclosure}/>
   if (entry.kind === 'reasoning') return <ReasoningCard content={entry.content} streamText={entry.streamText} active={!!entry.active} onDisclosure={onDisclosure}/>
 	const hasContent=!!entry.content||!!entry.streamText?.length
   if (entry.kind === 'assistant' && !hasContent) return null

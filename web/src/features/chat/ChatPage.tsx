@@ -8,7 +8,7 @@ import { DestructiveConfirmDialog } from '../../components/DestructiveConfirmDia
 import type { LiveSSHTaskTarget } from '../../lib/liveTasks'
 import { useNotifier } from '../../lib/notifications'
 import { clientId, compactTokenCount, errorStatus, errorText, keepEquivalent } from '../../lib/utils'
-import type { AgentEvent, AgentTaskList, Approval, ChatQueueMode, ChatSession, ChatSessionDelta, ChatState, Host, ModelProvider, QueuedChatMessage, Run, SSHShell, SystemSettings, ToolCapabilities } from '../../types'
+import type { AgentEvent, AgentTaskList, Approval, ChatQueueMode, ChatSession, ChatSessionDelta, ChatState, Host, ModelProvider, QueuedChatMessage, SSHShell, SystemSettings, ToolCapabilities } from '../../types'
 import { ApprovalDialog } from '../approval/ApprovalDialog'
 import { jsonRecord, parseRecord, textValue } from '../tools/payload'
 import { ChatWorkspacePanel } from '../workspace'
@@ -30,7 +30,6 @@ type ChatPageProps={
 	hosts:Host[]
 	providers:ModelProvider[]
 	approvals:Approval[]
-	runs:Run[]
 	workspaceShells:SSHShell[]
 	capabilities:ToolCapabilities
 	settings:SystemSettings|null
@@ -80,7 +79,7 @@ const PersistentPageBoundary=memo(function PersistentPageBoundary({visible,child
 	return children(visible)
 },(previous,next)=>!previous.visible&&!next.visible)
 
-export const ChatPage=memo(function ChatPage({ visible, onActivate, hosts, providers, approvals, runs, workspaceShells, capabilities, settings, imageTypes, agentAvailable, modelName, contextWindow, refreshConnections, dismissApproval, onCreateWorkspaceShell, onOpenWorkspaceShell, onWorkspaceShellStarted, onSettingsChanged, onHostChanged, onModelChanged, sidebarTarget, onSessionDeleted, onError }:ChatPageProps) {
+export const ChatPage=memo(function ChatPage({ visible, onActivate, hosts, providers, approvals, workspaceShells, capabilities, settings, imageTypes, agentAvailable, modelName, contextWindow, refreshConnections, dismissApproval, onCreateWorkspaceShell, onOpenWorkspaceShell, onWorkspaceShellStarted, onSettingsChanged, onHostChanged, onModelChanged, sidebarTarget, onSessionDeleted, onError }:ChatPageProps) {
 		const {t}=useTranslation()
 		const notify=useNotifier()
 		const activeContextWindow=contextWindow
@@ -538,7 +537,7 @@ export const ChatPage=memo(function ChatPage({ visible, onActivate, hosts, provi
 			<div className="messages" ref={messagesRef} onScroll={trackUserScroll} onWheel={pauseLatestOnWheel} onTouchMove={pauseLatest}>
 				{historyHasMore&&<button type="button" className="chat-history-more" disabled={loadingOlderMessages} onClick={()=>void loadOlderMessages()}>{loadingOlderMessages?<LoaderCircle className="spin" size={13}/>:<History size={13}/>} {t('chat.loadEarlier')}</button>}
 				{conversationEntries.length === 0 && <div className="empty-chat"><div className="radar"><Activity size={35}/></div><h2>{t('chat.emptyTitle')}</h2></div>}
-				<ChatEntryList items={renderEntries} sessionID={sessionId} visible={pageVisible} targets={liveSSHTaskTargets} actionEntryID={latestCompletedAssistantEntryID} runs={runs} hosts={hosts} onDisclosure={preserveChatDisclosurePosition}/>
+				<ChatEntryList items={renderEntries} sessionID={sessionId} visible={pageVisible} targets={liveSSHTaskTargets} actionEntryID={latestCompletedAssistantEntryID} hosts={hosts} onDisclosure={preserveChatDisclosurePosition}/>
 				{(sessionBusy||toolsRunning)&&<ChatActivityStatus visible={pageVisible} stopping={stopping} connectionRetry={connectionRetry} modelRetry={modelRetry}/>}
 				{conversationEntries.length>0&&<div className="chat-scroll-anchor" aria-hidden="true"/>}
 			</div>

@@ -1,1 +1,1 @@
-export { useAuditData, type AuditView } from './useAuditData'
+export { useAuditHistory, type AuditView } from './useAuditHistory'

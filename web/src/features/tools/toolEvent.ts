@@ -1,11 +1,11 @@
 import type { TFunction } from 'i18next'
 import { activeLiveTaskStatus, type LiveSSHTaskSnapshot } from '../../lib/liveTasks'
 import { sshTunnelRoute } from '../../lib/utils'
-import type { Host, Run } from '../../types'
+import type { Host } from '../../types'
 import type { ChatEntry } from '../chat/types'
 import { jsonRecord, numberValue, previewText, recordArray, textValue, toolCollectionPreviewItems, toolOutputPreviewChars, type JsonRecord } from './payload'
-import { executionPermission, fullProgram, hostIdentity, requestFromRun } from './request'
-import { compactScript, formatDuration, runAutoApproved, toolArgumentSummary, toolLabel } from './summary'
+import { executionPermission, fullProgram, hostIdentity } from './request'
+import { compactScript, formatDuration, toolArgumentSummary, toolLabel } from './summary'
 
 type ToolTarget={kind:'host'|'workspace'|'scope';label:string;name:string;id?:string}
 export type WorkspaceTransferEndpoint={kind:'host'|'workspace';name:string;path:string}
@@ -17,14 +17,13 @@ function cleanFileChangeOutput(value:string){const lines=value.split(/\r?\n/),re
 type ToolEventInput={
 	entry:ChatEntry
 	storedPayload:JsonRecord
-	runs:Run[]
 	hosts:Host[]
 	liveSSHTaskOwner:boolean
 	currentLiveSSHTask?:LiveSSHTaskSnapshot
 	t:TFunction
 }
 
-export function buildToolEventView({entry,storedPayload,runs,hosts,liveSSHTaskOwner,currentLiveSSHTask,t}:ToolEventInput){
+export function buildToolEventView({entry,storedPayload,hosts,liveSSHTaskOwner,currentLiveSSHTask,t}:ToolEventInput){
 	const storedDisplay=jsonRecord(storedPayload._display)
 	const storedToolArguments=jsonRecord(storedDisplay?.arguments)
 	const sshTaskOperation=entry.tool==='ssh_task'
@@ -47,21 +46,19 @@ export function buildToolEventView({entry,storedPayload,runs,hosts,liveSSHTaskOw
 	const taskPayload=jsonRecord(payload.task)
 	const resultPayload=jsonRecord(payload.result)
   const runID=entry.runId||textValue(payload.run_id)||textValue(taskPayload?.run_id)||textValue(resultPayload?.run_id)
-	const run=runs.find(item=>item.id===runID)
 	const display=jsonRecord(payload._display)
 	const toolArguments=jsonRecord(display?.arguments)
-	const displayRequest=jsonRecord(display?.request)||requestFromRun(run)
+	const displayRequest=jsonRecord(display?.request)
 	const executionTool=!!entry.tool&&['ssh_exec','ssh_run_script','ssh_tunnel','ssh_shell','ssh_file_read','ssh_file_list','ssh_file_edit','ssh_file_transfer','workspace_file_list','workspace_file_read','workspace_file_edit','workspace_file_delete','workspace_file_upload','workspace_file_download','workspace_shell'].includes(entry.tool)
 	const request=executionTool?displayRequest:undefined
 	const shellPayload=jsonRecord(payload.shell)||jsonRecord(resultPayload?.shell)
-	const destinationHostID=textValue(display?.host_id)||run?.host_id||textValue(request?.host_id)||textValue(toolArguments?.host_id)||textValue(toolArguments?.destination_host_id)||textValue(shellPayload?.host_id)||textValue(currentLiveSSHTask?.task?.host_id)||textValue(payload.host_id)||textValue(resultPayload?.host_id)
+	const destinationHostID=textValue(display?.host_id)||textValue(request?.host_id)||textValue(toolArguments?.host_id)||textValue(toolArguments?.destination_host_id)||textValue(shellPayload?.host_id)||textValue(currentLiveSSHTask?.task?.host_id)||textValue(payload.host_id)||textValue(resultPayload?.host_id)
 	const destinationHost=hostIdentity(hosts,destinationHostID)
   const hostID=destinationHost.id
   const hostName=destinationHost.name||hostID||'—'
   const rawPayloadStatus=textValue(payload.status)||textValue(taskPayload?.status)||textValue(resultPayload?.status)
 	const payloadStatus=sshTaskOperation?(rawPayloadStatus==='running'?'in_progress':rawPayloadStatus==='waiting_for_approval'?'approval_required':rawPayloadStatus):rawPayloadStatus
-  const runStatus=run?.status==='running'?'in_progress':run?.status
-  const status=sshTaskOperation?payloadStatus||runStatus||'completed':payloadStatus==='approval_required'&&runStatus&&runStatus!=='approval_required'?runStatus:payloadStatus||runStatus||'completed'
+  const status=payloadStatus==='running'?'in_progress':payloadStatus||'completed'
 	const toolLive=status==='in_progress'&&(!sshTaskOperation||liveSSHTaskOwner)
 	const program=request?fullProgram(request):''
 	const script=request?textValue(request.script):''
@@ -148,10 +145,10 @@ export function buildToolEventView({entry,storedPayload,runs,hosts,liveSSHTaskOw
 	const webSummary=webTool?textValue(payload.query):''
 	const operation=filePath||(script?t('tool.shellScript'):program||genericArgumentSummary||eventToolLabel||t('tool.result'))
   const env=request?jsonRecord(request.env):undefined
-	const rawStdout=shellOperation&&(shellAction==='input'||shellAction==='output')?(shellChunks.length?shellChunkStdout:shellOutput):textValue(payload.stdout)||textValue(resultPayload?.stdout)||entry.liveStdout||run?.stdout_redacted||''
+	const rawStdout=shellOperation&&(shellAction==='input'||shellAction==='output')?(shellChunks.length?shellChunkStdout:shellOutput):textValue(payload.stdout)||textValue(resultPayload?.stdout)||entry.liveStdout||''
 	const stdout=change?cleanFileChangeOutput(rawStdout):rawStdout
 	const workspaceDirectory=entry.tool==='workspace_file_list'
-	  const stderr=(shellOperation&&shellChunks.length?shellChunkStderr:'')||textValue(payload.stderr)||textValue(resultPayload?.stderr)||entry.liveStderr||run?.stderr_redacted||run?.error||''
+	  const stderr=(shellOperation&&shellChunks.length?shellChunkStderr:'')||textValue(payload.stderr)||textValue(resultPayload?.stderr)||entry.liveStderr||textValue(payload.error)||''
 	const outputView=textValue(payload.output_view)||textValue(resultPayload?.output_view)
 	const stdoutOmitted=numberValue(payload.stdout_omitted_bytes)||numberValue(resultPayload?.stdout_omitted_bytes)
 	const stderrOmitted=numberValue(payload.stderr_omitted_bytes)||numberValue(resultPayload?.stderr_omitted_bytes)
@@ -184,13 +181,13 @@ export function buildToolEventView({entry,storedPayload,runs,hosts,liveSSHTaskOw
   const instruction=textValue(payload.operator_instruction)||textValue(taskPayload?.operator_instruction)||textValue(resultPayload?.operator_instruction)
   const rawPayload={...payload};delete rawPayload._display
 		const resultExitCode=resultPayload?.exit_code
-	const exitCode=typeof payload.exit_code==='number'?payload.exit_code:typeof resultExitCode==='number'?resultExitCode:run?.exit_code??'—'
-	const duration=formatDuration(payload.duration??resultPayload?.duration,run)
-	const autoApproved=payload.auto_approved===true||resultPayload?.auto_approved===true||runAutoApproved(run)
+	const exitCode=typeof payload.exit_code==='number'?payload.exit_code:typeof resultExitCode==='number'?resultExitCode:'—'
+	const duration=formatDuration(payload.duration??resultPayload?.duration)
+	const autoApproved=payload.auto_approved===true||resultPayload?.auto_approved===true
 	const permission=executionPermission(request,hosts,destinationHostID,...(sshTransfer?[sourceHostID]:[]))
 	const purpose=request?textValue(request.reason):''
 	const liveTaskStartedAt=textValue(currentLiveSSHTask?.task?.started_at)
-	const persistedStartedAt=run?.started_at?Date.parse(run.started_at):liveTaskStartedAt?Date.parse(liveTaskStartedAt):entry.startedAt
+	const persistedStartedAt=liveTaskStartedAt?Date.parse(liveTaskStartedAt):entry.startedAt
 	return{
 		entry,sshTaskOperation,status,summaryLabel,sshTransfer,sourceHostName,sourcePath,hostName,
 		remotePath,workspaceTransferRoute,targets,commandSummary,autoApproved,request,permission,purpose,

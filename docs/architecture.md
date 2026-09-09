@@ -142,6 +142,28 @@ Web 导出接口返回诊断 ZIP：`diagnostics.json` 仅包含版本、Go/OS/�
 
 Runner 在调用工具前通过 Go context 绑定当前 session ID，Service 创建 Run 时只从可信 context 读取该值，模型工具参数不能伪造会话归属。异步 Task 会把该值复制到脱离 HTTP 请求生命周期的后台 context。Audit 的运行记录按 `runs.session_id` 分组，MCP Run 标记为 MCP Server 调用；MCP 活动视图按独立客户端会话展示调用过程。CLI、HTTP 直调和升级前的历史记录显示在 Direct / Legacy 分组。
 
+### Audit history pagination
+
+审计 Web 界面使用两级分页接口：`GET /api/v1/audit/groups` 默认每页 20 个会话分组，`GET /api/v1/audit/runs?session_id=...` 默认每页 50 条组内命令，`limit` 范围为 1–200。组内查询必须显式提供 `session_id`；空值仅代表 Direct / Legacy，不能表示全部。分组直接关联聊天会话标题或 MCP 客户端名称，不依赖聊天侧栏的最近 50 个会话；已删除会话的执行记录仍可分页读取。
+
+首次读取返回 `snapshot_at` 时间上界，后续外层和组内请求沿用此值及相同的 `q`。`q` 是对请求文本、命令参数和脚本的字面子串搜索，两级查询使用相同匹配范围；不搜索或读取 stdout/stderr 正文。分组的数量、待审批数和最近运行时间均针对这个搜索与时间范围。分组按最近匹配运行时间及 session ID 降序，命令按开始时间及 run ID 降序。存在下一页时返回 `next_cursor: {started_at,id}`；调用方将其作为 `cursor_started_at`、`cursor_id`，连同 `snapshot_at` 传回。Direct 分组的 cursor ID 可以为空，命令 cursor ID 不可为空。
+
+这个上界用于隔开新运行和历史翻页，不是跨请求冻结的数据库快照：状态更新、删除和回填到上界之前的记录仍然可见，前端必须处理重新校准与过期请求。时间排序在审计查询键中补齐 RFC3339Nano 小数精度，通过 `idx_runs_audit_session_time_id` 表达式索引支持组内范围查询，不改写历史时间戳。分组计数仍需聚合符合范围的记录，不引入汇总表或全文索引。现有 `/api/v1/run-summaries`、Agent/MCP 历史查询及其可信 context 会话隔离不变；新的审计 Service 查询同样尊重 context 会话约束。
+
+组内深页分别查询“相同时间且 ID 更小”和“更早时间”两个不重叠索引范围，各自最多读取 `limit+1` 条，合并排序最多 `2*(limit+1)` 条。不会因大量记录时间相同而扫描同一时间戳下的全部前序记录；游标已验证不晚于时间上界，因此这两个范围不再重复添加更宽的上界条件。
+
+分页状态层由 `AuditHistoryPage` 管理连续的已加载时间范围、固定上界、请求取消及原子提交；`AuditHistoryStore` 管理分组与各会话的独立订阅、展开选择、搜索切换和审计事件批处理。重新校准会读到原先的最早游标，不按旧页数截断；只刷新已展开会话的命令，隐藏视图停止分页订阅、请求与事件定时器。250 ms 定时器仅合并已收到的事件，不用于轮询。
+
+`useAuditHistory` 在 App 生命周期内持有状态，不订阅分页更新；`AuditRunsView` 订阅会话列表和展开选择，`AuditHistoryGroupCard` 分别订阅组内记录。底部“加载更早会话”和组内“加载更早记录”使用独立游标；搜索经 250 ms 防抖后查询服务端全部匹配历史，不再筛选已加载记录。完整搜索结果不超过 20 条运行时默认展开，手动收起的选择在搜索、刷新、删除和切页期间保留，加载更多不强制展开。保留原有 details 结构与收缩样式，完整运行详情仍按需读取。
+
+并发翻页共享组内补载；切换搜索、隐藏或删除使旧补载代次失效。分页错误保留失败操作，重试旧页时继续使用原游标，而不是重读首页。`AuditRunDetailResource` 仅在首次展开详情后创建；摘要变化时失效缓存，收起记录、收起会话、隐藏或卸载时取消详情读取，迟到响应不得覆盖新结果。详情错误只允许显式重试，不自动循环请求。
+
+旧的单层审计 Hook、前端分组/过滤、最近 50 个会话标题拼接和跨页面 `runs` 属性传递已移除。聊天工具卡片直接使用持久化工具结果的 `_display` 请求信息、生命周期状态及输出；截断结果仍通过聊天消息详情接口按需补全，不依赖用户是否打开过审计页。MCP 活动视图及 Agent/MCP 历史查询链路不变。
+
+删除成功时，HTTP 结果携带 `audit_event_id`，对应同一事务发布的 WebSocket 审计事件 `id`。客户端以此去重这两条到达顺序不定的通知，并立即使受影响的旧读取失效；快照中的历史删除事件仅触发重新校准，不再次执行删除过滤。删除范围及活动记录保留规则不变。
+
+会话标题写入及会话删除成功后也发布审计视图失效通知，以更新关联标题和会话存在状态；这些通知不写入 `audit_events`，不会将用户改名操作计入审计历史。四阶段验收范围与性能数据见 [审计历史验收记录](audit-history-validation.md)。
+
 ## Model provider routing
 
 模型提供商按 kind 映射为 Eino ChatModel：Anthropic 走 Claude 组件（原生 Anthropic API，`x-api-key` 认证），其余（OpenAI、DeepSeek、Ollama 和自定义兼容端点）走 OpenAI-compatible 组件。每条提供商记录可选配置 User-Agent 改写，对该提供商的聊天、连接测试和模型发现请求统一生效，用于兼容按 UA 过滤请求的网关（SDK 默认 UA 形如 `Anthropic/Go x.y.z`，可能被部分中转站拒绝）。API Key 在进入 SQLite 前使用与审计数据相同的 AES-256-GCM 主密钥加密，对外只返回 `has_api_key`。提供商只保存共享 `proxy_id`；模型发现、配置测试、主 Agent 和选择该记录的 subagent 在每次构建配置时解析同一个显式代理。修改代理会触发 Runtime 重载，代理失败不会静默回退直连。

@@ -1021,6 +1021,7 @@ type RunSearchPage struct {
 }
 
 type AuditRunDeleteResult struct {
+	AuditEventID   string   `json:"audit_event_id,omitempty"`
 	Deleted        int      `json:"deleted"`
 	Retained       int      `json:"retained"`
 	Scope          string   `json:"scope"`

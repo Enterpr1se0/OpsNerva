@@ -1,15 +1,14 @@
 import { memo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
-import { ChevronRight, LoaderCircle, ShieldCheck } from 'lucide-react'
-import { api } from '../../api/api'
+import { ChevronRight, ShieldCheck } from 'lucide-react'
 import { localeFor } from '../../lib/i18n'
-import { errorText, sshTunnelRoute } from '../../lib/utils'
+import { sshTunnelRoute } from '../../lib/utils'
 import type { Host, Run } from '../../types'
 import { numberValue, textValue, type JsonRecord } from '../tools/payload'
 import { fullProgram, hostIdentity, requestFromRun } from '../tools/request'
 import { compactScript, runAutoApproved } from '../tools/summary'
-import { AuditRunDetail } from './AuditRunDetail'
+import { AuditRunDetailLoader } from './AuditRunDetailLoader'
 
 function auditOperationSummary(req:JsonRecord,run:Run,hosts:Host[],t:TFunction){
 	const mode=textValue(req.mode)
@@ -41,34 +40,23 @@ function auditOperationSummary(req:JsonRecord,run:Run,hosts:Host[],t:TFunction){
 	}
 }
 
-export const AuditRunRow=memo(function AuditRunRow({run,hosts}:{run:Run;hosts:Host[]}){
+export const AuditRunRow=memo(function AuditRunRow({run,hosts,active}:{run:Run;hosts:Host[];active:boolean}){
 	const {t,i18n:instance}=useTranslation()
-	const [detail,setDetail]=useState<Run|null>(null)
-	const [loading,setLoading]=useState(false)
-	const [error,setError]=useState('')
+	const [disclosure,setDisclosure]=useState<'untouched'|'open'|'closed'>('untouched')
 	const req=requestFromRun(run)||{request:run.request_json}
 	const auditHost=hostIdentity(hosts,run.host_id)
 	const workspaceID=textValue(req.workspace_id)
 	const target=auditHost.name||(run.host_id.startsWith('workspace_')?workspaceID:run.host_id)||'—'
 	const operation=auditOperationSummary(req,run,hosts,t)
-	const open=async()=>{
-		if(detail||loading)return
-		setLoading(true);setError('')
-		try{setDetail((await api.runDetail(run.id)).run)}
-		catch(err){setError(errorText(err))}
-		finally{setLoading(false)}
-	}
-	const resolved=detail||run
-	const resolvedRequest=requestFromRun(resolved)||req
-	return <details onToggle={event=>{if(event.currentTarget.open)void open()}}>
-		<summary className="audit-row">
+	return <details open={disclosure==='open'}>
+		<summary className="audit-row" onClick={event=>{event.preventDefault();setDisclosure(current=>current==='open'?'closed':'open')}}>
 			<span>{new Date(run.started_at).toLocaleString(localeFor(instance.language))}</span>
 			<span className="command">{operation}</span>
 			<span className="audit-run-status"><span className={`run-status ${run.status}`}>{t(`statusLabels.${run.status}`,{defaultValue:run.status})}</span>{runAutoApproved(run)&&<span className="auto-approved"><ShieldCheck size={11}/>{t('approval.autoApproved')}</span>}</span>
 			<span title={run.host_id}>{target}</span><span>{run.exit_code}</span><ChevronRight className="audit-run-chevron" size={15}/>
 		</summary>
 		<div className="run-detail">
-			{loading?<div className="audit-loading" role="status"><LoaderCircle className="spin" size={16}/><span>{t('common.loading')}</span></div>:error?<div className="inline-error">{error}</div>:detail&&<AuditRunDetail run={resolved} req={resolvedRequest} hosts={hosts}/>}
+			{disclosure!=='untouched'&&<AuditRunDetailLoader run={run} hosts={hosts} active={active&&disclosure==='open'}/>}
 		</div>
 	</details>
 })

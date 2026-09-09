@@ -11,7 +11,7 @@ import { SSHShellStatus, SSHShellTerminal, SSHTunnelStatus, sshShellActive, sshS
 import { SSHWorkspacePage } from './features/workspace'
 import { NotificationContext, type NotificationSink, type AppNotification } from './lib/notifications'
 import { FileTransferProvider } from './features/sftp'
-import { useAuditData, type AuditView } from './features/audit'
+import { useAuditHistory, type AuditView } from './features/audit'
 import { desktopRuntime, errorStatus, errorText, clientId, keepEquivalent } from './lib/utils'
 import type { Approval, AuthStatus, Health, Host, LLMToolCatalog, ManagedSkill, MCPServer, ModelProvider, Proxy, SSHShell, SSHTunnel, SystemSettings, ToolCapabilities } from './types'
 import { ChatPage } from './features/chat/ChatPage'
@@ -185,7 +185,7 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 	const refreshProxies=useCallback(()=>api.proxies().then(setProxies).catch(err=>notify(errorText(err),'error')),[notify])
 	const refreshSettings=useCallback(()=>api.systemSettings().then(setSettings).catch(err=>notify(errorText(err),'error')),[notify])
 	const refreshCapabilities=useCallback(()=>api.capabilities().then(setCapabilities).catch(err=>notify(errorText(err),'error')),[notify])
-	const audit=useAuditData({active:page==='audit'&&auditView==='runs',refreshHosts,notify})
+	const audit=useAuditHistory(page==='audit'&&auditView==='runs',notify)
 	const dismissApproval=useCallback((approvalID:string)=>{
 		setApprovals(current=>current.filter(item=>item.id!==approvalID))
 	},[])
@@ -403,7 +403,7 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
       </div></header>
       <section ref={workspaceRef} className={`workspace workspace-${page}`}>
 			<ChatPage visible={page==='chat'} onActivate={activateChat}
-				hosts={hosts} providers={providers} approvals={approvals} runs={audit.runs} workspaceShells={workspaceShells}
+				hosts={hosts} providers={providers} approvals={approvals} workspaceShells={workspaceShells}
 				capabilities={capabilities} settings={settings} imageTypes={settings?.chat_image_allowed_types||defaultChatImageTypes}
 					agentAvailable={!!health?.agent_available} modelName={health?.model?.model} contextWindow={health?.model?.context_window||0} refreshConnections={refreshConnections}
 				dismissApproval={dismissApproval} onCreateWorkspaceShell={createWorkspaceShell} onOpenWorkspaceShell={setSelectedShell} onWorkspaceShellStarted={observeAgentWorkspaceShell} onSettingsChanged={setSettings}
@@ -418,7 +418,7 @@ function Application({auth,onLogout}:{auth:AuthStatus;onLogout:()=>void}) {
 		<Suspense fallback={<div className="panel" role="status">{t('common.loading')}</div>}>
 		{page === 'config' && <ConfigurationPage hosts={hosts} providers={providers} proxies={proxies} settings={settings} capabilities={capabilities} health={health} refreshModels={refreshModels} refreshHosts={refreshHosts} refreshProxies={refreshProxies} refreshCapabilities={refreshCapabilities} refreshHealth={refreshHealth} onSettingsChanged={setSettings} onOpenMCPActivity={()=>{setAuditView('mcp');navigate('audit')}}/>}
 		{page === 'extensions' && <ExtensionsPage skills={skills} mcpServers={mcpServers} toolCatalog={toolCatalog} refreshSkills={refreshSkills} refreshMCPServers={refreshMCPServers} refreshToolCatalog={refreshToolCatalog} onToolCatalogChanged={setToolCatalog}/>}
-		{page === 'audit' && <AuditPage view={auditView} onViewChange={setAuditView} mcpRefreshKey={mcpActivityRefresh} runs={audit.runs} hosts={hosts} sessions={audit.sessions} ready={audit.ready} error={audit.error} runsHasMore={audit.runsHasMore} loadingMore={audit.loadingMore} onLoadMoreRuns={audit.loadMore} onDeleteRuns={audit.deleteRuns}/>}
+		{page === 'audit' && <AuditPage view={auditView} onViewChange={setAuditView} mcpRefreshKey={mcpActivityRefresh} history={audit} hosts={hosts} notify={notify}/>}
         {page === 'logs' && <LogsPage/>}
 		</Suspense>
       </section>

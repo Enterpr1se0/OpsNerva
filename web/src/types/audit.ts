@@ -74,20 +74,31 @@ export interface ServerLogResponse {
   file?: string
 }
 
-export interface RunSearchPage {
-  runs: Run[]
-  has_more: boolean
-  scan_limited?: boolean
-  next_started_at?: string
-  next_id?: string
-}
-
 export interface AuditRunDeleteResult {
+	audit_event_id?: string
   deleted: number
   retained: number
   scope: 'all' | 'session' | 'direct'
   session_id?: string
   retained_run_ids?: string[]
+}
+
+export interface AuditHistoryCursor {
+	started_at: string
+	id: string
+}
+
+export type AuditPageRequest={query:string;limit:number;snapshotAt?:string;cursor?:AuditHistoryCursor}
+export type AuditPageResult<T>={items:T[];snapshotAt:string;nextCursor:AuditHistoryCursor|null}
+
+export interface AuditHistoryGroup {
+	session_id: string
+	kind: 'chat' | 'mcp' | 'direct'
+	title: string
+	session_exists: boolean
+	latest_started_at: string
+	run_count: number
+	pending_count: number
 }
 
 export interface RunDetail {

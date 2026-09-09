@@ -372,13 +372,17 @@ func TestApplicationWebSocketStreamsAuditAfterCommittedWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	deleteSessionID := sessionID
-	if _, err := st.DeleteAuditRuns(ctx, &deleteSessionID, "test"); err != nil {
+	deleteResult, err := st.DeleteAuditRuns(ctx, &deleteSessionID, "test")
+	if err != nil {
 		t.Fatal(err)
 	}
 	deletion := receiveApplicationEvent(t, connection)
 	var deletionEvent applicationAuditEvent
 	if err := json.Unmarshal(deletion.Data, &deletionEvent); err != nil {
 		t.Fatal(err)
+	}
+	if deleteResult.AuditEventID == "" || deleteResult.AuditEventID != deletionEvent.ID {
+		t.Fatalf("deletion response and event identities differ: %#v, %#v", deleteResult, deletionEvent)
 	}
 	if deletion.Topic != "audit" || deletion.Mode != "delta" || deletionEvent.Type != "audit_records_deleted" || deletionEvent.Data["scope"] != "session" || deletionEvent.Data["session_id"] != sessionID || deletionEvent.Data["deleted"] != float64(1) {
 		t.Fatalf("unexpected audit deletion delta: event=%#v payload=%#v", deletion, deletionEvent)

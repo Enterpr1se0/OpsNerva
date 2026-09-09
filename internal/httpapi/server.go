@@ -187,6 +187,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/runs", s.searchRuns)
 	s.mux.HandleFunc("GET /api/v1/run-summaries", s.searchRunSummaries)
 	s.mux.HandleFunc("GET /api/v1/runs/{id}", s.getRun)
+	s.mux.HandleFunc("GET /api/v1/audit/groups", s.listAuditHistoryGroups)
+	s.mux.HandleFunc("GET /api/v1/audit/runs", s.listAuditHistoryRuns)
 	s.mux.HandleFunc("DELETE /api/v1/audit/runs", s.deleteAuditRuns)
 	s.mux.HandleFunc("GET /api/v1/mcp/activity", s.listMCPActivity)
 	s.mux.HandleFunc("GET /api/v1/audit", s.listAudit)
