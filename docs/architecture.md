@@ -116,7 +116,7 @@ HTTP Chat Handler 使用保留 request logger/value、但移除浏览器取消�
 
 复杂工作使用项目自有的顺序计划：`ops_plan_create` 创建目标和 2–8 个步骤，`ops_plan_step_update` 完成或跳过当前步骤并自动推进下一步，`ops_plan_revise` 替换未完成部分。已完成和已跳过步骤保留，全部完成后计划仍可查询，直到新计划替换。计划不包含依赖图、负责人或阻塞状态。
 
-`internal/domain/plan.go` 集中维护计划输入规则、顺序推进和历史保留，转换返回独立快照，可脱离数据库与 Agent 框架测试。`internal/service/plans.go` 负责可信会话绑定、审计和领域错误到应用错误的转换，不依赖工具层。`internal/store/plans.go` 负责事务、持久化和提交后的事件发布，状态校验仍在取得写锁后执行，避免并发更新使用旧状态。会话 HTTP 接口和 Chat state 组装集中于 `internal/httpapi/chat_sessions.go`。Web 的 `SessionPlanPanel` 自己持有计划状态，通过现有 WebSocket 订阅 `plan` 字段，计划更新不再写入 `ChatPage` 状态。Runtime 注入计划作为权威状态与不可信文本，审批解释和自动审批读取同一个当前步骤。前端沿用历史 `SessionPlan` 的目标、当前步骤和进度展示，默认收起，展开内容在文档流内；Agent 停止时显示暂停并停止动画。启动迁移把现有 `agent_task_files` 的标题、说明和完成进度转为顺序计划，完成项保留在前，未完成项按原 ID 顺序推进，随后移除旧存储表和工具开关。SSH 后台任务机制独立，不受影响。
+`internal/domain/plan.go` 仅定义共享的计划数据类型。`internal/plan` 集中维护计划输入规则、当前步骤查询、顺序推进、历史保留和校验错误，只依赖 `domain`；转换返回独立快照，可脱离数据库与 Agent 框架测试。`internal/service/plans.go` 负责可信会话绑定、审计和计划校验错误到应用错误的转换，不依赖工具层。`internal/store/plans.go` 负责事务、持久化和提交后的事件发布，状态校验仍在取得写锁后执行，避免并发更新使用旧状态。会话 HTTP 接口和 Chat state 组装集中于 `internal/httpapi/chat_sessions.go`。Web 的 `SessionPlanPanel` 自己持有计划状态，通过现有 WebSocket 订阅 `plan` 字段，计划更新不再写入 `ChatPage` 状态。Runtime 注入计划作为权威状态与不可信文本，审批解释和自动审批读取同一个当前步骤。前端沿用历史 `SessionPlan` 的目标、当前步骤和进度展示，默认收起，展开内容在文档流内；Agent 停止时显示暂停并停止动画。启动迁移把现有 `agent_task_files` 的标题、说明和完成进度转为顺序计划，完成项保留在前，未完成项按原 ID 顺序推进，随后移除旧存储表和工具开关。SSH 后台任务机制独立，不受影响。
 
 ## Audit storage
 

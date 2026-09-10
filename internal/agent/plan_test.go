@@ -9,6 +9,7 @@ import (
 	"github.com/Enterpr1se0/opsnerva/internal/agenttool"
 	"github.com/Enterpr1se0/opsnerva/internal/config"
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	planlogic "github.com/Enterpr1se0/opsnerva/internal/plan"
 	"github.com/Enterpr1se0/opsnerva/internal/security"
 	"github.com/Enterpr1se0/opsnerva/internal/service"
 	"github.com/Enterpr1se0/opsnerva/internal/store"
@@ -60,7 +61,7 @@ func TestPlanToolCatalogAndSessionContext(t *testing.T) {
 	if err := json.Unmarshal([]byte(content), &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "completed" || result.Plan.Status != "active" || result.Plan.SessionID != "plan-tools" || result.Plan.CurrentStep().Number != 1 {
+	if result.Status != "completed" || result.Plan.Status != "active" || result.Plan.SessionID != "plan-tools" || planlogic.CurrentStep(result.Plan).Number != 1 {
 		t.Fatalf("plan result: %s", content)
 	}
 	content, err = byName["ops_plan_step_update"].InvokableRun(ctx, `{"step_number":2,"status":"completed"}`)
@@ -74,7 +75,7 @@ func TestPlanToolCatalogAndSessionContext(t *testing.T) {
 	if err := json.Unmarshal([]byte(content), &failure); err != nil {
 		t.Fatal(err)
 	}
-	if failure.Status != "failed" || failure.Plan == nil || failure.Plan.CurrentStep().Number != 1 {
+	if failure.Status != "failed" || failure.Plan == nil || planlogic.CurrentStep(*failure.Plan).Number != 1 {
 		t.Fatalf("correction context missing: %s", content)
 	}
 }

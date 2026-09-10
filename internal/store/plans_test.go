@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	planlogic "github.com/Enterpr1se0/opsnerva/internal/plan"
 )
 
 func TestAgentPlanCommitAndConcurrentTransition(t *testing.T) {
@@ -53,7 +54,7 @@ func TestAgentPlanCommitAndConcurrentTransition(t *testing.T) {
 	}
 	select {
 	case plan := <-changes:
-		if plan.Steps[0].Status != "completed" || plan.CurrentStep().Number != 2 {
+		if plan.Steps[0].Status != "completed" || planlogic.CurrentStep(plan).Number != 2 {
 			t.Fatalf("event before committed plan: %#v", plan)
 		}
 	case <-time.After(time.Second):
@@ -64,11 +65,11 @@ func TestAgentPlanCommitAndConcurrentTransition(t *testing.T) {
 		t.Fatal("failed update published an event")
 	default:
 	}
-	if _, err := st.ReviseAgentPlanRemaining(ctx, "s", nil); !errors.Is(err, domain.ErrInvalidAgentPlan) {
-		t.Fatalf("store bypassed domain validation: %v", err)
+	if _, err := st.ReviseAgentPlanRemaining(ctx, "s", nil); !errors.Is(err, planlogic.ErrInvalid) {
+		t.Fatalf("store bypassed plan validation: %v", err)
 	}
 	plan, err := st.GetAgentPlan(ctx, "s")
-	if err != nil || plan.CurrentStep().Number != 2 || len(plan.Steps) != 2 {
+	if err != nil || planlogic.CurrentStep(plan).Number != 2 || len(plan.Steps) != 2 {
 		t.Fatalf("failed revision changed stored plan: %#v %v", plan, err)
 	}
 	select {
@@ -85,7 +86,7 @@ func TestAgentPlanReplaceDoesNotMutateInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	plan, err := domain.NewAgentPlan("Goal", []string{"Inspect", "Verify"})
+	plan, err := planlogic.New("Goal", []string{"Inspect", "Verify"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +143,7 @@ func TestMigrateAgentTaskPlansPreservesProgress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plan.Steps) != 3 || plan.Steps[0].Title != "Finished" || plan.Steps[0].Status != "completed" || plan.CurrentStep().Title != "First pending" || plan.Steps[2].Status != "pending" || plan.Steps[2].Description != "kept description" {
+	if len(plan.Steps) != 3 || plan.Steps[0].Title != "Finished" || plan.Steps[0].Status != "completed" || planlogic.CurrentStep(plan).Title != "First pending" || plan.Steps[2].Status != "pending" || plan.Steps[2].Description != "kept description" {
 		t.Fatalf("migrated plan: %#v", plan)
 	}
 	if _, err := st.TransitionAgentPlanStep(ctx, "s", 2, "completed"); err != nil {
@@ -157,7 +158,7 @@ func TestMigrateAgentTaskPlansPreservesProgress(t *testing.T) {
 	}
 	defer st.Close()
 	plan, err = st.GetAgentPlan(ctx, "s")
-	if err != nil || plan.CurrentStep().Number != 3 {
+	if err != nil || planlogic.CurrentStep(plan).Number != 3 {
 		t.Fatalf("migration repeated on restart: %#v %v", plan, err)
 	}
 }
@@ -187,7 +188,7 @@ INSERT INTO agent_plan_steps VALUES('s',1,'Inspect','completed','2026-08-08T01:0
 	}
 	defer st.Close()
 	plan, err := st.GetAgentPlan(ctx, "s")
-	if err != nil || plan.Status != "active" || plan.CurrentStep() == nil || plan.CurrentStep().Number != 2 || plan.Steps[0].Status != "completed" || plan.Steps[0].Description != "" {
+	if err != nil || plan.Status != "active" || planlogic.CurrentStep(plan) == nil || planlogic.CurrentStep(plan).Number != 2 || plan.Steps[0].Status != "completed" || plan.Steps[0].Description != "" {
 		t.Fatalf("original plan did not resume: %#v %v", plan, err)
 	}
 	if _, err := st.TransitionAgentPlanStep(ctx, "s", 2, "completed"); err != nil {

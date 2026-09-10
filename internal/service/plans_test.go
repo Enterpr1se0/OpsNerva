@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	planlogic "github.com/Enterpr1se0/opsnerva/internal/plan"
 	"github.com/Enterpr1se0/opsnerva/internal/store"
 )
 
@@ -16,11 +16,11 @@ func TestAgentPlanSequentialLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.CurrentStep().Number != 1 || len(plan.Steps) != 3 {
+	if planlogic.CurrentStep(plan).Number != 1 || len(plan.Steps) != 3 {
 		t.Fatalf("initial plan: %#v", plan)
 	}
 	var validation *InputValidationError
-	if _, err := svc.UpdateAgentPlanStep(ctx, 2, "completed", "test"); !errors.As(err, &validation) || !errors.Is(err, domain.ErrInvalidAgentPlan) {
+	if _, err := svc.UpdateAgentPlanStep(ctx, 2, "completed", "test"); !errors.As(err, &validation) || !errors.Is(err, planlogic.ErrInvalid) {
 		t.Fatalf("out-of-order completion was not classified as validation: %v", err)
 	}
 	if _, err := svc.UpdateAgentPlanStep(ctx, 1, "blocked", "test"); err == nil {
@@ -31,14 +31,14 @@ func TestAgentPlanSequentialLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	finishedAt := plan.Steps[0].UpdatedAt
-	if plan.CurrentStep().Number != 2 || currentAgentPlanTask(plan) != "Repair service — Repair" {
+	if planlogic.CurrentStep(plan).Number != 2 || currentAgentPlanTask(plan) != "Repair service — Repair" {
 		t.Fatalf("current task: %#v", plan)
 	}
 	plan, err = svc.ReviseAgentPlan(ctx, []string{"Adjust", "Verify"}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Steps[0].Title != "Inspect" || !plan.Steps[0].UpdatedAt.Equal(finishedAt) || plan.CurrentStep().Title != "Adjust" {
+	if plan.Steps[0].Title != "Inspect" || !plan.Steps[0].UpdatedAt.Equal(finishedAt) || planlogic.CurrentStep(plan).Title != "Adjust" {
 		t.Fatalf("revision lost history: %#v", plan)
 	}
 	if _, err := svc.UpdateAgentPlanStep(ctx, 2, "skipped", "test"); err != nil {
@@ -48,7 +48,7 @@ func TestAgentPlanSequentialLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Status != "completed" || plan.CurrentStep() != nil || len(plan.Steps) != 3 {
+	if plan.Status != "completed" || planlogic.CurrentStep(plan) != nil || len(plan.Steps) != 3 {
 		t.Fatalf("final plan: %#v", plan)
 	}
 	stored, err := svc.GetAgentPlan(ctx, "")
@@ -75,16 +75,16 @@ func TestAgentPlanInputValidation(t *testing.T) {
 	}
 	for _, titles := range [][]string{{"one"}, {"same", " SAME "}, {"", "valid"}} {
 		var validation *InputValidationError
-		if _, err := svc.CreateAgentPlan(ctx, "Goal", titles, "test"); !errors.As(err, &validation) || !errors.Is(err, domain.ErrInvalidAgentPlan) {
-			t.Fatalf("expected application/domain validation for %#v: %v", titles, err)
+		if _, err := svc.CreateAgentPlan(ctx, "Goal", titles, "test"); !errors.As(err, &validation) || !errors.Is(err, planlogic.ErrInvalid) {
+			t.Fatalf("expected application/plan validation for %#v: %v", titles, err)
 		}
 	}
 }
 
 func TestAgentPlanErrorClassification(t *testing.T) {
 	var validation *InputValidationError
-	if err := agentPlanError(domain.ErrInvalidAgentPlan); !errors.As(err, &validation) || !errors.Is(err, domain.ErrInvalidAgentPlan) {
-		t.Fatalf("domain error not mapped to application validation: %v", err)
+	if err := agentPlanError(planlogic.ErrInvalid); !errors.As(err, &validation) || !errors.Is(err, planlogic.ErrInvalid) {
+		t.Fatalf("plan error not mapped to application validation: %v", err)
 	}
 	for _, original := range []error{nil, store.ErrNotFound, context.Canceled, context.DeadlineExceeded, errors.New("database is closed")} {
 		if mapped := agentPlanError(original); mapped != original {

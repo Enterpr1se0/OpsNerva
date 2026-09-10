@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	planlogic "github.com/Enterpr1se0/opsnerva/internal/plan"
 )
 
 func readAgentPlan(ctx context.Context, reader *sql.Tx, sessionID string) (domain.AgentPlan, error) {
@@ -82,13 +83,13 @@ func (s *Store) ReplaceAgentPlan(ctx context.Context, plan domain.AgentPlan) (do
 
 func (s *Store) TransitionAgentPlanStep(ctx context.Context, sessionID string, number int, status string) (domain.AgentPlan, error) {
 	return s.changeAgentPlan(ctx, sessionID, true, func(plan domain.AgentPlan, now time.Time) (domain.AgentPlan, error) {
-		return plan.TransitionStep(number, status, now)
+		return planlogic.TransitionStep(plan, number, status, now)
 	})
 }
 
 func (s *Store) ReviseAgentPlanRemaining(ctx context.Context, sessionID string, titles []string) (domain.AgentPlan, error) {
 	return s.changeAgentPlan(ctx, sessionID, true, func(plan domain.AgentPlan, now time.Time) (domain.AgentPlan, error) {
-		return plan.ReviseRemaining(titles, now)
+		return planlogic.ReviseRemaining(plan, titles, now)
 	})
 }
 
