@@ -2,11 +2,9 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strings"
-	"unicode/utf8"
 
-	"github.com/Enterpr1se0/opsnerva/internal/agenttool"
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
 )
 
@@ -15,79 +13,59 @@ func (s *Service) GetAgentPlan(ctx context.Context, sessionID string) (domain.Ag
 		sessionID = SessionIDFromContext(ctx)
 	}
 	if sessionID == "" {
-		return domain.AgentPlan{}, agenttool.InvalidInput("plan requires a session context")
+		return domain.AgentPlan{}, asInputValidationError(errors.New("plan requires a session context"))
 	}
 	return s.store.GetAgentPlan(ctx, sessionID)
 }
 
 func (s *Service) CreateAgentPlan(ctx context.Context, goal string, titles []string, actor string) (domain.AgentPlan, error) {
 	sessionID := SessionIDFromContext(ctx)
-	goal = strings.TrimSpace(goal)
-	if sessionID == "" || goal == "" || utf8.RuneCountInString(goal) > 500 {
-		return domain.AgentPlan{}, agenttool.InvalidInput("plan requires a session and a goal of 1-500 characters")
+	if sessionID == "" {
+		return domain.AgentPlan{}, asInputValidationError(errors.New("plan requires a session context"))
 	}
-	normalized, err := normalizePlanTitles(titles, 2)
+	plan, err := domain.NewAgentPlan(goal, titles)
 	if err != nil {
-		return domain.AgentPlan{}, err
+		return plan, asInputValidationError(err)
 	}
-	steps := make([]domain.AgentPlanStep, len(normalized))
-	for i, title := range normalized {
-		status := "pending"
-		if i == 0 {
-			status = "in_progress"
-		}
-		steps[i] = domain.AgentPlanStep{Number: i + 1, Title: title, Status: status}
-	}
-	plan, err := s.store.ReplaceAgentPlan(ctx, domain.AgentPlan{SessionID: sessionID, Goal: goal, Status: "active", Steps: steps})
+	plan.SessionID = sessionID
+	plan, err = s.store.ReplaceAgentPlan(ctx, plan)
 	if err == nil {
-		s.audit(ctx, "", "agent_plan_created", actor, map[string]any{"session_id": sessionID, "goal": goal, "step_count": len(steps)})
+		s.audit(ctx, "", "agent_plan_created", actor, map[string]any{"session_id": sessionID, "goal": plan.Goal, "step_count": len(plan.Steps)})
 	}
-	return plan, err
+	return plan, agentPlanError(err)
 }
 
 func (s *Service) UpdateAgentPlanStep(ctx context.Context, number int, status, actor string) (domain.AgentPlan, error) {
 	sessionID := SessionIDFromContext(ctx)
-	if sessionID == "" || number < 1 || (status != "completed" && status != "skipped") {
-		return domain.AgentPlan{}, agenttool.InvalidInput("set the current step_number to completed or skipped")
+	if sessionID == "" {
+		return domain.AgentPlan{}, asInputValidationError(errors.New("plan requires a session context"))
 	}
 	plan, err := s.store.TransitionAgentPlanStep(ctx, sessionID, number, status)
 	if err == nil {
 		s.audit(ctx, "", "agent_plan_step_updated", actor, map[string]any{"session_id": sessionID, "step_number": number, "status": status})
 	}
-	return plan, err
+	return plan, agentPlanError(err)
 }
 
 func (s *Service) ReviseAgentPlan(ctx context.Context, titles []string, actor string) (domain.AgentPlan, error) {
 	sessionID := SessionIDFromContext(ctx)
 	if sessionID == "" {
-		return domain.AgentPlan{}, agenttool.InvalidInput("plan requires a session context")
+		return domain.AgentPlan{}, asInputValidationError(errors.New("plan requires a session context"))
 	}
-	normalized, err := normalizePlanTitles(titles, 1)
-	if err != nil {
-		return domain.AgentPlan{}, err
-	}
-	plan, err := s.store.ReviseAgentPlanRemaining(ctx, sessionID, normalized)
+	plan, err := s.store.ReviseAgentPlanRemaining(ctx, sessionID, titles)
 	if err == nil {
 		s.audit(ctx, "", "agent_plan_revised", actor, map[string]any{"session_id": sessionID, "remaining_steps": len(titles)})
 	}
-	return plan, err
+	return plan, agentPlanError(err)
 }
 
-func normalizePlanTitles(titles []string, minimum int) ([]string, error) {
-	if len(titles) < minimum || len(titles) > 8 {
-		return nil, agenttool.InvalidInput("provide %d-8 ordered steps", minimum)
+// Domain validation is translated at the application boundary. Database and
+// cancellation errors must keep their original classification.
+func agentPlanError(err error) error {
+	if errors.Is(err, domain.ErrInvalidAgentPlan) {
+		return asInputValidationError(err)
 	}
-	result := make([]string, len(titles))
-	seen := make(map[string]bool, len(titles))
-	for i, title := range titles {
-		title = strings.TrimSpace(title)
-		if title == "" || utf8.RuneCountInString(title) > 240 || seen[strings.ToLower(title)] {
-			return nil, agenttool.InvalidInput("step %d must have a unique title of 1-240 characters", i+1)
-		}
-		seen[strings.ToLower(title)] = true
-		result[i] = title
-	}
-	return result, nil
+	return err
 }
 
 func currentAgentPlanTask(plan domain.AgentPlan) string {

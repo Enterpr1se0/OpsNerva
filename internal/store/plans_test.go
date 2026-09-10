@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -62,6 +63,39 @@ func TestAgentPlanCommitAndConcurrentTransition(t *testing.T) {
 	case <-changes:
 		t.Fatal("failed update published an event")
 	default:
+	}
+	if _, err := st.ReviseAgentPlanRemaining(ctx, "s", nil); !errors.Is(err, domain.ErrInvalidAgentPlan) {
+		t.Fatalf("store bypassed domain validation: %v", err)
+	}
+	plan, err := st.GetAgentPlan(ctx, "s")
+	if err != nil || plan.CurrentStep().Number != 2 || len(plan.Steps) != 2 {
+		t.Fatalf("failed revision changed stored plan: %#v %v", plan, err)
+	}
+	select {
+	case <-changes:
+		t.Fatal("failed revision published an event")
+	default:
+	}
+}
+
+func TestAgentPlanReplaceDoesNotMutateInput(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "snapshot.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	plan, err := domain.NewAgentPlan("Goal", []string{"Inspect", "Verify"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.SessionID = "s"
+	stored, err := st.ReplaceAgentPlan(ctx, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.CreatedAt.IsZero() || !plan.Steps[0].UpdatedAt.IsZero() || stored.CreatedAt.IsZero() || !stored.UpdatedAt.Equal(stored.Steps[0].UpdatedAt) {
+		t.Fatalf("persistence modified caller snapshot: %#v / %#v", plan, stored)
 	}
 }
 

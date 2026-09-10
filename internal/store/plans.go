@@ -4,18 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
+	"slices"
 	"time"
 
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
 )
 
-type planReader interface {
-	QueryRowContext(context.Context, string, ...any) *sql.Row
-	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
-}
-
-func readAgentPlan(ctx context.Context, reader planReader, sessionID string) (domain.AgentPlan, error) {
+func readAgentPlan(ctx context.Context, reader *sql.Tx, sessionID string) (domain.AgentPlan, error) {
 	var plan domain.AgentPlan
 	var created, updated string
 	err := reader.QueryRowContext(ctx, `SELECT session_id,goal,status,created_at,updated_at FROM agent_plans WHERE session_id=?`, sessionID).
@@ -76,7 +71,8 @@ func (s *Store) GetAgentPlan(ctx context.Context, sessionID string) (domain.Agen
 
 func (s *Store) ReplaceAgentPlan(ctx context.Context, plan domain.AgentPlan) (domain.AgentPlan, error) {
 	return s.changeAgentPlan(ctx, plan.SessionID, false, func(_ domain.AgentPlan, now time.Time) (domain.AgentPlan, error) {
-		plan.CreatedAt = now
+		plan.CreatedAt, plan.UpdatedAt = now, now
+		plan.Steps = slices.Clone(plan.Steps)
 		for i := range plan.Steps {
 			plan.Steps[i].UpdatedAt = now
 		}
@@ -86,44 +82,13 @@ func (s *Store) ReplaceAgentPlan(ctx context.Context, plan domain.AgentPlan) (do
 
 func (s *Store) TransitionAgentPlanStep(ctx context.Context, sessionID string, number int, status string) (domain.AgentPlan, error) {
 	return s.changeAgentPlan(ctx, sessionID, true, func(plan domain.AgentPlan, now time.Time) (domain.AgentPlan, error) {
-		step := plan.CurrentStep()
-		if step == nil || step.Number != number || (status != "completed" && status != "skipped") {
-			return plan, fmt.Errorf("invalid plan transition: complete or skip the current step")
-		}
-		step.Status, step.UpdatedAt = status, now
-		plan.Status = "completed"
-		for i := range plan.Steps {
-			if plan.Steps[i].Status == "pending" {
-				plan.Steps[i].Status, plan.Steps[i].UpdatedAt = "in_progress", now
-				plan.Status = "active"
-				break
-			}
-		}
-		return plan, nil
+		return plan.TransitionStep(number, status, now)
 	})
 }
 
 func (s *Store) ReviseAgentPlanRemaining(ctx context.Context, sessionID string, titles []string) (domain.AgentPlan, error) {
 	return s.changeAgentPlan(ctx, sessionID, true, func(plan domain.AgentPlan, now time.Time) (domain.AgentPlan, error) {
-		if plan.Status == "completed" {
-			return plan, fmt.Errorf("invalid plan revision: plan is completed; create a new plan")
-		}
-		retained := 0
-		for _, step := range plan.Steps {
-			if step.Status != "completed" && step.Status != "skipped" {
-				break
-			}
-			retained++
-		}
-		plan.Steps = plan.Steps[:retained]
-		for i, title := range titles {
-			status := "pending"
-			if i == 0 {
-				status = "in_progress"
-			}
-			plan.Steps = append(plan.Steps, domain.AgentPlanStep{Number: retained + i + 1, Title: title, Status: status, UpdatedAt: now})
-		}
-		return plan, nil
+		return plan.ReviseRemaining(titles, now)
 	})
 }
 
@@ -150,7 +115,6 @@ func (s *Store) changeAgentPlan(ctx context.Context, sessionID string, existing 
 	if err != nil {
 		return plan, err
 	}
-	plan.UpdatedAt = now
 	if err := writeAgentPlan(ctx, tx, plan); err != nil {
 		return plan, err
 	}

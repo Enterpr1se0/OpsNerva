@@ -17,8 +17,7 @@ import { ChatEntryList } from './ChatEntryList'
 import { ChatSessionSidebar, SessionRenameDialog } from './ChatSessionSidebar'
 import { ChatVisibilityContext } from './ChatVisibilityContext'
 import { ComposerControls } from './ComposerControls'
-import { SessionPlan } from './SessionPlan'
-import { useSessionPlan } from './sessionPlanState'
+import { SessionPlanPanel } from './SessionPlan'
 import './sessionPlan.css'
 import { agentFrameAffectsEntries, deactivateReasoning, historyEntries, insertQueuedMessage, mergePersistedToolEntries, prependHistoryEntries, queuedMessageEntries, reduceAgentEntryFrames, settledTurnEntries, updateToolRunStatus } from './chatEntries'
 import { applyChatSessionDelta, contextWindowForSession, newChatSessionID, newSessionMarker, recalledSession, recalledWorkspace, recalledWorkspacePanelCollapsed, rememberSession, rememberWorkspace, rememberWorkspacePanelCollapsed } from './sessionState'
@@ -112,7 +111,6 @@ export const ChatPage=memo(function ChatPage({ visible, onActivate, hosts, provi
 	const [connectionRetry,setConnectionRetry]=useState<ConnectionRetryState|null>(null)
 		const [contextUsage,setContextUsage]=useState<ContextUsage>({tokens:0,window:activeContextWindow})
 		useEffect(()=>setContextUsage(current=>current.tokens===0?{...current,window:activeContextWindow}:current),[activeContextWindow])
-	const plan=useSessionPlan(visible,sessionId)
 	const [workspaceID,setWorkspaceID]=useState(recalledWorkspace)
 	const [fileBrowserMode,setFileBrowserMode]=useState<'workspace'|'sftp'>('workspace')
 	const [sftpHostID,setSFTPHostID]=useState('')
@@ -519,7 +517,7 @@ export const ChatPage=memo(function ChatPage({ visible, onActivate, hosts, provi
 	  {workspacePanelCollapsed&&<button type="button" className="chat-panel-open-button" onClick={()=>setWorkspaceCollapsed(false)} title={t('workspace.expandPanel')} aria-label={t('workspace.expandPanel')}><PanelLeftOpen size={15}/></button>}
     <div className="chat-main panel">
 	  <div className="session-approval-slot">{currentApprovals.length>0&&<ApprovalDialog key={currentApprovals[0].id} approval={currentApprovals[0]} pendingCount={currentApprovals.length} hosts={hosts} running={sessionBusy||toolsRunning} stopping={stopping} onStop={()=>void stopAgent()} dismissApproval={dismissApproval} onApproved={result=>{if(result.status==='running')setEntries(old=>updateToolRunStatus(old,result.run_id,'in_progress'));if(result.shell?.kind==='workspace')onWorkspaceShellStarted(result.shell)}} onNotice={notify}/>}</div>
-	      <div className="session-plan-slot">{plan&&<SessionPlan key={`${plan.session_id}:${plan.created_at}`} plan={plan} active={sessionBusy&&!stopping&&currentApprovals.length===0} visible={pageVisible}/>}</div>
+	      <SessionPlanPanel sessionID={sessionId} active={sessionBusy&&!stopping&&currentApprovals.length===0} visible={pageVisible}/>
 		<div className="conversation-view">
 			<div className="messages" ref={messagesRef} onScroll={trackUserScroll} onWheel={pauseLatestOnWheel} onTouchMove={pauseLatest}>
 				{historyHasMore&&<button type="button" className="chat-history-more" disabled={loadingOlderMessages} onClick={()=>void loadOlderMessages()}>{loadingOlderMessages?<LoaderCircle className="spin" size={13}/>:<History size={13}/>} {t('chat.loadEarlier')}</button>}
