@@ -10,7 +10,7 @@ import { useAutoCollapseDetails } from '../../../lib/hooks'
 import { sshShellCanReconnect, reconnectOperatorShell } from '../shellState'
 import { useNotifier } from '../../../lib/notifications'
 
-export function SSHShellStatus({shells,hosts,open,onOpenChange,onOpen,onClose,onCreated,onReconnected}:{shells:SSHShell[];hosts:Host[];open:boolean;onOpenChange:(open:boolean)=>void;onOpen:(shell:SSHShell)=>void;onClose:(id:string)=>Promise<void>;onCreated:(shell:SSHShell)=>void;onReconnected:(previousID:string,shell:SSHShell)=>void}){
+export function SSHShellStatus({shells,hosts,open,onOpenChange,onOpen,onClose,onCreated,onReconnected}:{shells:SSHShell[];hosts:Host[];open:boolean;onOpenChange:(open:boolean)=>void;onOpen:(shell:SSHShell)=>void;onClose:(id:string)=>Promise<void>;onCreated:(shell:SSHShell)=>void;onReconnected:(shell:SSHShell)=>void}){
 	const {t}=useTranslation()
 	const [creating,setCreating]=useState(false)
 	const [retrying,setRetrying]=useState('')
@@ -19,7 +19,7 @@ export function SSHShellStatus({shells,hosts,open,onOpenChange,onOpen,onClose,on
 	const retry=async(shell:SSHShell)=>{
 		if(retryingRef.current)return
 		retryingRef.current=true;setRetrying(shell.id)
-		try{onReconnected(shell.id,await reconnectOperatorShell(shell))}
+		try{onReconnected(await reconnectOperatorShell(shell))}
 		catch(err){notify(errorText(err),'error')}
 		finally{retryingRef.current=false;setRetrying('')}
 	}

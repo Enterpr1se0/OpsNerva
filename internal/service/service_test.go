@@ -47,6 +47,8 @@ type fakeTransport struct {
 	probeErr              error
 	connectionShells      []string
 	shellConnectionShells []string
+	shellSessions         []*fakeShellSession
+	shellOpenErrs         []error
 }
 
 type fakeTunnelClient struct {

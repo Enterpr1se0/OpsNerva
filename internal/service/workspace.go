@@ -1058,26 +1058,34 @@ func (s *Service) openOperatorWorkspaceTerminal(ctx context.Context, host domain
 }
 
 func (s *Service) openWorkspaceShellRuntime(ctx context.Context, host domain.Host, req domain.ExecRequest, run domain.Run, actor string, transient bool) (domain.SSHShell, error) {
+	options, opener, err := s.workspaceInteractiveShell(ctx, host, req, transient)
+	if err != nil {
+		return domain.SSHShell{}, err
+	}
+	return s.openInteractiveShell(ctx, host, req, run, actor, options, opener)
+}
+
+func (s *Service) workspaceInteractiveShell(ctx context.Context, host domain.Host, req domain.ExecRequest, transient bool) (interactiveShellOptions, interactiveShellOpener, error) {
 	if req.Mode != domain.ExecWorkspaceShellStart {
-		return domain.SSHShell{}, fmt.Errorf("invalid Workspace shell request mode")
+		return interactiveShellOptions{}, nil, fmt.Errorf("invalid Workspace shell request mode")
 	}
 	if err := validateInteractiveShellSize(req); err != nil {
-		return domain.SSHShell{}, err
+		return interactiveShellOptions{}, nil, err
 	}
 	workspace, ok := s.workspaceByID(req.WorkspaceID)
 	if !ok {
-		return domain.SSHShell{}, fmt.Errorf("workspace %q not found", req.WorkspaceID)
+		return interactiveShellOptions{}, nil, fmt.Errorf("workspace %q not found", req.WorkspaceID)
 	}
 	configuredBackend, err := s.configuredWorkspaceShellBackend(ctx)
 	if err != nil {
-		return domain.SSHShell{}, err
+		return interactiveShellOptions{}, nil, err
 	}
 	if req.WorkspaceShellBackend == "" || req.WorkspaceShellBackend != configuredBackend {
-		return domain.SSHShell{}, fmt.Errorf("approved workspace shell backend %q is no longer enabled", req.WorkspaceShellBackend)
+		return interactiveShellOptions{}, nil, fmt.Errorf("approved workspace shell backend %q is no longer enabled", req.WorkspaceShellBackend)
 	}
 	program, args, directory, environment, err := s.workspacePTYCommand(workspace, req)
 	if err != nil {
-		return domain.SSHShell{}, err
+		return interactiveShellOptions{}, nil, err
 	}
 	user := strings.TrimSpace(os.Getenv("USER"))
 	if runtime.GOOS == "windows" {
@@ -1086,12 +1094,12 @@ func (s *Service) openWorkspaceShellRuntime(ctx context.Context, host domain.Hos
 	if user == "" {
 		user = "local"
 	}
-	return s.openInteractiveShell(ctx, host, req, run, actor, interactiveShellOptions{
+	return interactiveShellOptions{
 		kind: domain.SSHShellKindWorkspace, workspaceID: workspace.ID,
 		backend: req.WorkspaceShellBackend, user: user, transient: transient,
 	}, func(shellCtx context.Context, output func(string, []byte)) (sshx.ShellSession, error) {
 		return startWorkspacePTY(shellCtx, program, args, directory, environment, req.ShellCols, req.ShellRows, output)
-	})
+	}, nil
 }
 
 func (s *Service) workspaceShellTarget(ctx context.Context, shellID, sessionID, workspaceID string) (domain.SSHShell, error) {

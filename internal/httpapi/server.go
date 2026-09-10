@@ -172,6 +172,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/ssh-shells/{id}/host-status", s.sshShellHostStatus)
 	s.mux.HandleFunc("GET /api/v1/ssh-shells/{id}/events", s.sshShellEvents)
 	s.mux.HandleFunc("GET /api/v1/ssh-shells/{id}/ws", s.sshShellWebSocket)
+	s.mux.HandleFunc("POST /api/v1/ssh-shells/{id}/reconnect", s.reconnectSSHShell)
 	s.mux.HandleFunc("POST /api/v1/ssh-shells/{id}/input", s.sshShellInput)
 	s.mux.HandleFunc("POST /api/v1/ssh-shells/{id}/resize", s.resizeSSHShell)
 	s.mux.HandleFunc("POST /api/v1/ssh-shells/{id}/interrupt", s.interruptSSHShell)
@@ -732,6 +733,15 @@ func (s *Server) getSSHShell(w http.ResponseWriter, r *http.Request) {
 	respond(w, result, err)
 }
 
+func (s *Server) reconnectSSHShell(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.ReconnectOperatorSSHShell(r.Context(), r.PathValue("id"), actor(r))
+	if err != nil {
+		writeSSHShellError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (s *Server) sshShellHostStatus(w http.ResponseWriter, r *http.Request) {
 	result, err := s.service.GetSSHShellHostStatus(r.Context(), r.PathValue("id"))
 	if errors.Is(err, store.ErrNotFound) {
@@ -900,7 +910,7 @@ func writeSSHShellError(w http.ResponseWriter, err error) {
 	status := http.StatusBadRequest
 	if errors.Is(err, store.ErrNotFound) {
 		status = http.StatusNotFound
-	} else if strings.Contains(err.Error(), "is running") || strings.Contains(err.Error(), "limit reached") {
+	} else if errors.Is(err, service.ErrSSHShellReconnectConflict) || strings.Contains(err.Error(), "is running") || strings.Contains(err.Error(), "limit reached") {
 		status = http.StatusConflict
 	}
 	writeErrorStatus(w, err, status)

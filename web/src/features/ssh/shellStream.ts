@@ -81,7 +81,12 @@ export function openShellStream(id:string,callbacks:{
 			if(disposed||ended||!ready||socket?.readyState!==WebSocket.OPEN)return false
 			socket.send(JSON.stringify(command));return true
 		},
-		retry:connect,
+		retry:()=>{
+			if(disposed)return
+			ended=false;attempts=0
+			if(socket?.readyState===WebSocket.OPEN||socket?.readyState===WebSocket.CONNECTING)return
+			connect()
+		},
 		close:()=>{disposed=true;clearRetry();disconnect();document.removeEventListener('visibilitychange',visibilityChanged)},
 	}
 }

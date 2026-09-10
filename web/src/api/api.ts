@@ -220,6 +220,7 @@ export const api = {
   retrySSHTunnel: (id:string) => request<void>(`/api/v1/ssh-tunnels/${encodeURIComponent(id)}/retry`, { method:'POST', body:'{}' }),
   sshShells: (sessionId='') => request<SSHShellList>(`/api/v1/ssh-shells?session_id=${encodeURIComponent(sessionId)}`),
   startSSHShell: (input:SSHShellStartInput) => request<SSHShell>('/api/v1/ssh-shells', { method:'POST', body:JSON.stringify(input) }),
+  reconnectSSHShell: (id:string) => request<SSHShell>(`/api/v1/ssh-shells/${encodeURIComponent(id)}/reconnect`, { method:'POST' }),
   sshShell: (id:string,after=0,coalesce=false) => request<SSHShellSnapshot>(`/api/v1/ssh-shells/${encodeURIComponent(id)}?after=${after}&coalesce=${coalesce}`),
   sshShellHostStatus: (id:string) => request<SSHHostStatus>(`/api/v1/ssh-shells/${encodeURIComponent(id)}/host-status`),
   sshShellInput: (id:string,input:string,sensitive=false,submit=false,reason='') => request<void>(`/api/v1/ssh-shells/${encodeURIComponent(id)}/input`, { method:'POST', body:JSON.stringify({input,sensitive,submit,reason}) }),

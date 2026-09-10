@@ -13,7 +13,7 @@ import { reconnectOperatorShell, sshShellCanReconnect } from '../shellState'
 import { openShellStream, type ShellStream, type ShellStreamState } from '../shellStream'
 import { SSHHostStatusBar } from './SSHHostStatusBar'
 
-export function SSHShellTerminal({initialShell,relatedShells=[],onSelect,onClose,onChanged,onReconnected,onError,embedded=false}:{initialShell:SSHShell;relatedShells?:SSHShell[];onSelect?:(shell:SSHShell)=>void;onClose:()=>void;onChanged:()=>void;onReconnected:(previousID:string,shell:SSHShell)=>void;onError:(message:string)=>void;embedded?:boolean}){
+export function SSHShellTerminal({initialShell,relatedShells=[],onSelect,onClose,onChanged,onReconnected,onError,embedded=false}:{initialShell:SSHShell;relatedShells?:SSHShell[];onSelect?:(shell:SSHShell)=>void;onClose:()=>void;onChanged:()=>void;onReconnected:(shell:SSHShell)=>void;onError:(message:string)=>void;embedded?:boolean}){
 	const {t}=useTranslation()
 	const [shell,setShell]=useState(initialShell)
 	const [previousInitial,setPreviousInitial]=useState(initialShell)
@@ -27,9 +27,15 @@ export function SSHShellTerminal({initialShell,relatedShells=[],onSelect,onClose
 	const terminalElement=useRef<HTMLDivElement>(null)
 	const terminalRef=useRef<XTermInstance|null>(null)
 	const streamRef=useRef<ShellStream|null>(null)
+	const previousInitialStatusRef=useRef(initialShell.status)
 	const onChangedRef=useRef(onChanged)
 	const onErrorRef=useRef(onError)
 	useLayoutEffect(()=>{onChangedRef.current=onChanged;onErrorRef.current=onError},[onChanged,onError])
+	useEffect(()=>{
+		const previous=previousInitialStatusRef.current
+		previousInitialStatusRef.current=initialShell.status
+		if(previous!=='running'&&initialShell.status==='running')streamRef.current?.retry()
+	},[initialShell.status])
 	const active=sshShellActive(shell.status)
 	const connected=active&&streamState==='connected'
 
@@ -172,8 +178,10 @@ export function SSHShellTerminal({initialShell,relatedShells=[],onSelect,onClose
 		if(!sshShellCanReconnect(shell))return
 		reconnectingRef.current=true;setReconnecting(true)
 		try{
-			const replacement=await reconnectOperatorShell(shell)
-			onReconnected(shell.id,replacement)
+			const reconnected=await reconnectOperatorShell(shell)
+			setShell(reconnected)
+			onReconnected(reconnected)
+			streamRef.current?.retry()
 		}catch(err){onError(errorText(err))}
 		finally{reconnectingRef.current=false;setReconnecting(false)}
 	}

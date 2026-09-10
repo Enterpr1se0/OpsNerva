@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -39,12 +40,19 @@ func (s *fakeShellSession) HostStatus(context.Context) (sshx.HostStatus, error) 
 func (f *fakeTransport) OpenShell(_ context.Context, connection sshx.ConnectionSpec, _ domain.ExecRequest, cols, rows int, callback func(string, []byte)) (sshx.ShellSession, error) {
 	f.mu.Lock()
 	f.shellConnectionShells = append(f.shellConnectionShells, connection.ShellPath)
-	f.mu.Unlock()
+	if len(f.shellOpenErrs) > 0 {
+		err := f.shellOpenErrs[0]
+		f.shellOpenErrs = f.shellOpenErrs[1:]
+		f.mu.Unlock()
+		return nil, err
+	}
 	code := 0
 	session := &fakeShellSession{
 		callback: callback, done: make(chan struct{}), cols: cols, rows: rows,
 		exit: sshx.ShellExit{ExitCode: &code},
 	}
+	f.shellSessions = append(f.shellSessions, session)
+	f.mu.Unlock()
 	callback("stdout", []byte("fixture@test:$ "))
 	return session, nil
 }
@@ -888,4 +896,162 @@ func shellExit(code int, err error) sshx.ShellExit {
 
 func intPointer(value int) *int {
 	return &value
+}
+
+func TestReconnectOperatorSSHShellKeepsLogicalShell(t *testing.T) {
+	svc, transport, host := newTestService(t)
+	ctx := context.Background()
+	shell, err := svc.StartOperatorSSHShell(ctx, host.ID, domain.SSHShellSurfaceQuick, "admin-web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := svc.GetSSHShellSnapshot(ctx, shell.ID, "", 0, 0, false, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport.mu.Lock()
+	firstSession := transport.shellSessions[0]
+	transport.mu.Unlock()
+	firstSession.finish(sshx.ShellExit{Err: errors.New("connection reset")})
+
+	failed := waitForOperatorShellStatus(t, svc, shell.ID, "failed")
+	if failed.TerminationReason != "connection_lost" {
+		t.Fatalf("termination reason = %q, want connection_lost", failed.TerminationReason)
+	}
+	reconnected, err := svc.ReconnectOperatorSSHShell(ctx, shell.ID, "admin-web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reconnected.ID != shell.ID || reconnected.Status != "running" {
+		t.Fatalf("reconnect replaced the logical shell: before=%#v after=%#v", shell, reconnected)
+	}
+	if reconnected.StartedAt != shell.StartedAt {
+		t.Fatalf("reconnect changed logical shell start time: before=%s after=%s", shell.StartedAt, reconnected.StartedAt)
+	}
+	snapshot, err := svc.GetSSHShellSnapshot(ctx, shell.ID, "", 0, 0, false, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.NextSequence <= initial.NextSequence {
+		t.Fatalf("event sequence did not continue: before=%d after=%d", initial.NextSequence, snapshot.NextSequence)
+	}
+	statuses := make([]string, 0)
+	for _, event := range snapshot.Events {
+		if event.Stream == "status" {
+			statuses = append(statuses, event.Status)
+		}
+	}
+	if !slices.Contains(statuses, "failed") || !slices.Contains(statuses, "starting") || !slices.Contains(statuses, "running") {
+		t.Fatalf("reconnect lifecycle events = %v", statuses)
+	}
+	transport.mu.Lock()
+	opened := len(transport.shellSessions)
+	transport.mu.Unlock()
+	if opened != 2 {
+		t.Fatalf("underlying PTY generations = %d, want 2", opened)
+	}
+	stored, err := svc.store.ListSSHShells(ctx, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 0 {
+		t.Fatalf("operator reconnect persisted execution history: %#v", stored)
+	}
+}
+
+func TestReconnectOperatorSSHShellRejectsLiveAndFinishedShells(t *testing.T) {
+	svc, transport, host := newTestService(t)
+	ctx := context.Background()
+	shell, err := svc.StartOperatorSSHShell(ctx, host.ID, domain.SSHShellSurfaceQuick, "admin-web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ReconnectOperatorSSHShell(ctx, shell.ID, "admin-web"); err == nil {
+		t.Fatal("running shell reconnect was accepted")
+	}
+	transport.mu.Lock()
+	session := transport.shellSessions[0]
+	transport.mu.Unlock()
+	session.finish(shellExit(0, nil))
+	waitForMissingOperatorShell(t, svc, shell.ID)
+	if _, err := svc.ReconnectOperatorSSHShell(ctx, shell.ID, "admin-web"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("completed shell reconnect error = %v, want not found", err)
+	}
+}
+
+func TestReconnectOperatorSSHShellFailureRemainsRetryableAndClosable(t *testing.T) {
+	svc, transport, host := newTestService(t)
+	ctx := context.Background()
+	shell, err := svc.StartOperatorSSHShell(ctx, host.ID, domain.SSHShellSurfaceQuick, "admin-web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport.mu.Lock()
+	firstSession := transport.shellSessions[0]
+	transport.shellOpenErrs = append(transport.shellOpenErrs, errors.New("temporary reconnect failure"))
+	transport.mu.Unlock()
+	firstSession.finish(sshx.ShellExit{Err: errors.New("connection reset")})
+	waitForOperatorShellStatus(t, svc, shell.ID, "failed")
+
+	if _, err := svc.ReconnectOperatorSSHShell(ctx, shell.ID, "admin-web"); err == nil || !strings.Contains(err.Error(), "temporary reconnect failure") {
+		t.Fatalf("reconnect error = %v", err)
+	}
+	failed := waitForOperatorShellStatus(t, svc, shell.ID, "failed")
+	if failed.ID != shell.ID || failed.TerminationReason != "connection_lost" {
+		t.Fatalf("failed reconnect lost its logical shell: %#v", failed)
+	}
+	list, err := svc.ListSSHShells(ctx, "", true, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list.Count != 1 || list.Shells[0].ID != shell.ID {
+		t.Fatalf("failed reconnect disappeared from active operator list: %#v", list)
+	}
+	closed, err := svc.CloseSSHShell(ctx, shell.ID, "", "", "admin-web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed.Status != "closed" || closed.ID != shell.ID {
+		t.Fatalf("closed failed shell = %#v", closed)
+	}
+	waitForMissingOperatorShell(t, svc, shell.ID)
+}
+
+func waitForOperatorShellStatus(t *testing.T, svc *Service, shellID, status string) domain.SSHShell {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		svc.shellMu.RLock()
+		state := svc.shells[shellID]
+		svc.shellMu.RUnlock()
+		if state != nil {
+			state.mu.Lock()
+			shell := state.shell
+			state.mu.Unlock()
+			if shell.Status == status {
+				return shell
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("shell %q did not reach %s", shellID, status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func waitForMissingOperatorShell(t *testing.T, svc *Service, shellID string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		svc.shellMu.RLock()
+		_, exists := svc.shells[shellID]
+		svc.shellMu.RUnlock()
+		if !exists {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("shell %q was retained after a terminal exit", shellID)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
