@@ -278,7 +278,7 @@ Eino Agent 的 `ssh_tunnel` 支持 `start`、`list` 和 `stop`。`direction=loca
 
 如果主 Agent 已产生 Tool 结果却以空正文结束，Runtime 不会重跑原 Agent Loop。它会把本轮已持久化的脱敏 Tool 结果和最新任务状态交给一个 `MaxIterations=1`、无 Tool、无 checkpoint 的独立总结 Agent，仅补生成最终回复；该路径不能再次执行操作。总结仍失败时会返回明确错误，并保留原 Tool 结果供下一轮继续。
 
-部署、修复、迁移和多组件诊断等复杂工作使用 Eino `plantask` 中间件提供的 `TaskCreate`、`TaskGet`、`TaskUpdate` 和 `TaskList`。任务支持 `pending`、`in_progress`、`completed` 状态、依赖关系、负责人和元数据；状态由 SQLite Backend 按可信会话 context 隔离。Chat state 与 Web 展示当前任务列表，刷新、断网或达到 Agent 迭代上限后可继续；全部任务完成时框架会清空本轮列表。
+部署、修复、迁移和多组件诊断等复杂工作使用自有顺序计划。Agent 通过 `ops_plan_create` 创建目标和步骤，通过 `ops_plan_step_update` 完成或跳过当前步骤，下一步自动开始；范围变化时使用 `ops_plan_revise` 调整剩余步骤。聊天顶部显示目标、当前步骤和进度，可展开查看步骤列表。停止 Agent 后显示暂停，继续时沿用已有进度；全部完成后保留计划，新计划建立时才替换。计划没有依赖阻塞或负责人配置。
 
 CLI 审批示例：
 

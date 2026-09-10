@@ -895,17 +895,17 @@ func TestQueryEmitsFrameworkRetryWithoutRerunningAgent(t *testing.T) {
 	}
 }
 
-func TestQueryInjectsPersistedTasksBeforeCurrentUser(t *testing.T) {
+func TestQueryInjectsPersistedPlanBeforeCurrentUser(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if err := st.WriteAgentTaskFile(ctx, "session_task_context", "agent-tasks/1.json", `{"id":"1","subject":"Inspect logs","description":"Inspect logs","status":"completed","blocks":[],"blockedBy":[]}`); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.WriteAgentTaskFile(ctx, "session_task_context", "agent-tasks/2.json", `{"id":"2","subject":"Fix timeout","description":"Fix timeout","status":"in_progress","blocks":[],"blockedBy":[]}`); err != nil {
+	if _, err := st.ReplaceAgentPlan(ctx, domain.AgentPlan{SessionID: "session_task_context", Goal: "Fix the service", Status: "active", Steps: []domain.AgentPlanStep{
+		{Number: 1, Title: "Inspect logs", Status: "completed"},
+		{Number: 2, Title: "Fix timeout", Status: "in_progress"},
+	}}); err != nil {
 		t.Fatal(err)
 	}
 	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{
@@ -931,40 +931,45 @@ func TestQueryInjectsPersistedTasksBeforeCurrentUser(t *testing.T) {
 	}
 }
 
-func TestQueryEmitsCurrentTasksWithTaskToolResult(t *testing.T) {
+func TestQueryEmitsPlanWithPlanToolResult(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	const sessionID = "session_task_event"
-	if err := st.WriteAgentTaskFile(ctx, sessionID, "agent-tasks/1.json", `{"id":"1","subject":"Inspect logs","description":"Inspect logs","status":"in_progress","blocks":[],"blockedBy":[]}`); err != nil {
+	const sessionID = "session_plan_event"
+	plan := domain.AgentPlan{SessionID: sessionID, Goal: "Inspect logs", Status: "active", Steps: []domain.AgentPlanStep{{Number: 1, Title: "Inspect logs", Status: "in_progress"}}}
+	result, err := planToolResult(ctx, nil, "ops_plan_create", plan, nil)
+	if err != nil {
 		t.Fatal(err)
 	}
-	toolCall := schema.ToolCall{ID: "call-task-list", Type: "function", Function: schema.FunctionCall{Name: "TaskList", Arguments: `{}`}}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolCall := schema.ToolCall{ID: "call-plan", Type: "function", Function: schema.FunctionCall{Name: "ops_plan_create", Arguments: `{"goal":"Inspect logs","steps":["Read","Verify"]}`}}
 	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{{
 		adk.EventFromMessage(schema.AssistantMessage("", []schema.ToolCall{toolCall}), nil, schema.Assistant, ""),
-		adk.EventFromMessage(schema.ToolMessage(`{"result":"#1 [in_progress] Inspect logs"}`, toolCall.ID, schema.WithToolName(toolCall.Function.Name)), nil, schema.Tool, toolCall.Function.Name),
+		adk.EventFromMessage(schema.ToolMessage(string(encoded), toolCall.ID, schema.WithToolName(toolCall.Function.Name)), nil, schema.Tool, toolCall.Function.Name),
 		adk.EventFromMessage(schema.AssistantMessage("Continuing.", nil), nil, schema.Assistant, ""),
 	}}}
 	runtime := &Runtime{runner: runner, store: st}
-	var taskEvent Event
+	var received struct {
+		Status string           `json:"status"`
+		Plan   domain.AgentPlan `json:"plan"`
+	}
 	if _, err := runtime.Query(ctx, sessionID, "continue", func(event Event) {
-		if event.Type == "tool" && event.ToolName == "TaskList" && event.Status != "in_progress" {
-			taskEvent = event
+		if event.Type == "tool" && event.ToolName == "ops_plan_create" && event.Status != "in_progress" {
+			if err := json.Unmarshal([]byte(event.Content), &received); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}); err != nil {
 		t.Fatal(err)
 	}
-	var payload struct {
-		Tasks domain.AgentTaskList `json:"tasks"`
-	}
-	if err := json.Unmarshal([]byte(taskEvent.Content), &payload); err != nil {
-		t.Fatalf("decode task event: %v, content=%s", err, taskEvent.Content)
-	}
-	if payload.Tasks.SessionID != sessionID || len(payload.Tasks.Items) != 1 || payload.Tasks.Items[0].Subject != "Inspect logs" {
-		t.Fatalf("task event did not include current session state: %#v", payload.Tasks)
+	if received.Status != "completed" || received.Plan.Status != "active" || received.Plan.SessionID != sessionID || len(received.Plan.Steps) != 1 || received.Plan.Steps[0].Title != "Inspect logs" {
+		t.Fatalf("plan event: %#v", received)
 	}
 }
 
@@ -1052,7 +1057,7 @@ func TestQueryUsesNoToolFinalizerAfterToolActivityWithoutFinalAnswer(t *testing.
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if err := st.WriteAgentTaskFile(ctx, "session_safe_finalizer", "agent-tasks/1.json", `{"id":"1","subject":"Deploy","description":"Deploy the service","status":"completed","blocks":[],"blockedBy":[]}`); err != nil {
+	if _, err := st.ReplaceAgentPlan(ctx, domain.AgentPlan{SessionID: "session_safe_finalizer", Goal: "Deploy", Status: "completed", Steps: []domain.AgentPlanStep{{Number: 1, Title: "Deploy", Status: "completed"}}}); err != nil {
 		t.Fatal(err)
 	}
 	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{{
@@ -1085,7 +1090,7 @@ func TestQueryUsesNoToolFinalizerAfterToolActivityWithoutFinalAnswer(t *testing.
 	if err := json.Unmarshal([]byte(finalizerInputs[0][0].Content), &input); err != nil {
 		t.Fatal(err)
 	}
-	if input.Request != "部署服务" || len(input.Tasks) != 1 || input.Tasks[0].Status != "completed" || len(input.ToolResults) != 1 || input.ToolResults[0].ToolName != "ssh_exec" || !strings.Contains(input.ToolResults[0].Content, "active") {
+	if input.Request != "部署服务" || input.Plan == nil || len(input.Plan.Steps) != 1 || input.Plan.Steps[0].Status != "completed" || len(input.ToolResults) != 1 || input.ToolResults[0].ToolName != "ssh_exec" || !strings.Contains(input.ToolResults[0].Content, "active") {
 		t.Fatalf("final answer context = %#v", input)
 	}
 	messages, err := st.ListChatMessages(ctx, "session_safe_finalizer", 10)
@@ -2190,19 +2195,5 @@ func TestToolHistoryIsEnrichedWithCompleteAuditedCommand(t *testing.T) {
 	if !strings.Contains(workspaceCall, `"workspace_id":"workspace-demo"`) {
 		t.Fatalf("conversation workspace target was not preserved: %s", workspaceCall)
 	}
-	if err := st.WriteAgentTaskFile(ctx, "session-tasks", "agent-tasks/1.json", `{"id":"1","subject":"Inspect","description":"Inspect the service","status":"in_progress","blocks":[],"blockedBy":[]}`); err != nil {
-		t.Fatal(err)
-	}
-	taskCall := runtime.enrichToolContent(service.WithSessionID(ctx, "session-tasks"), `{"result":"Task list"}`, &capturedToolCall{
-		Name: "TaskList", Arguments: `{}`,
-	})
-	var taskPayload struct {
-		Tasks domain.AgentTaskList `json:"tasks"`
-	}
-	if err := json.Unmarshal([]byte(taskCall), &taskPayload); err != nil {
-		t.Fatal(err)
-	}
-	if len(taskPayload.Tasks.Items) != 1 || taskPayload.Tasks.Items[0].Subject != "Inspect" {
-		t.Fatalf("task state was not attached to the Tool display payload: %s", taskCall)
-	}
+
 }

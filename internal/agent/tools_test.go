@@ -169,8 +169,8 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 	if len(descriptors) != len(loaded) || len(descriptors) < 20 {
 		t.Fatalf("catalog=%d loaded=%d", len(descriptors), len(loaded))
 	}
-	if len(descriptors) != 21 {
-		t.Fatalf("built-in catalog size=%d, want 21", len(descriptors))
+	if len(descriptors) != 24 {
+		t.Fatalf("built-in catalog size=%d, want 24", len(descriptors))
 	}
 
 	seen := make(map[string]bool, len(descriptors))

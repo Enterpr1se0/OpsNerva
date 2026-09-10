@@ -1,7 +1,7 @@
 export type { HostAuthType, HostSudoMode, HostKey, Host, HostInput, SSHTunnel, SSHTunnelList, SSHTunnelStartInput, SSHTunnelUpdateInput, SSHShell, SSHShellEvent, SSHShellSnapshot, SSHShellList, SSHHostStatus, SSHShellStartInput, SSHShellUsage, SFTPFileEntry, SFTPFileList, SFTPMutationResult, SFTPDeletion } from './ssh'
 export type { Approval, ApprovalExecutionResult, Run, CommandExplanation, CommandReview, ServerLogEntry, ServerLogResponse, AuditRunDeleteResult, RunDetail } from './audit'
 export type { ChatQueueMode, ChatTokenUsage, ChatSession, ChatSessionDelta, ChatToolCallStatus, ChatAttachment, ChatMessage, ChatMessagePage, ChatToolCall, ChatState, QueuedChatMessage, ChatContextSummary, ChatContextCompressionResult } from './chat'
-export type { AgentEvent, AgentTask, AgentTaskList } from './agent'
+export type { AgentEvent, AgentPlan, AgentPlanStep } from './agent'
 export type { ModelProviderKind, ModelReasoningEffort, ModelProvider, ModelProviderInput, ModelDiscoveryInput, ModelTestInput, ModelCatalog, ModelMetadata, ModelStatus, ModelTestResult, ModelTestJob, Health } from './model'
 export type { WorkspaceShellMode, ApprovalMode, AuthStatus, ConfigurationImportResult, Proxy, ProxyInput, ProxyTestResult, SystemSettings, SystemSettingsInput, WebSearchSettings, WebSearchSettingsInput, WebSearchResponse } from './config'
 export type { WorkspaceCapability, WorkspaceInput, WorkspaceUploadResult, WorkspaceFileEntry, WorkspaceFileList, WorkspaceFilePreview, WorkspaceDeleteResult, ToolCapabilities, FileMetadata } from './workspace'

@@ -168,15 +168,23 @@ CREATE TABLE IF NOT EXISTS chat_attachments (
   FOREIGN KEY(message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_chat_attachments_message ON chat_attachments(message_id, created_at);
-CREATE TABLE IF NOT EXISTS agent_task_files (
-  session_id TEXT NOT NULL,
-  file_path TEXT NOT NULL,
-  content TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS agent_plans (
+  session_id TEXT PRIMARY KEY,
+  goal TEXT NOT NULL,
+  status TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  PRIMARY KEY(session_id,file_path)
+  updated_at TEXT NOT NULL
 );
-DROP INDEX IF EXISTS idx_agent_task_files_session;
+CREATE TABLE IF NOT EXISTS agent_plan_steps (
+  session_id TEXT NOT NULL,
+  step_number INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(session_id,step_number),
+  FOREIGN KEY(session_id) REFERENCES agent_plans(session_id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL DEFAULT '',
@@ -362,6 +370,12 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
 );
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "agent_plan_steps", "description", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.migrateAgentPlans(ctx); err != nil {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "ssh_shell_events", "content_readable", "TEXT"); err != nil {

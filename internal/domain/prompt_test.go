@@ -41,10 +41,10 @@ func TestDefaultSystemPromptUsesCurrentProductName(t *testing.T) {
 func TestDefaultSystemPromptKeepsHardOperationalRules(t *testing.T) {
 	for _, instruction := range []string{
 		"Use only listed tools",
-		"use TaskCreate unless a current task list exists",
-		"Mark ready work in_progress before starting",
-		"record dependencies with TaskUpdate",
-		"Use TaskList to resume",
+		"use ops_plan_create unless an unfinished plan exists",
+		"Follow the current step",
+		"use ops_plan_step_update after verification",
+		"ops_plan_revise to change unfinished steps",
 		"Never request or send secrets",
 		"never run sudo or embed passwords",
 		"Validation and approval are authoritative",

@@ -48,7 +48,7 @@ func TestCatalogClassification(t *testing.T) {
 	tests := []struct {
 		name, category, guard string
 	}{
-		{name: "TaskCreate", category: "planning", guard: "agent_state"},
+		{name: "ops_plan_create", category: "planning", guard: "agent_state"},
 		{name: "skill", category: "skills", guard: "read_only"},
 		{name: "mcp__search", category: "mcp", guard: "external_mcp"},
 		{name: "workspace_file_read", category: "workspace", guard: "approval_required"},

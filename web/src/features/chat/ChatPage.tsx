@@ -8,7 +8,7 @@ import { DestructiveConfirmDialog } from '../../components/DestructiveConfirmDia
 import type { LiveSSHTaskTarget } from '../../lib/liveTasks'
 import { useNotifier } from '../../lib/notifications'
 import { clientId, compactTokenCount, errorStatus, errorText, keepEquivalent } from '../../lib/utils'
-import type { AgentEvent, AgentTaskList, Approval, ChatQueueMode, ChatSession, ChatSessionDelta, ChatState, Host, ModelProvider, QueuedChatMessage, SSHShell, SystemSettings, ToolCapabilities } from '../../types'
+import type { AgentEvent, Approval, ChatQueueMode, ChatSession, ChatSessionDelta, ChatState, Host, ModelProvider, QueuedChatMessage, SSHShell, SystemSettings, ToolCapabilities } from '../../types'
 import { ApprovalDialog } from '../approval/ApprovalDialog'
 import { jsonRecord, parseRecord, textValue } from '../tools/payload'
 import { ChatWorkspacePanel } from '../workspace'
@@ -17,11 +17,13 @@ import { ChatEntryList } from './ChatEntryList'
 import { ChatSessionSidebar, SessionRenameDialog } from './ChatSessionSidebar'
 import { ChatVisibilityContext } from './ChatVisibilityContext'
 import { ComposerControls } from './ComposerControls'
-import { SessionTaskItems, SessionTasks } from './SessionTasks'
+import { SessionPlan } from './SessionPlan'
+import { useSessionPlan } from './sessionPlanState'
+import './sessionPlan.css'
 import { agentFrameAffectsEntries, deactivateReasoning, historyEntries, insertQueuedMessage, mergePersistedToolEntries, prependHistoryEntries, queuedMessageEntries, reduceAgentEntryFrames, settledTurnEntries, updateToolRunStatus } from './chatEntries'
 import { applyChatSessionDelta, contextWindowForSession, newChatSessionID, newSessionMarker, recalledSession, recalledWorkspace, recalledWorkspacePanelCollapsed, rememberSession, rememberWorkspace, rememberWorkspacePanelCollapsed } from './sessionState'
-import { buildSessionTaskRows, groupedTaskToolEntries, latestLiveSSHTaskTargets, tasksFromToolContent } from './taskEntries'
-import type { ChatEntry, ChatRenderItem, ConnectionRetryState, ContextUsage, ModelRetryState, PendingChatImage } from './types'
+import { latestLiveSSHTaskTargets } from './taskEntries'
+import type { ChatEntry, ConnectionRetryState, ContextUsage, ModelRetryState, PendingChatImage } from './types'
 import { useChatScroll } from './useChatScroll'
 
 type ChatPageProps={
@@ -52,7 +54,6 @@ type ChatPageProps={
 
 const emptyChatEntries:ChatEntry[]=[]
 const emptyLiveSSHTaskTargets:readonly LiveSSHTaskTarget[]=[]
-const emptyChatRenderItems:ChatRenderItem[]=[]
 type ActiveChatStream = { id: string; sessionId: string; controller: AbortController }
 type ChatHistoryCursor = {createdAt:string;id:string}
 
@@ -111,8 +112,7 @@ export const ChatPage=memo(function ChatPage({ visible, onActivate, hosts, provi
 	const [connectionRetry,setConnectionRetry]=useState<ConnectionRetryState|null>(null)
 		const [contextUsage,setContextUsage]=useState<ContextUsage>({tokens:0,window:activeContextWindow})
 		useEffect(()=>setContextUsage(current=>current.tokens===0?{...current,window:activeContextWindow}:current),[activeContextWindow])
-  const [tasks,setTasks]=useState<AgentTaskList|null>(null)
-	const [tasksExpanded,setTasksExpanded]=useState(false)
+	const plan=useSessionPlan(visible,sessionId)
 	const [workspaceID,setWorkspaceID]=useState(recalledWorkspace)
 	const [fileBrowserMode,setFileBrowserMode]=useState<'workspace'|'sftp'>('workspace')
 	const [sftpHostID,setSFTPHostID]=useState('')
@@ -134,10 +134,8 @@ export const ChatPage=memo(function ChatPage({ visible, onActivate, hosts, provi
 	const toolsRunning=useMemo(()=>running?false:entries.some(item=>item.kind==='tool'&&item.transient),[entries,running])
 	const liveSSHTaskTargets=useMemo(()=>visible?latestLiveSSHTaskTargets(entries):emptyLiveSSHTaskTargets,[entries,visible])
 	const conversationEntries=useMemo(()=>visible?[...entries,...queuedMessageEntries(queuedMessages,count=>t('chat.queuedImages',{count}))]:emptyChatEntries,[entries,queuedMessages,t,visible])
-	const renderEntries=useMemo(()=>visible?groupedTaskToolEntries(conversationEntries):emptyChatRenderItems,[conversationEntries,visible])
 	const latestConversationEntryID=conversationEntries.at(-1)?.id||''
 	const {messagesRef,trackUserScroll,pauseLatestOnWheel,pauseLatest,preserveChatDisclosurePosition,followLatest,captureHistoryAnchor}=useChatScroll({visible,latestConversationEntryID,loadingSession,sessionId})
-	const taskRows=useMemo(()=>tasks?buildSessionTaskRows(tasks):[],[tasks])
 	const latestCompletedAssistantEntryID=useMemo(()=>{
 		if(!visible||sessionBusy)return ''
 		for(let index=entries.length-1;index>=0;index--){
@@ -150,13 +148,6 @@ export const ChatPage=memo(function ChatPage({ visible, onActivate, hosts, provi
 	useEffect(()=>{sessionIDRef.current=sessionId},[sessionId])
 	useEffect(()=>{if(!sessionId)setContextUsage({tokens:0,window:activeContextWindow})},[activeContextWindow,sessionId])
 	useEffect(()=>{if(!selectedWorkspace)return;if(workspaceID!==selectedWorkspace.id)setWorkspaceID(selectedWorkspace.id);rememberWorkspace(selectedWorkspace.id)},[selectedWorkspace,workspaceID])
-	const taskSessionID=tasks?.session_id
-	const hasTasks=!!tasks
-	const [taskDisclosureOwner,setTaskDisclosureOwner]=useState({sessionID:taskSessionID,hasTasks})
-	if(taskDisclosureOwner.sessionID!==taskSessionID||taskDisclosureOwner.hasTasks!==hasTasks){
-		setTaskDisclosureOwner({sessionID:taskSessionID,hasTasks})
-		setTasksExpanded(hasTasks)
-	}
 	useEffect(()=>()=>{sessionLoadRef.current='';const stream=activeStreamRef.current;activeStreamRef.current=null;stream?.controller.abort()},[])
 	useEffect(()=>()=>{for(const url of imageURLsRef.current)URL.revokeObjectURL(url);imageURLsRef.current.clear()},[])
 	const addImages=(files:File[])=>{const accepted=files.filter(file=>imageTypes.includes(file.type));if(accepted.length!==files.length)setImageNotice(t('chat.imageTypeRejected'));if(!accepted.length)return;const next=accepted.map(file=>{const url=URL.createObjectURL(file);imageURLsRef.current.add(url);return{id:clientId(),file,url}});setPendingImages(current=>[...current,...next])}
@@ -182,7 +173,7 @@ export const ChatPage=memo(function ChatPage({ visible, onActivate, hosts, provi
       const state = await api.chatState(id)
       if(sessionLoadRef.current!==requestID)return
 		lastAgentEventSessionRef.current=id;lastAgentEventIDRef.current=0
-	      setEntries(historyEntries(state.messages||[],id));setHistoryHasMore(!!state.messages_has_more);setHistoryCursor(state.messages_next_created_at&&state.messages_next_id?{createdAt:state.messages_next_created_at,id:state.messages_next_id}:null);setDetachedRunning(!!state.active);setQueuedMessages(state.queued_messages||[]);setQueueingMode(null);setStopping(false);setModelRetry(null);setConnectionRetry(null);setTasks(state.tasks?.items?.length?state.tasks:null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setWorkspaceID(state.workspace_id||'');setBoundWorkspaceID(state.workspace_id||'')
+	      setEntries(historyEntries(state.messages||[],id));setHistoryHasMore(!!state.messages_has_more);setHistoryCursor(state.messages_next_created_at&&state.messages_next_id?{createdAt:state.messages_next_created_at,id:state.messages_next_id}:null);setDetachedRunning(!!state.active);setQueuedMessages(state.queued_messages||[]);setQueueingMode(null);setStopping(false);setModelRetry(null);setConnectionRetry(null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setWorkspaceID(state.workspace_id||'');setBoundWorkspaceID(state.workspace_id||'')
 	      startedQueueMessageIDsRef.current.clear()
       setSessionId(id); rememberSession(id); setHistoryError('')
 	} catch (err) { if(sessionLoadRef.current===requestID)setHistoryError(errorText(err)) }
@@ -229,7 +220,7 @@ export const ChatPage=memo(function ChatPage({ visible, onActivate, hosts, provi
 		lastAgentEventSessionRef.current='';lastAgentEventIDRef.current=0
 		sessionLoadRef.current=''
     setLoadingSession('')
-	    followLatest(true);startedQueueMessageIDsRef.current.clear();setSessionId('');setBoundWorkspaceID('');setEntries([]);setHistoryHasMore(false);setHistoryCursor(null);setLoadingOlderMessages(false); setMessage('');clearPendingImages(); setHistoryError('');setContextUsage({tokens:0,window:activeContextWindow});setDetachedRunning(false);setQueuedMessages([]);setQueueingMode(null);setStopping(false);setCompressingContext(false);setModelRetry(null);setConnectionRetry(null);setTasks(null); rememberSession(newSessionMarker)
+	    followLatest(true);startedQueueMessageIDsRef.current.clear();setSessionId('');setBoundWorkspaceID('');setEntries([]);setHistoryHasMore(false);setHistoryCursor(null);setLoadingOlderMessages(false); setMessage('');clearPendingImages(); setHistoryError('');setContextUsage({tokens:0,window:activeContextWindow});setDetachedRunning(false);setQueuedMessages([]);setQueueingMode(null);setStopping(false);setCompressingContext(false);setModelRetry(null);setConnectionRetry(null);rememberSession(newSessionMarker)
 	},[activeContextWindow,clearPendingImages,detachActiveStream,followLatest,onActivate,workspaceSwitching])
 
 	const switchSession=useCallback((id:string)=>{
@@ -318,7 +309,6 @@ export const ChatPage=memo(function ChatPage({ visible, onActivate, hosts, provi
 					const shell=workspaceShellStartedByTool(frame.content)
 					if(shell)onWorkspaceShellStarted(shell)
 				}
-				if(/^Task(Create|Get|Update|List)$/.test(frame.tool_name||'')){const nextTasks=tasksFromToolContent(frame.content);if(nextTasks)setTasks(nextTasks.items.length?nextTasks:null)}
 			}
 			if(frame.type==='done'||frame.type==='interrupted'){
 				startedQueueMessageIDsRef.current.clear()
@@ -350,7 +340,6 @@ export const ChatPage=memo(function ChatPage({ visible, onActivate, hosts, provi
 					await waitForReconnect(delay,controller.signal)
 					const state=await api.chatState(sessionId)
 					if(!active)return
-					setTasks(state.tasks?.items?.length?state.tasks:null)
 					setQueuedMessages(state.queued_messages||[])
 					setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)})
 					setBoundWorkspaceID(state.workspace_id||'')
@@ -402,7 +391,6 @@ export const ChatPage=memo(function ChatPage({ visible, onActivate, hosts, provi
 				if(count!==lastRunningToolCount){lastRunningToolCount=count;if(!messages?.length)refreshPersistedTools()}
 			}
 			if(has('queued_messages'))setQueuedMessages(current=>keepEquivalent(current,state.queued_messages||[]))
-			if(has('tasks'))setTasks(state.tasks?.items?.length?state.tasks:null)
 			if(has('workspace_id')&&state.workspace_id!==undefined){setWorkspaceID(state.workspace_id);setBoundWorkspaceID(state.workspace_id)}
 			if(has('context_tokens')||has('context_window'))setContextUsage(current=>{
 				const tokens=state.context_tokens??current.tokens
@@ -465,7 +453,6 @@ export const ChatPage=memo(function ChatPage({ visible, onActivate, hosts, provi
             if(isAttached()){
               setDetachedRunning(!!state.active)
               setQueuedMessages(state.queued_messages||[])
-              setTasks(state.tasks?.items?.length?state.tasks:null)
               setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)})
               setBoundWorkspaceID(state.workspace_id||'')
               setEntries(old=>settledTurnEntries(state.messages||[],querySessionID,old,!!state.active))
@@ -504,7 +491,7 @@ export const ChatPage=memo(function ChatPage({ visible, onActivate, hosts, provi
 			const result=await api.cancelChatSession(targetSessionID)
 			requested=result.cancelled
 			if(result.cancelled)setQueuedMessages([])
-			if(!result.cancelled){const state=await api.chatState(targetSessionID);setDetachedRunning(!!state.active);setQueuedMessages(state.queued_messages||[]);setTasks(state.tasks?.items?.length?state.tasks:null);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setEntries(old=>settledTurnEntries(state.messages||[],targetSessionID,old,!!state.active))}
+			if(!result.cancelled){const state=await api.chatState(targetSessionID);setDetachedRunning(!!state.active);setQueuedMessages(state.queued_messages||[]);setContextUsage({tokens:state.context_tokens||0,window:contextWindowForSession(state.context_tokens||0,state.context_window||0,activeContextWindow)});setEntries(old=>settledTurnEntries(state.messages||[],targetSessionID,old,!!state.active))}
 		}catch(err){setEntries(old=>[...old,{id:clientId(),kind:'error',content:t('chat.stopFailed',{message:errorText(err)})}])}
 		finally{if(!requested)setStopping(false)}
   }
@@ -532,16 +519,15 @@ export const ChatPage=memo(function ChatPage({ visible, onActivate, hosts, provi
 	  {workspacePanelCollapsed&&<button type="button" className="chat-panel-open-button" onClick={()=>setWorkspaceCollapsed(false)} title={t('workspace.expandPanel')} aria-label={t('workspace.expandPanel')}><PanelLeftOpen size={15}/></button>}
     <div className="chat-main panel">
 	  <div className="session-approval-slot">{currentApprovals.length>0&&<ApprovalDialog key={currentApprovals[0].id} approval={currentApprovals[0]} pendingCount={currentApprovals.length} hosts={hosts} running={sessionBusy||toolsRunning} stopping={stopping} onStop={()=>void stopAgent()} dismissApproval={dismissApproval} onApproved={result=>{if(result.status==='running')setEntries(old=>updateToolRunStatus(old,result.run_id,'in_progress'));if(result.shell?.kind==='workspace')onWorkspaceShellStarted(result.shell)}} onNotice={notify}/>}</div>
-	      <div className="session-task-slot">{tasks&&<SessionTasks tasks={tasks} rows={taskRows} expanded={tasksExpanded} onExpanded={setTasksExpanded}/>}</div>
+	      <div className="session-plan-slot">{plan&&<SessionPlan key={`${plan.session_id}:${plan.created_at}`} plan={plan} active={sessionBusy&&!stopping&&currentApprovals.length===0} visible={pageVisible}/>}</div>
 		<div className="conversation-view">
 			<div className="messages" ref={messagesRef} onScroll={trackUserScroll} onWheel={pauseLatestOnWheel} onTouchMove={pauseLatest}>
 				{historyHasMore&&<button type="button" className="chat-history-more" disabled={loadingOlderMessages} onClick={()=>void loadOlderMessages()}>{loadingOlderMessages?<LoaderCircle className="spin" size={13}/>:<History size={13}/>} {t('chat.loadEarlier')}</button>}
 				{conversationEntries.length === 0 && <div className="empty-chat"><div className="radar"><Activity size={35}/></div><h2>{t('chat.emptyTitle')}</h2></div>}
-				<ChatEntryList items={renderEntries} sessionID={sessionId} visible={pageVisible} targets={liveSSHTaskTargets} actionEntryID={latestCompletedAssistantEntryID} hosts={hosts} onDisclosure={preserveChatDisclosurePosition}/>
+				<ChatEntryList items={conversationEntries} sessionID={sessionId} visible={pageVisible} targets={liveSSHTaskTargets} actionEntryID={latestCompletedAssistantEntryID} hosts={hosts} onDisclosure={preserveChatDisclosurePosition}/>
 				{(sessionBusy||toolsRunning)&&<ChatActivityStatus visible={pageVisible} stopping={stopping} connectionRetry={connectionRetry} modelRetry={modelRetry}/>}
 				{conversationEntries.length>0&&<div className="chat-scroll-anchor" aria-hidden="true"/>}
 			</div>
-			{tasks&&tasksExpanded&&<SessionTaskItems rows={taskRows}/>}
 		</div>
 		  <form className="composer" onSubmit={submit}>
 			  <ComposerControls sessionId={sessionId} sessionBusy={sessionBusy} loadingSession={!!loadingSession} workspaceSwitching={workspaceSwitching} compressingContext={compressingContext} settings={settings} hosts={hosts} providers={providers} modelName={modelName} contextUsage={contextUsage} onSettingsChanged={onSettingsChanged} onHostChanged={onHostChanged} onModelChanged={onModelChanged} onError={onError} onCompress={compressContext}/>

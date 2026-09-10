@@ -1622,25 +1622,6 @@ func TestApprovalDecisionCancelsRetriedCommandExplanation(t *testing.T) {
 	}
 }
 
-func TestCurrentAgentTaskPrefersInProgressThenUnblockedPending(t *testing.T) {
-	tasks := domain.AgentTaskList{Items: []domain.AgentTask{
-		{ID: "1", Subject: "Blocked", Status: "pending", BlockedBy: []string{"2"}},
-		{ID: "2", Subject: "Ready", Status: "pending"},
-		{ID: "3", Subject: "Running", Status: "in_progress"},
-	}}
-	if got := currentAgentTask(tasks); got != "#3 Running" {
-		t.Fatalf("current task = %q", got)
-	}
-	tasks.Items[2].Status = "completed"
-	if got := currentAgentTask(tasks); got != "#2 Ready" {
-		t.Fatalf("ready task = %q", got)
-	}
-	tasks.Items[1].Status = "completed"
-	if got := currentAgentTask(tasks); got != "#1 Blocked" {
-		t.Fatalf("resolved dependency task = %q", got)
-	}
-}
-
 func TestReadOnlyExecutesAndAuditIsRedacted(t *testing.T) {
 	svc, transport, host := newTestService(t)
 	result, err := svc.Submit(context.Background(), domain.ExecRequest{HostID: host.ID, Mode: domain.ExecProgram, Program: "uname", Args: []string{"-a"}, Reason: "test read"}, "test")
@@ -2767,7 +2748,7 @@ func TestChatSessionsCanBeListedLoadedAndDeleted(t *testing.T) {
 	if err := svc.store.UpsertTask(ctx, task, domain.ExecResult{RunID: run.ID, Status: "completed"}, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.store.WriteAgentTaskFile(ctx, "session-one", "agent-tasks/1.json", `{"id":"1","subject":"Inspect","description":"Inspect","status":"in_progress","blocks":[],"blockedBy":[]}`); err != nil {
+	if _, err := svc.store.ReplaceAgentPlan(ctx, domain.AgentPlan{SessionID: "session-one", Goal: "Inspect", Status: "active", Steps: []domain.AgentPlanStep{{Number: 1, Title: "Inspect", Status: "in_progress"}}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := svc.store.AppendAudit(ctx, domain.AuditEvent{RunID: run.ID, Type: "command_completed", Actor: "test"}); err != nil {
@@ -2817,8 +2798,8 @@ func TestChatSessionsCanBeListedLoadedAndDeleted(t *testing.T) {
 	if _, _, _, err := svc.store.GetTask(ctx, task.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("conversation task survived deletion: %v", err)
 	}
-	if agentTasks, err := svc.store.ListAgentTasks(ctx, "session-one"); err != nil || len(agentTasks.Items) != 0 {
-		t.Fatalf("conversation Agent tasks survived deletion: tasks=%#v err=%v", agentTasks, err)
+	if _, err := svc.store.GetAgentPlan(ctx, "session-one"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("conversation plan survived deletion: %v", err)
 	}
 	audit, err := svc.store.ListAudit(ctx, "", 100)
 	if err != nil {

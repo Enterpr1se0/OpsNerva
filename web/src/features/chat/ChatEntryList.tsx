@@ -9,8 +9,7 @@ import { useLiveSSHTasks, type LiveSSHTaskSnapshot, type LiveSSHTaskTarget } fro
 import { compactTokenCount, formatFileSize } from '../../lib/utils'
 import type { ChatTokenUsage, Host } from '../../types'
 import { ToolEventCard } from '../tools/components/ToolEventCard'
-import { TaskToolGroupCard } from './TaskToolGroupCard'
-import type { ChatEntry, ChatRenderItem } from './types'
+import type { ChatEntry } from './types'
 import { useChatCardDisclosure, type ChatDisclosurePositionHandler } from './useChatCardDisclosure'
 
 const MarkdownMessage=lazy(()=>import('../../components/MarkdownMessage').then(module=>({default:module.MarkdownMessage})))
@@ -19,14 +18,13 @@ const StreamingTextNodes=memo(function StreamingTextNodes({value}:{value:StreamT
 	return <>{value.blocks.map((block,index)=><span key={index}>{block}</span>)}{value.tail&&<span key="tail">{value.tail}</span>}</>
 })
 
-export const ChatEntryList=memo(function ChatEntryList({items,sessionID,visible,targets,actionEntryID,hosts,onDisclosure}:{items:ChatRenderItem[];sessionID:string;visible:boolean;targets:readonly LiveSSHTaskTarget[];actionEntryID:string;hosts:Host[];onDisclosure:ChatDisclosurePositionHandler}){
+export const ChatEntryList=memo(function ChatEntryList({items,sessionID,visible,targets,actionEntryID,hosts,onDisclosure}:{items:ChatEntry[];sessionID:string;visible:boolean;targets:readonly LiveSSHTaskTarget[];actionEntryID:string;hosts:Host[];onDisclosure:ChatDisclosurePositionHandler}){
 	const documentVisible=useDocumentVisible()
 	const liveSSHTasks=useLiveSSHTasks(visible&&documentVisible,sessionID,targets)
 	const owners=useMemo(()=>new Map(targets.map(target=>[target.entryID,target.taskID])),[targets])
-	return <>{items.map(item=>{
-		if(item.kind==='task_tool_group')return <TaskToolGroupCard key={item.id} group={item} onDisclosure={onDisclosure}/>
-		const taskID=owners.get(item.entry.id)
-		return <ChatBubble key={item.entry.id} sessionID={sessionID} entry={item.entry} showActions={item.entry.id===actionEntryID} hosts={hosts} liveSSHTaskOwner={!!taskID} liveSSHTask={taskID?liveSSHTasks.get(taskID):undefined} onDisclosure={onDisclosure}/>
+	return <>{items.map(entry=>{
+		const taskID=owners.get(entry.id)
+		return <ChatBubble key={entry.id} sessionID={sessionID} entry={entry} showActions={entry.id===actionEntryID} hosts={hosts} liveSSHTaskOwner={!!taskID} liveSSHTask={taskID?liveSSHTasks.get(taskID):undefined} onDisclosure={onDisclosure}/>
 	})}</>
 })
 

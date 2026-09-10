@@ -545,7 +545,6 @@
 /* Reasoning, tasks, and tool execution. */
 :root[data-theme='light'] :where(
   .reasoning-content,
-  .session-task-items,
   .tool-event,
   .tool-command-block,
   .tool-context-pane,
@@ -600,8 +599,7 @@
   .tool-compact-table td,
   .tool-array-section code,
   .tool-object-section h4,
-  .reasoning-title b,
-  .task-list-summary b
+  .reasoning-title b
 ) {
   color: var(--light-text);
 }
@@ -613,8 +611,7 @@
   .tool-generic-grid dt,
   .tool-instruction,
   .tool-compact-table th,
-  .reasoning-title span,
-  .task-list-summary small
+  .reasoning-title span
 ) {
   color: var(--light-text-muted);
 }
@@ -654,11 +651,6 @@
   border-color: #a9c5dc;
   background: #edf5fb;
   color: #39739d;
-}
-
-:root[data-theme='light'] .task-tool-group-count {
-  background: var(--light-accent-soft);
-  color: var(--light-accent);
 }
 
 :root[data-theme='light'] .tool-event summary .tool-target-chip {
@@ -741,34 +733,6 @@
 
 :root[data-theme='light'] .tool-event summary .tool-summary-preview.stderr :where(span, pre) {
   color: var(--light-danger);
-}
-
-:root[data-theme='light'] .session-task-items {
-  background: rgb(255 255 255 / 97%);
-  box-shadow: var(--light-shadow);
-}
-
-:root[data-theme='light'] .session-task-items li:not(:last-child)::before {
-  background: var(--light-border-strong);
-}
-
-:root[data-theme='light'] .task-item-marker {
-  border-color: var(--light-border-strong);
-  background: var(--light-surface);
-  color: var(--light-text-muted);
-}
-
-:root[data-theme='light'] .session-task-items li.in_progress .task-item-marker,
-:root[data-theme='light'] .session-task-items li.completed .task-item-marker {
-  border-color: var(--light-accent-border);
-  background: var(--light-accent-soft);
-  color: var(--light-accent);
-}
-
-:root[data-theme='light'] .session-task-items li.blocked .task-item-marker {
-  border-color: var(--light-warning-border);
-  background: var(--light-warning-soft);
-  color: var(--light-warning);
 }
 
 /* Approval and confirmation dialogs. */

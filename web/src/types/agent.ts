@@ -33,21 +33,19 @@ export interface AgentEvent {
 	attachment_count?: number
 }
 
-export interface AgentTask {
-  id: string
-  subject: string
-  description: string
-  status: 'pending' | 'in_progress' | 'completed'
-  blocks: string[]
-  blocked_by: string[]
-  active_form?: string
-  owner?: string
-  metadata?: Record<string, unknown>
+export interface AgentPlanStep {
+  number: number
+  title: string
+  description?: string
+  status: 'pending' | 'in_progress' | 'completed' | 'skipped'
   updated_at: string
 }
 
-export interface AgentTaskList {
+export interface AgentPlan {
   session_id: string
-  items: AgentTask[]
+  goal: string
+  status: 'active' | 'completed'
+  steps: AgentPlanStep[]
+  created_at: string
   updated_at: string
 }

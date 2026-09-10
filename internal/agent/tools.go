@@ -55,7 +55,10 @@ func newHistoryTools(svc *service.Service) *agenttool.History {
 }
 
 func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
-	var tools []tool.BaseTool
+	tools, err := buildPlanTools(svc)
+	if err != nil {
+		return nil, err
+	}
 	sshTools := newSSHTools(svc)
 	workspaceTools := newWorkspaceTools(svc)
 	webTools := newWebTools(svc)

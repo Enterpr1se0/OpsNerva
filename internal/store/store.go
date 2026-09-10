@@ -11,8 +11,6 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1578,115 +1576,6 @@ AND NOT EXISTS (
 	return len(turns), nil
 }
 
-type AgentTaskFile struct {
-	Path      string
-	Content   string
-	UpdatedAt time.Time
-}
-
-func (s *Store) ListAgentTaskFiles(ctx context.Context, sessionID string) ([]AgentTaskFile, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT file_path,content,updated_at FROM agent_task_files WHERE session_id=? ORDER BY file_path`, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	files := make([]AgentTaskFile, 0)
-	for rows.Next() {
-		var file AgentTaskFile
-		var updated string
-		if err := rows.Scan(&file.Path, &file.Content, &updated); err != nil {
-			return nil, err
-		}
-		file.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
-		files = append(files, file)
-	}
-	return files, rows.Err()
-}
-
-func (s *Store) ReadAgentTaskFile(ctx context.Context, sessionID, filePath string) (AgentTaskFile, error) {
-	var file AgentTaskFile
-	var updated string
-	err := s.db.QueryRowContext(ctx, `SELECT file_path,content,updated_at FROM agent_task_files WHERE session_id=? AND file_path=?`, sessionID, filePath).Scan(
-		&file.Path, &file.Content, &updated,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return AgentTaskFile{}, ErrNotFound
-	}
-	if err != nil {
-		return AgentTaskFile{}, err
-	}
-	file.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
-	return file, nil
-}
-
-func (s *Store) WriteAgentTaskFile(ctx context.Context, sessionID, filePath, content string) error {
-	now := formatTime(time.Now().UTC())
-	_, err := s.db.ExecContext(ctx, `INSERT INTO agent_task_files(session_id,file_path,content,created_at,updated_at) VALUES(?,?,?,?,?)
-ON CONFLICT(session_id,file_path) DO UPDATE SET content=excluded.content,updated_at=excluded.updated_at`,
-		sessionID, filePath, content, now, now)
-	if err == nil {
-		s.publishChange(Change{Topic: ChangeChatState, SessionID: sessionID})
-	}
-	return err
-}
-
-func (s *Store) DeleteAgentTaskFile(ctx context.Context, sessionID, filePath string) error {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM agent_task_files WHERE session_id=? AND file_path=?`, sessionID, filePath)
-	if err != nil {
-		return err
-	}
-	if count, _ := result.RowsAffected(); count == 0 {
-		return ErrNotFound
-	}
-	s.publishChange(Change{Topic: ChangeChatState, SessionID: sessionID})
-	return nil
-}
-
-func (s *Store) ListAgentTasks(ctx context.Context, sessionID string) (domain.AgentTaskList, error) {
-	files, err := s.ListAgentTaskFiles(ctx, sessionID)
-	if err != nil {
-		return domain.AgentTaskList{}, err
-	}
-	result := domain.AgentTaskList{SessionID: sessionID, Items: make([]domain.AgentTask, 0)}
-	for _, file := range files {
-		name := filepath.Base(file.Path)
-		if filepath.Ext(name) != ".json" {
-			continue
-		}
-		id := strings.TrimSuffix(name, ".json")
-		if _, err := strconv.Atoi(id); err != nil {
-			continue
-		}
-		var stored struct {
-			Subject     string         `json:"subject"`
-			Description string         `json:"description"`
-			Status      string         `json:"status"`
-			Blocks      []string       `json:"blocks"`
-			BlockedBy   []string       `json:"blockedBy"`
-			ActiveForm  string         `json:"activeForm"`
-			Owner       string         `json:"owner"`
-			Metadata    map[string]any `json:"metadata"`
-		}
-		if err := json.Unmarshal([]byte(file.Content), &stored); err != nil {
-			return domain.AgentTaskList{}, fmt.Errorf("decode agent task %s: %w", id, err)
-		}
-		result.Items = append(result.Items, domain.AgentTask{
-			ID: id, Subject: stored.Subject, Description: stored.Description, Status: stored.Status,
-			Blocks: stored.Blocks, BlockedBy: stored.BlockedBy, ActiveForm: stored.ActiveForm,
-			Owner: stored.Owner, Metadata: stored.Metadata, UpdatedAt: file.UpdatedAt,
-		})
-		if file.UpdatedAt.After(result.UpdatedAt) {
-			result.UpdatedAt = file.UpdatedAt
-		}
-	}
-	sort.Slice(result.Items, func(i, j int) bool {
-		left, _ := strconv.Atoi(result.Items[i].ID)
-		right, _ := strconv.Atoi(result.Items[j].ID)
-		return left < right
-	})
-	return result, nil
-}
-
 func (s *Store) ListChatMessages(ctx context.Context, sessionID string, limit int) ([]domain.ChatMessage, error) {
 	return s.listChatMessages(ctx, sessionID, limit, false)
 }
@@ -2139,7 +2028,7 @@ WHERE runs.session_id=? AND approvals.continuation_kind=? AND approvals.checkpoi
 WHERE session_id=? OR run_id IN (SELECT id FROM runs WHERE session_id=?)`, sessionID, sessionID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM agent_task_files WHERE session_id=?`, sessionID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM agent_plans WHERE session_id=?`, sessionID); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {

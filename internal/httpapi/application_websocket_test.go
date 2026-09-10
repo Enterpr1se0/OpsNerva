@@ -276,7 +276,7 @@ func TestApplicationWebSocketPushesChatStateFieldDelta(t *testing.T) {
 	if update.Topic != "chat_state" || update.Mode != "delta" || string(delta["context_tokens"]) != "2048" || string(delta["context_window"]) != "8192" {
 		t.Fatalf("unexpected chat state delta: event=%#v payload=%s", update, update.Data)
 	}
-	for _, field := range []string{"active", "tasks", "queued_messages", "running_tool_calls", "workspace_id"} {
+	for _, field := range []string{"active", "plan", "queued_messages", "running_tool_calls", "workspace_id"} {
 		if _, exists := delta[field]; exists {
 			t.Errorf("unchanged field %q included in chat state delta: %s", field, update.Data)
 		}

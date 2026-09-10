@@ -1967,9 +1967,13 @@ func (s *Server) applicationChatState(ctx context.Context, sessionID string, inc
 	if err != nil {
 		return nil, err
 	}
-	tasks, taskErr := s.service.GetAgentTasks(ctx, sessionID)
-	if taskErr != nil {
-		return nil, taskErr
+	plan, planErr := s.service.GetAgentPlan(ctx, sessionID)
+	var currentPlan *domain.AgentPlan
+	if planErr == nil {
+		currentPlan = &plan
+	}
+	if planErr != nil && !errors.Is(planErr, store.ErrNotFound) {
+		return nil, planErr
 	}
 	active := s.chatSessionActive(sessionID)
 	contextSummary, summaryErr := s.service.GetChatContextSummary(ctx, sessionID)
@@ -1979,7 +1983,7 @@ func (s *Server) applicationChatState(ctx context.Context, sessionID string, inc
 	state := map[string]any{
 		"active": active, "workspace_id": session.WorkspaceID,
 		"context_tokens": session.ContextTokens, "context_window": session.ContextWindow,
-		"running_tool_calls": runningToolCalls, "tasks": tasks,
+		"running_tool_calls": runningToolCalls, "plan": currentPlan,
 		"queued_messages": s.chatQueue.snapshot(sessionID),
 	}
 	if includeMessages {

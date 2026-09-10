@@ -114,9 +114,9 @@ HTTP Chat Handler 使用保留 request logger/value、但移除浏览器取消�
 
 ## Agent tasks
 
-复杂工作直接使用 `github.com/cloudwego/eino/adk/middlewares/plantask`。中间件在 `BeforeAgent` 注入 `TaskCreate`、`TaskGet`、`TaskUpdate` 和 `TaskList`，框架负责字段 schema、任务依赖、环检测、状态更新和全部完成后的清理。
+复杂工作使用项目自有的顺序计划：`ops_plan_create` 创建目标和 2–8 个步骤，`ops_plan_step_update` 完成或跳过当前步骤并自动推进下一步，`ops_plan_revise` 替换未完成部分。已完成和已跳过步骤保留，全部完成后计划仍可查询，直到新计划替换。计划不包含依赖图、负责人或阻塞状态。
 
-项目实现 `plantask.Backend`，将框架任务文件写入 `agent_task_files`。Backend 只从可信 Go context 读取 session ID，模型参数不能跨会话访问任务。Chat state 返回当前任务列表，Web 展示进度、当前任务和依赖；Runtime 在后续模型请求前注入现存任务状态，并把它作为不可信文本处理。任务状态不扩大权限，所有 SSH Tool 仍独立通过输入校验、审批模式和加密审计。
+`internal/service/plans.go` 负责会话绑定与输入校验，`internal/store/plans.go` 以事务读写 `agent_plans` / `agent_plan_steps`。事务提交后发布 Chat state 变更，Web 通过现有 WebSocket 订阅 `plan` 字段。Runtime 注入计划作为权威状态与不可信文本，审批解释和自动审批读取同一个当前步骤。前端沿用历史 `SessionPlan` 的目标、当前步骤和进度展示，默认收起，展开内容在文档流内；Agent 停止时显示暂停并停止动画。启动迁移把现有 `agent_task_files` 的标题、说明和完成进度转为顺序计划，完成项保留在前，未完成项按原 ID 顺序推进，随后移除旧存储表和工具开关。SSH 后台任务机制独立，不受影响。
 
 ## Audit storage
 

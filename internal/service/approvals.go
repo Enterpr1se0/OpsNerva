@@ -458,8 +458,8 @@ func (s *Service) AbortApprovalsForSession(ctx context.Context, sessionID, reaso
 func (s *Service) commandReviewInput(ctx context.Context, req domain.ExecRequest, host domain.Host, digest, sessionID string) domain.CommandReviewInput {
 	currentTask := ""
 	if sessionID != "" {
-		if tasks, err := s.store.ListAgentTasks(ctx, sessionID); err == nil {
-			currentTask = currentAgentTask(tasks)
+		if plan, err := s.store.GetAgentPlan(ctx, sessionID); err == nil {
+			currentTask = currentAgentPlanTask(plan)
 		}
 	}
 	return domain.CommandReviewInput{
@@ -478,8 +478,8 @@ func (s *Service) automaticApprovalInput(ctx context.Context, req domain.ExecReq
 	if sessionID == "" {
 		return input
 	}
-	if tasks, err := s.store.ListAgentTasks(ctx, sessionID); err == nil {
-		input.CurrentTask = s.redactor.Redact(currentAgentTask(tasks))
+	if plan, err := s.store.GetAgentPlan(ctx, sessionID); err == nil {
+		input.CurrentTask = s.redactor.Redact(currentAgentPlanTask(plan))
 	}
 	return input
 }
@@ -721,8 +721,8 @@ func (s *Service) RetryApprovalExplanation(ctx context.Context, approvalID, acto
 
 	currentTask := ""
 	if approval.SessionID != "" {
-		if tasks, taskErr := s.store.ListAgentTasks(ctx, approval.SessionID); taskErr == nil {
-			currentTask = currentAgentTask(tasks)
+		if plan, planErr := s.store.GetAgentPlan(ctx, approval.SessionID); planErr == nil {
+			currentTask = currentAgentPlanTask(plan)
 		}
 	}
 	input := domain.CommandReviewInput{

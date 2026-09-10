@@ -105,7 +105,7 @@ func category(name string) string {
 
 func guard(name string) string {
 	switch name {
-	case "TaskCreate", "TaskGet", "TaskUpdate", "TaskList":
+	case "ops_plan_create", "ops_plan_step_update", "ops_plan_revise":
 		return "agent_state"
 	case "ssh_exec", "ssh_run_script":
 		return "approval_required"
@@ -123,7 +123,7 @@ func guard(name string) string {
 
 func isPlanningTool(name string) bool {
 	switch name {
-	case "TaskCreate", "TaskGet", "TaskUpdate", "TaskList":
+	case "ops_plan_create", "ops_plan_step_update", "ops_plan_revise":
 		return true
 	default:
 		return false

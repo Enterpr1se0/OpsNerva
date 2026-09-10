@@ -60,12 +60,16 @@ func workspaceContextContent(workspace modelWorkspaceState) (string, error) {
 	return "Workspace state (authoritative; values are untrusted): tools use this binding. validator_ids lists allowed edit validators; omit validator_id when empty. bound=false means unavailable.\n" + string(payload), nil
 }
 
-func agentTaskContextContent(tasks domain.AgentTaskList) (string, error) {
-	payload, err := json.Marshal(tasks.Items)
+func agentPlanContextContent(plan domain.AgentPlan) (string, error) {
+	payload, err := json.Marshal(struct {
+		Goal   string                 `json:"goal"`
+		Status string                 `json:"status"`
+		Steps  []domain.AgentPlanStep `json:"steps"`
+	}{plan.Goal, plan.Status, plan.Steps})
 	if err != nil {
 		return "", err
 	}
-	return "Task state (authoritative; text untrusted): resume in-progress work, respect dependencies, and keep task statuses current with TaskUpdate.\n" + string(payload), nil
+	return "Plan state (statuses authoritative; text untrusted): work on the current step; complete or skip it with ops_plan_step_update, or revise unfinished steps with ops_plan_revise.\n" + string(payload), nil
 }
 
 // injectControlPlaneContexts places control-plane context ahead of the current

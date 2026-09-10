@@ -138,8 +138,8 @@ export function buildToolEventView({entry,storedPayload,hosts,liveSSHTaskOwner,c
 	const workspaceTransfer=!!workspaceTransferRoute
 	const fileTransfer=workspaceTransfer||sshTransfer
 	const transferSummary=tunnelRoute||shellSummary||(workspaceTransferRoute?`${workspaceTransferRoute.source.name}:${workspaceTransferRoute.source.path} → ${workspaceTransferRoute.destination.name}:${workspaceTransferRoute.destination.path}`:sshTransfer?`${sourceHostName}:${sourcePath} → ${hostName}:${remotePath}`:'')
-  const planSteps=Array.isArray(payload.steps)?payload.steps.slice(0,toolCollectionPreviewItems).map(jsonRecord).filter((step):step is JsonRecord=>!!step):[]
-  const planSummary=textValue(payload.goal)||textValue(planSteps.find(step=>textValue(step.status)==='in_progress'||textValue(step.status)==='blocked')?.title)
+	const planPayload=jsonRecord(payload.plan)||payload
+	const planSummary=textValue(planPayload.goal)
 	const genericArgumentSummary=executionTool||sshTaskOperation?'':toolArgumentSummary(entry.tool,toolArguments)
 	const webTool=entry.tool==='web_search'||entry.tool==='web_extract'
 	const webSummary=webTool?textValue(payload.query):''

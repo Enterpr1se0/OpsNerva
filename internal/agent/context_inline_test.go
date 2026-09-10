@@ -19,7 +19,7 @@ func TestInjectControlPlaneContexts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskContent, err := agentTaskContextContent(domain.AgentTaskList{Items: []domain.AgentTask{{ID: "1", Subject: "Inspect", Status: "in_progress"}}})
+	taskContent, err := agentPlanContextContent(domain.AgentPlan{Goal: "Inspect", Status: "active", Steps: []domain.AgentPlanStep{{Number: 1, Title: "Inspect", Status: "in_progress"}}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -27,13 +27,9 @@ export function safeToolArgument(value:unknown,key='',depth=0):unknown{
 
 export function toolArgumentSummary(toolName:string|undefined,argumentsValue:JsonRecord|undefined){
 	if(!argumentsValue)return''
-	if(toolName==='TaskCreate')return argumentsValue.subject?displayValue(argumentsValue.subject):''
-	if(toolName==='TaskGet')return argumentsValue.taskId?`#${displayValue(argumentsValue.taskId)}`:''
-	if(toolName==='TaskUpdate'){
-		const taskID=argumentsValue.taskId||argumentsValue.task_id
-		const nextStatus=argumentsValue.status
-		return [taskID?`#${displayValue(taskID)}`:'',nextStatus?i18n.t(`statusLabels.${displayValue(nextStatus)}`,{defaultValue:displayValue(nextStatus)}):''].filter(Boolean).join(' · ')
-	}
+	if(toolName==='ops_plan_create')return displayValue(argumentsValue.goal)
+	if(toolName==='ops_plan_step_update')return [argumentsValue.step_number,i18n.t(`statusLabels.${argumentsValue.status}`)].filter(Boolean).join(' · ')
+	if(toolName==='ops_plan_revise')return Array.isArray(argumentsValue.steps)?argumentsValue.steps.map(value=>displayValue(value)).join(' · '):''
 	const preferred=toolName==='web_extract'?['urls']:toolName==='skill'?['skill']:toolName==='ssh_history'?['run_id','query']:['query','action','url','uri','path','name','run_id','task_id']
 	for(const key of preferred){
 		const value=safeToolArgument(argumentsValue[key],key)

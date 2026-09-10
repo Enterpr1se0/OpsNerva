@@ -173,9 +173,7 @@ const en = {
     uploadPartial: 'Uploaded {{uploaded}}; {{failed}} failed: {{message}}',
     file: 'file', directory: 'directory',
   },
-  agentTasks: {
-    title: 'Tasks', blocked: '{{count}} blocked', operation: 'Operation', operations: 'Operations', operationCount: '{{count}} operations',
-  },
+  plan: { completed: '{{completed}} / {{total}} completed' },
   tool: {
     shellScript: 'Shell script', moreLines: '{{line}} ... (+{{count}} lines)', fileOperation: 'File operation', readOperation: 'Read file', searchOperation: 'Search file',
     fullScript: 'Full script', fullCommand: 'Full command', originalArgs: 'ARGV · original arguments', environment: 'Environment variables',
@@ -259,7 +257,7 @@ const en = {
     debugHint: 'Debug logs are off. Set OPSNERVA_LOG_LEVEL=debug and restart the service.',
     columns: { time: 'Time', level: 'Level', component: 'Component', event: 'Event / fields' }, general: 'general', emptyTitle: 'No matching server logs',
   },
-  statusLabels: { pending: 'pending', completed: 'completed', skipped: 'skipped', partial: 'partial', closed: 'closed', expired: 'expired', failed: 'failed', unknown: 'result unknown', active: 'active', running: 'running', retrying: 'retrying', stopping: 'stopping', stopped: 'stopped', cancelled: 'cancelled', blocked: 'blocked', in_progress: 'in progress', ready: 'ready', error: 'error', connecting: 'connecting', interrupted: 'interrupted', rejected: 'rejected', approval_required: 'approval required' },
+  statusLabels: { paused: 'Paused', pending: 'pending', completed: 'completed', skipped: 'skipped', partial: 'partial', closed: 'closed', expired: 'expired', failed: 'failed', unknown: 'result unknown', active: 'active', running: 'running', retrying: 'retrying', stopping: 'stopping', stopped: 'stopped', cancelled: 'cancelled', blocked: 'blocked', in_progress: 'in progress', ready: 'ready', error: 'error', connecting: 'connecting', interrupted: 'interrupted', rejected: 'rejected', approval_required: 'approval required' },
   toolCategories: { planning: 'Task orchestration', execution: 'Command execution', hosts: 'SSH hosts', tasks: 'Long tasks', remote_files: 'Remote files', workspace: 'Workspace', web: 'Web search', history: 'Audit history', approvals: 'Approvals', skills: 'Skills', mcp: 'External MCP' },
   toolGuards: { read_only: 'Read only', approval_required: 'Approval control', agent_state: 'Agent state', audited_control: 'Audited control', external_mcp: 'External MCP' },
   toolNames: {
@@ -268,7 +266,7 @@ const en = {
     ssh_task: 'Manage background task', ssh_tunnel: 'Manage SSH port forwarding', ssh_shell: 'SSH Shell', ssh_host_list: 'List hosts', ssh_host_inspect: 'Inspect host',
     workspace_file_list: 'List Workspace directory', workspace_file_read: 'Read Workspace file', workspace_file_search_mode: 'Search Workspace file', workspace_file_edit: 'Edit Workspace file', workspace_file_delete: 'Delete Workspace entry',
     workspace_file_upload: 'Upload Workspace file', workspace_file_download: 'Download to Workspace', workspace_shell: 'Workspace Shell', ssh_history: 'Read execution history', skill: 'Read Skill',
-    TaskCreate: 'Create task', TaskGet: 'Get task', TaskUpdate: 'Update task', TaskList: 'List tasks', web_search: 'Search the Web', web_extract: 'Extract Web pages',
+    ops_plan_create: 'Create plan', ops_plan_step_update: 'Update step', ops_plan_revise: 'Revise plan', web_search: 'Search the Web', web_extract: 'Extract Web pages',
   },
 }
 

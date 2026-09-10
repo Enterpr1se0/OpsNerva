@@ -474,7 +474,7 @@ body {
 :where(
   .tool-event-rich > summary,
   .reasoning-card > summary,
-  .session-tasks > summary,
+  .session-plan > summary,
   .mcp-tools > summary,
   .tool-schema-raw > summary,
   .command-review-panel > summary,
@@ -492,7 +492,7 @@ body {
 :where(
   .tool-event-rich > summary > svg,
   .reasoning-card > summary > svg:last-child,
-  .session-tasks > summary > svg:last-child,
+  .session-plan > summary > svg:last-child,
   .mcp-tools > summary > svg:last-child,
   .tool-schema-raw > summary > svg:last-child,
   .command-review-panel > summary > svg:last-child,
@@ -505,7 +505,7 @@ body {
 
 .tool-event-rich[open] > summary > svg,
 .reasoning-card[open] > summary > svg:last-child,
-.session-tasks[open] > summary > svg:last-child,
+.session-plan[open] > summary > svg:last-child,
 .mcp-tools[open] > summary > svg:last-child,
 .tool-schema-raw[open] > summary > svg:last-child,
 .command-review-panel[open] > summary > svg:last-child,
@@ -536,8 +536,8 @@ body {
 
 .tool-summary-icon,
 .tool-status,
-.task-list-icon,
-.task-list-state {
+.plan-icon,
+.plan-state {
   transition:
     color var(--motion-view) var(--motion-ease),
     background-color var(--motion-view) var(--motion-ease),
@@ -546,7 +546,7 @@ body {
 }
 
 .tool-status,
-.task-list-state {
+.plan-state {
   animation: app-status-settle var(--motion-view) var(--motion-ease) both;
 }
 
@@ -557,19 +557,10 @@ body {
   animation: app-inline-status-in var(--motion-view) var(--motion-ease) both;
 }
 
-.task-list-progress > i > em,
+.plan-progress > i > em,
 .tool-live-progress.determinate > i > em,
 .file-transfer-progress > i > em {
   transition: width 280ms var(--motion-ease);
-}
-
-.session-task-view {
-  animation: app-task-backdrop-in var(--motion-view) ease both;
-}
-
-.session-task-items {
-  transform-origin: top center;
-  animation: app-task-panel-in var(--motion-disclosure) var(--motion-ease) both;
 }
 
 .chat-layout {
@@ -614,13 +605,7 @@ body {
   from { opacity: 0; transform: translateY(-3px); }
 }
 
-@keyframes app-task-backdrop-in {
-  from { opacity: 0; }
-}
 
-@keyframes app-task-panel-in {
-  from { opacity: 0; transform: translateY(-6px) scaleY(.985); }
-}
 
 :where(.app-select-menu, .model-combobox-menu) {
   transform-origin: top center;

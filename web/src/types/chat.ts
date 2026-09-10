@@ -1,4 +1,4 @@
-import type { AgentTaskList } from './agent'
+import type { AgentPlan } from './agent'
 
 export type ChatQueueMode = 'followup' | 'steering'
 
@@ -84,7 +84,7 @@ export interface ChatState {
 	messages_next_created_at?: string
 	messages_next_id?: string
 	running_tool_calls: number
-  tasks: AgentTaskList
+  plan: AgentPlan | null
 	queued_messages: QueuedChatMessage[]
 	context_summary?: ChatContextSummary
 }

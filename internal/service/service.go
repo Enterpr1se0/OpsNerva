@@ -444,46 +444,6 @@ func (s *Service) hasActiveTaskForSession(sessionID string) bool {
 	return false
 }
 
-func (s *Service) GetAgentTasks(ctx context.Context, sessionID string) (domain.AgentTaskList, error) {
-	if strings.TrimSpace(sessionID) == "" {
-		sessionID = SessionIDFromContext(ctx)
-	}
-	if sessionID == "" {
-		return domain.AgentTaskList{}, fmt.Errorf("agent tasks require a session context")
-	}
-	return s.store.ListAgentTasks(ctx, sessionID)
-}
-
-func currentAgentTask(tasks domain.AgentTaskList) string {
-	for _, task := range tasks.Items {
-		if task.Status == "in_progress" {
-			return fmt.Sprintf("#%s %s", task.ID, task.Subject)
-		}
-	}
-	for _, task := range tasks.Items {
-		if task.Status == "pending" && !agentTaskBlocked(tasks, task) {
-			return fmt.Sprintf("#%s %s", task.ID, task.Subject)
-		}
-	}
-	return ""
-}
-
-func agentTaskBlocked(tasks domain.AgentTaskList, task domain.AgentTask) bool {
-	for _, blockerID := range task.BlockedBy {
-		resolved := false
-		for _, candidate := range tasks.Items {
-			if candidate.ID == blockerID {
-				resolved = candidate.Status == "completed"
-				break
-			}
-		}
-		if !resolved {
-			return true
-		}
-	}
-	return false
-}
-
 func (s *Service) SaveModelProvider(ctx context.Context, input domain.ModelProviderInput, actor string) (domain.ModelProvider, error) {
 	input.ID = strings.TrimSpace(input.ID)
 	input.Name = strings.TrimSpace(input.Name)

@@ -599,25 +599,6 @@ type ChatAttachment struct {
 	Data      []byte `json:"-"`
 }
 
-type AgentTaskList struct {
-	SessionID string      `json:"session_id"`
-	Items     []AgentTask `json:"items"`
-	UpdatedAt time.Time   `json:"updated_at"`
-}
-
-type AgentTask struct {
-	ID          string         `json:"id"`
-	Subject     string         `json:"subject"`
-	Description string         `json:"description"`
-	Status      string         `json:"status"`
-	Blocks      []string       `json:"blocks"`
-	BlockedBy   []string       `json:"blocked_by"`
-	ActiveForm  string         `json:"active_form,omitempty"`
-	Owner       string         `json:"owner,omitempty"`
-	Metadata    map[string]any `json:"metadata,omitempty"`
-	UpdatedAt   time.Time      `json:"updated_at"`
-}
-
 type ExecMode string
 
 const (
