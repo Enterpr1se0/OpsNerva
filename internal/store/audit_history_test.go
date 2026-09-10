@@ -238,6 +238,51 @@ func TestAuditHistorySearchAndExactSessionScope(t *testing.T) {
 	}
 }
 
+func TestAuditHistoryHostAndTimeFiltersAgreeAcrossGroupsAndRuns(t *testing.T) {
+	st, ctx := newSearchStore(t)
+	base := time.Date(2026, 8, 24, 8, 0, 0, 0, time.UTC)
+	if _, err := st.UpsertHost(ctx, domain.Host{ID: "host-b", Name: "host-b", Address: "127.0.0.2", Port: 22, User: "ops", AuthType: "agent", CreatedAt: base}); err != nil {
+		t.Fatal(err)
+	}
+	create := func(id, session, hostID, status string, started time.Time) {
+		t.Helper()
+		if err := st.CreateRun(ctx, domain.Run{ID: id, SessionID: session, HostID: hostID, RequestJSON: `{}`, RequestDigest: id, Status: status, StartedAt: started}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	create("mixed-too-early", "mixed", "host-a", "completed", base.Add(30*time.Minute))
+	create("mixed-match", "mixed", "host-a", "approval_required", base.Add(2*time.Hour+123456789*time.Nanosecond))
+	create("mixed-other-host", "mixed", "host-b", "completed", base.Add(150*time.Minute))
+	create("mixed-too-late", "mixed", "host-a", "completed", base.Add(210*time.Minute))
+	create("second-match", "second", "host-a", "completed", base.Add(90*time.Minute))
+	create("other-host", "other", "host-b", "completed", base.Add(2*time.Hour))
+
+	filter := domain.AuditHistoryFilter{
+		HostID: "host-a", StartedAfter: base.Add(time.Hour), StartedBefore: base.Add(3 * time.Hour),
+		SnapshotAt: base.Add(4 * time.Hour), Limit: 20,
+	}
+	groups, err := st.ListAuditHistoryGroups(ctx, filter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups.Groups) != 2 || groups.Groups[0].SessionID != "mixed" || groups.Groups[0].RunCount != 1 || groups.Groups[0].PendingCount != 1 ||
+		groups.Groups[1].SessionID != "second" || groups.Groups[1].RunCount != 1 || groups.Groups[1].PendingCount != 0 {
+		t.Fatalf("filtered groups = %#v", groups.Groups)
+	}
+	for _, group := range groups.Groups {
+		filter.SessionID = &group.SessionID
+		page, err := st.ListAuditHistoryRuns(ctx, filter)
+		if err != nil || len(page.Runs) != group.RunCount {
+			t.Fatalf("group %q and runs disagree: group=%#v runs=%#v err=%v", group.SessionID, group, page, err)
+		}
+		for _, run := range page.Runs {
+			if run.HostID != filter.HostID || run.StartedAt.Before(filter.StartedAfter) || run.StartedAt.After(filter.StartedBefore) {
+				t.Fatalf("run escaped filter: %#v", run)
+			}
+		}
+	}
+}
+
 func TestAuditHistoryRevalidationReflectsDeletionAndStatus(t *testing.T) {
 	st, ctx := newSearchStore(t)
 	now := time.Now().UTC()
@@ -354,6 +399,7 @@ func TestAuditHistoryStoreRejectsInvalidFilters(t *testing.T) {
 		{SnapshotAt: now, Limit: 201},
 		{SnapshotAt: now, Limit: 20, Before: &domain.AuditHistoryCursor{}},
 		{SnapshotAt: now, Limit: 20, Before: &domain.AuditHistoryCursor{StartedAt: now.Add(time.Second), ID: "one"}},
+		{SnapshotAt: now, Limit: 20, StartedAfter: now, StartedBefore: now.Add(-time.Second)},
 	} {
 		if _, err := st.ListAuditHistoryGroups(ctx, filter); err == nil {
 			t.Fatalf("accepted invalid group filter: %#v", filter)
@@ -376,15 +422,18 @@ func TestAuditHistoryStoreRejectsInvalidFilters(t *testing.T) {
 func TestAuditHistoryIndexUpgradePreservesExistingRows(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "upgrade.db")
-	// First create a database without the new index, as on the previous version.
+	// First create a database without the audit expression indexes, as on an
+	// earlier version.
 	func() {
 		st, err := Open(ctx, path)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer st.Close()
-		if _, err := st.db.ExecContext(ctx, "DROP INDEX idx_runs_audit_session_time_id"); err != nil {
-			t.Fatal(err)
+		for _, name := range []string{"idx_runs_audit_session_time_id", "idx_runs_audit_time_session_id", "idx_runs_audit_host_time_session_id"} {
+			if _, err := st.db.ExecContext(ctx, "DROP INDEX "+name); err != nil {
+				t.Fatal(err)
+			}
 		}
 		now := time.Date(2026, 1, 1, 0, 0, 0, 100000000, time.UTC)
 		if _, err := st.UpsertHost(ctx, domain.Host{ID: "host-a", Name: "host-a", Address: "127.0.0.1", Port: 22, User: "ops", AuthType: "agent", CreatedAt: now}); err != nil {
@@ -401,14 +450,38 @@ func TestAuditHistoryIndexUpgradePreservesExistingRows(t *testing.T) {
 	if err := st.db.QueryRowContext(ctx, "SELECT started_at FROM runs WHERE id='run'").Scan(&started); err != nil || started != "2026-01-01T00:00:00.1Z" {
 		t.Fatalf("upgrade rewrote stored timestamp: %q, err=%v", started, err)
 	}
-	var indexes int
-	if err := st.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_runs_audit_session_time_id'").Scan(&indexes); err != nil || indexes != 1 {
-		t.Fatalf("upgrade index count=%d, err=%v", indexes, err)
+	for _, name := range []string{"idx_runs_audit_session_time_id", "idx_runs_audit_time_session_id", "idx_runs_audit_host_time_session_id"} {
+		var indexes int
+		if err := st.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?", name).Scan(&indexes); err != nil || indexes != 1 {
+			t.Fatalf("upgrade index %s count=%d, err=%v", name, indexes, err)
+		}
 	}
 	page, err := st.ListAuditHistoryGroups(ctx, domain.AuditHistoryFilter{SnapshotAt: time.Now().UTC(), Limit: 20})
 	if err != nil || len(page.Groups) != 1 {
 		t.Fatalf("upgraded history = %#v, err=%v", page, err)
 	}
+}
+
+func explainAuditHistoryQuery(t *testing.T, st *Store, ctx context.Context, statement string, args []any) string {
+	t.Helper()
+	rows, err := st.db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+statement, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var plan []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return strings.Join(plan, "\n")
 }
 
 func TestAuditHistoryQueryPlans(t *testing.T) {
@@ -424,7 +497,8 @@ func TestAuditHistoryQueryPlans(t *testing.T) {
 	_, err = tx.ExecContext(ctx, `WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<30000)
 INSERT INTO runs(id,session_id,host_id,request_json,request_digest,status,started_at)
 SELECT printf('run-%05d',x),CASE WHEN x<=15000 THEN 'large-session' ELSE printf('session-%03d',x%300) END,
-'host-a','{}','digest','completed',? FROM n`, formatTime(now))
+CASE WHEN x%4=0 THEN 'host-b' ELSE 'host-a' END,'{}','digest','completed',
+CASE WHEN x%100=0 THEN ? ELSE ? END FROM n`, formatTime(now), formatTime(now.Add(-2*time.Hour)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,25 +519,8 @@ SELECT printf('run-%05d',x),CASE WHEN x<=15000 THEN 'large-session' ELSE printf(
 		if err != nil {
 			t.Fatal(err)
 		}
-		rows, err := st.db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+statement, args...)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var plan []string
-		for rows.Next() {
-			var id, parent, unused int
-			var detail string
-			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
-				t.Fatal(err)
-			}
-			t.Logf("%s: %s", kind, detail)
-			plan = append(plan, detail)
-		}
-		if err := rows.Err(); err != nil {
-			t.Fatal(err)
-		}
-		rows.Close()
-		joined := strings.Join(plan, "\n")
+		joined := explainAuditHistoryQuery(t, st, ctx, statement, args)
+		t.Logf("%s plan:\n%s", kind, joined)
 		if !strings.Contains(joined, "USING INDEX idx_runs_audit_session_time_id") {
 			t.Fatalf("%s no longer uses the audit index: %s", kind, joined)
 		}
@@ -481,4 +538,55 @@ SELECT printf('run-%05d',x),CASE WHEN x<=15000 THEN 'large-session' ELSE printf(
 		}
 		t.Logf("%s: 30000-run fixture took %s", kind, time.Since(started))
 	}
+	filtered := domain.AuditHistoryFilter{
+		HostID: "host-a", StartedAfter: now.Add(-time.Hour), StartedBefore: now.Add(time.Hour),
+		SnapshotAt: now, Limit: 20,
+	}
+	for _, kind := range []string{"filtered-groups", "filtered-runs"} {
+		var statement string
+		var args []any
+		if kind == "filtered-groups" {
+			statement, args, err = auditHistoryGroupsQuery(filtered)
+		} else {
+			filtered.SessionID = &session
+			statement, args, err = auditHistoryRunsQuery(filtered)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		joined := explainAuditHistoryQuery(t, st, ctx, statement, args)
+		t.Logf("%s plan:\n%s", kind, joined)
+		if kind == "filtered-groups" {
+			if !strings.Contains(joined, "USING INDEX idx_runs_audit_host_time_session_id (host_id=? AND <expr>>? AND <expr><?)") {
+				t.Fatalf("host/time group filter does not seek its range: %s", joined)
+			}
+		} else if !strings.Contains(joined, "USING INDEX idx_runs_audit_session_time_id (session_id=? AND <expr>>? AND <expr><?)") || strings.Contains(joined, "TEMP B-TREE") {
+			t.Fatalf("filtered run page does not seek its session range: %s", joined)
+		}
+		started := time.Now()
+		if kind == "filtered-groups" {
+			_, err = st.ListAuditHistoryGroups(ctx, filtered)
+		} else {
+			_, err = st.ListAuditHistoryRuns(ctx, filtered)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("%s: 30000-run fixture took %s", kind, time.Since(started))
+	}
+	timeFiltered := domain.AuditHistoryFilter{StartedAfter: now.Add(-time.Hour), StartedBefore: now.Add(time.Hour), SnapshotAt: now, Limit: 20}
+	statement, args, err := auditHistoryGroupsQuery(timeFiltered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := explainAuditHistoryQuery(t, st, ctx, statement, args)
+	t.Logf("time-filtered-groups plan:\n%s", joined)
+	if !strings.Contains(joined, "USING INDEX idx_runs_audit_time_session_id (<expr>>? AND <expr><?)") {
+		t.Fatalf("time group filter does not seek its range: %s", joined)
+	}
+	started := time.Now()
+	if _, err := st.ListAuditHistoryGroups(ctx, timeFiltered); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("time-filtered-groups: 30000-run fixture took %s", time.Since(started))
 }

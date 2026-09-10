@@ -1051,9 +1051,25 @@
 }
 
 /* Audit and logs. */
-:root[data-theme='light'] :where(.search-box, .audit-session > .audit-table, .run-detail, .log-stream) {
+:root[data-theme='light'] :where(.search-box, .audit-filter-bar, .audit-session > .audit-table, .run-detail, .log-stream) {
   border-color: var(--light-border);
   background: var(--light-surface);
+}
+
+:root[data-theme='light'] .audit-filter-bar :where(input, .app-select-trigger) {
+  border-color: var(--light-border);
+  background: var(--light-surface);
+  color: var(--light-text);
+}
+
+:root[data-theme='light'] .audit-filter-bar input {
+  color-scheme: light;
+}
+
+:root[data-theme='light'] .audit-filter-clear {
+  border-color: var(--light-border-strong);
+  background: var(--light-subtle);
+  color: var(--light-text-muted);
 }
 
 :root[data-theme='light'] .audit-session-summary:hover,

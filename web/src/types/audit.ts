@@ -88,7 +88,9 @@ export interface AuditHistoryCursor {
 	id: string
 }
 
-export type AuditPageRequest={query:string;limit:number;snapshotAt?:string;cursor?:AuditHistoryCursor}
+export type AuditHistoryFilters={query:string;hostID:string;startedAfter:string;startedBefore:string}
+export function emptyAuditHistoryFilters():AuditHistoryFilters{return{query:'',hostID:'',startedAfter:'',startedBefore:''}}
+export type AuditPageRequest=AuditHistoryFilters&{limit:number;snapshotAt?:string;cursor?:AuditHistoryCursor}
 export type AuditPageResult<T>={items:T[];snapshotAt:string;nextCursor:AuditHistoryCursor|null}
 
 export interface AuditHistoryGroup {

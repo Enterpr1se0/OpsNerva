@@ -56,6 +56,8 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE INDEX IF NOT EXISTS idx_runs_host_started ON runs(host_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_session_started_id ON runs(session_id, started_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_audit_session_time_id ON runs(session_id,` + auditRunTimeSQL + ` DESC,id DESC);
+CREATE INDEX IF NOT EXISTS idx_runs_audit_time_session_id ON runs(` + auditRunTimeSQL + ` DESC,session_id,id DESC);
+CREATE INDEX IF NOT EXISTS idx_runs_audit_host_time_session_id ON runs(host_id,` + auditRunTimeSQL + ` DESC,session_id,id DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_started_id ON runs(started_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_digest ON runs(request_digest);
 CREATE TABLE IF NOT EXISTS approvals (

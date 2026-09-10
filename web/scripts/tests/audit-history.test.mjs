@@ -14,6 +14,7 @@ const settle=async()=>{for(let i=0;i<200;i++)await Promise.resolve()}
 const flush=async()=>{const callbacks=[...timers.values()];timers.clear();callbacks.forEach(fn=>fn());await settle()}
 const stamp=n=>new Date(Date.UTC(2026,0,1)+n*1000).toISOString()
 const run=(n,session='a')=>({id:`${session}-${String(n).padStart(5,'0')}`,session_id:session,started_at:stamp(n),request_json:`echo ${n}`,status:'completed',host_id:'host',exit_code:0})
+const filters=(overrides={})=>({query:'',hostID:'',startedAfter:'',startedBefore:'',...overrides})
 const position=item=>({started_at:item.started_at,id:item.id})
 const key=cursor=>`${cursor.started_at}/${cursor.id}`
 const desc=(a,b)=>a===b?0:a>b?-1:1
@@ -24,7 +25,8 @@ function fixture(count=400){
 	const request=(kind,session,input,signal)=>{
 		calls.push({kind,session,input:{...input},signal})
 		const snapshotAt=input.snapshotAt||stamp(now)
-		const matching=rows.filter(row=>row.started_at<=snapshotAt&&row.request_json.includes(input.query))
+		const matching=rows.filter(row=>row.started_at<=snapshotAt&&row.request_json.includes(input.query)&&
+			(!input.hostID||row.host_id===input.hostID)&&(!input.startedAfter||row.started_at>=input.startedAfter)&&(!input.startedBefore||row.started_at<=input.startedBefore))
 		let items
 		if(kind==='runs')items=matching.filter(row=>row.session_id===session).sort((a,b)=>desc(key(position(a)),key(position(b))))
 		else{
@@ -104,7 +106,7 @@ await check('query change rejects a late old response even when transport ignore
 	const f=fixture(),page=new AuditHistoryPage((input,signal)=>f.api.runs('a',input,signal),position,100,error=>f.errors.push(error))
 	page.setActive(true);await page.refresh()
 	const delayed=f.hold('runs'),pending=page.loadMore(),signal=f.calls.at(-1).signal
-	page.reset('echo 4');assert(signal.aborted)
+	page.reset(filters({query:'echo 4'}));assert(signal.aborted)
 	await page.refresh();const current=page.getSnapshot()
 	delayed.release();assert.equal(await pending,false)
 	assert.equal(page.getSnapshot(),current);assert(current.items.every(item=>item.request_json.includes('echo 4')))
@@ -220,14 +222,19 @@ await check('REST then WebSocket reports are deduplicated and snapshot deletion 
 	await flush();assert.equal(s.getRuns('a').getSnapshot().items.length,2);s.dispose()
 })
 
-await check('search reset cancels old group and command requests while preserving disclosure choices',async()=>{
+await check('filter reset cancels old group and command requests while preserving disclosure choices',async()=>{
 	const f=fixture(100),s=f.store
 	s.setActive(true);await settle();s.setOpen('a',true);await settle()
 	const hold=f.hold('groups'),pending=s.refresh();await settle()
-	s.setQuery('echo 1');await settle()
+	s.setFilters(filters({query:'echo 1',hostID:'host',startedAfter:stamp(10),startedBefore:stamp(90)}));await settle()
 	const current=s.groups.getSnapshot();hold.release();await pending
 	assert.equal(s.groups.getSnapshot(),current);assert(s.getViewSnapshot().expanded.has('a'))
-	assert(s.getRuns('a').getSnapshot().items.every(item=>item.request_json.includes('echo 1')))
+	assert(s.getRuns('a').getSnapshot().items.every(item=>item.request_json.includes('echo 1')&&item.started_at>=stamp(10)&&item.started_at<=stamp(90)))
+	const filteredCalls=f.calls.filter(call=>call.input.hostID==='host')
+	assert(filteredCalls.length>=2)
+	for(const call of filteredCalls)assert.deepEqual(
+		{query:call.input.query,hostID:call.input.hostID,startedAfter:call.input.startedAfter,startedBefore:call.input.startedBefore},
+		filters({query:'echo 1',hostID:'host',startedAfter:stamp(10),startedBefore:stamp(90)}))
 	s.dispose()
 })
 
@@ -280,7 +287,7 @@ await check('a group moving between refresh pages keeps one correctly ordered ro
 	assert.deepEqual(page.getSnapshot().items.map(item=>item.id),['c','a','b'])
 })
 
-await check('the HTTP client carries search, snapshot, abort signal and empty direct cursor IDs',async()=>{
+await check('the HTTP client carries filters, snapshot, abort signal and empty direct cursor IDs',async()=>{
 	const {auditHistoryApi}=await import('../../src/api/auditHistory.ts')
 	const originalFetch=globalThis.fetch,calls=[]
 	globalThis.fetch=async(path,init)=>{
@@ -289,13 +296,16 @@ await check('the HTTP client carries search, snapshot, abort signal and empty di
 	}
 	try{
 		const controller=new AbortController()
-		const input={query:'echo 100% & _',limit:20,snapshotAt:stamp(10),cursor:{started_at:stamp(9),id:''}}
+		const input={...filters({query:'echo 100% & _',hostID:'host/a',startedAfter:stamp(2),startedBefore:stamp(8)}),limit:20,snapshotAt:stamp(10),cursor:{started_at:stamp(9),id:''}}
 		await auditHistoryApi.groups(input,controller.signal)
 		await auditHistoryApi.runs('',input,controller.signal)
 		assert.equal(calls[0].url.pathname,'/api/v1/audit/groups')
 		assert.equal(calls[1].url.pathname,'/api/v1/audit/runs')
 		for(const {url,init} of calls){
 			assert.equal(url.searchParams.get('q'),input.query)
+			assert.equal(url.searchParams.get('host_id'),input.hostID)
+			assert.equal(url.searchParams.get('started_after'),input.startedAfter)
+			assert.equal(url.searchParams.get('started_before'),input.startedBefore)
 			assert.equal(url.searchParams.get('snapshot_at'),stamp(10))
 			assert.equal(url.searchParams.get('cursor_started_at'),stamp(9))
 			assert(url.searchParams.has('cursor_id'));assert.equal(url.searchParams.get('cursor_id'),'')
@@ -366,7 +376,7 @@ await check('failed older pages retain their cursor and resume the same page on 
 	const refreshHold=f.hold('runs'),refresh=page.refresh()
 	refreshHold.reject(new Error('offline'));await refresh
 	assert.equal(page.getSnapshot().failedOperation,'refresh')
-	page.reset('new query');assert.equal(page.getSnapshot().failedOperation,null)
+	page.reset(filters({query:'new query'}));assert.equal(page.getSnapshot().failedOperation,null)
 })
 
 await check('an already loaded group moved into an older page updates rather than leaving a stale duplicate',async()=>{
@@ -416,7 +426,7 @@ await check('search changes cancel old hydration even if the server returns the 
 	s.setActive(true);await settle();await s.loadMoreGroups()
 	const hold=f.hold('runs'),pending=s.loadMoreGroups();await settle()
 	assert(hold.started)
-	s.setQuery('echo 2');await settle()
+	s.setFilters(filters({query:'echo 2'}));await settle()
 	const count=f.calls.length,state=s.groups.getSnapshot()
 	hold.release();await pending;await settle()
 	assert.equal(f.calls.length,count,'old hydration must not fetch sessions outside the new query')

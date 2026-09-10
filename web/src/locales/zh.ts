@@ -244,6 +244,7 @@ const zh = {
     callId: '调用 ID', approvalId: '审批 ID', taskId: '任务 ID', runEvidence: '运行审计', mcpRunGroup: 'MCP Server 调用',
     direct: '直接操作 / 旧操作', missingConversation: '会话已删除或不可用',
     loadedGroups: '已加载 {{count}} 个会话', noSession: '没有 Agent 会话上下文', lastRun: '最近运行 {{date}}', pending: '待审批',
+		allHosts: '全部主机', startedAfter: '开始时间', startedBefore: '结束时间', clearFilters: '清除筛选', invalidTimeRange: '开始时间不能晚于结束时间',
     columns: { time: '时间', operation: '操作', status: '状态', host: '主机', exit: '退出码' }, unknownOperation: '未知操作',
 		loadMoreGroups: '加载更早会话', loadMore: '加载更早记录', clear: '全部删除', deleteSession: '删除记录',
 		deleteSessionTitle: '删除“{{title}}”的审计记录？', deleteAllTitle: '删除全部审计记录？',

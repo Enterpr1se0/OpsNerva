@@ -186,12 +186,51 @@ func TestAuditHistoryEndpointsPaginateAndSearch(t *testing.T) {
 	}
 }
 
+func TestAuditHistoryEndpointsFilterByHostAndTime(t *testing.T) {
+	server, st, host := newAuditHistoryServer(t)
+	ctx := t.Context()
+	base := time.Now().UTC().Add(-4 * time.Hour).Truncate(time.Second)
+	other, err := st.UpsertHost(ctx, domain.Host{ID: "host-other", Name: "other", Address: "127.0.0.2", Port: 22,
+		User: "ops", AuthType: "agent", SudoMode: "none", CreatedAt: base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, run := range []domain.Run{
+		{ID: "too-early", SessionID: "session", HostID: host.ID, StartedAt: base, Status: "completed"},
+		{ID: "match", SessionID: "session", HostID: host.ID, StartedAt: base.Add(2 * time.Hour), Status: "completed"},
+		{ID: "other-host", SessionID: "session", HostID: other.ID, StartedAt: base.Add(2 * time.Hour), Status: "completed"},
+	} {
+		run.RequestJSON = `{}`
+		run.RequestDigest = run.ID
+		if err := st.CreateRun(ctx, run); err != nil {
+			t.Fatal(err)
+		}
+	}
+	params := url.Values{
+		"host_id":        {host.ID},
+		"started_after":  {base.Add(time.Hour).Format(time.RFC3339Nano)},
+		"started_before": {base.Add(3 * time.Hour).Format(time.RFC3339Nano)},
+	}
+	var groups domain.AuditHistoryGroupPage
+	auditHistoryGET(t, server.Handler(), "/api/v1/audit/groups?"+params.Encode(), http.StatusOK, &groups)
+	if len(groups.Groups) != 1 || groups.Groups[0].SessionID != "session" || groups.Groups[0].RunCount != 1 {
+		t.Fatalf("filtered groups = %#v", groups)
+	}
+	params.Set("session_id", "session")
+	var runs domain.AuditHistoryRunPage
+	auditHistoryGET(t, server.Handler(), "/api/v1/audit/runs?"+params.Encode(), http.StatusOK, &runs)
+	if len(runs.Runs) != 1 || runs.Runs[0].ID != "match" || runs.HasMore {
+		t.Fatalf("filtered runs = %#v", runs)
+	}
+}
+
 func TestAuditHistoryEndpointsValidateBoundariesAndAuthentication(t *testing.T) {
 	server, _, _ := newAuditHistoryServer(t)
 	handler := server.Handler()
 	past := url.QueryEscape(time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano))
 	future := url.QueryEscape(time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano))
 	for _, suffix := range []string{"limit=0", "limit=-1", "limit=201", "limit=wat", "snapshot_at=", "snapshot_at=invalid", "snapshot_at=" + future,
+		"started_after=", "started_after=invalid", "started_before=", "started_before=invalid", "started_after=" + future + "&started_before=" + past,
 		"cursor_id=one", "cursor_started_at=" + past, "cursor_started_at=" + past + "&cursor_id=one",
 		"snapshot_at=" + past + "&cursor_id=one", "snapshot_at=" + past + "&cursor_started_at=invalid&cursor_id=one",
 		"snapshot_at=" + past + "&cursor_started_at=" + future + "&cursor_id=one"} {

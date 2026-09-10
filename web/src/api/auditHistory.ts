@@ -6,6 +6,9 @@ type HistoryResponse={snapshot_at:string;has_more:boolean;next_cursor?:AuditHist
 function historyParams(input:AuditPageRequest){
 	const params=new URLSearchParams({limit:String(input.limit)})
 	if(input.query)params.set('q',input.query)
+	if(input.hostID)params.set('host_id',input.hostID)
+	if(input.startedAfter)params.set('started_after',input.startedAfter)
+	if(input.startedBefore)params.set('started_before',input.startedBefore)
 	if(input.snapshotAt)params.set('snapshot_at',input.snapshotAt)
 	if(input.cursor){
 		params.set('cursor_started_at',input.cursor.started_at)

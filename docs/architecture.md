@@ -66,7 +66,7 @@ Workspace 在 `workspace_dir` 下按 ID 托管；SQLite 只登记 ID、权限和
 
 `workspace_shell` 是唯一开放给模型的本地 Shell，支持一次性 `run` 以及 `start/input/output/list/interrupt/close` 交互式 PTY。`input/output` 的 `wait_seconds` 是读取前的可取消延迟，范围 0–600 秒、默认 5 秒；定时期间的输出事件只实时推送到 Web，不会唤醒工具，定时结束后按调用开始时确定的序列游标读取一页。管理员在 SQLite 持久化的 System 设置中明确选择 `sandbox`、`host` 或 `disabled`，Linux 默认 `sandbox`，Windows 默认 `host`。启动或运行时解析出的实际后端写入 `ExecRequest.workspace_shell_backend`，和 Workspace ID、相对 cwd、环境及脚本一起进入加密审批摘要；执行前再次读取设置，后端不一致即拒绝。交互会话复用 SSH 终端的事件序列、ANSI 输出、尺寸变更、Ctrl+C 与持久化状态，但以 `kind=workspace` 记录 Workspace 和后端；没有 TTL。Web 以 WebSocket JSON 控制帧发送输入、实际尺寸和中断，服务端以带序列号的二进制帧发送脱敏后的原始 PTY 字节，重连通过 `after` 游标续传；相邻输出分片在单个 SQLite 事务中批量提交，较大的事件载荷以独立 Zstandard 帧存储并在读取时透明解压，旧 TEXT 记录保持兼容。Bubblewrap 交互模式复用外层专用 PTY 的 session/controlling terminal，不再创建第二个 session，因此 Bash job control和全屏程序可用；原始 ANSI 事件保留给 Web 终端，Agent 适配器使用跨块状态机移除控制序列。启动和一次性脚本都遵循当前审批模式，不再进行等级分类。
 
-App 中由用户直接新建的 SSH/Workspace Terminal 与上述 Agent Tool Shell 只共享 PTY、尺寸、序列和实时订阅组件。App Terminal 不创建 Run、Approval、Audit、`ssh_shell_sessions` 或 `ssh_shell_events`，最近 2 MiB 输出仅在进程内用于 WebSocket 重连，关闭或服务重启后即丢弃；用户按键不会形成输入事件，也不经过面向模型的凭据检测、密码提示阻断或输出脱敏。Agent/MCP Shell 继续使用 SQLite 历史、响应游标、凭据隔离和执行审计；用户接管这类 Shell 输入密码时仍使用不保存明文的私密通道。
+App 中由用户直接新建的 SSH/Workspace Terminal 与上述 Agent Tool Shell 只共享 PTY、尺寸、序列和实时订阅组件。App Terminal 不创建 Run、Approval、Audit、`ssh_shell_sessions` 或 `ssh_shell_events`，最近 2 MiB 输出仅保存在进程内；浏览器 WebSocket 断开后以原 Shell ID 和事件序列游标重新附着，SSH 连接或本地 Workspace PTY 异常结束时也保留同一逻辑 Shell，手动重连只替换其底层运行代次，不创建第二个 Shell。普通 SSH 无法在连接死亡后恢复原远端进程，因此底层 PTY 会重建，但卡片、Shell ID、输出历史和事件序列保持不变；正常退出、主动关闭或服务重启后不提供伪恢复。用户按键不会形成输入事件，也不经过面向模型的凭据检测、密码提示阻断或输出脱敏。Agent/MCP Shell 继续使用 SQLite 历史、响应游标、凭据隔离和执行审计；用户接管这类 Shell 输入密码时仍使用不保存明文的私密通道。
 
 `web_search` 和 `web_extract` 共用管理员保存在 `web_search_settings` 中的 Tavily 配置，但可由 func 管理分别启停。Tavily 设置只保存共享 `proxy_id`，运行时从 `proxies` 解析 HTTP、HTTPS、SOCKS5 或 SOCKS5H 地址及加密凭据；请求禁用环境代理，选中的代理失败时不会回退直连。查询、域名过滤条件和待提取 URL 会离开本机。管理员结果数是上限，模型省略结果数时默认取 5。搜索支持 topic、depth、相对/绝对日期范围和高级分片；提取一次接受最多五个公开 HTTP/HTTPS URL，并支持 query、depth 和相关分片。URL 输入与提供方返回值均会规范化、去重并拒绝凭据、localhost、私网和链路本地地址。
 
@@ -146,17 +146,17 @@ Runner 在调用工具前通过 Go context 绑定当前 session ID，Service 创
 
 审计 Web 界面使用两级分页接口：`GET /api/v1/audit/groups` 默认每页 20 个会话分组，`GET /api/v1/audit/runs?session_id=...` 默认每页 50 条组内命令，`limit` 范围为 1–200。组内查询必须显式提供 `session_id`；空值仅代表 Direct / Legacy，不能表示全部。分组直接关联聊天会话标题或 MCP 客户端名称，不依赖聊天侧栏的最近 50 个会话；已删除会话的执行记录仍可分页读取。
 
-首次读取返回 `snapshot_at` 时间上界，后续外层和组内请求沿用此值及相同的 `q`。`q` 是对请求文本、命令参数和脚本的字面子串搜索，两级查询使用相同匹配范围；不搜索或读取 stdout/stderr 正文。分组的数量、待审批数和最近运行时间均针对这个搜索与时间范围。分组按最近匹配运行时间及 session ID 降序，命令按开始时间及 run ID 降序。存在下一页时返回 `next_cursor: {started_at,id}`；调用方将其作为 `cursor_started_at`、`cursor_id`，连同 `snapshot_at` 传回。Direct 分组的 cursor ID 可以为空，命令 cursor ID 不可为空。
+首次读取返回 `snapshot_at` 时间上界，后续外层和组内请求沿用此值及相同的 `q`、`host_id`、`started_after`、`started_before`。起止时间是包含边界的 RFC3339 时间，服务端统一按 UTC 比较并拒绝反向范围。`q` 是对请求文本、命令参数和脚本的字面子串搜索，两级查询使用相同匹配范围；不搜索或读取 stdout/stderr 正文。分组的数量、待审批数和最近运行时间均针对这个搜索、主机与时间范围。分组按最近匹配运行时间及 session ID 降序，命令按开始时间及 run ID 降序。存在下一页时返回 `next_cursor: {started_at,id}`；调用方将其作为 `cursor_started_at`、`cursor_id`，连同快照和筛选条件传回。Direct 分组的 cursor ID 可以为空，命令 cursor ID 不可为空。
 
-这个上界用于隔开新运行和历史翻页，不是跨请求冻结的数据库快照：状态更新、删除和回填到上界之前的记录仍然可见，前端必须处理重新校准与过期请求。时间排序在审计查询键中补齐 RFC3339Nano 小数精度，通过 `idx_runs_audit_session_time_id` 表达式索引支持组内范围查询，不改写历史时间戳。分组计数仍需聚合符合范围的记录，不引入汇总表或全文索引。现有 `/api/v1/run-summaries`、Agent/MCP 历史查询及其可信 context 会话隔离不变；新的审计 Service 查询同样尊重 context 会话约束。
+这个上界用于隔开新运行和历史翻页，不是跨请求冻结的数据库快照：状态更新、删除和回填到上界之前的记录仍然可见，前端必须处理重新校准与过期请求。时间排序在审计查询键中补齐 RFC3339Nano 小数精度，不改写历史时间戳。`idx_runs_audit_session_time_id` 支持组内范围查询，`idx_runs_audit_time_session_id` 与 `idx_runs_audit_host_time_session_id` 分别支持时间、主机加时间的分组范围查询；旧数据库打开时只补建索引。分组计数仍需聚合符合范围的记录，不引入汇总表或全文索引。现有 `/api/v1/run-summaries`、Agent/MCP 历史查询及其可信 context 会话隔离不变；新的审计 Service 查询同样尊重 context 会话约束。
 
 组内深页分别查询“相同时间且 ID 更小”和“更早时间”两个不重叠索引范围，各自最多读取 `limit+1` 条，合并排序最多 `2*(limit+1)` 条。不会因大量记录时间相同而扫描同一时间戳下的全部前序记录；游标已验证不晚于时间上界，因此这两个范围不再重复添加更宽的上界条件。
 
-分页状态层由 `AuditHistoryPage` 管理连续的已加载时间范围、固定上界、请求取消及原子提交；`AuditHistoryStore` 管理分组与各会话的独立订阅、展开选择、搜索切换和审计事件批处理。重新校准会读到原先的最早游标，不按旧页数截断；只刷新已展开会话的命令，隐藏视图停止分页订阅、请求与事件定时器。250 ms 定时器仅合并已收到的事件，不用于轮询。
+分页状态层由 `AuditHistoryPage` 管理完整筛选条件、连续的已加载时间范围、固定上界、请求取消及原子提交；`AuditHistoryStore` 管理分组与各会话的独立订阅、展开选择、筛选切换和审计事件批处理。任何筛选变化都会取消旧请求并清除其快照、边界和游标；重新校准会读到原先的最早游标，不按旧页数截断。只刷新已展开会话的命令，隐藏视图停止分页订阅、请求与事件定时器。250 ms 定时器仅合并已收到的事件，不用于轮询。
 
-`useAuditHistory` 在 App 生命周期内持有状态，不订阅分页更新；`AuditRunsView` 订阅会话列表和展开选择，`AuditHistoryGroupCard` 分别订阅组内记录。底部“加载更早会话”和组内“加载更早记录”使用独立游标；搜索经 250 ms 防抖后查询服务端全部匹配历史，不再筛选已加载记录。完整搜索结果不超过 20 条运行时默认展开，手动收起的选择在搜索、刷新、删除和切页期间保留，加载更多不强制展开。保留原有 details 结构与收缩样式，完整运行详情仍按需读取。
+`useAuditHistory` 在 App 生命周期内持有状态，不订阅分页更新；`AuditRunsView` 订阅会话列表和展开选择，`AuditHistoryGroupCard` 分别订阅组内记录。底部“加载更早会话”和组内“加载更早记录”使用独立游标；搜索经 250 ms 防抖，主机和本地起止时间在有效时直接转换为 UTC，全部由服务端查询而不是筛选已加载记录。完整筛选结果不超过 20 条运行时默认展开，手动收起的选择在筛选、刷新、删除和切页期间保留，加载更多不强制展开。保留原有 details 结构与收缩样式，完整运行详情仍按需读取。
 
-并发翻页共享组内补载；切换搜索、隐藏或删除使旧补载代次失效。分页错误保留失败操作，重试旧页时继续使用原游标，而不是重读首页。`AuditRunDetailResource` 仅在首次展开详情后创建；摘要变化时失效缓存，收起记录、收起会话、隐藏或卸载时取消详情读取，迟到响应不得覆盖新结果。详情错误只允许显式重试，不自动循环请求。
+并发翻页共享组内补载；切换筛选、隐藏或删除使旧补载代次失效。分页错误保留失败操作，重试旧页时继续使用原游标，而不是重读首页。`AuditRunDetailResource` 仅在首次展开详情后创建；摘要变化时失效缓存，收起记录、收起会话、隐藏或卸载时取消详情读取，迟到响应不得覆盖新结果。详情错误只允许显式重试，不自动循环请求。
 
 旧的单层审计 Hook、前端分组/过滤、最近 50 个会话标题拼接和跨页面 `runs` 属性传递已移除。聊天工具卡片直接使用持久化工具结果的 `_display` 请求信息、生命周期状态及输出；截断结果仍通过聊天消息详情接口按需补全，不依赖用户是否打开过审计页。MCP 活动视图及 Agent/MCP 历史查询链路不变。
 

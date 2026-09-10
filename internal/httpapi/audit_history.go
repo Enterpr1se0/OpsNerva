@@ -11,7 +11,7 @@ import (
 
 func auditHistoryFilter(r *http.Request, defaultLimit int) (domain.AuditHistoryFilter, error) {
 	query := r.URL.Query()
-	filter := domain.AuditHistoryFilter{Query: query.Get("q"), Limit: defaultLimit}
+	filter := domain.AuditHistoryFilter{Query: query.Get("q"), HostID: query.Get("host_id"), Limit: defaultLimit}
 	if query.Has("limit") {
 		limit, err := strconv.Atoi(query.Get("limit"))
 		if err != nil || limit < 1 || limit > 200 {
@@ -25,6 +25,22 @@ func auditHistoryFilter(r *http.Request, defaultLimit int) (domain.AuditHistoryF
 			return filter, fmt.Errorf("invalid audit snapshot_at")
 		}
 		filter.SnapshotAt = value.UTC()
+	}
+	for key, destination := range map[string]*time.Time{
+		"started_after":  &filter.StartedAfter,
+		"started_before": &filter.StartedBefore,
+	} {
+		if !query.Has(key) {
+			continue
+		}
+		value, err := time.Parse(time.RFC3339Nano, query.Get(key))
+		if err != nil || value.IsZero() {
+			return filter, fmt.Errorf("invalid audit %s", key)
+		}
+		*destination = value.UTC()
+	}
+	if !filter.StartedAfter.IsZero() && !filter.StartedBefore.IsZero() && filter.StartedAfter.After(filter.StartedBefore) {
+		return filter, fmt.Errorf("invalid audit time range: started_after must not be later than started_before")
 	}
 	if query.Has("cursor_started_at") || query.Has("cursor_id") {
 		if filter.SnapshotAt.IsZero() || !query.Has("cursor_started_at") || !query.Has("cursor_id") {

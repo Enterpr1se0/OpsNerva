@@ -10,11 +10,14 @@ type AuditHistoryCursor struct {
 }
 
 type AuditHistoryFilter struct {
-	Query      string
-	SessionID  *string // nil: all groups; pointer to "": only direct operations
-	SnapshotAt time.Time
-	Before     *AuditHistoryCursor
-	Limit      int
+	Query         string
+	HostID        string
+	SessionID     *string // nil: all groups; pointer to "": only direct operations
+	StartedAfter  time.Time
+	StartedBefore time.Time
+	SnapshotAt    time.Time
+	Before        *AuditHistoryCursor
+	Limit         int
 }
 
 type AuditHistoryGroup struct {

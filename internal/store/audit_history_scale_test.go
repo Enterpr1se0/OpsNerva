@@ -72,7 +72,7 @@ SELECT printf('run-%06d',x),CASE WHEN x<=50000 THEN 'large-session' ELSE printf(
 			}
 			plan.Close()
 			joined := strings.Join(steps, "\n")
-			if !strings.Contains(joined, "USING INDEX idx_runs_audit_session_time_id (session_id=? AND <expr>=? AND id<?)") ||
+			if !strings.Contains(joined, "USING INDEX idx_runs_audit_time_session_id (<expr>=? AND session_id=? AND id<?)") ||
 				!strings.Contains(joined, "USING INDEX idx_runs_audit_session_time_id (session_id=? AND <expr><?)") ||
 				strings.Count(joined, "TEMP B-TREE") != 1 {
 				t.Fatalf("deep pagination must seek both disjoint ranges and sort only the bounded merge: %s", joined)

@@ -24,6 +24,9 @@ func auditHistoryWhere(filter domain.AuditHistoryFilter, snapshotBound bool) (st
 	if filter.Before != nil && (filter.Before.StartedAt.IsZero() || filter.Before.StartedAt.After(filter.SnapshotAt)) {
 		return "", nil, fmt.Errorf("invalid audit cursor boundary")
 	}
+	if !filter.StartedAfter.IsZero() && !filter.StartedBefore.IsZero() && filter.StartedAfter.After(filter.StartedBefore) {
+		return "", nil, fmt.Errorf("invalid audit time range: started_after must not be later than started_before")
+	}
 	where := " WHERE 1=1"
 	var args []any
 	if snapshotBound {
@@ -33,6 +36,18 @@ func auditHistoryWhere(filter domain.AuditHistoryFilter, snapshotBound bool) (st
 	if filter.SessionID != nil {
 		where += " AND session_id=?"
 		args = append(args, *filter.SessionID)
+	}
+	if filter.HostID != "" {
+		where += " AND host_id=?"
+		args = append(args, filter.HostID)
+	}
+	if !filter.StartedAfter.IsZero() {
+		where += " AND " + auditRunTimeSQL + ">=?"
+		args = append(args, filter.StartedAfter.UTC().Format(auditTimeLayout))
+	}
+	if !filter.StartedBefore.IsZero() {
+		where += " AND " + auditRunTimeSQL + "<=?"
+		args = append(args, filter.StartedBefore.UTC().Format(auditTimeLayout))
 	}
 	if filter.Query != "" {
 		where += ` AND (search_text LIKE ? ESCAPE '\' OR request_json LIKE ? ESCAPE '\' OR tool_arguments_json LIKE ? ESCAPE '\')`

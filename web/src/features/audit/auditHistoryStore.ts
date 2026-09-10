@@ -1,15 +1,19 @@
 import type { AuditHistoryClient } from '../../api/auditHistory'
 import type { ApplicationEvent } from '../../api/appEvents'
-import type { AuditHistoryGroup, AuditRunDeleteResult, Run } from '../../types/audit'
+import { emptyAuditHistoryFilters, type AuditHistoryFilters, type AuditHistoryGroup, type AuditRunDeleteResult, type Run } from '../../types/audit'
 import { AuditHistoryPage } from './auditHistoryPage'
 
 export type AuditHistoryEvent={id?:string;type?:string;data?:AuditRunDeleteResult}
 type AuditSubscription=(listener:(event:ApplicationEvent<AuditHistoryEvent>)=>void)=>()=>void
-type AuditHistoryView={query:string;expanded:ReadonlySet<string>;active:boolean}
+type AuditHistoryView={filters:AuditHistoryFilters;expanded:ReadonlySet<string>;active:boolean}
 const eventBatchDelay=250
 
 function deletionIncludes(result:AuditRunDeleteResult,sessionID:string){
 	return result.scope==='all'||(result.scope==='direct'?sessionID==='':sessionID===result.session_id)
+}
+
+function sameFilters(a:AuditHistoryFilters,b:AuditHistoryFilters){
+	return a.query===b.query&&a.hostID===b.hostID&&a.startedAfter===b.startedAfter&&a.startedBefore===b.startedBefore
 }
 
 // Own one instance per audit view lifetime. Page snapshots have independent
@@ -17,7 +21,7 @@ function deletionIncludes(result:AuditRunDeleteResult,sessionID:string){
 export class AuditHistoryStore {
 	readonly groups:AuditHistoryPage<AuditHistoryGroup>
 	private runs=new Map<string,AuditHistoryPage<Run>>()
-	private view:AuditHistoryView={query:'',expanded:new Set(),active:false}
+	private view:AuditHistoryView={filters:emptyAuditHistoryFilters(),expanded:new Set(),active:false}
 	private manuallyCollapsed=new Set<string>()
 	private listeners=new Set<()=>void>()
 	private active=false
@@ -42,7 +46,7 @@ export class AuditHistoryStore {
 		let page=this.runs.get(sessionID)
 		if(!page){
 			page=new AuditHistoryPage((input,signal)=>this.api.runs(sessionID,input,signal),run=>({started_at:run.started_at,id:run.id}),50,this.reportError)
-			page.reset(this.view.query)
+			page.reset(this.view.filters)
 			this.runs.set(sessionID,page)
 		}
 		return page
@@ -56,12 +60,13 @@ export class AuditHistoryStore {
 		if(active){this.unsubscribe=this.subscribeAudit(this.onEvent);void this.refresh()}
 		else{this.unsubscribe?.();this.unsubscribe=null;this.stopCycle()}
 	}
-	setQuery(query:string){
-		if(query===this.view.query)return
+	setFilters(filters:AuditHistoryFilters){
+		if(sameFilters(filters,this.view.filters))return
+		const next={...filters}
 		this.stopCycle()
-		this.groups.reset(query)
-		for(const page of this.runs.values())page.reset(query)
-		this.publish({...this.view,query})
+		this.groups.reset(next)
+		for(const page of this.runs.values())page.reset(next)
+		this.publish({...this.view,filters:next})
 		void this.refresh()
 	}
 	setOpen(sessionID:string,open:boolean){

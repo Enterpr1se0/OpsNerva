@@ -31,10 +31,14 @@ const render=()=>renderToStaticMarkup(createElement(AuditRunsView,{history:store
 
 let html=render()
 assert(html.includes('aria-label="Search"'));assert(!html.includes('class="spin"'))
+assert(html.includes('All hosts'));assert(html.includes('Start time'));assert(html.includes('End time'));assert(!html.includes('Clear filters'))
 store.setActive(true);await settle();html=render()
 assert(html.includes('Load earlier sessions'));assert(!html.includes('Load earlier records'))
 assert(html.includes('Joined old title'));assert(html.includes('External Agent'));assert(html.includes('Direct / legacy operations'))
 assert(!html.includes('Deleted or unavailable'));assert(!html.includes('RUNS'));assert.equal(calls.length,0)
+
+store.setFilters({query:'',hostID:'host',startedAfter:stamp(10),startedBefore:stamp(90)});await settle();html=render()
+assert(html.includes('Clear filters'));assert(html.includes('>host</span>'))
 
 store.setOpen('old-session',true);await settle();html=render()
 assert(html.includes('class="audit-session panel" open=""'))

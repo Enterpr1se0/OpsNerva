@@ -1,4 +1,4 @@
-import type { AuditHistoryCursor, AuditPageRequest, AuditPageResult } from '../../types/audit'
+import { emptyAuditHistoryFilters, type AuditHistoryCursor, type AuditHistoryFilters, type AuditPageRequest, type AuditPageResult } from '../../types/audit'
 export type AuditPageSnapshot<T>={items:readonly T[];snapshotAt:string;nextCursor:AuditHistoryCursor|null;ready:boolean;loading:'idle'|'refresh'|'more';error:unknown;failedOperation:'refresh'|'more'|null}
 type PageOperation={controller:AbortController;promise:Promise<boolean>}
 type PageLoader<T>=(input:AuditPageRequest,signal:AbortSignal)=>Promise<AuditPageResult<T>>
@@ -15,7 +15,7 @@ export class AuditHistoryPage<T> {
 	private listeners=new Set<()=>void>()
 	private operation:PageOperation|null=null
 	private active=false
-	private query=''
+	private filters=emptyAuditHistoryFilters()
 	private boundary:AuditHistoryCursor|null=null
 	private load:PageLoader<T>
 	private position:(item:T)=>AuditHistoryCursor
@@ -40,8 +40,8 @@ export class AuditHistoryPage<T> {
 		operation?.controller.abort()
 		this.publish({loading:'idle'})
 	}
-	reset(query:string){
-		this.cancel();this.query=query;this.boundary=null
+	reset(filters:AuditHistoryFilters){
+		this.cancel();this.filters={...filters};this.boundary=null
 		this.publish({items:[],snapshotAt:'',nextCursor:null,ready:false,error:null,failedOperation:null})
 	}
 	retain(predicate:(item:T)=>boolean){
@@ -96,7 +96,7 @@ export class AuditHistoryPage<T> {
 		const boundary=kind==='refresh'?this.boundary:null
 		const items:T[]=[]
 		while(this.operation===operation){
-			const page=await this.load({query:this.query,limit:this.limit,snapshotAt,cursor:cursor||undefined},operation.controller.signal)
+			const page=await this.load({...this.filters,limit:this.limit,snapshotAt,cursor:cursor||undefined},operation.controller.signal)
 			if(this.operation!==operation)return null
 			if(snapshotAt&&timeKey(page.snapshotAt)!==timeKey(snapshotAt))throw new Error('Audit history snapshot changed during pagination')
 			snapshotAt=page.snapshotAt

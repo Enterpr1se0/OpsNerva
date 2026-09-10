@@ -244,6 +244,7 @@ const en = {
     callId: 'Call ID', approvalId: 'Approval ID', taskId: 'Task ID', runEvidence: 'Run audit', mcpRunGroup: 'MCP Server calls',
     direct: 'Direct / legacy operations', missingConversation: 'Deleted or unavailable conversation',
     loadedGroups: '{{count}} loaded sessions', noSession: 'No Agent session context', lastRun: 'Last run {{date}}', pending: 'pending',
+		allHosts: 'All hosts', startedAfter: 'Start time', startedBefore: 'End time', clearFilters: 'Clear filters', invalidTimeRange: 'Start time must not be later than end time',
     columns: { time: 'Time', operation: 'Operation', status: 'Status', host: 'Host', exit: 'Exit' }, unknownOperation: 'Unknown operation',
 		loadMoreGroups: 'Load earlier sessions', loadMore: 'Load earlier records', clear: 'Delete all', deleteSession: 'Delete records',
 		deleteSessionTitle: 'Delete audit records for “{{title}}”?', deleteAllTitle: 'Delete all audit records?',
