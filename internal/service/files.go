@@ -590,3 +590,12 @@ func parseFileEditOutput(path, validatorID, output string, succeeded bool) domai
 	}
 	return metadata
 }
+
+func (s *Service) ListFiles(ctx context.Context, hostID, path string, actor string) (domain.ExecResult, error) {
+	if !posixpath.IsAbs(path) {
+		return domain.ExecResult{}, asInputValidationError(fmt.Errorf("remote directory path must be absolute"))
+	}
+	return s.Submit(ctx, domain.ExecRequest{HostID: hostID, Mode: domain.ExecProgram, Program: "ls", Args: []string{"-la", "--", path}, Reason: "list a remote directory for diagnosis"}, actor)
+}
+
+func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'" }

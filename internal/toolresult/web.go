@@ -7,6 +7,7 @@ import (
 
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
 	"github.com/Enterpr1se0/opsnerva/internal/service"
+	"github.com/Enterpr1se0/opsnerva/internal/websearch"
 )
 
 type WebPolicy struct{}
@@ -40,7 +41,7 @@ func NormalizeWebSearch(result domain.WebSearchResponse, err error) (domain.WebS
 		result.Code = "timeout"
 		result.Retryable = true
 		result.NextAction = "retry once with a narrower query or fewer results"
-	case errors.Is(err, service.ErrWebSearchUpstream):
+	case errors.Is(err, websearch.ErrUpstream):
 		result.Code, result.Retryable, result.NextAction = classifyWebProviderError(err)
 	case strings.Contains(strings.ToLower(err.Error()), "timeout"):
 		result.Code = "timeout"
@@ -78,7 +79,7 @@ func NormalizeWebExtract(result domain.WebExtractResponse, err error) (domain.We
 		result.Code = "timeout"
 		result.Retryable = true
 		result.NextAction = "retry once with fewer URLs"
-	case errors.Is(err, service.ErrWebSearchUpstream):
+	case errors.Is(err, websearch.ErrUpstream):
 		result.Code, result.Retryable, result.NextAction = classifyWebProviderError(err)
 	case strings.Contains(strings.ToLower(err.Error()), "timeout"):
 		result.Code = "timeout"
@@ -91,25 +92,25 @@ func NormalizeWebExtract(result domain.WebExtractResponse, err error) (domain.We
 }
 
 func classifyWebProviderError(err error) (string, bool, string) {
-	var providerError *service.WebSearchProviderError
+	var providerError *websearch.ProviderError
 	if !errors.As(err, &providerError) {
 		return "provider_failed", true, "retry once only when the provider failure appears transient"
 	}
 	switch providerError.Code {
-	case service.WebSearchErrorInvalidRequest:
+	case websearch.ErrorInvalidRequest:
 		return providerError.Code, false, "correct the search or extraction parameters; do not repeat unchanged input"
-	case service.WebSearchErrorAuthenticationFailed:
+	case websearch.ErrorAuthenticationFailed:
 		return providerError.Code, false, "tell the operator to verify the Tavily API key in Settings; do not retry"
-	case service.WebSearchErrorQuotaExhausted:
+	case websearch.ErrorQuotaExhausted:
 		return providerError.Code, false, "tell the operator that Tavily quota is exhausted; do not retry"
-	case service.WebSearchErrorRateLimited:
+	case websearch.ErrorRateLimited:
 		if providerError.Retryable {
 			return providerError.Code, true, "retry once after a short delay with fewer results or URLs"
 		}
 		return providerError.Code, false, "do not retry in this turn; continue with sources already available"
-	case service.WebSearchErrorTimeout:
+	case websearch.ErrorTimeout:
 		return providerError.Code, providerError.Retryable, "retry once with fewer results or URLs only when the operation is still necessary"
-	case service.WebSearchErrorProviderUnavailable:
+	case websearch.ErrorProviderUnavailable:
 		return providerError.Code, providerError.Retryable, "retry once only when the operation is still necessary; otherwise report the provider outage"
 	default:
 		return "provider_failed", providerError.Retryable, "retry once only when the provider failure appears transient"

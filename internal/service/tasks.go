@@ -285,6 +285,21 @@ func (s *Service) WaitTask(ctx context.Context, id string, afterStdout, afterStd
 	}
 }
 
+func (s *Service) hasActiveTaskForSession(sessionID string) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return false
+	}
+	s.taskMu.RLock()
+	defer s.taskMu.RUnlock()
+	for _, state := range s.tasks {
+		if state.task.SessionID == sessionID {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Service) CancelTask(id, actor string) error {
 	return s.cancelTask(context.Background(), id, actor, false)
 }

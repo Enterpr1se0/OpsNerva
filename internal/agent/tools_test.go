@@ -21,6 +21,7 @@ import (
 	"github.com/Enterpr1se0/opsnerva/internal/sshx"
 	"github.com/Enterpr1se0/opsnerva/internal/store"
 	"github.com/Enterpr1se0/opsnerva/internal/toolresult"
+	"github.com/Enterpr1se0/opsnerva/internal/websearch"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
@@ -710,7 +711,7 @@ func TestWebExtractToolResultExposesPartialAndProviderFailures(t *testing.T) {
 	}
 	failed, err := toolresult.NormalizeWebExtract(domain.WebExtractResponse{
 		FailedResults: []domain.WebExtractFailedResult{{URL: "https://example.org", Error: "blocked"}},
-	}, service.ErrWebSearchUpstream)
+	}, websearch.ErrUpstream)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -724,16 +725,16 @@ func TestWebToolResultClassifiesProviderFailures(t *testing.T) {
 		code      string
 		retryable bool
 	}{
-		{code: service.WebSearchErrorInvalidRequest},
-		{code: service.WebSearchErrorAuthenticationFailed},
-		{code: service.WebSearchErrorQuotaExhausted},
-		{code: service.WebSearchErrorRateLimited, retryable: true},
-		{code: service.WebSearchErrorProviderUnavailable, retryable: true},
-		{code: service.WebSearchErrorTimeout},
+		{code: websearch.ErrorInvalidRequest},
+		{code: websearch.ErrorAuthenticationFailed},
+		{code: websearch.ErrorQuotaExhausted},
+		{code: websearch.ErrorRateLimited, retryable: true},
+		{code: websearch.ErrorProviderUnavailable, retryable: true},
+		{code: websearch.ErrorTimeout},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.code, func(t *testing.T) {
-			providerError := &service.WebSearchProviderError{Code: testCase.code, Retryable: testCase.retryable, Message: "provider response"}
+			providerError := &websearch.ProviderError{Code: testCase.code, Retryable: testCase.retryable, Message: "provider response"}
 			search, err := toolresult.NormalizeWebSearch(domain.WebSearchResponse{}, providerError)
 			if err != nil || search.OK || search.Code != testCase.code || search.Retryable != testCase.retryable || search.ToolVersion != "1.1" || search.NextAction == "" {
 				t.Fatalf("search provider error = %#v, err=%v", search, err)

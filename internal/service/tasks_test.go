@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -241,5 +242,288 @@ func TestTaskOutputIsCheckpointedInsteadOfPersistedPerChunk(t *testing.T) {
 	completed, result, _, _, err := svc.WaitTask(ctx, task.ID, 0, 0, time.Second, "terminal")
 	if err != nil || completed.Status != "completed" || result.Stdout != "one\ntwo\nthree\n" {
 		t.Fatalf("terminal checkpoint = task=%#v result=%#v error=%v", completed, result, err)
+	}
+}
+
+func TestWaitTaskBlocksUntilNewOutput(t *testing.T) {
+	svc, _, host := newTestService(t)
+	state := &taskState{
+		task:   domain.Task{ID: "task-wait", HostID: host.ID, Status: "running", StartedAt: time.Now().UTC()},
+		result: domain.ExecResult{Status: "running", Stdout: "old"},
+	}
+	svc.taskMu.Lock()
+	svc.tasks[state.task.ID] = state
+	svc.taskMu.Unlock()
+	t.Cleanup(func() {
+		svc.taskMu.Lock()
+		delete(svc.tasks, state.task.ID)
+		svc.taskMu.Unlock()
+	})
+	go func() {
+		time.Sleep(120 * time.Millisecond)
+		svc.taskMu.Lock()
+		state.result.Stdout = "old-new"
+		notifyTaskWaitersLocked(state)
+		svc.taskMu.Unlock()
+	}()
+	started := time.Now()
+	task, result, _, waitDeadlineReached, err := svc.WaitTask(context.Background(), state.task.ID, len("old"), 0, time.Second, "output")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.ID != state.task.ID || result.Stdout != "old-new" || waitDeadlineReached || time.Since(started) < 100*time.Millisecond {
+		t.Fatalf("task wait returned early or lost output: task=%#v result=%#v elapsed=%s", task, result, time.Since(started))
+	}
+}
+
+func TestWaitTaskDeadlineDoesNotChangeRunningTask(t *testing.T) {
+	svc, _, host := newTestService(t)
+	state := &taskState{
+		task:   domain.Task{ID: "task-wait-deadline", HostID: host.ID, Status: "running", StartedAt: time.Now().UTC()},
+		result: domain.ExecResult{Status: "running", Stdout: "unchanged"},
+	}
+	svc.taskMu.Lock()
+	svc.tasks[state.task.ID] = state
+	svc.taskMu.Unlock()
+	t.Cleanup(func() {
+		svc.taskMu.Lock()
+		delete(svc.tasks, state.task.ID)
+		svc.taskMu.Unlock()
+	})
+	task, result, _, waitDeadlineReached, err := svc.WaitTask(context.Background(), state.task.ID, len("unchanged"), 0, 30*time.Millisecond, "terminal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !waitDeadlineReached || task.Status != "running" || result.Status != "running" || result.Stdout != "unchanged" {
+		t.Fatalf("task wait deadline mutated the task: task=%#v result=%#v deadline=%t", task, result, waitDeadlineReached)
+	}
+}
+
+func waitForBackgroundTaskApproval(t *testing.T, svc *Service, taskID string) (domain.Task, domain.ExecResult) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		task, result, _, err := svc.GetTask(taskID)
+		if err == nil && task.Status == "approval_required" && result.RunID != "" && result.ApprovalID != "" {
+			return task, result
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("task did not enter approval_required: task=%#v result=%#v err=%v", task, result, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestBackgroundApprovalReturnsImmediatelyAndTracksExecution(t *testing.T) {
+	svc, transport, host := newTestService(t)
+	base, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ctx := WithSessionID(base, "session_blocking_task")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	transport.mu.Lock()
+	transport.execStarted = started
+	transport.execRelease = release
+	transport.mu.Unlock()
+
+	startedAt := time.Now()
+	task, err := svc.StartTask(ctx, domain.ExecRequest{
+		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
+		Reason: "restart demo as a managed task",
+	}, "eino-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(startedAt) > 500*time.Millisecond || task.ID == "" || task.Status != "running" {
+		t.Fatalf("background task did not return immediately: %#v elapsed=%s", task, time.Since(startedAt))
+	}
+
+	_, pending := waitForBackgroundTaskApproval(t, svc, task.ID)
+	if pending.Status != "approval_required" || pending.RunID == "" || pending.ApprovalID == "" {
+		t.Fatalf("invalid background approval state: %#v", pending)
+	}
+	if _, err := svc.ApproveAsync(context.Background(), pending.ApprovalID, "reviewed", "operator"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-base.Done():
+		t.Fatal("approved background task did not start")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		task, _, _, err := svc.GetTask(task.ID)
+		if err == nil && task.Status == "running" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("approved task did not enter running: task=%#v err=%v", task, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	releaseOnce.Do(func() { close(release) })
+	deadline = time.Now().Add(time.Second)
+	for {
+		completed, result, taskErr, err := svc.GetTask(task.ID)
+		if err == nil && completed.Status == "completed" {
+			if result.Status != "completed" || taskErr != "" {
+				t.Fatalf("completed task result = %#v error=%q", result, taskErr)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("background task did not complete: task=%#v result=%#v error=%q err=%v", completed, result, taskErr, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestBackgroundApprovalRejectionUpdatesTask(t *testing.T) {
+	svc, transport, host := newTestService(t)
+	ctx := WithSessionID(context.Background(), "session_rejected_task")
+	task, err := svc.StartTask(ctx, domain.ExecRequest{
+		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
+		Reason: "restart demo as a managed task",
+	}, "eino-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, pending := waitForBackgroundTaskApproval(t, svc, task.ID)
+	const instruction = "inspect logs instead"
+	if err := svc.Reject(context.Background(), pending.ApprovalID, instruction, "operator"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		rejected, result, _, err := svc.GetTask(task.ID)
+		if err == nil && rejected.Status == "rejected" {
+			if result.Status != "rejected" || result.OperatorInstruction != instruction {
+				t.Fatalf("rejected task lost operator instruction: task=%#v result=%#v", rejected, result)
+			}
+			if len(transport.calls) != 0 {
+				t.Fatalf("rejected background task executed %d times", len(transport.calls))
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("background task did not become rejected: task=%#v result=%#v err=%v", rejected, result, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestApprovedBackgroundTaskCanBeCancelledWhileRunning(t *testing.T) {
+	svc, transport, host := newTestService(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	transport.mu.Lock()
+	transport.execStarted = started
+	transport.execRelease = release
+	transport.mu.Unlock()
+	ctx := WithSessionID(context.Background(), "session_cancel_task")
+	task, err := svc.StartTask(ctx, domain.ExecRequest{
+		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
+		Reason: "restart demo as a managed task",
+	}, "eino-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, pending := waitForBackgroundTaskApproval(t, svc, task.ID)
+	if _, err := svc.ApproveAsync(context.Background(), pending.ApprovalID, "reviewed", "operator"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("approved background task did not start")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		running, _, _, err := svc.GetTask(task.ID)
+		if err == nil && running.Status == "running" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("task did not enter running before cancellation: %#v err=%v", running, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := svc.CancelTask(task.ID, "eino-agent"); err != nil {
+		t.Fatal(err)
+	}
+	cancelled, result, _, err := svc.GetTask(task.ID)
+	if err != nil || cancelled.Status != "cancelled" || result.Status != "cancelled" {
+		t.Fatalf("cancelled background task = %#v result=%#v err=%v", cancelled, result, err)
+	}
+	deadline = time.Now().Add(time.Second)
+	for {
+		run, err := svc.store.GetRun(context.Background(), pending.RunID)
+		if err == nil && terminalExecutionStatus(run.Status) {
+			if run.Status != "interrupted" {
+				t.Fatalf("cancelled execution run status = %s", run.Status)
+			}
+			cancelled, result, _, taskErr := svc.GetTask(task.ID)
+			if taskErr != nil || cancelled.Status != "cancelled" || result.Status != "cancelled" {
+				t.Fatalf("worker completion overwrote cancellation: task=%#v result=%#v err=%v", cancelled, result, taskErr)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("cancelled remote execution did not stop: run=%#v err=%v", run, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestBackgroundTaskKeepsItsToolCallForStreamEvents(t *testing.T) {
+	svc, transport, host := newTestService(t)
+	transport.mu.Lock()
+	transport.stdout = []byte("first\nsecond\n")
+	transport.mu.Unlock()
+	svc.transport = &streamingFakeTransport{
+		fakeTransport: transport,
+		chunks: []fakeStreamChunk{
+			{stream: "stdout", data: "first\n"},
+			{stream: "stdout", data: "second\n"},
+		},
+	}
+
+	const sessionID = "streaming_background"
+	const toolCallID = "call_streaming_background"
+	events, unsubscribe := svc.SubscribeExecutionEvents(sessionID)
+	defer unsubscribe()
+	taskCtx := WithExecutionOwner(WithSessionID(context.Background(), sessionID), toolCallID, "ssh_exec", `{"host_id":"test","program":"uname","background":true}`)
+	task, err := svc.StartTask(taskCtx, domain.ExecRequest{
+		HostID: host.ID, Mode: domain.ExecProgram, Program: "uname", Args: []string{"-a"}, Reason: "inspect the host kernel",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Status != "running" {
+		t.Fatalf("background task did not start: %#v", task)
+	}
+
+	var output string
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case event := <-events:
+			if event.ToolCallID != toolCallID || event.ToolName != "ssh_exec" {
+				t.Fatalf("background stream was attached to the wrong tool: %#v", event)
+			}
+			if event.Stream == "stdout" {
+				output += event.Content
+			}
+			if event.Status == "completed" {
+				if output != "first\nsecond\n" {
+					t.Fatalf("unexpected background output: %q", output)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for background stream")
+		}
 	}
 }

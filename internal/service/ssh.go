@@ -94,6 +94,38 @@ func requireAgentHostAccess(actor string, host domain.Host) error {
 	return nil
 }
 
+func (s *Service) hydrateHostSecrets(host domain.Host, includeSudo bool) (domain.Host, error) {
+	if host.AuthType == "password" {
+		plain, err := s.encryptor.Decrypt(host.PasswordCipher)
+		if err != nil {
+			return domain.Host{}, fmt.Errorf("decrypt SSH password: %w", err)
+		}
+		host.Password = string(plain)
+	}
+	if host.AuthType == "key" && host.PrivateKeyCipher != "" {
+		plain, err := s.encryptor.Decrypt(host.PrivateKeyCipher)
+		if err != nil {
+			return domain.Host{}, fmt.Errorf("decrypt SSH private key: %w", err)
+		}
+		host.PrivateKey = plain
+	}
+	if host.ProxyPasswordCipher != "" {
+		plain, err := s.encryptor.Decrypt(host.ProxyPasswordCipher)
+		if err != nil {
+			return domain.Host{}, fmt.Errorf("decrypt SSH proxy password: %w", err)
+		}
+		host.ProxyPassword = string(plain)
+	}
+	if includeSudo && host.SudoMode == "password" {
+		plain, err := s.encryptor.Decrypt(host.SudoCipher)
+		if err != nil {
+			return domain.Host{}, fmt.Errorf("decrypt sudo password: %w", err)
+		}
+		host.SudoPassword = string(plain)
+	}
+	return host, nil
+}
+
 func requireAgentSSHAccess(actor string, connection sshx.ConnectionSpec) error {
 	if err := requireAgentHostAccess(actor, connection.Target); err != nil {
 		return err

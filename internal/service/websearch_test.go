@@ -2,20 +2,19 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
-	"unicode/utf8"
 
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/websearch"
 )
 
 func TestTavilyWebSearchUsesConfiguredProxyAndKeepsCredentialsEncrypted(t *testing.T) {
@@ -41,7 +40,14 @@ func TestTavilyWebSearchUsesConfiguredProxyAndKeepsCredentialsEncrypted(t *testi
 		if r.Header.Get("Proxy-Authorization") != wantProxyAuth {
 			t.Errorf("unexpected proxy authorization: %q", r.Header.Get("Proxy-Authorization"))
 		}
-		var input tavilySearchRequest
+		var input struct {
+			Query          string
+			MaxResults     int      `json:"max_results"`
+			TimeRange      string   `json:"time_range"`
+			IncludeDomains []string `json:"include_domains"`
+			IncludeAnswer  bool     `json:"include_answer"`
+			IncludeRaw     bool     `json:"include_raw_content"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 			t.Error(err)
 		}
@@ -119,7 +125,166 @@ func TestTavilyWebSearchUsesConfiguredProxyAndKeepsCredentialsEncrypted(t *testi
 	}
 }
 
-func TestWebSearchValidatesConfigurationAndInput(t *testing.T) {
+func TestWebSearchUsesLiveConfigurationWithoutApproval(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	ctx := context.Background()
+	var hits atomic.Int32
+	var wantAuthorization atomic.Value
+	wantAuthorization.Store("Bearer first-key")
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.Header.Get("Authorization") != wantAuthorization.Load().(string) {
+			t.Errorf("request used stale credentials: %q", r.Header.Get("Authorization"))
+		}
+		_, _ = w.Write([]byte(`{"results":[{"url":"https://example.com/docs","content":"search","raw_content":"extract"}]}`))
+	}))
+	defer provider.Close()
+	input := domain.WebSearchSettingsInput{Enabled: true, BaseURL: provider.URL, APIKey: "first-key", TimeoutSeconds: 5, MaxResults: 2}
+	if _, err := svc.SaveWebSearchSettings(ctx, input, "test"); err != nil {
+		t.Fatal(err)
+	}
+	client := svc.webSearch
+	reviewer := &fakeAutomaticApprovalReviewer{}
+	explainer := &fakeCommandExplainer{}
+	svc.SetAutomaticApprovalReviewer(reviewer)
+	svc.SetApprovalReviewer(explainer)
+	for _, mode := range []string{domain.ApprovalModeManual, domain.ApprovalModeAuto} {
+		saveApprovalMode(t, svc, mode)
+		if _, err := svc.SearchWeb(ctx, domain.WebSearchRequest{Query: "docs"}, "eino-agent"); err != nil {
+			t.Fatalf("search in %s mode: %v", mode, err)
+		}
+		if _, err := svc.ExtractWeb(ctx, domain.WebExtractRequest{URLs: []string{"https://example.com/docs"}}, "mcp-client"); err != nil {
+			t.Fatalf("extract in %s mode: %v", mode, err)
+		}
+	}
+	approvals, err := svc.ListApprovals(ctx, "", 100)
+	if err != nil || len(approvals) != 0 || len(reviewer.Inputs()) != 0 || len(explainer.Inputs()) != 0 {
+		t.Fatalf("web request entered approval: approvals=%v err=%v", approvals, err)
+	}
+	input.APIKey = "second-key"
+	input.MaxResults = 1
+	wantAuthorization.Store("Bearer second-key")
+	if _, err := svc.SaveWebSearchSettings(ctx, input, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SearchWeb(ctx, domain.WebSearchRequest{Query: "docs"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SearchWeb(ctx, domain.WebSearchRequest{Query: "docs", MaxResults: 2}, "test"); err == nil {
+		t.Fatal("new result limit was not applied")
+	}
+	input.Enabled = false
+	input.APIKey = ""
+	if _, err := svc.SaveWebSearchSettings(ctx, input, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SearchWeb(ctx, domain.WebSearchRequest{Query: "docs"}, "test"); !errors.Is(err, ErrWebSearchDisabled) {
+		t.Fatalf("disabled search: %v", err)
+	}
+	if _, err := svc.ExtractWeb(ctx, domain.WebExtractRequest{URLs: []string{"https://example.com/docs"}}, "test"); !errors.Is(err, ErrWebSearchDisabled) {
+		t.Fatalf("disabled extract: %v", err)
+	}
+	if svc.webSearch != client || hits.Load() != 5 {
+		t.Fatalf("client recreated or rejected request reached provider: hits=%d", hits.Load())
+	}
+}
+
+func TestWebSearchAuditsProviderOutcomesWithoutRawInput(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		extract   bool
+		invalid   bool
+		status    int
+		body      string
+		wantEvent string
+		wantError string
+	}{
+		{name: "search", status: 200, body: `{"results":[],"request_id":"request-search","usage":{"credits":2}}`, wantEvent: "web_search_completed"},
+		{name: "search authentication", status: 401, body: `{"error":"private-api-key"}`, wantEvent: "web_search_failed", wantError: websearch.ErrorAuthenticationFailed},
+		{name: "invalid search", invalid: true, status: 200},
+		{name: "extract partial", extract: true, status: 200, body: `{"results":[{"url":"https://example.com/docs","raw_content":"page"}],"failed_results":[{"url":"https://example.org/docs","error":"unavailable"}]}`, wantEvent: "web_extract_completed"},
+		{name: "extract empty", extract: true, status: 200, body: `{"results":[]}`, wantEvent: "web_extract_failed", wantError: websearch.ErrorProviderUnavailable},
+		{name: "extract authentication", extract: true, status: 401, body: `{}`, wantEvent: "web_extract_failed", wantError: websearch.ErrorAuthenticationFailed},
+		{name: "invalid extract", extract: true, invalid: true, status: 200},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			svc, _, _ := newTestService(t)
+			ctx := context.Background()
+			var hits atomic.Int32
+			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				hits.Add(1)
+				w.WriteHeader(testCase.status)
+				_, _ = w.Write([]byte(testCase.body))
+			}))
+			defer provider.Close()
+			if _, err := svc.SaveWebSearchSettings(ctx, domain.WebSearchSettingsInput{
+				Enabled: true, BaseURL: provider.URL, APIKey: "private-api-key", TimeoutSeconds: 5, MaxResults: 2,
+			}, "test"); err != nil {
+				t.Fatal(err)
+			}
+			var callErr error
+			digestInput, digestField := "private query", "query_sha256"
+			if testCase.extract {
+				digestInput, digestField = "https://example.com/docs\nhttps://example.org/docs", "urls_sha256"
+				urls := []string{"https://example.com/docs#one", "https://example.com/docs#two", "https://example.org/docs"}
+				if testCase.invalid {
+					urls = nil
+				}
+				_, callErr = svc.ExtractWeb(ctx, domain.WebExtractRequest{URLs: urls}, "eino-agent")
+			} else {
+				query := " private query "
+				if testCase.invalid {
+					query = ""
+				}
+				_, callErr = svc.SearchWeb(ctx, domain.WebSearchRequest{Query: query}, "eino-agent")
+			}
+			if (callErr != nil) != (testCase.invalid || testCase.wantError != "") {
+				t.Fatalf("call error: %v", callErr)
+			}
+			events, err := svc.ListAudit(ctx, "", 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := make([]domain.AuditEvent, 0, 1)
+			for _, event := range events {
+				if event.Actor == "eino-agent" {
+					calls = append(calls, event)
+				}
+			}
+			if testCase.invalid {
+				if len(calls) != 0 || hits.Load() != 0 {
+					t.Fatalf("invalid input produced calls: events=%v hits=%d", calls, hits.Load())
+				}
+				return
+			}
+			if len(calls) != 1 || calls[0].Type != testCase.wantEvent || calls[0].RunID != "" || hits.Load() != 1 {
+				t.Fatalf("unexpected audit: events=%v hits=%d", calls, hits.Load())
+			}
+			data := calls[0].Data
+			digest := sha256.Sum256([]byte(digestInput))
+			if data[digestField] != hex.EncodeToString(digest[:]) || data["http_status"] != float64(testCase.status) || data["duration_ms"] == nil {
+				t.Fatalf("lost call metadata: %v", data)
+			}
+			if testCase.extract && data["url_count"] != float64(2) {
+				t.Fatalf("URL count was not normalized: %v", data)
+			}
+			if testCase.wantError != "" && data["error_code"] != testCase.wantError {
+				t.Fatalf("lost provider error: %v", data)
+			}
+			encoded, err := json.Marshal(calls)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, raw := range []string{"private query", "private-api-key", "https://example.com/docs", "https://example.org/docs"} {
+				if strings.Contains(string(encoded), raw) {
+					t.Fatalf("audit exposed raw input or credentials: %s", encoded)
+				}
+			}
+		})
+	}
+}
+
+func TestWebSearchValidatesConfiguration(t *testing.T) {
 	svc, _, _ := newTestService(t)
 	ctx := context.Background()
 	if _, err := svc.SearchWeb(ctx, domain.WebSearchRequest{Query: "test"}, "test"); !errors.Is(err, ErrWebSearchDisabled) {
@@ -130,16 +295,6 @@ func TestWebSearchValidatesConfigurationAndInput(t *testing.T) {
 	}, "test"); err == nil || !strings.Contains(err.Error(), "API key") {
 		t.Fatalf("enabled search without key was accepted: %v", err)
 	}
-	if _, err := normalizeWebSearchRequest(domain.WebSearchRequest{Query: "test", IncludeDomains: []string{"https://example.com/path"}}, 5); err == nil {
-		t.Fatal("domain with scheme and path was accepted")
-	}
-	defaulted, err := normalizeWebSearchRequest(domain.WebSearchRequest{Query: "test"}, 17)
-	if err != nil || defaulted.MaxResults != defaultWebSearchRequestResults {
-		t.Fatalf("omitted max_results did not use the bounded tool default: request=%#v err=%v", defaulted, err)
-	}
-	if _, err := normalizeWebSearchRequest(domain.WebSearchRequest{Query: "test", MaxResults: 18}, 17); err == nil {
-		t.Fatal("max_results above the administrator limit was accepted")
-	}
 	for _, proxyURL := range []string{
 		"http://127.0.0.1:7890", "https://proxy.example:8443", "socks5://127.0.0.1:1080", "socks5h://proxy.example:1080",
 	} {
@@ -149,9 +304,6 @@ func TestWebSearchValidatesConfigurationAndInput(t *testing.T) {
 	}
 	if _, err := svc.SaveProxy(ctx, domain.ProxyInput{Name: "invalid", URL: "ftp://proxy.example:21"}, "test"); err == nil {
 		t.Fatal("unsupported proxy scheme was accepted")
-	}
-	if normalized, err := normalizeTavilyBaseURL("https://api.tavily.com/extract"); err != nil || normalized != "https://api.tavily.com" {
-		t.Fatalf("extract endpoint was not normalized to its API base: url=%q err=%v", normalized, err)
 	}
 }
 
@@ -174,7 +326,12 @@ func TestTavilyWebExtractUsesConfiguredProxyAndReturnsPartialResults(t *testing.
 		if r.Header.Get("Authorization") != "Bearer tvly-extract-secret" {
 			t.Errorf("missing Tavily bearer token: %q", r.Header.Get("Authorization"))
 		}
-		var input tavilyExtractRequest
+		var input struct {
+			URLs          []string
+			ExtractDepth  string `json:"extract_depth"`
+			Format        string
+			IncludeImages bool `json:"include_images"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 			t.Error(err)
 		}
@@ -217,342 +374,5 @@ func TestTavilyWebExtractUsesConfiguredProxyAndReturnsPartialResults(t *testing.
 	}
 	if strings.Contains(string(encoded), "tvly-extract-secret") || strings.Contains(string(encoded), "proxy-extract-secret") {
 		t.Fatalf("extract result exposed configured credentials: %s", encoded)
-	}
-}
-
-func TestWebExtractValidatesURLs(t *testing.T) {
-	normalized, err := normalizeWebExtractRequest(domain.WebExtractRequest{URLs: []string{
-		"https://example.com/docs#one", "https://example.com/docs#two", "HTTPS://EXAMPLE.COM:443/docs#three",
-	}})
-	if err != nil || len(normalized.URLs) != 1 || normalized.URLs[0] != "https://example.com/docs" {
-		t.Fatalf("URLs were not normalized and deduplicated: request=%#v err=%v", normalized, err)
-	}
-	for _, value := range []string{
-		"", "file:///etc/passwd", "https://user:secret@example.com/", "http://localhost/test",
-		"http://127.0.0.1/test", "http://127.1/test", "http://10.0.0.1/test", "http://169.254.169.254/latest/meta-data", "https://host.internal/docs", "https://example.com:bad/docs",
-	} {
-		if _, err := normalizeWebExtractRequest(domain.WebExtractRequest{URLs: []string{value}}); err == nil {
-			t.Errorf("unsafe extract URL %q was accepted", value)
-		}
-	}
-	tooMany := make([]string, maxWebExtractURLs+1)
-	for index := range tooMany {
-		tooMany[index] = fmt.Sprintf("https://example.com/%d", index)
-	}
-	if _, err := normalizeWebExtractRequest(domain.WebExtractRequest{URLs: tooMany}); err == nil {
-		t.Fatal("too many extract URLs were accepted")
-	}
-}
-
-func TestWebExtractPreservesCompleteContent(t *testing.T) {
-	svc, _, _ := newTestService(t)
-	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/extract" {
-			t.Errorf("unexpected Tavily path %q", r.URL.Path)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(tavilyExtractResponse{Results: []domain.WebExtractResult{{
-			URL: "https://example.com/large", RawContent: strings.Repeat("x", 9<<10),
-		}}})
-	}))
-	defer provider.Close()
-
-	_, err := svc.SaveWebSearchSettings(context.Background(), domain.WebSearchSettingsInput{
-		Enabled: true, BaseURL: provider.URL, APIKey: "test-key", TimeoutSeconds: 20, MaxResults: 5,
-	}, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := svc.ExtractWeb(context.Background(), domain.WebExtractRequest{URLs: []string{"https://example.com/large"}}, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(result.Results) != 1 || len(result.Results[0].RawContent) != 9<<10 {
-		t.Fatalf("complete extracted content was not preserved: %#v", result)
-	}
-}
-
-func TestTavilyRequestPreservesContextCancellation(t *testing.T) {
-	svc, _, _ := newTestService(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	var response tavilyExtractResponse
-	_, err := svc.requestTavily(ctx, resolvedWebSearchSettings{
-		WebSearchSettings: domain.WebSearchSettings{BaseURL: "http://127.0.0.1:1", TimeoutSeconds: 5},
-		APIKey:            "test",
-	}, "/extract", tavilyExtractRequest{URLs: []string{"https://example.com"}}, &response)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("canceled Tavily request returned %v", err)
-	}
-}
-
-func TestWebRequestsValidateAdvancedRetrievalParameters(t *testing.T) {
-	search, err := normalizeWebSearchRequest(domain.WebSearchRequest{
-		Query: " releases ", Topic: "NEWS", SearchDepth: "advanced", StartDate: "2026-07-01", EndDate: "2026-08-01",
-		ChunksPerSource: 2, IncludeDomains: []string{"GO.DEV"}, ExcludeDomains: []string{"example.com"},
-	}, 17)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if search.Query != "releases" || search.MaxResults != defaultWebSearchRequestResults || search.Topic != "news" || search.SearchDepth != "advanced" || search.ChunksPerSource != 2 || search.IncludeDomains[0] != "go.dev" {
-		t.Fatalf("advanced search normalization = %#v", search)
-	}
-	for _, input := range []domain.WebSearchRequest{
-		{Query: "test", TimeRange: "week", StartDate: "2026-01-01"},
-		{Query: "test", StartDate: "2026-02-01", EndDate: "2026-01-01"},
-		{Query: "test", SearchDepth: "basic", ChunksPerSource: 1},
-		{Query: "test", IncludeDomains: []string{"example.com"}, ExcludeDomains: []string{"example.com"}},
-	} {
-		if _, err := normalizeWebSearchRequest(input, 10); err == nil {
-			t.Errorf("invalid search parameters were accepted: %#v", input)
-		}
-	}
-
-	extract, err := normalizeWebExtractRequest(domain.WebExtractRequest{
-		URLs: []string{"https://example.com/docs"}, Query: " installation ", ExtractDepth: "ADVANCED", ChunksPerSource: 4,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if extract.Query != "installation" || extract.ExtractDepth != "advanced" || extract.ChunksPerSource != 4 {
-		t.Fatalf("advanced extract normalization = %#v", extract)
-	}
-	if _, err := normalizeWebExtractRequest(domain.WebExtractRequest{URLs: []string{"https://example.com"}, ChunksPerSource: 1}); err == nil {
-		t.Fatal("extract chunks_per_source without query was accepted")
-	}
-}
-
-func TestTavilyAdvancedParametersAndUsageMetadata(t *testing.T) {
-	svc, _, _ := newTestService(t)
-	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/search":
-			var input tavilySearchRequest
-			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-				t.Error(err)
-			}
-			if input.Topic != "news" || input.SearchDepth != "advanced" || input.StartDate != "2026-07-01" || input.EndDate != "2026-08-01" || input.ChunksPerSource != 2 {
-				t.Errorf("advanced search payload = %#v", input)
-			}
-			_, _ = w.Write([]byte(`{"results":[{"title":"Release","url":"https://go.dev/release","content":"details"}],"request_id":"req-search","usage":{"credits":2}}`))
-		case "/extract":
-			var input tavilyExtractRequest
-			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-				t.Error(err)
-			}
-			if input.Query != "installation" || input.ExtractDepth != "advanced" || input.ChunksPerSource != 4 {
-				t.Errorf("advanced extract payload = %#v", input)
-			}
-			_, _ = w.Write([]byte(`{"results":[{"url":"https://go.dev/release","raw_content":"details"}],"request_id":"req-extract","usage":{"credits":2}}`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer provider.Close()
-	_, err := svc.SaveWebSearchSettings(context.Background(), domain.WebSearchSettingsInput{
-		Enabled: true, BaseURL: provider.URL, APIKey: "test-key", TimeoutSeconds: 20, MaxResults: 10,
-	}, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	search, err := svc.SearchWeb(context.Background(), domain.WebSearchRequest{
-		Query: "releases", Topic: "news", SearchDepth: "advanced", StartDate: "2026-07-01", EndDate: "2026-08-01", ChunksPerSource: 2,
-	}, "test")
-	if err != nil || search.RequestID != "req-search" || search.Credits != 2 {
-		t.Fatalf("search metadata = %#v, err=%v", search, err)
-	}
-	extract, err := svc.ExtractWeb(context.Background(), domain.WebExtractRequest{
-		URLs: []string{"https://go.dev/release"}, Query: "installation", ExtractDepth: "advanced", ChunksPerSource: 4,
-	}, "test")
-	if err != nil || extract.RequestID != "req-extract" || extract.Credits != 2 {
-		t.Fatalf("extract metadata = %#v, err=%v", extract, err)
-	}
-}
-
-func TestWebSearchBoundsModelPayloadAndFiltersProviderURLs(t *testing.T) {
-	svc, _, _ := newTestService(t)
-	providerResults := []domain.WebSearchResult{
-		{Title: "unsafe", URL: "http://127.0.0.1/private", Content: "private"},
-		{Title: "duplicate", URL: "https://source-0.example.com/page#duplicate", Content: "duplicate"},
-	}
-	largeContent := strings.Repeat("界🙂", 1200)
-	for index := 0; index < 20; index++ {
-		providerResults = append(providerResults, domain.WebSearchResult{
-			Title: fmt.Sprintf("Source %d", index), URL: fmt.Sprintf("https://source-%d.example.com/page#section", index),
-			Content: largeContent, Score: 1 - float64(index)/100,
-		})
-	}
-	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(tavilySearchResponse{Results: providerResults, RequestID: "req-large", Usage: tavilyUsage{Credits: 2}})
-	}))
-	defer provider.Close()
-	_, err := svc.SaveWebSearchSettings(context.Background(), domain.WebSearchSettingsInput{
-		Enabled: true, BaseURL: provider.URL, APIKey: "test-key", TimeoutSeconds: 20, MaxResults: 20,
-	}, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := svc.SearchWeb(context.Background(), domain.WebSearchRequest{Query: "large", MaxResults: 20}, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	encoded, err := json.Marshal(result)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(encoded) > maxWebSearchModelResponseBytes {
-		t.Fatalf("search model payload = %d, want <= %d", len(encoded), maxWebSearchModelResponseBytes)
-	}
-	if len(result.Results) != 20 || !result.Truncated || result.OmittedResults != 2 || result.OriginalBytes <= result.ReturnedBytes {
-		t.Fatalf("search budget metadata = %#v", result)
-	}
-	seen := make(map[string]bool, len(result.Results))
-	for _, item := range result.Results {
-		if !utf8.ValidString(item.Content) || len(item.Content) > maxWebSearchResultContentBytes || item.Truncated != (item.ReturnedBytes < item.OriginalBytes) || item.ReturnedBytes != len(item.Content) {
-			t.Fatalf("invalid bounded search result: %#v", item)
-		}
-		if strings.Contains(item.URL, "127.0.0.1") || strings.Contains(item.URL, "#") || seen[item.URL] {
-			t.Fatalf("unsafe or duplicate search URL survived: %q", item.URL)
-		}
-		seen[item.URL] = true
-	}
-}
-
-func TestWebExtractBoundsAggregateModelPayload(t *testing.T) {
-	svc, _, _ := newTestService(t)
-	providerResults := make([]domain.WebExtractResult, 5)
-	largeContent := strings.Repeat("文🙂", 8000)
-	for index := range providerResults {
-		providerResults[index] = domain.WebExtractResult{URL: fmt.Sprintf("https://source-%d.example.com/page", index), RawContent: largeContent}
-	}
-	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(tavilyExtractResponse{Results: providerResults, RequestID: "req-large-extract"})
-	}))
-	defer provider.Close()
-	_, err := svc.SaveWebSearchSettings(context.Background(), domain.WebSearchSettingsInput{
-		Enabled: true, BaseURL: provider.URL, APIKey: "test-key", TimeoutSeconds: 20, MaxResults: 10,
-	}, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	urls := make([]string, len(providerResults))
-	for index := range providerResults {
-		urls[index] = providerResults[index].URL
-	}
-	result, err := svc.ExtractWeb(context.Background(), domain.WebExtractRequest{URLs: urls}, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	encoded, err := json.Marshal(result)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(encoded) > maxWebExtractModelResponseBytes {
-		t.Fatalf("extract model payload = %d, want <= %d", len(encoded), maxWebExtractModelResponseBytes)
-	}
-	if len(result.Results) != 5 || !result.Truncated || result.OriginalBytes <= result.ReturnedBytes {
-		t.Fatalf("extract budget metadata = %#v", result)
-	}
-	for _, item := range result.Results {
-		if !utf8.ValidString(item.RawContent) || len(item.RawContent) > maxWebExtractResultContentBytes || !item.Truncated || item.ReturnedBytes != len(item.RawContent) {
-			t.Fatalf("invalid bounded extract result: %#v", item)
-		}
-	}
-}
-
-func TestTavilyProviderErrorsAreClassifiedAndRetriedOnce(t *testing.T) {
-	testCases := []struct {
-		name       string
-		status     int
-		retryAfter string
-		wantCode   string
-		wantHits   int32
-		wantOK     bool
-		retryable  bool
-	}{
-		{name: "invalid request", status: http.StatusBadRequest, wantCode: WebSearchErrorInvalidRequest, wantHits: 1},
-		{name: "authentication", status: http.StatusUnauthorized, wantCode: WebSearchErrorAuthenticationFailed, wantHits: 1},
-		{name: "short rate limit", status: http.StatusTooManyRequests, wantHits: 2, wantOK: true},
-		{name: "long rate limit", status: http.StatusTooManyRequests, retryAfter: "10", wantCode: WebSearchErrorRateLimited, wantHits: 1},
-		{name: "provider unavailable", status: http.StatusServiceUnavailable, wantHits: 2, wantOK: true},
-	}
-	for _, testCase := range testCases {
-		t.Run(testCase.name, func(t *testing.T) {
-			svc, _, _ := newTestService(t)
-			var hits atomic.Int32
-			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				current := hits.Add(1)
-				if current == 1 || testCase.wantHits == 1 {
-					if testCase.retryAfter != "" {
-						w.Header().Set("Retry-After", testCase.retryAfter)
-					}
-					w.WriteHeader(testCase.status)
-					_, _ = w.Write([]byte(`{"error":"` + strings.Repeat("x", 8<<10) + `"}`))
-					return
-				}
-				_, _ = w.Write([]byte(`{"results":[]}`))
-			}))
-			defer provider.Close()
-			var output tavilySearchResponse
-			meta, err := svc.requestTavily(context.Background(), resolvedWebSearchSettings{
-				WebSearchSettings: domain.WebSearchSettings{BaseURL: provider.URL, TimeoutSeconds: 5}, APIKey: "test",
-			}, "/search", tavilySearchRequest{Query: "test", SearchDepth: "basic", MaxResults: 1}, &output)
-			if testCase.wantOK {
-				if err != nil || meta.RetryCount != 1 {
-					t.Fatalf("retry result meta=%#v err=%v", meta, err)
-				}
-			} else {
-				var providerError *WebSearchProviderError
-				if !errors.As(err, &providerError) || providerError.Code != testCase.wantCode || providerError.Retryable != testCase.retryable || len(err.Error()) > maxWebSearchErrorBytes+256 {
-					t.Fatalf("provider error = %#v, err=%v", providerError, err)
-				}
-			}
-			if hits.Load() != testCase.wantHits {
-				t.Fatalf("provider hits = %d, want %d", hits.Load(), testCase.wantHits)
-			}
-		})
-	}
-}
-
-func TestTavilyIdenticalInflightRequestsAreCoalesced(t *testing.T) {
-	svc, _, _ := newTestService(t)
-	var hits atomic.Int32
-	started := make(chan struct{})
-	release := make(chan struct{})
-	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if hits.Add(1) == 1 {
-			close(started)
-		}
-		<-release
-		_, _ = w.Write([]byte(`{"results":[]}`))
-	}))
-	defer provider.Close()
-	settings := resolvedWebSearchSettings{WebSearchSettings: domain.WebSearchSettings{BaseURL: provider.URL, TimeoutSeconds: 5}, APIKey: "test"}
-	var group sync.WaitGroup
-	errorsSeen := make(chan error, 2)
-	for index := 0; index < 2; index++ {
-		group.Add(1)
-		go func() {
-			defer group.Done()
-			var output tavilySearchResponse
-			_, err := svc.requestTavily(context.Background(), settings, "/search", tavilySearchRequest{Query: "same", SearchDepth: "basic", MaxResults: 1}, &output)
-			errorsSeen <- err
-		}()
-	}
-	<-started
-	time.Sleep(20 * time.Millisecond)
-	close(release)
-	group.Wait()
-	close(errorsSeen)
-	for err := range errorsSeen {
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	if hits.Load() != 1 {
-		t.Fatalf("identical in-flight requests produced %d provider calls", hits.Load())
 	}
 }

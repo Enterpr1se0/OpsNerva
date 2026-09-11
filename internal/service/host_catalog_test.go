@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -153,5 +154,94 @@ func TestRunScriptDetectsAndPersistsMissingShellOnce(t *testing.T) {
 	}
 	if len(transport.connectionShells) != 2 || transport.connectionShells[0] != "/usr/bin/bash" || transport.connectionShells[1] != "/usr/bin/bash" {
 		t.Fatalf("script connection shells = %#v", transport.connectionShells)
+	}
+}
+
+func TestAgentHostAvailabilityFiltersAndEnforcesAccess(t *testing.T) {
+	svc, transport, enabled := newTestService(t)
+	ctx := context.Background()
+	disabled := false
+	hidden, err := svc.SaveHost(ctx, domain.HostInput{
+		Name: "manual-only", Address: "192.0.2.90", Port: 22, User: "ops",
+		AgentEnabled: &disabled, AuthType: "agent", SudoMode: "none",
+	}, "operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hidden, err = svc.SaveHost(ctx, domain.HostInput{
+		ID: hidden.ID, Name: hidden.Name, Address: hidden.Address, Port: hidden.Port, User: hidden.User,
+		AuthType: hidden.AuthType, SudoMode: hidden.SudoMode,
+	}, "operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hidden.AgentEnabled {
+		t.Fatal("editing an Agent-disabled host without changing the switch re-enabled it")
+	}
+	target, err := svc.SaveHost(ctx, domain.HostInput{
+		Name: "hidden-jump-target", Address: "192.0.2.91", Port: 22, User: "ops",
+		ProxyJumpHostID: hidden.ID, AuthType: "agent", SudoMode: "none",
+	}, "operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	capabilities, err := svc.ListHostCapabilities(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(capabilities) != 1 || capabilities[0].ID != enabled.ID {
+		t.Fatalf("Agent host catalog included unavailable hosts: %#v", capabilities)
+	}
+	if capabilities[0].Root || capabilities[0].Shell != "bash" {
+		t.Fatalf("Agent host catalog returned incorrect effective capabilities: %#v", capabilities[0])
+	}
+	for _, hostID := range []string{hidden.ID, target.ID} {
+		_, err := svc.Submit(ctx, domain.ExecRequest{
+			HostID: hostID, Mode: domain.ExecProgram, Program: "uname", Reason: "verify Agent host access",
+		}, "eino-agent")
+		if !errors.Is(err, ErrAgentHostAccessDenied) {
+			t.Fatalf("Agent request for unavailable host %q was not rejected: %v", hostID, err)
+		}
+	}
+	if _, err := svc.ProbeHost(ctx, hidden.ID, "eino-agent"); !errors.Is(err, ErrAgentHostAccessDenied) {
+		t.Fatalf("Agent probe for unavailable host was not rejected: %v", err)
+	}
+
+	result, err := svc.Submit(ctx, domain.ExecRequest{
+		HostID: hidden.ID, Mode: domain.ExecProgram, Program: "uname", Reason: "verify manual host access",
+	}, "operator")
+	if err != nil || result.Status != "completed" {
+		t.Fatalf("manual operation on Agent-disabled host failed: result=%#v err=%v", result, err)
+	}
+	if len(transport.calls) != 1 {
+		t.Fatalf("rejected Agent requests reached SSH transport: %d calls", len(transport.calls))
+	}
+}
+
+func TestAgentHostCatalogKeepsProbeFailureExplicit(t *testing.T) {
+	svc, transport, enabled := newTestService(t)
+	transport.probeErr = errors.New("host unreachable")
+
+	capabilities, err := svc.ListHostCapabilities(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(capabilities) != 1 || capabilities[0].ID != enabled.ID || capabilities[0].Shell != "unknown" {
+		t.Fatalf("Agent host catalog did not preserve a probe failure explicitly: %#v", capabilities)
+	}
+	transport.probeErr = nil
+	capabilities, err = svc.ListHostCapabilities(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capabilities[0].Shell != "bash" || transport.probeCalls != 2 {
+		t.Fatalf("successful retry did not refresh shell capability: capability=%#v probes=%d", capabilities[0], transport.probeCalls)
+	}
+	if _, err := svc.ListHostCapabilities(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if transport.probeCalls != 2 {
+		t.Fatalf("successful shell detection was not reused: probes=%d", transport.probeCalls)
 	}
 }

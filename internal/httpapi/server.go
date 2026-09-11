@@ -32,6 +32,7 @@ import (
 	"github.com/Enterpr1se0/opsnerva/internal/service"
 	"github.com/Enterpr1se0/opsnerva/internal/skills"
 	"github.com/Enterpr1se0/opsnerva/internal/store"
+	"github.com/Enterpr1se0/opsnerva/internal/websearch"
 	webui "github.com/Enterpr1se0/opsnerva/web"
 
 	"golang.org/x/text/encoding/simplifiedchinese"
@@ -1146,19 +1147,19 @@ func (s *Server) testWebSearch(w http.ResponseWriter, r *http.Request) {
 	result, err := s.service.SearchWeb(r.Context(), domain.WebSearchRequest{Query: input.Query, MaxResults: 1}, actor(r))
 	if err != nil {
 		status := http.StatusBadRequest
-		var providerError *service.WebSearchProviderError
+		var providerError *websearch.ProviderError
 		if errors.Is(err, context.DeadlineExceeded) {
 			status = http.StatusGatewayTimeout
 		} else if errors.As(err, &providerError) {
 			switch providerError.Code {
-			case service.WebSearchErrorTimeout:
+			case websearch.ErrorTimeout:
 				status = http.StatusGatewayTimeout
-			case service.WebSearchErrorRateLimited, service.WebSearchErrorQuotaExhausted:
+			case websearch.ErrorRateLimited, websearch.ErrorQuotaExhausted:
 				status = http.StatusTooManyRequests
 			default:
 				status = http.StatusBadGateway
 			}
-		} else if errors.Is(err, service.ErrWebSearchUpstream) {
+		} else if errors.Is(err, websearch.ErrUpstream) {
 			status = http.StatusBadGateway
 		}
 		writeErrorStatus(w, err, status)

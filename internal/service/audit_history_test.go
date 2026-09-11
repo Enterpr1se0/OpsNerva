@@ -51,3 +51,14 @@ func TestAuditHistoryServicePreservesSessionIsolation(t *testing.T) {
 		t.Fatal("continuation without snapshot was accepted")
 	}
 }
+
+func TestAuditPersistsAfterRequestCancellation(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	svc.audit(ctx, "run-cancelled", "request_finished", "test", map[string]any{"status": "completed"})
+	events, err := svc.ListAudit(context.Background(), "run-cancelled", 10)
+	if err != nil || len(events) != 1 || events[0].Type != "request_finished" {
+		t.Fatalf("audit after request cancellation = %#v, err=%v", events, err)
+	}
+}

@@ -23,7 +23,8 @@ App 控制面通过 loopback HTTP API 连接本地 Sidecar。`auth.password` 非
 ## Packages
 
 - `internal/sshx`：进程内 SSH 认证、严格 host key、SFTP、SOCKS5/HTTP 代理、ProxyJump、输出上限和连接探测。
-- `internal/service/websearch.go`：Tavily 请求、HTTP/HTTPS/SOCKS5 代理、凭据解密、响应限额与外部内容脱敏。
+- `internal/websearch`：独立的 Tavily Search/Extract Client，负责请求校验、代理、重试、并发限制、请求合并、响应裁剪和外部内容脱敏。
+- `internal/service/websearch.go`：Web Search 配置、凭据解密、Client 调用与审计持久化；不接入审批。
 - `internal/service`：审批状态机、摘要绑定、执行并发、任务、审计事务，以及外部 MCP Client Session 与动态工具生命周期。
 - `internal/store`：SQLite hosts、runs、approvals、events、chat、加密模型/MCP 配置与 Eino checkpoints。
 - `internal/agenttool`：Eino 与 MCP 共用的 Tool 输入契约、Schema、结果投影和 SSH/Workspace/Web/History 执行适配器。
@@ -33,6 +34,34 @@ App 控制面通过 loopback HTTP API 连接本地 Sidecar。`auth.password` 非
 - `internal/httpapi`：本地 HTTP API、SSE、应用状态/交互终端 WebSocket 和嵌入 Go 二进制的 React 静态资源。
 - `internal/observability`：`slog` 多路 Handler、字段脱敏、JSONL 文件轮转与 Web 内存日志缓冲。
 - `internal/skills`：可上传、永久删除和启停的无权限运维方法论注册表。
+
+## Service organization
+
+`internal/service` 的第一阶段拆分只调整代码与测试的归属，不改变公开接口、审批行为、SQL、事件协议或资源生命周期。`service.go` 只保留共享依赖与状态、构造函数、Store 访问和关闭入口。
+
+| 文件 | 职责 |
+| --- | --- |
+| `hosts.go`、`ssh.go` | 主机配置与 Host Key 管理；SSH 连接解析与凭据解密 |
+| `chat_sessions.go` | 会话、消息、附件读取及会话管理 |
+| `model_providers.go`、`models.go` | 提供商配置与凭据管理；模型发现与连接测试配置 |
+| `system_settings.go` | 系统配置与 MCP HTTP 访问令牌 |
+| `execution_request.go`、`command_validation.go` | 请求规范化、摘要与参数校验；命令契约校验 |
+| `execution.go` | 提交、审批分流、执行与并发限制 |
+| `history.go`、`audit_history.go` | 运行历史查询与原文读取；审计查询、删除与追加 |
+| `recovery.go` | 启动时恢复中断的任务、运行和工具记录 |
+| `websearch.go` | 动态解析 Web Search 配置与凭据、调用独立 Client、写入调用审计 |
+
+文件列表、任务状态判断等逻辑归回已有的 `files.go`、`tasks.go`；共享凭据字符校验位于 `input_validation.go`。测试按相同职责归档，`service_test.go` 仅保留共享 Transport fake 与测试服务构造器；审批测试区分决策、说明生成和批准后执行。
+
+第二阶段已完成 Web Search 的组件解耦：`Service` 持有一个 `websearch.Client`，并发槽与请求合并状态归 Client 所有。每次调用传入当前配置的明文快照，不向 Client 传递 `Service`、Store、审批接口或持久化回调。Client 返回结果、结构化错误与不含原始查询/URL 的 `CallInfo`；配置或输入校验失败时不生成调用审计，已验证调用的成功、失败与取消由 Service 通过原审计通道记录。Search/Extract 不走人工或自动审批，关闭配置阻止新调用，不改变既有在途请求的取消与超时语义。
+
+请求协议、输入校验、输出预算和并发测试直接构造 Client，无需数据库；配置动态生效、凭据加密、代理、审计与审批隔离由 Service 集成测试覆盖。HTTP 和工具结果映射直接使用 `websearch.ProviderError`，不保留旧 Service 错误类型的兼容别名。
+
+其余模块仍共享 `Service` 状态。后续按依赖顺序逐阶段推进，每阶段独立验证：
+
+1. 继续抽出 Workspace 文件操作实现；仅传递实际依赖，不把整个 `*Service` 传给新组件。
+2. 分别收拢 Shell、Tunnel、外部 MCP Client 的运行时状态和关闭职责，保留用户交互与 Agent/MCP 审计的边界。
+3. 最后梳理 Execution、Approval、Task 的交叉调用，统一完成与取消路径，并分离业务状态更新和事件发布，再调整调用方装配。
 
 ## Dynamic extensions
 

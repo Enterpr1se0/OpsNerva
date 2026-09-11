@@ -1,6 +1,9 @@
 package service
 
-import "errors"
+import (
+	"errors"
+	"strings"
+)
 
 // InputValidationError identifies a rejected tool contract without relying on
 // message text. Agent and MCP adapters expose it as a non-retryable failure.
@@ -9,6 +12,7 @@ type InputValidationError struct {
 }
 
 func (err *InputValidationError) Error() string { return err.err.Error() }
+
 func (err *InputValidationError) Unwrap() error { return err.err }
 
 func asInputValidationError(err error) error {
@@ -21,4 +25,8 @@ func asInputValidationError(err error) error {
 		return err
 	}
 	return &InputValidationError{err: err}
+}
+
+func containsCredentialControl(value string) bool {
+	return strings.ContainsAny(value, "\x00\r\n")
 }
