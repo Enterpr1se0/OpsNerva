@@ -95,3 +95,25 @@ func TestPruneChatTurnsExcludedFromContext(t *testing.T) {
 		t.Fatalf("pruned attachment remained: %v", err)
 	}
 }
+
+func TestPruneChatTurnsRespectsSessionScope(t *testing.T) {
+	st, ctx := newSearchStore(t)
+	for _, sessionID := range []string{"session-a", "session-b"} {
+		id, err := st.AppendPendingChatMessage(ctx, sessionID, "user", "failed turn")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.SetChatMessageStatus(ctx, id, "failed"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if count, err := st.PruneChatTurnsExcludedFromContext(ctx, "session-a"); err != nil || count != 1 {
+		t.Fatalf("scoped cleanup: %d, %v", count, err)
+	}
+	if messages, err := st.ListChatMessages(ctx, "session-b", 10); err != nil || len(messages) != 1 {
+		t.Fatalf("cleanup touched another session: %#v, %v", messages, err)
+	}
+	if count, err := st.PruneChatTurnsExcludedFromContext(ctx, ""); err != nil || count != 1 {
+		t.Fatalf("startup cleanup must cover all remaining sessions: %d, %v", count, err)
+	}
+}

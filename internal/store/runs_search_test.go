@@ -92,15 +92,17 @@ func TestSearchRunsRegexMatchesHumanReadableRequestAndRedactedOutput(t *testing.
 	if err := st.UpdateRun(ctx, domain.Run{ID: "run-regex-redis", HostID: "host-b", Status: "failed", StderrRedacted: "redis connection timeout after [REDACTED]", CompletedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	runs, err := st.SearchRunsRegex(ctx, `nginx-(api|web)|connection[[:space:]]+timeout`, "", "", 0)
+	page, err := st.SearchRunSummariesRegexFilteredPage(ctx, `nginx-(api|web)|connection[[:space:]]+timeout`, domain.RunSearchFilter{Limit: 10})
+	runs := page.Runs
 	if err != nil || len(runs) != 2 || runs[0].ID != "run-regex-redis" || runs[1].ID != "run-regex-nginx" {
 		t.Fatalf("regex history search = %#v, err=%v", runs, err)
 	}
-	runs, err = st.SearchRunsRegex(ctx, `nginx-.*`, "host-a", "", 1)
+	page, err = st.SearchRunSummariesRegexFilteredPage(ctx, `nginx-.*`, domain.RunSearchFilter{HostID: "host-a", Limit: 1})
+	runs = page.Runs
 	if err != nil || len(runs) != 1 || runs[0].ID != "run-regex-nginx" {
 		t.Fatalf("filtered regex history search = %#v, err=%v", runs, err)
 	}
-	if _, err := st.SearchRunsRegex(ctx, `[`, "", "", 0); err == nil || !strings.Contains(err.Error(), "POSIX") {
+	if _, err := st.SearchRunSummariesRegexFilteredPage(ctx, `[`, domain.RunSearchFilter{Limit: 10}); err == nil || !strings.Contains(err.Error(), "POSIX") {
 		t.Fatalf("invalid history regex was accepted: %v", err)
 	}
 }
@@ -191,7 +193,8 @@ func TestSearchRunsFilteredByStructuredFieldsAndQueryScope(t *testing.T) {
 	if err != nil || len(requestOnly) != 1 || requestOnly[0].ID != "run-request" {
 		t.Fatalf("request scope = %#v, err=%v", requestOnly, err)
 	}
-	regexOutput, err := st.SearchRunsRegexFiltered(ctx, `nginx[[:space:]]+timeout`, domain.RunSearchFilter{QueryScope: "output", SessionID: "session-a", Status: "failed"})
+	regexPage, err := st.SearchRunSummariesRegexFilteredPage(ctx, `nginx[[:space:]]+timeout`, domain.RunSearchFilter{QueryScope: "output", SessionID: "session-a", Status: "failed", Limit: 10})
+	regexOutput := regexPage.Runs
 	if err != nil || len(regexOutput) != 1 || regexOutput[0].ID != "run-output" {
 		t.Fatalf("regex output filter = %#v, err=%v", regexOutput, err)
 	}

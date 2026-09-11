@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS runs (
   completed_at TEXT,
   FOREIGN KEY(host_id) REFERENCES hosts(id)
 );
-CREATE INDEX IF NOT EXISTS idx_runs_host_started ON runs(host_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_runs_host_started_id ON runs(host_id, started_at DESC, id DESC);
+DROP INDEX IF EXISTS idx_runs_host_started;
 CREATE INDEX IF NOT EXISTS idx_runs_session_started_id ON runs(session_id, started_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_audit_session_time_id ON runs(session_id,` + auditRunTimeSQL + ` DESC,id DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_audit_time_session_id ON runs(` + auditRunTimeSQL + ` DESC,session_id,id DESC);
@@ -86,10 +87,10 @@ CREATE TABLE IF NOT EXISTS audit_events (
   data_json TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_events(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_audit_run_created ON audit_events(run_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_created_id ON audit_events(created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_run_created_id ON audit_events(run_id, created_at DESC, id DESC);
+DROP INDEX IF EXISTS idx_audit_created;
+DROP INDEX IF EXISTS idx_audit_run_created;
 CREATE TABLE IF NOT EXISTS chat_sessions (
   session_id TEXT PRIMARY KEY,
   title TEXT NOT NULL DEFAULT '',
