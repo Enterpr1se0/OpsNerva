@@ -25,6 +25,7 @@ App 控制面通过 loopback HTTP API 连接本地 Sidecar。`auth.password` 非
 - `internal/sshx`：进程内 SSH 认证、严格 host key、SFTP、SOCKS5/HTTP 代理、ProxyJump、输出上限和连接探测。
 - `internal/websearch`：独立的 Tavily Search/Extract Client，负责请求校验、代理、重试、并发限制、请求合并、响应裁剪和外部内容脱敏。
 - `internal/service/websearch.go`：Web Search 配置、凭据解密、Client 调用与审计持久化；不接入审批。
+- `internal/workspacefs`：按 Workspace 根目录解析路径、读取/搜索/枚举文件、生成预览、打开下载流、保存普通文本及同步文件；不依赖 Service、Store 或 SSH。
 - `internal/service`：审批状态机、摘要绑定、执行并发、任务、审计事务，以及外部 MCP Client Session 与动态工具生命周期。
 - `internal/store`：SQLite hosts、runs、approvals、events、chat、加密模型/MCP 配置与 Eino checkpoints。
 - `internal/agenttool`：Eino 与 MCP 共用的 Tool 输入契约、Schema、结果投影和 SSH/Workspace/Web/History 执行适配器。
@@ -50,6 +51,11 @@ App 控制面通过 loopback HTTP API 连接本地 Sidecar。`auth.password` 非
 | `history.go`、`audit_history.go` | 运行历史查询与原文读取；审计查询、删除与追加 |
 | `recovery.go` | 启动时恢复中断的任务、运行和工具记录 |
 | `websearch.go` | 动态解析 Web Search 配置与凭据、调用独立 Client、写入调用审计 |
+| `workspace.go` | Workspace 注册管理、配置快照与能力目录 |
+| `workspace_files.go`、`workspace_edit.go` | Agent 文件调用与输出协议；编辑事务、冲突检测及配置校验器 |
+| `workspace_browser.go` | 管理端文件 DTO、操作入口和文件监听 |
+| `workspace_transfers.go`、`workspace_upload.go` | SSH 与 Workspace 传输编排；上传流与原子落盘 |
+| `workspace_shell.go` | Workspace Shell 后端选择、命令构造及执行编排，生命周期仍复用现有 Shell 实现 |
 
 文件列表、任务状态判断等逻辑归回已有的 `files.go`、`tasks.go`；共享凭据字符校验位于 `input_validation.go`。测试按相同职责归档，`service_test.go` 仅保留共享 Transport fake 与测试服务构造器；审批测试区分决策、说明生成和批准后执行。
 
@@ -57,9 +63,13 @@ App 控制面通过 loopback HTTP API 连接本地 Sidecar。`auth.password` 非
 
 请求协议、输入校验、输出预算和并发测试直接构造 Client，无需数据库；配置动态生效、凭据加密、代理、审计与审批隔离由 Service 集成测试覆盖。HTTP 和工具结果映射直接使用 `websearch.ProviderError`，不保留旧 Service 错误类型的兼容别名。
 
-其余模块仍共享 `Service` 状态。后续按依赖顺序逐阶段推进，每阶段独立验证：
+第三阶段已完成 Workspace 基础文件层解耦。`workspacefs.FS` 只持有根目录，不持有 Service、配置注册表、审批或审计回调；调用方每次按当前 Workspace 配置构造文件操作对象。读取返回内容、文件信息、偏移和完整 SHA256；工具输出标记与 HTTP DTO 由 Service 组装。路径输入错误在 Service 边界映射为原有 `InputValidationError`，文件不存在等 I/O 错误保持分类。
 
-1. 继续抽出 Workspace 文件操作实现；仅传递实际依赖，不把整个 `*Service` 传给新组件。
+底层沿用现有路径/符号链接检查和原子文本保存流程，不将其视为操作系统级沙箱。读写权限与审批前后校验仍归 Service；文件监听频率、传输进度、Shell 生命周期和 Agent 编辑校验器未改变。目录同步实现移至文件模块，上传和 Agent 编辑共用该实现，不保留旧副本。文件模块单测不需要数据库，Service 与 HTTP 测试验证原有协议、审批和权限边界。
+
+其余编排与运行时状态仍由 `Service` 持有。后续按依赖顺序逐阶段推进，每阶段独立验证：
+
+1. 继续解耦 Workspace 编辑事务、上传/删除落盘及注册状态；保留校验器执行、审批与审计的编排边界，不把整个 `*Service` 传给新组件。
 2. 分别收拢 Shell、Tunnel、外部 MCP Client 的运行时状态和关闭职责，保留用户交互与 Agent/MCP 审计的边界。
 3. 最后梳理 Execution、Approval、Task 的交叉调用，统一完成与取消路径，并分离业务状态更新和事件发布，再调整调用方装配。
 

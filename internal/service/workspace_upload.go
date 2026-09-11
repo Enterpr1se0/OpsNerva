@@ -13,6 +13,7 @@ import (
 
 	"github.com/Enterpr1se0/opsnerva/internal/config"
 	"github.com/Enterpr1se0/opsnerva/internal/transfer"
+	"github.com/Enterpr1se0/opsnerva/internal/workspacefs"
 )
 
 // CreateAdminWorkspaceDirectory creates one directory. An existing directory is
@@ -32,7 +33,7 @@ func (s *Service) CreateAdminWorkspaceDirectory(ctx context.Context, workspaceID
 	if relativePath == "" || relativePath == "." || len(relativePath) > 1024 {
 		return fmt.Errorf("invalid workspace directory path")
 	}
-	target, err := s.resolveWorkspacePath(workspace, relativePath, true)
+	target, err := resolveWorkspacePath(workspace, relativePath, true)
 	if err != nil {
 		return err
 	}
@@ -49,7 +50,7 @@ func (s *Service) CreateAdminWorkspaceDirectory(ctx context.Context, workspaceID
 		}
 		return nil
 	}
-	return syncLocalDirectory(filepath.Dir(target))
+	return workspacefs.SyncDirectory(filepath.Dir(target))
 }
 
 func (s *Service) UploadWorkspaceFile(ctx context.Context, workspaceID, targetPath, originalFilename string, source io.Reader, actor string) (WorkspaceUploadResult, error) {
@@ -71,7 +72,7 @@ func (s *Service) validateWorkspaceFileDestination(workspace config.Workspace, t
 	if targetPath == "" || targetPath == "." || len(targetPath) > 1024 {
 		return "", "", fmt.Errorf("invalid workspace destination path")
 	}
-	target, err := s.resolveWorkspacePath(workspace, targetPath, true)
+	target, err := resolveWorkspacePath(workspace, targetPath, true)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return "", "", fmt.Errorf("workspace destination parent directory does not exist")
@@ -133,7 +134,7 @@ func (s *Service) storeWorkspaceFile(ctx context.Context, workspace config.Works
 		}
 		return WorkspaceUploadResult{}, err
 	}
-	if err := syncLocalDirectory(parent); err != nil {
+	if err := workspacefs.SyncDirectory(parent); err != nil {
 		_ = os.Remove(target)
 		return WorkspaceUploadResult{}, err
 	}

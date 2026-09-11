@@ -1,10 +1,10 @@
 //go:build !windows
 
-package service
+package workspacefs
 
 import "os"
 
-func syncLocalDirectory(path string) error {
+func SyncDirectory(path string) error {
 	directory, err := os.Open(path)
 	if err != nil {
 		return err
