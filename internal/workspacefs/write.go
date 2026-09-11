@@ -53,7 +53,7 @@ func (fs *FS) SaveText(ctx context.Context, relativePath, content string) (Write
 	}
 	suffix := time.Now().UTC().Format("20060102T150405Z") + "-" + ids.New("file")
 	temporary := filepath.Join(filepath.Dir(path), ".opsnerva-"+filepath.Base(path)+"-"+suffix+".tmp")
-	if err := WriteSyncedFile(temporary, []byte(content), info.Mode().Perm()); err != nil {
+	if err := writeSyncedFile(temporary, []byte(content), info.Mode().Perm()); err != nil {
 		return WriteResult{}, err
 	}
 	defer os.Remove(temporary)
@@ -72,9 +72,9 @@ func (fs *FS) SaveText(ctx context.Context, relativePath, content string) (Write
 	}, nil
 }
 
-// WriteSyncedFile creates a staging file at an already validated path. It syncs
+// writeSyncedFile creates a staging file at an already validated path. It syncs
 // content and permissions, and never replaces an existing file.
-func WriteSyncedFile(path string, content []byte, mode os.FileMode) error {
+func writeSyncedFile(path string, content []byte, mode os.FileMode) error {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
 	if err != nil {
 		return err

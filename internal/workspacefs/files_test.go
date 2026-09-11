@@ -157,7 +157,7 @@ func TestSaveTextPreservesBytesModeAndCancellation(t *testing.T) {
 	if _, err := fs.SaveText(ctx, "edit.txt", "cancelled"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled save: %v", err)
 	}
-	if err := WriteSyncedFile(target, []byte("overwrite"), 0o600); !errors.Is(err, os.ErrExist) {
+	if err := writeSyncedFile(target, []byte("overwrite"), 0o600); !errors.Is(err, os.ErrExist) {
 		t.Fatalf("exclusive write: %v", err)
 	}
 	actual, err = os.ReadFile(target)

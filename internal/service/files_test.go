@@ -14,6 +14,7 @@ import (
 
 	"github.com/Enterpr1se0/opsnerva/internal/config"
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/fileedit"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -133,7 +134,7 @@ func TestRemoteFileEditPreservesExactMatchConflict(t *testing.T) {
 	svc, transport, host := newTestService(t)
 	saveApprovalMode(t, svc, domain.ApprovalModeFullAccess)
 	transport.stdout = []byte{}
-	transport.stderr = []byte("file edit conflict: old_text matched 0 blocks; " + fileEditRetryAdvice + "\n")
+	transport.stderr = []byte("file edit conflict: old_text matched 0 blocks; " + fileedit.RetryAdvice + "\n")
 	transport.exitCode = 75
 
 	result, err := svc.EditRemoteFile(context.Background(), host.ID, "/etc/app.yml", "- name: task", "- name: updated", "", false, "update task", "eino-agent")
@@ -228,7 +229,7 @@ func TestRemoteFileSearchReturnsStructuredNoMatchResult(t *testing.T) {
 }
 
 func TestFileEditHeredocMarkerCannotTerminateFromContent(t *testing.T) {
-	edit, change, err := buildTextEdit("/etc/app.conf", "old", "__OPS_FILE_EDIT_known__")
+	edit, change, err := fileedit.Build("/etc/app.conf", "old", "__OPS_FILE_EDIT_known__")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,23 +268,6 @@ func TestRemoteFileEditRejectsSecretsAndInvalidReplacements(t *testing.T) {
 	}
 }
 
-func TestBuildTextEditNormalizesInputAndBuildsMinimalDiff(t *testing.T) {
-	edit, change, err := buildTextEdit("app.conf", "\ufeffa\r\nb\r\n", "a\r\nc\r\nd\r\n")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if edit.OldText != "a\nb" || edit.NewText != "a\nc\nd" || change.Additions != 2 || change.Deletions != 1 || !strings.Contains(change.Diff, "@@ unique block @@\n a\n-b\n+c\n+d\n") || strings.ContainsAny(change.Diff, "\ufeff\r") {
-		t.Fatalf("unexpected normalized edit=%#v change=%#v", edit, change)
-	}
-	if err := validateTextEditChange("app.conf", edit, change); err != nil {
-		t.Fatalf("generated edit failed consistency check: %v", err)
-	}
-	change.Diff = strings.Replace(change.Diff, "+c", "+other", 1)
-	if err := validateTextEditChange("app.conf", edit, change); err == nil {
-		t.Fatal("mismatched approval diff was accepted")
-	}
-}
-
 func TestRemoteFileChangePreservesLineEndingsAndFinalNewlineState(t *testing.T) {
 	requireLinuxRemoteFileScript(t)
 	for _, testCase := range []struct {
@@ -299,7 +283,7 @@ func TestRemoteFileChangePreservesLineEndingsAndFinalNewlineState(t *testing.T) 
 			if err := os.WriteFile(target, []byte(testCase.original), 0o640); err != nil {
 				t.Fatal(err)
 			}
-			edit, _, err := buildTextEdit(target, testCase.oldText, testCase.newText)
+			edit, _, err := fileedit.Build(target, testCase.oldText, testCase.newText)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -321,7 +305,7 @@ func TestRemoteFileChangeCreatesMissingFileWithoutPatch(t *testing.T) {
 	requireLinuxRemoteFileScript(t)
 	directory := t.TempDir()
 	target := filepath.Join(directory, "created.conf")
-	edit, change, err := buildTextEdit(target, "", "enabled=true")
+	edit, change, err := fileedit.Build(target, "", "enabled=true")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -347,7 +331,7 @@ func TestRemoteFileChangeScriptsApplyWithoutPersistentBackups(t *testing.T) {
 	if err := os.WriteFile(target, []byte("header\n状态=关闭\nfooter\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	edit, _, err := buildTextEdit(target, "状态=关闭", "状态=开启")
+	edit, _, err := fileedit.Build(target, "状态=关闭", "状态=开启")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +366,7 @@ func TestRemoteFileChangeRejectsAmbiguousOldText(t *testing.T) {
 	if err := os.WriteFile(target, []byte("enabled=false\nenabled=false\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	edit, _, err := buildTextEdit(target, "enabled=false", "enabled=true")
+	edit, _, err := fileedit.Build(target, "enabled=false", "enabled=true")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +392,7 @@ func TestRemoteFileChangeRequiresExactLeadingWhitespace(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	withoutIndent, _, err := buildTextEdit(target,
+	withoutIndent, _, err := fileedit.Build(target,
 		"- name: install package\n      ansible.builtin.apt:\n        name: curl",
 		"- name: update package\n      ansible.builtin.apt:\n        name: curl")
 	if err != nil {
@@ -426,7 +410,7 @@ func TestRemoteFileChangeRequiresExactLeadingWhitespace(t *testing.T) {
 		t.Fatalf("unindented edit changed target: content=%q err=%v", content, readErr)
 	}
 
-	withIndent, _, err := buildTextEdit(target,
+	withIndent, _, err := fileedit.Build(target,
 		"    - name: install package\n      ansible.builtin.apt:\n        name: curl",
 		"    - name: update package\n      ansible.builtin.apt:\n        name: curl")
 	if err != nil {
@@ -451,7 +435,7 @@ func TestRemoteFileChangeRejectsConcurrentTargetChange(t *testing.T) {
 	if err := os.WriteFile(target, []byte("enabled=false\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	edit, _, err := buildTextEdit(target, "enabled=false", "enabled=true")
+	edit, _, err := fileedit.Build(target, "enabled=false", "enabled=true")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/Enterpr1se0/opsnerva/internal/config"
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
+	"github.com/Enterpr1se0/opsnerva/internal/fileedit"
 	"github.com/Enterpr1se0/opsnerva/internal/ids"
 )
 
@@ -20,7 +21,6 @@ const (
 	fileContentMarker    = "__OPS_FILE_CONTENT__"
 	fileAfterMarker      = "__OPS_FILE_AFTER__"
 	fileValidationMarker = "__OPS_FILE_VALIDATION_OK__"
-	fileEditRetryAdvice  = "copy one exact unique block from the latest read, preserving all leading whitespace"
 )
 
 // ValidatorIDs returns the configured validator identifiers for one execution
@@ -205,7 +205,7 @@ func (s *Service) EditRemoteFile(ctx context.Context, hostID, path, oldText, new
 	if _, err := s.validatorCommandFor(validatorID, "remote", path, path); err != nil {
 		return domain.ExecResult{}, err
 	}
-	edit, change, err := buildTextEdit(path, oldText, newText)
+	edit, change, err := fileedit.Build(path, oldText, newText)
 	if err != nil {
 		return domain.ExecResult{}, err
 	}
@@ -222,7 +222,7 @@ func (s *Service) EditRemoteFile(ctx context.Context, hostID, path, oldText, new
 		return result, fmt.Errorf("validation failed; the target file was not changed")
 	}
 	if result.ExitCode == 75 {
-		return result, fileEditConflictError(result, "file edit conflict: "+fileEditRetryAdvice)
+		return result, fileEditConflictError(result, "file edit conflict: "+fileedit.RetryAdvice)
 	}
 	return result, submitErr
 }
@@ -241,7 +241,7 @@ func (s *Service) prepareRemoteFileChange(req domain.ExecRequest) (domain.ExecRe
 	if req.TextEdit == nil {
 		return req, fmt.Errorf("remote text edit is missing")
 	}
-	if err := validateTextEditChange(req.RemotePath, *req.TextEdit, *req.Change); err != nil {
+	if err := fileedit.ValidateChange(req.RemotePath, *req.TextEdit, *req.Change); err != nil {
 		return req, err
 	}
 	suffix := time.Now().UTC().Format("20060102T150405Z") + "-" + ids.New("file")
@@ -344,82 +344,6 @@ func writeRemoteText(value, quotedPath string) string {
 	return "printf '%s' " + shellQuote(value) + " > " + quotedPath
 }
 
-func buildTextEdit(path, oldText, newText string) (domain.TextEdit, domain.FileChange, error) {
-	oldText, err := normalizeTextEditBlock(oldText, true)
-	if err != nil {
-		return domain.TextEdit{}, domain.FileChange{}, fmt.Errorf("invalid old_text: %w", err)
-	}
-	newText, err = normalizeTextEditBlock(newText, true)
-	if err != nil {
-		return domain.TextEdit{}, domain.FileChange{}, fmt.Errorf("invalid new_text: %w", err)
-	}
-	if oldText == newText {
-		return domain.TextEdit{}, domain.FileChange{}, fmt.Errorf("old_text and new_text must be different")
-	}
-
-	var oldLines []string
-	if oldText != "" {
-		oldLines = strings.Split(oldText, "\n")
-	}
-	var newLines []string
-	if newText != "" {
-		newLines = strings.Split(newText, "\n")
-	}
-	prefix := 0
-	for prefix < len(oldLines) && prefix < len(newLines) && oldLines[prefix] == newLines[prefix] {
-		prefix++
-	}
-	suffix := 0
-	for suffix < len(oldLines)-prefix && suffix < len(newLines)-prefix && oldLines[len(oldLines)-1-suffix] == newLines[len(newLines)-1-suffix] {
-		suffix++
-	}
-	oldChanged := oldLines[prefix : len(oldLines)-suffix]
-	newChanged := newLines[prefix : len(newLines)-suffix]
-	body := make([]string, 0, len(oldLines)+len(newChanged))
-	for _, line := range oldLines[:prefix] {
-		body = append(body, " "+line)
-	}
-	for _, line := range oldChanged {
-		body = append(body, "-"+line)
-	}
-	for _, line := range newChanged {
-		body = append(body, "+"+line)
-	}
-	if suffix > 0 {
-		for _, line := range oldLines[len(oldLines)-suffix:] {
-			body = append(body, " "+line)
-		}
-	}
-	diff := "--- " + path + "\n+++ " + path + "\n@@ unique block @@\n" + strings.Join(body, "\n") + "\n"
-	return domain.TextEdit{OldText: oldText, NewText: newText}, domain.FileChange{
-		Diff: diff, Additions: len(newChanged), Deletions: len(oldChanged),
-	}, nil
-}
-
-func validateTextEditChange(path string, edit domain.TextEdit, change domain.FileChange) error {
-	normalizedEdit, expectedChange, err := buildTextEdit(path, edit.OldText, edit.NewText)
-	if err != nil {
-		return fmt.Errorf("invalid persisted text edit: %w", err)
-	}
-	if normalizedEdit != edit || expectedChange != change {
-		return fmt.Errorf("file edit approval data does not match the generated change")
-	}
-	return nil
-}
-
-func normalizeTextEditBlock(value string, allowEmpty bool) (string, error) {
-	value = strings.TrimPrefix(value, "\ufeff")
-	value = strings.ReplaceAll(value, "\r\n", "\n")
-	if strings.ContainsAny(value, "\x00\r") {
-		return "", fmt.Errorf("contains unsupported control characters")
-	}
-	value = strings.TrimSuffix(value, "\n")
-	if value == "" && !allowEmpty {
-		return "", fmt.Errorf("must contain at least one complete line")
-	}
-	return value, nil
-}
-
 func remoteTextEditLocateProgram() string {
 	return strings.Join([]string{
 		"BEGIN {",
@@ -478,7 +402,7 @@ func remoteTextEditLocateProgram() string {
 		"END {",
 		"  if (read_status < 0 || expected_count != old_count || expected_count == 0) { exit 76 }",
 		"  if (matches != 1) {",
-		"    printf \"file edit conflict: old_text matched %d blocks; " + fileEditRetryAdvice + "\\n\", matches > \"/dev/stderr\"",
+		"    printf \"file edit conflict: old_text matched %d blocks; " + fileedit.RetryAdvice + "\\n\", matches > \"/dev/stderr\"",
 		"    exit 75",
 		"  }",
 		"  print match_start, match_end, delete_start, delete_end, match_eol",

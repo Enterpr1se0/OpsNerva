@@ -224,15 +224,11 @@ func (s *Service) executeWorkspace(ctx context.Context, req domain.ExecRequest, 
 	case domain.ExecWorkspaceSearch:
 		result.Stdout, err = files.Search(req.RelativePath, req.SearchPattern, req.SearchMatchMode, req.ContextLines)
 	case domain.ExecWorkspaceEdit:
-		path, pathErr := resolveWorkspacePath(workspace, req.RelativePath, true)
-		if pathErr != nil {
-			return sshx.RawResult{}, pathErr
-		}
 		if workspace.Access != "read_write" {
 			err = fmt.Errorf("workspace %q is read_only", workspace.ID)
 			break
 		}
-		result, err = s.editWorkspaceFile(ctx, workspace, path, req)
+		result, err = s.editWorkspaceFile(ctx, workspace, req)
 	case domain.ExecWorkspaceDelete:
 		deleted, deleteErr := s.deleteWorkspaceEntry(ctx, workspace, req.RelativePath, req.Recursive, actor)
 		if deleteErr != nil {
@@ -256,7 +252,11 @@ func redactWorkspaceResult(result sshx.RawResult, err error, root string) (sshx.
 		result.Stderr = []byte(redactWorkspacePaths(err.Error(), roots))
 	}
 	if err != nil {
-		err = fmt.Errorf("%s", redactWorkspacePaths(err.Error(), roots))
+		// Do not erase input-error and cancellation identities when the message
+		// contains no local path that needs redaction.
+		if redacted := redactWorkspacePaths(err.Error(), roots); redacted != err.Error() {
+			err = fmt.Errorf("%s", redacted)
+		}
 	}
 	return result, err
 }
