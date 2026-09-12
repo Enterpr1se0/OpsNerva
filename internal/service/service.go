@@ -12,6 +12,7 @@ import (
 	"github.com/Enterpr1se0/opsnerva/internal/sshx"
 	"github.com/Enterpr1se0/opsnerva/internal/store"
 	"github.com/Enterpr1se0/opsnerva/internal/websearch"
+	"github.com/Enterpr1se0/opsnerva/internal/workspaces"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -24,10 +25,8 @@ type Service struct {
 	redactor             *security.Redactor
 	limits               config.Limits
 	dataDir              string
-	workspaceRoot        string
 	workspaceSandboxPath string
-	workspaceMu          sync.RWMutex
-	workspaces           map[string]config.Workspace
+	workspaces           *workspaces.Registry
 	validators           map[string]config.Validator
 	skills               *skills.Registry
 
@@ -95,7 +94,7 @@ func New(st *store.Store, transport sshx.Transport, encryptor *security.Encrypto
 	result := &Service{
 		store: st, transport: transport, encryptor: encryptor, redactor: redactor, limits: limits,
 		workspaceSandboxPath: config.Default().WorkspaceSandboxPath,
-		globalSem:            make(chan struct{}, global), hostSems: make(map[string]chan struct{}), tasks: make(map[string]*taskState), approvalTasks: make(map[string]*taskState), taskSubscribers: make(map[string]map[uint64]*taskSubscriber), workspaces: make(map[string]config.Workspace), validators: make(map[string]config.Validator), mcpRuntime: make(map[string]*mcpRuntimeState),
+		globalSem:            make(chan struct{}, global), hostSems: make(map[string]chan struct{}), tasks: make(map[string]*taskState), approvalTasks: make(map[string]*taskState), taskSubscribers: make(map[string]map[uint64]*taskSubscriber), workspaces: workspaces.New(st), validators: make(map[string]config.Validator), mcpRuntime: make(map[string]*mcpRuntimeState),
 		mcpOAuthFlows: make(map[string]*mcpOAuthFlow), mcpOAuthByServer: make(map[string]*mcpOAuthFlow),
 		mcpActivitySubscribers: make(map[uint64]*mcpActivitySubscriber),
 		modelMetadata:          newModelMetadataCache(modelsDevMetadataURL),

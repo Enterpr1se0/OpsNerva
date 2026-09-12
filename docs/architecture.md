@@ -27,6 +27,7 @@ App 控制面通过 loopback HTTP API 连接本地 Sidecar。`auth.password` 非
 - `internal/service/websearch.go`：Web Search 配置、凭据解密、Client 调用与审计持久化；不接入审批。
 - `internal/fileedit`：SSH 与 Workspace 共用的文本块规范化、展示 diff、审批载荷一致性检查和字节保留替换算法；不执行 I/O。
 - `internal/workspacefs`：按 Workspace 根目录解析路径、读取/搜索/枚举文件、生成预览、打开下载流、保存文本、暂存/提交编辑、上传落盘、目录创建和删除；不依赖 Service、Store 或 SSH。
+- `internal/workspaces`：管理 Workspace 根目录、注册快照、串行注册变更与注册目录生命周期；通过五个持久化方法直接使用 Store，不持有 Service、终端或审批状态。
 - `internal/service`：审批状态机、摘要绑定、执行并发、任务、审计事务，以及外部 MCP Client Session 与动态工具生命周期。
 - `internal/store`：SQLite hosts、runs、approvals、events、chat、加密模型/MCP 配置与 Eino checkpoints。
 - `internal/agenttool`：Eino 与 MCP 共用的 Tool 输入契约、Schema、结果投影和 SSH/Workspace/Web/History 执行适配器。
@@ -52,7 +53,7 @@ App 控制面通过 loopback HTTP API 连接本地 Sidecar。`auth.password` 非
 | `history.go`、`audit_history.go` | 运行历史查询与原文读取；审计查询、删除与追加 |
 | `recovery.go` | 启动时恢复中断的任务、运行和工具记录 |
 | `websearch.go` | 动态解析 Web Search 配置与凭据、调用独立 Client、写入调用审计 |
-| `workspace.go` | Workspace 注册管理、配置快照与能力目录 |
+| `workspace.go` | Workspace 管理入口、活动终端限制、注册审计、能力目录及虚拟执行主机 |
 | `workspace_files.go`、`workspace_edit.go` | Agent 文件调用与输出协议；编辑审批入口、校验器执行与文件事务编排 |
 | `workspace_browser.go` | 管理端文件 DTO、操作入口和文件监听 |
 | `workspace_transfers.go`、`workspace_upload.go` | SSH 与 Workspace 传输编排；管理端上传/目录创建入口及上传成功审计 |
@@ -81,11 +82,16 @@ Workspace 编辑采用 `workspacefs.FS.PrepareEdit → Service 校验器 → Edi
 
 上传和删除的摘要复制在写入间检查取消，上传提交与删除前再次检查；已有测试之外，增加源流中断、最终进度回调触发取消、摘要不符、并发同名目标、审批后权限/目录内容变化和成功审计次数的回归。取消不会用额外 goroutine 包装阻塞读取：HTTP/SFTP 仍负责解除自己的阻塞 Read，已经进入的 `RemoveAll` 不承诺中途回滚。这一阶段不改变注册状态、监听器、传输生命周期或全局运行时装配。
 
+第六阶段已完成 Workspace 注册状态解耦。`workspaces.Registry` 独立持有管理根目录和注册表，`Get`/`Snapshot` 返回值拷贝，Service 与文件、传输、会话、Shell 调用方直接读取 Registry，不再保留 Service 的 map、根目录字段和查询包装。根目录与数据目录隔离、Windows 保留名称、大小写重复、初始化与注册目录删除检查归 Registry；SQL 和默认 Workspace 只初始化一次的行为仍由原 Store 实现负责。
+
+注册变更由独立变更锁覆盖持久化、内存发布和目录清理，防止并发创建、更新或删除后重建时发生乱序。快照读锁不跨文件 I/O、SQL 或同步持久化通知持有，通知回调可以读取快照；读者在发布前看到上一份完整配置。持久化失败不修改已发布状态；删除在数据库解除注册及会话绑定后从快照移除，再删除受控目录，已解除注册但清理失败的结果仍交 Service 审计。这不是文件系统与 SQLite 的联合事务；创建目录后持久化失败仍可能留下未注册目录，不自动删除可能已有的文件。
+
+Service 保留活动终端检查、不可变 ID 输入约束、审计、能力投影和 Workspace 虚拟主机。会话解绑仍由 `Store.DeleteWorkspace` 的原事务完成，既有 session/chat_state 通知不迁移、不重复发布；Registry 不拥有后台任务或关闭流程。本阶段串行化注册变更，不声称把终端启动、在途文件操作与注册修改变成一个全局原子操作，这部分仍随运行时生命周期阶段处理。测试覆盖持久化失败、重新加载、并发大小写重复、更新顺序、删除重建、独立快照、根目录保护、会话解绑事件及活动终端限制。
+
 其余编排与运行时状态仍由 `Service` 持有。后续按依赖顺序逐阶段推进，每阶段独立验证：
 
-1. 继续解耦 Workspace 注册状态；保留审批与审计的编排边界，不把整个 `*Service` 传给新组件。
-2. 分别收拢 Shell、Tunnel、外部 MCP Client 的运行时状态和关闭职责，保留用户交互与 Agent/MCP 审计的边界。
-3. 最后梳理 Execution、Approval、Task 的交叉调用，统一完成与取消路径，并分离业务状态更新和事件发布，再调整调用方装配。
+1. 分别收拢 Shell、Tunnel、外部 MCP Client 的运行时状态和关闭职责，保留用户交互与 Agent/MCP 审计的边界。
+2. 最后梳理 Execution、Approval、Task 的交叉调用，统一完成与取消路径，并分离业务状态更新和事件发布，再调整调用方装配。
 
 ## Dynamic extensions
 

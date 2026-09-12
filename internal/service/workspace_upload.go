@@ -15,7 +15,7 @@ func (s *Service) CreateAdminWorkspaceDirectory(ctx context.Context, workspaceID
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	workspace, ok := s.workspaceByID(workspaceID)
+	workspace, ok := s.workspaces.Get(workspaceID)
 	if !ok {
 		return fmt.Errorf("workspace %q not found", workspaceID)
 	}
@@ -26,7 +26,7 @@ func (s *Service) CreateAdminWorkspaceDirectory(ctx context.Context, workspaceID
 }
 
 func (s *Service) UploadWorkspaceFile(ctx context.Context, workspaceID, targetPath, originalFilename string, source io.Reader, actor string) (WorkspaceUploadResult, error) {
-	workspace, ok := s.workspaceByID(workspaceID)
+	workspace, ok := s.workspaces.Get(workspaceID)
 	if !ok {
 		return WorkspaceUploadResult{}, fmt.Errorf("workspace %q not found", workspaceID)
 	}

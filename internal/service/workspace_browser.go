@@ -72,7 +72,7 @@ type WorkspaceDeleteResult struct {
 const workspaceWatchDebounce = 120 * time.Millisecond
 
 func (s *Service) ListAdminWorkspaceFiles(workspaceID, relativePath string) (WorkspaceFileList, error) {
-	workspace, ok := s.workspaceByID(workspaceID)
+	workspace, ok := s.workspaces.Get(workspaceID)
 	if !ok {
 		return WorkspaceFileList{}, fmt.Errorf("workspace %q not found", workspaceID)
 	}
@@ -108,7 +108,7 @@ func (s *Service) ListAdminWorkspaceFiles(workspaceID, relativePath string) (Wor
 // changes below a child directory cannot alter the current listing, and avoiding
 // recursive watches keeps large projects from consuming one watch per folder.
 func (s *Service) WatchAdminWorkspaceFiles(ctx context.Context, workspaceID, relativePath string) (WorkspaceFileWatch, error) {
-	workspace, ok := s.workspaceByID(workspaceID)
+	workspace, ok := s.workspaces.Get(workspaceID)
 	if !ok {
 		return WorkspaceFileWatch{}, fmt.Errorf("workspace %q not found", workspaceID)
 	}
@@ -199,7 +199,7 @@ func (s *Service) WatchAdminWorkspaceFiles(ctx context.Context, workspaceID, rel
 }
 
 func (s *Service) PreviewAdminWorkspaceFile(workspaceID, relativePath string) (WorkspaceFilePreview, error) {
-	workspace, ok := s.workspaceByID(workspaceID)
+	workspace, ok := s.workspaces.Get(workspaceID)
 	if !ok {
 		return WorkspaceFilePreview{}, fmt.Errorf("workspace %q not found", workspaceID)
 	}
@@ -213,7 +213,7 @@ func (s *Service) PreviewAdminWorkspaceFile(workspaceID, relativePath string) (W
 }
 
 func (s *Service) OpenAdminWorkspaceFile(workspaceID, relativePath string) (WorkspaceFileDownload, error) {
-	workspace, ok := s.workspaceByID(workspaceID)
+	workspace, ok := s.workspaces.Get(workspaceID)
 	if !ok {
 		return WorkspaceFileDownload{}, fmt.Errorf("workspace %q not found", workspaceID)
 	}
@@ -226,7 +226,7 @@ func (s *Service) OpenAdminWorkspaceFile(workspaceID, relativePath string) (Work
 }
 
 func (s *Service) SaveAdminWorkspaceTextFile(ctx context.Context, workspaceID, relativePath, content string) (WorkspaceUploadResult, error) {
-	workspace, ok := s.workspaceByID(workspaceID)
+	workspace, ok := s.workspaces.Get(workspaceID)
 	if !ok {
 		return WorkspaceUploadResult{}, fmt.Errorf("workspace %q not found", workspaceID)
 	}
@@ -241,7 +241,7 @@ func (s *Service) SaveAdminWorkspaceTextFile(ctx context.Context, workspaceID, r
 }
 
 func (s *Service) DeleteAdminWorkspaceEntry(ctx context.Context, workspaceID, relativePath, actor string) (WorkspaceDeleteResult, error) {
-	workspace, ok := s.workspaceByID(workspaceID)
+	workspace, ok := s.workspaces.Get(workspaceID)
 	if !ok {
 		return WorkspaceDeleteResult{}, fmt.Errorf("workspace %q not found", workspaceID)
 	}

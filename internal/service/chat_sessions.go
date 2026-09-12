@@ -21,7 +21,7 @@ func (s *Service) PrepareChatSession(ctx context.Context, sessionID, workspaceID
 		return domain.ChatSession{}, fmt.Errorf("session id is required")
 	}
 	if workspaceID != "" {
-		if _, ok := s.workspaceByID(workspaceID); !ok {
+		if _, ok := s.workspaces.Get(workspaceID); !ok {
 			return domain.ChatSession{}, fmt.Errorf("workspace %q not found", workspaceID)
 		}
 	}
@@ -114,7 +114,7 @@ func (s *Service) SetChatSessionWorkspace(ctx context.Context, sessionID, worksp
 		return domain.ChatSession{}, fmt.Errorf("session id is required")
 	}
 	if workspaceID != "" {
-		if _, ok := s.workspaceByID(workspaceID); !ok {
+		if _, ok := s.workspaces.Get(workspaceID); !ok {
 			return domain.ChatSession{}, fmt.Errorf("workspace %q not found", workspaceID)
 		}
 	}
@@ -150,7 +150,7 @@ func (s *Service) SessionWorkspace(ctx context.Context) (WorkspaceCapability, er
 	if session.WorkspaceID == "" {
 		return WorkspaceCapability{}, fmt.Errorf("no Workspace is bound to this conversation; select one in the chat interface")
 	}
-	workspace, ok := s.workspaceByID(session.WorkspaceID)
+	workspace, ok := s.workspaces.Get(session.WorkspaceID)
 	if !ok {
 		return WorkspaceCapability{}, fmt.Errorf("the conversation Workspace %q is no longer available; select another Workspace", session.WorkspaceID)
 	}

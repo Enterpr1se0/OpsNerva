@@ -31,7 +31,7 @@ func (s *Service) UploadWorkspaceFileToHost(ctx context.Context, hostID, workspa
 // path in the conversation-bound Workspace. The destination is resolved both
 // before approval and immediately before the atomic local commit.
 func (s *Service) DownloadHostFileToWorkspace(ctx context.Context, hostID, remotePath, expectedSHA256, workspaceID, relativePath string, timeoutSeconds int, reason, actor string) (domain.ExecResult, error) {
-	workspace, ok := s.workspaceByID(workspaceID)
+	workspace, ok := s.workspaces.Get(workspaceID)
 	if !ok {
 		return domain.ExecResult{}, fmt.Errorf("workspace %q not found", workspaceID)
 	}
@@ -66,7 +66,7 @@ func (s *Service) executeWorkspaceDownload(ctx context.Context, connection sshx.
 	if !ok {
 		return sshx.RawResult{ExitCode: -1, Duration: time.Since(started)}, fmt.Errorf("configured SSH transport does not support SFTP")
 	}
-	workspace, ok := s.workspaceByID(req.WorkspaceID)
+	workspace, ok := s.workspaces.Get(req.WorkspaceID)
 	if !ok {
 		return sshx.RawResult{ExitCode: -1, Duration: time.Since(started)}, fmt.Errorf("workspace %q not found", req.WorkspaceID)
 	}
@@ -99,7 +99,7 @@ func (s *Service) executeWorkspaceDownload(ctx context.Context, connection sshx.
 }
 
 func (s *Service) prepareWorkspaceUpload(req domain.ExecRequest) (domain.ExecRequest, error) {
-	workspace, ok := s.workspaceByID(req.WorkspaceID)
+	workspace, ok := s.workspaces.Get(req.WorkspaceID)
 	if !ok {
 		return req, fmt.Errorf("workspace %q not found", req.WorkspaceID)
 	}

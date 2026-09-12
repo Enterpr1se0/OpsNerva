@@ -11,7 +11,7 @@ import (
 )
 
 func (s *Service) DeleteWorkspaceEntry(ctx context.Context, workspaceID, relativePath string, recursive bool, reason, actor string) (domain.ExecResult, error) {
-	workspace, ok := s.workspaceByID(workspaceID)
+	workspace, ok := s.workspaces.Get(workspaceID)
 	if !ok {
 		return domain.ExecResult{}, fmt.Errorf("workspace %q not found", workspaceID)
 	}

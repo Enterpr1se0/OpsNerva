@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Enterpr1se0/opsnerva/internal/config"
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
 )
 
@@ -50,6 +51,8 @@ func TestConversationWorkspaceBindingIsAuthoritative(t *testing.T) {
 	if _, err := svc.SetChatSessionWorkspace(ctx, session.ID, "project", "web-user"); err != nil {
 		t.Fatal(err)
 	}
+	events, _, unsubscribe := svc.SubscribeStateEvents()
+	defer unsubscribe()
 	if err := svc.DeleteAdminWorkspace(ctx, "project", "web-user"); err != nil {
 		t.Fatal(err)
 	}
@@ -59,6 +62,89 @@ func TestConversationWorkspaceBindingIsAuthoritative(t *testing.T) {
 	}
 	if afterDelete.WorkspaceID != "" {
 		t.Fatalf("deleted Workspace remains bound: %q", afterDelete.WorkspaceID)
+	}
+	seen := map[string]bool{}
+	for len(events) > 0 {
+		seen[(<-events).Topic] = true
+	}
+	if !seen[StateTopicSessions] || !seen[StateTopicChatState] || !seen[StateTopicAudit] {
+		t.Fatalf("Workspace deletion lost committed state notifications: %+v", seen)
+	}
+}
+
+func TestWorkspaceRegistryReloadKeepsPersistedAccessAndAudit(t *testing.T) {
+	svc, projectRoot := newWorkspaceService(t, "read_write")
+	ctx := context.Background()
+	if _, err := svc.CreateAdminWorkspace(ctx, domain.WorkspaceInput{ID: "persisted"}, "operator"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.UpdateAdminWorkspace(ctx, "persisted", domain.WorkspaceInput{Access: "read_write"}, "operator"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.UpdateAdminWorkspace(ctx, "persisted", domain.WorkspaceInput{ID: "renamed", Access: "read_only"}, "operator"); err == nil {
+		t.Fatal("immutable Workspace ID was changed")
+	}
+	cfg := config.Default()
+	cfg.DataDir = svc.dataDir
+	reloaded := New(svc.store, svc.transport, svc.encryptor, svc.redactor, svc.limits, cfg)
+	t.Cleanup(func() {
+		if err := reloaded.Shutdown(context.Background()); err != nil {
+			t.Error(err)
+		}
+	})
+	if err := reloaded.InitializeWorkspaces(ctx, filepath.Dir(projectRoot)); err != nil {
+		t.Fatal(err)
+	}
+	workspace, ok := reloaded.workspaces.Get("persisted")
+	if !ok || workspace.Access != "read_write" || filepath.Base(workspace.Root) != "persisted" {
+		t.Fatalf("registry reload lost persisted configuration: %+v", workspace)
+	}
+	if _, ok := reloaded.workspaces.Get("default"); ok {
+		t.Fatal("registry reload resurrected deleted default Workspace")
+	}
+	events, err := svc.ListAudit(ctx, "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{}
+	for _, event := range events {
+		if event.Data["workspace_id"] == "persisted" {
+			counts[event.Type]++
+			if event.Actor != "operator" {
+				t.Fatalf("registry audit owner changed: %+v", event)
+			}
+		}
+	}
+	if counts["workspace_created"] != 1 || counts["workspace_updated"] != 1 || len(counts) != 2 {
+		t.Fatalf("registry emitted missing or duplicate audit: %+v", counts)
+	}
+}
+
+func TestWorkspaceRegistryRetainsActiveTerminalGuard(t *testing.T) {
+	svc, root := newWorkspaceService(t, "read_write")
+	// Keep this boundary test independent of local Bash/PTY availability.
+	svc.shellMu.Lock()
+	svc.shells["workspace-fixture"] = &sshShellState{shell: domain.SSHShell{
+		ID: "workspace-fixture", Kind: domain.SSHShellKindWorkspace, WorkspaceID: "project", Status: "running",
+	}}
+	svc.shellMu.Unlock()
+	defer func() {
+		svc.shellMu.Lock()
+		delete(svc.shells, "workspace-fixture")
+		svc.shellMu.Unlock()
+	}()
+	ctx := context.Background()
+	if _, err := svc.UpdateAdminWorkspace(ctx, "project", domain.WorkspaceInput{Access: "read_only"}, "operator"); err == nil || !strings.Contains(err.Error(), "active terminal") {
+		t.Fatalf("active terminal allowed access change: %v", err)
+	}
+	if err := svc.DeleteAdminWorkspace(ctx, "project", "operator"); err == nil || !strings.Contains(err.Error(), "active terminal") {
+		t.Fatalf("active terminal allowed unregistration: %v", err)
+	}
+	if workspace, ok := svc.workspaces.Get("project"); !ok || workspace.Access != "read_write" {
+		t.Fatalf("rejected mutation changed registration: %+v", workspace)
+	}
+	if _, err := os.Stat(root); err != nil {
+		t.Fatalf("rejected mutation removed Workspace directory: %v", err)
 	}
 }
 
@@ -115,7 +201,7 @@ func TestWorkspaceAdminCreateUpdateAndRemove(t *testing.T) {
 	if err := svc.DeleteAdminWorkspace(context.Background(), "docs", "admin-web"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := svc.workspaceByID("docs"); ok {
+	if _, ok := svc.workspaces.Get("docs"); ok {
 		t.Fatal("removed workspace remains active")
 	}
 	if _, err := os.Lstat(docsRoot); !os.IsNotExist(err) {
@@ -165,7 +251,8 @@ func TestWorkspaceManagedDirectoriesRejectUnsafeNamesAndSymlinks(t *testing.T) {
 	if err := svc.InitializeWorkspaces(context.Background(), configuredRoot); err != nil {
 		t.Fatalf("Workspace root below a symlinked system parent was rejected: %v", err)
 	}
-	if !sameWorkspaceFile(svc.workspaceRoot, filepath.Join(parentTarget, "managed")) {
-		t.Fatalf("Workspace root was not canonicalized: %q", svc.workspaceRoot)
+	workspace, ok := svc.workspaces.Get("project")
+	if !ok || !sameWorkspaceFile(filepath.Dir(workspace.Root), filepath.Join(parentTarget, "managed")) {
+		t.Fatalf("Workspace root was not canonicalized: %+v", workspace)
 	}
 }

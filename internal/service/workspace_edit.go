@@ -18,7 +18,7 @@ import (
 )
 
 func (s *Service) EditWorkspaceFile(ctx context.Context, workspaceID, relativePath, oldText, newText, validatorID, reason, actor string) (domain.ExecResult, error) {
-	workspace, ok := s.workspaceByID(workspaceID)
+	workspace, ok := s.workspaces.Get(workspaceID)
 	if !ok {
 		return domain.ExecResult{}, fmt.Errorf("workspace %q not found", workspaceID)
 	}

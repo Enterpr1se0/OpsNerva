@@ -23,7 +23,7 @@ func (s *Service) ReadWorkspaceFileAdvanced(ctx context.Context, workspaceID, re
 	if maxBytes < 0 || tailLines < 0 || (offset != 0 && tailLines != 0) {
 		return domain.ExecResult{}, fmt.Errorf("invalid Workspace file read range: max_bytes and tail_lines must be non-negative; tail_lines cannot be combined with offset_bytes")
 	}
-	workspace, ok := s.workspaceByID(workspaceID)
+	workspace, ok := s.workspaces.Get(workspaceID)
 	if !ok {
 		return domain.ExecResult{}, fmt.Errorf("workspace %q not found", workspaceID)
 	}
@@ -42,7 +42,7 @@ func (s *Service) ReadWorkspaceFileAdvanced(ctx context.Context, workspaceID, re
 }
 
 func (s *Service) ListWorkspaceFiles(ctx context.Context, workspaceID, relativePath, actor string) (domain.ExecResult, error) {
-	workspace, ok := s.workspaceByID(workspaceID)
+	workspace, ok := s.workspaces.Get(workspaceID)
 	if !ok {
 		return domain.ExecResult{}, fmt.Errorf("workspace %q not found", workspaceID)
 	}
@@ -58,7 +58,7 @@ func (s *Service) ListWorkspaceFiles(ctx context.Context, workspaceID, relativeP
 }
 
 func (s *Service) SearchWorkspace(ctx context.Context, workspaceID, relativePath, pattern string, matchMode domain.FileSearchMatchMode, contextLines int, actor string) (domain.ExecResult, error) {
-	workspace, ok := s.workspaceByID(workspaceID)
+	workspace, ok := s.workspaces.Get(workspaceID)
 	if !ok {
 		return domain.ExecResult{}, fmt.Errorf("workspace %q not found", workspaceID)
 	}
@@ -91,7 +91,7 @@ func isWorkspaceMode(mode domain.ExecMode) bool {
 
 func (s *Service) executeWorkspace(ctx context.Context, req domain.ExecRequest, actor string, stream func(string, []byte)) (sshx.RawResult, error) {
 	started := time.Now()
-	workspace, ok := s.workspaceByID(req.WorkspaceID)
+	workspace, ok := s.workspaces.Get(req.WorkspaceID)
 	if !ok {
 		return sshx.RawResult{}, fmt.Errorf("workspace %q not found", req.WorkspaceID)
 	}

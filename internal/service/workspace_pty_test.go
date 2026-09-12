@@ -42,7 +42,7 @@ func TestWorkspaceSandboxPTYKeepsJobControl(t *testing.T) {
 	}
 	svc, _ := newWorkspaceService(t, "read_write")
 	svc.workspaceSandboxPath = bubblewrap
-	workspace, ok := svc.workspaceByID("project")
+	workspace, ok := svc.workspaces.Get("project")
 	if !ok {
 		t.Fatal("test Workspace is unavailable")
 	}

@@ -24,7 +24,7 @@ import (
 // submission so the exact host or sandbox boundary is approval-bound.
 func (s *Service) RunWorkspaceShell(ctx context.Context, workspaceID, script, cwd string, env map[string]string, timeoutSeconds int, reason, actor string) (domain.ExecResult, error) {
 	workspaceID = strings.TrimSpace(workspaceID)
-	workspace, ok := s.workspaceByID(workspaceID)
+	workspace, ok := s.workspaces.Get(workspaceID)
 	if !ok {
 		return domain.ExecResult{}, fmt.Errorf("workspace %q not found", workspaceID)
 	}
@@ -94,7 +94,7 @@ func (s *Service) StartOperatorWorkspaceShell(ctx context.Context, workspaceID, 
 
 func (s *Service) workspaceShellStartRequest(ctx context.Context, workspaceID, cwd string, env map[string]string, cols, rows int, reason string) (domain.ExecRequest, error) {
 	workspaceID = strings.TrimSpace(workspaceID)
-	workspace, ok := s.workspaceByID(workspaceID)
+	workspace, ok := s.workspaces.Get(workspaceID)
 	if !ok {
 		return domain.ExecRequest{}, fmt.Errorf("workspace %q not found", workspaceID)
 	}
@@ -150,7 +150,7 @@ func (s *Service) workspaceInteractiveShell(ctx context.Context, host domain.Hos
 	if err := validateInteractiveShellSize(req); err != nil {
 		return interactiveShellOptions{}, nil, err
 	}
-	workspace, ok := s.workspaceByID(req.WorkspaceID)
+	workspace, ok := s.workspaces.Get(req.WorkspaceID)
 	if !ok {
 		return interactiveShellOptions{}, nil, fmt.Errorf("workspace %q not found", req.WorkspaceID)
 	}
