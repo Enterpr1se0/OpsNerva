@@ -49,7 +49,7 @@ func (s *Service) DownloadHostFileToWorkspace(ctx context.Context, hostID, remot
 	if timeoutSeconds < 0 || timeoutSeconds > 600 {
 		return domain.ExecResult{}, fmt.Errorf("workspace download timeout_seconds must be between 1 and 600 when provided")
 	}
-	relativePath, _, err := s.validateWorkspaceFileDestination(workspace, relativePath, filepath.Base(remotePath))
+	relativePath, err := s.validateWorkspaceFileDestination(workspace, relativePath, filepath.Base(remotePath))
 	if err != nil {
 		return domain.ExecResult{}, err
 	}
@@ -70,7 +70,7 @@ func (s *Service) executeWorkspaceDownload(ctx context.Context, connection sshx.
 	if !ok {
 		return sshx.RawResult{ExitCode: -1, Duration: time.Since(started)}, fmt.Errorf("workspace %q not found", req.WorkspaceID)
 	}
-	if _, _, err := s.validateWorkspaceFileDestination(workspace, req.RelativePath, filepath.Base(req.RemotePath)); err != nil {
+	if _, err := s.validateWorkspaceFileDestination(workspace, req.RelativePath, filepath.Base(req.RemotePath)); err != nil {
 		return sshx.RawResult{ExitCode: -1, Duration: time.Since(started)}, err
 	}
 	timeout := req.TimeoutSeconds

@@ -123,7 +123,7 @@ func (edit *Edit) Commit(ctx context.Context) (WriteResult, error) {
 	if err := edit.Close(); err != nil {
 		return WriteResult{}, fmt.Errorf("workspace file was committed but removing its staging file failed: %w", err)
 	}
-	if err := SyncDirectory(filepath.Dir(edit.target)); err != nil {
+	if err := syncDirectory(filepath.Dir(edit.target)); err != nil {
 		return WriteResult{}, fmt.Errorf("workspace file was committed but syncing its directory failed: %w", err)
 	}
 	return edit.result, nil

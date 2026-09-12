@@ -26,7 +26,7 @@ App 控制面通过 loopback HTTP API 连接本地 Sidecar。`auth.password` 非
 - `internal/websearch`：独立的 Tavily Search/Extract Client，负责请求校验、代理、重试、并发限制、请求合并、响应裁剪和外部内容脱敏。
 - `internal/service/websearch.go`：Web Search 配置、凭据解密、Client 调用与审计持久化；不接入审批。
 - `internal/fileedit`：SSH 与 Workspace 共用的文本块规范化、展示 diff、审批载荷一致性检查和字节保留替换算法；不执行 I/O。
-- `internal/workspacefs`：按 Workspace 根目录解析路径、读取/搜索/枚举文件、生成预览、打开下载流、保存普通文本、暂存/提交编辑及同步文件；不依赖 Service、Store 或 SSH。
+- `internal/workspacefs`：按 Workspace 根目录解析路径、读取/搜索/枚举文件、生成预览、打开下载流、保存文本、暂存/提交编辑、上传落盘、目录创建和删除；不依赖 Service、Store 或 SSH。
 - `internal/service`：审批状态机、摘要绑定、执行并发、任务、审计事务，以及外部 MCP Client Session 与动态工具生命周期。
 - `internal/store`：SQLite hosts、runs、approvals、events、chat、加密模型/MCP 配置与 Eino checkpoints。
 - `internal/agenttool`：Eino 与 MCP 共用的 Tool 输入契约、Schema、结果投影和 SSH/Workspace/Web/History 执行适配器。
@@ -55,7 +55,8 @@ App 控制面通过 loopback HTTP API 连接本地 Sidecar。`auth.password` 非
 | `workspace.go` | Workspace 注册管理、配置快照与能力目录 |
 | `workspace_files.go`、`workspace_edit.go` | Agent 文件调用与输出协议；编辑审批入口、校验器执行与文件事务编排 |
 | `workspace_browser.go` | 管理端文件 DTO、操作入口和文件监听 |
-| `workspace_transfers.go`、`workspace_upload.go` | SSH 与 Workspace 传输编排；上传流与原子落盘 |
+| `workspace_transfers.go`、`workspace_upload.go` | SSH 与 Workspace 传输编排；管理端上传/目录创建入口及上传成功审计 |
+| `workspace_delete.go` | Agent 删除审批入口、当前写权限检查及删除成功审计 |
 | `workspace_shell.go` | Workspace Shell 后端选择、命令构造及执行编排，生命周期仍复用现有 Shell 实现 |
 
 文件列表、任务状态判断等逻辑归回已有的 `files.go`、`tasks.go`；共享凭据字符校验位于 `input_validation.go`。测试按相同职责归档，`service_test.go` 仅保留共享 Transport fake 与测试服务构造器；审批测试区分决策、说明生成和批准后执行。
@@ -74,9 +75,15 @@ Workspace 编辑采用 `workspacefs.FS.PrepareEdit → Service 校验器 → Edi
 
 此阶段补齐准备与提交前的取消检查；目录同步失败发生在提交之后，返回明确的提交后错误，不再冒充退出码 74 的校验失败。仍然只由校验器失败产生 74，编辑冲突产生 75；不需要脱敏的错误保留原有路径输入/取消分类。测试覆盖字节与权限保留、新建不覆盖、校验期间目标变化、审批载荷篡改、拒绝/取消清理以及工具输出与持久化结果。校验器集成测试使用 Go 测试进程，不依赖 Bash。
 
+第五阶段已完成 Workspace 上传/删除文件层解耦。`workspacefs.Upload` 统一管理管理端上传与 SSH 下载的目的路径、同目录暂存、流式 SHA256、可选源版本检查、排他硬链接提交和失败清理；不新增文件大小限制。`UploadOptions` 只包含摘要和现有字节进度 reporter，仍复用 `transfer.Writer` 的节流协议，不加入计时器、数据库或事件总线。目的路径预检查不构成预留或持久授权，实际上传重新检查目的路径；SSH 下载前后的编排和审批后配置读取仍在 Service。
+
+目录创建和实际删除也归文件层。Service 保留 read_write 检查、Agent 审批、原有 HTTP/工具 DTO，以及文件操作成功后的审计事件；失败和取消不会额外写入成功事件。删除仍保留文件 SHA256、明确的递归意图与禁止根目录删除规则，非递归预检查用 `ReadDir(1)` 判断空目录，不完整枚举。文件层每次删除都会重新检查目标，目录同步 helper 已收为包内实现，不保留 Service 侧副本或旧导出入口。
+
+上传和删除的摘要复制在写入间检查取消，上传提交与删除前再次检查；已有测试之外，增加源流中断、最终进度回调触发取消、摘要不符、并发同名目标、审批后权限/目录内容变化和成功审计次数的回归。取消不会用额外 goroutine 包装阻塞读取：HTTP/SFTP 仍负责解除自己的阻塞 Read，已经进入的 `RemoveAll` 不承诺中途回滚。这一阶段不改变注册状态、监听器、传输生命周期或全局运行时装配。
+
 其余编排与运行时状态仍由 `Service` 持有。后续按依赖顺序逐阶段推进，每阶段独立验证：
 
-1. 继续解耦 Workspace 上传/删除落盘及注册状态；保留审批与审计的编排边界，不把整个 `*Service` 传给新组件。
+1. 继续解耦 Workspace 注册状态；保留审批与审计的编排边界，不把整个 `*Service` 传给新组件。
 2. 分别收拢 Shell、Tunnel、外部 MCP Client 的运行时状态和关闭职责，保留用户交互与 Agent/MCP 审计的边界。
 3. 最后梳理 Execution、Approval、Task 的交叉调用，统一完成与取消路径，并分离业务状态更新和事件发布，再调整调用方装配。
 

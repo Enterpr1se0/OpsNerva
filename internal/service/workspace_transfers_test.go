@@ -63,6 +63,69 @@ func TestWorkspaceDownloadUsesVersionBoundAtomicDestination(t *testing.T) {
 	}
 }
 
+func TestWorkspaceDownloadRechecksAccessDestinationAndSourceAfterApproval(t *testing.T) {
+	for _, change := range []string{"access", "destination", "source"} {
+		t.Run(change, func(t *testing.T) {
+			svc, root := newWorkspaceService(t, "read_write")
+			ctx := context.Background()
+			content := []byte("original\n")
+			transport := &workspaceDownloadTransport{fakeTransport: &fakeTransport{}, content: content, remotePath: "/tmp/report.txt"}
+			svc.transport = transport
+			host, err := svc.SaveHost(ctx, domain.HostInput{Name: "source", Address: "192.0.2.50", Port: 22, User: "ops", AuthType: "agent", SudoMode: "none"}, "test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			digest := fmt.Sprintf("%x", sha256.Sum256(content))
+			pending, err := svc.DownloadHostFileToWorkspace(ctx, host.ID, transport.remotePath, digest, "project", "report.txt", 30, "download reviewed version", "eino-agent")
+			if err != nil || pending.Status != "approval_required" {
+				t.Fatalf("download skipped approval: %+v err=%v", pending, err)
+			}
+			target := filepath.Join(root, "report.txt")
+			wantError := ""
+			switch change {
+			case "access":
+				wantError = "read_only"
+				if _, err := svc.UpdateAdminWorkspace(ctx, "project", domain.WorkspaceInput{Access: "read_only"}, "operator"); err != nil {
+					t.Fatal(err)
+				}
+			case "destination":
+				wantError = "already exists"
+				if err := os.WriteFile(target, []byte("keep"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "source":
+				wantError = "remote download source version conflict"
+				transport.content = []byte("changed\n")
+			}
+			result, err := svc.Approve(ctx, pending.ApprovalID, "reviewed", "operator")
+			if err == nil || result.Status != "failed" || !strings.Contains(err.Error(), wantError) {
+				t.Fatalf("stale download was accepted: %+v err=%v", result, err)
+			}
+			entries, err := os.ReadDir(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if change == "destination" {
+				stored, err := os.ReadFile(target)
+				if err != nil || string(stored) != "keep" || len(entries) != 1 {
+					t.Fatalf("conflict changed target or leaked staging: %q %v err=%v", stored, entries, err)
+				}
+			} else if len(entries) != 0 {
+				t.Fatalf("failed download left files: %v", entries)
+			}
+			events, err := svc.ListAudit(ctx, "", 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, event := range events {
+				if event.Type == "workspace_file_downloaded" {
+					t.Fatalf("failed download wrote success audit: %+v", event)
+				}
+			}
+		})
+	}
+}
+
 func TestWorkspaceUploadRejectsReadOnlyWorkspace(t *testing.T) {
 	svc, _ := newWorkspaceService(t, "read_only")
 	if _, err := svc.UploadWorkspaceFile(context.Background(), "project", "file.txt", "file.txt", bytes.NewBufferString("x"), "admin-web"); err == nil || !strings.Contains(err.Error(), "read_only") {

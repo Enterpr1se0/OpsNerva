@@ -2,13 +2,9 @@ package service
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -18,115 +14,6 @@ import (
 	"github.com/Enterpr1se0/opsnerva/internal/sshx"
 	"github.com/Enterpr1se0/opsnerva/internal/workspacefs"
 )
-
-func (s *Service) DeleteWorkspaceEntry(ctx context.Context, workspaceID, relativePath string, recursive bool, reason, actor string) (domain.ExecResult, error) {
-	workspace, ok := s.workspaceByID(workspaceID)
-	if !ok {
-		return domain.ExecResult{}, fmt.Errorf("workspace %q not found", workspaceID)
-	}
-	relativePath = strings.TrimSpace(relativePath)
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		return domain.ExecResult{}, fmt.Errorf("reason is required")
-	}
-	if _, _, err := s.validateWorkspaceDeleteTarget(workspace, relativePath, recursive); err != nil {
-		return domain.ExecResult{}, err
-	}
-	host, err := s.workspaceHost(ctx, workspaceID)
-	if err != nil {
-		return domain.ExecResult{}, err
-	}
-	return s.Submit(ctx, domain.ExecRequest{
-		HostID: host.ID, Mode: domain.ExecWorkspaceDelete, WorkspaceID: workspaceID,
-		RelativePath: relativePath, Recursive: recursive, Reason: reason,
-	}, actor)
-}
-
-func (s *Service) validateWorkspaceDeleteTarget(workspace config.Workspace, relativePath string, recursive bool) (string, os.FileInfo, error) {
-	if workspace.Access != "read_write" {
-		return "", nil, fmt.Errorf("workspace %q is read_only", workspace.ID)
-	}
-	relativePath = strings.TrimSpace(relativePath)
-	if relativePath == "" || relativePath == "." {
-		return "", nil, fmt.Errorf("Workspace root cannot be deleted")
-	}
-	path, err := resolveWorkspacePath(workspace, relativePath, false)
-	if err != nil {
-		return "", nil, err
-	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		return "", nil, err
-	}
-	if !info.Mode().IsRegular() && !info.IsDir() {
-		return "", nil, fmt.Errorf("only regular Workspace files and directories can be deleted")
-	}
-	if info.IsDir() && !recursive {
-		entries, readErr := os.ReadDir(path)
-		if readErr != nil {
-			return "", nil, readErr
-		}
-		if len(entries) != 0 {
-			return "", nil, fmt.Errorf("workspace directory is not empty; set recursive=true to delete it")
-		}
-	}
-	return path, info, nil
-}
-
-func (s *Service) deleteWorkspaceEntry(ctx context.Context, workspace config.Workspace, relativePath string, recursive bool, actor string) (WorkspaceDeleteResult, error) {
-	path, info, err := s.validateWorkspaceDeleteTarget(workspace, relativePath, recursive)
-	if err != nil {
-		return WorkspaceDeleteResult{}, err
-	}
-	entryType := "directory"
-	var size int64
-	var sha256Sum string
-	if info.Mode().IsRegular() {
-		entryType = "file"
-		size = info.Size()
-		file, err := os.Open(path)
-		if err != nil {
-			return WorkspaceDeleteResult{}, err
-		}
-		digest := sha256.New()
-		_, copyErr := io.Copy(digest, file)
-		closeErr := file.Close()
-		if copyErr != nil {
-			return WorkspaceDeleteResult{}, copyErr
-		}
-		if closeErr != nil {
-			return WorkspaceDeleteResult{}, closeErr
-		}
-		sha256Sum = hex.EncodeToString(digest.Sum(nil))
-	}
-	normalizedPath := filepath.ToSlash(filepath.Clean(relativePath))
-	if info.IsDir() {
-		if recursive {
-			err = os.RemoveAll(path)
-		} else {
-			err = os.Remove(path)
-		}
-	} else {
-		err = os.Remove(path)
-	}
-	if err != nil {
-		return WorkspaceDeleteResult{}, err
-	}
-	if err := workspacefs.SyncDirectory(filepath.Dir(path)); err != nil {
-		return WorkspaceDeleteResult{}, err
-	}
-	result := WorkspaceDeleteResult{
-		WorkspaceID: workspace.ID, Path: normalizedPath, Type: entryType, Size: size, SHA256: sha256Sum,
-	}
-	eventType := "workspace_file_deleted"
-	if entryType == "directory" {
-		eventType = "workspace_directory_deleted"
-	}
-	s.audit(ctx, "", eventType, actor, map[string]any{
-		"workspace_id": workspace.ID, "path": normalizedPath, "type": entryType, "size": size, "sha256": result.SHA256, "permanent": true,
-	})
-	return result, nil
-}
 
 func (s *Service) ReadWorkspaceFile(ctx context.Context, workspaceID, relativePath string, maxBytes int, offset int64, actor string) (domain.ExecResult, error) {
 	return s.ReadWorkspaceFileAdvanced(ctx, workspaceID, relativePath, maxBytes, offset, 0, actor)

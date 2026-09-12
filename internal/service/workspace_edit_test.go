@@ -130,7 +130,7 @@ func TestWorkspaceEditValidatorProcess(t *testing.T) {
 	}
 	action, staged, target := os.Args[len(os.Args)-3], os.Args[len(os.Args)-2], os.Args[len(os.Args)-1]
 	content, err := os.ReadFile(staged)
-	if err != nil || strings.TrimSuffix(string(content), "\n") != "port=9090" || staged == target || filepath.Dir(staged) != filepath.Dir(target) {
+	if err != nil || strings.TrimSuffix(string(content), "\n") != "port=9090" || staged == target || !sameWorkspaceFile(filepath.Dir(staged), filepath.Dir(target)) {
 		t.Fatalf("validator did not receive staged replacement: content=%q err=%v", content, err)
 	}
 	if action != "create" {

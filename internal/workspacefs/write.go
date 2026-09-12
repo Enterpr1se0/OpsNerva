@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +22,31 @@ const MaxTextFileBytes = 100 << 20
 type WriteResult struct {
 	Size   int64
 	SHA256 string
+}
+
+// copyWithContext checks cancellation between writes without starting a worker
+// that could outlive its caller. The source must unblock its own pending reads.
+func copyWithContext(ctx context.Context, destination io.Writer, source io.Reader) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	written, err := io.Copy(contextWriter{ctx: ctx, destination: destination}, source)
+	if err != nil {
+		return written, err
+	}
+	return written, ctx.Err()
+}
+
+type contextWriter struct {
+	ctx         context.Context
+	destination io.Writer
+}
+
+func (writer contextWriter) Write(content []byte) (int, error) {
+	if err := writer.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return writer.destination.Write(content)
 }
 
 func (fs *FS) SaveText(ctx context.Context, relativePath, content string) (WriteResult, error) {
@@ -63,7 +90,7 @@ func (fs *FS) SaveText(ctx context.Context, relativePath, content string) (Write
 	if err := os.Rename(temporary, path); err != nil {
 		return WriteResult{}, err
 	}
-	if err := SyncDirectory(filepath.Dir(path)); err != nil {
+	if err := syncDirectory(filepath.Dir(path)); err != nil {
 		return WriteResult{}, err
 	}
 	digest := sha256.Sum256([]byte(content))
@@ -102,4 +129,34 @@ func writeSyncedFile(path string, content []byte, mode os.FileMode) error {
 	}
 	succeeded = true
 	return nil
+}
+
+// CreateDirectory creates one directory. An existing directory is
+// accepted so folder uploads can merge trees without overwriting existing files.
+func (fs *FS) CreateDirectory(ctx context.Context, relativePath string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	relativePath = strings.TrimSpace(relativePath)
+	if relativePath == "" || relativePath == "." || len(relativePath) > 1024 {
+		return fmt.Errorf("invalid workspace directory path")
+	}
+	target, err := fs.Resolve(relativePath, true)
+	if err != nil {
+		return err
+	}
+	if err := os.Mkdir(target, 0o755); err != nil {
+		if !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		info, statErr := os.Stat(target)
+		if statErr != nil {
+			return statErr
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("workspace directory conflicts with an existing file")
+		}
+		return nil
+	}
+	return syncDirectory(filepath.Dir(target))
 }

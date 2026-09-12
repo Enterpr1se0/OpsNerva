@@ -3,10 +3,117 @@ package service
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+type workspaceUploadReadFunc func([]byte) (int, error)
+
+func (read workspaceUploadReadFunc) Read(buffer []byte) (int, error) { return read(buffer) }
+
+func TestWorkspaceMutationAuditIsRecordedOnlyAfterSuccess(t *testing.T) {
+	svc, root := newWorkspaceService(t, "read_write")
+	ctx := context.Background()
+	uploaded, err := svc.UploadWorkspaceFile(ctx, "project", "audit.txt", "", strings.NewReader("bytes"), "admin-web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.UploadWorkspaceFile(ctx, "project", "audit.txt", "", strings.NewReader("overwrite"), "admin-web"); err == nil {
+		t.Fatal("conflicting upload succeeded")
+	}
+	deleted, err := svc.DeleteAdminWorkspaceEntry(ctx, "project", "audit.txt", "operator")
+	if err != nil || deleted.SHA256 != uploaded.SHA256 {
+		t.Fatalf("deletion metadata changed: %+v err=%v", deleted, err)
+	}
+	if _, err := svc.DeleteAdminWorkspaceEntry(ctx, "project", "audit.txt", "operator"); err == nil {
+		t.Fatal("missing target deletion succeeded")
+	}
+	events, err := svc.ListAudit(ctx, "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{}
+	for _, event := range events {
+		if event.Type != "workspace_file_uploaded" && event.Type != "workspace_file_deleted" {
+			continue
+		}
+		counts[event.Type]++
+		if event.Data["workspace_id"] != "project" || event.Data["path"] != "audit.txt" || event.Data["sha256"] != uploaded.SHA256 || event.Data["size"] != float64(5) {
+			t.Fatalf("mutation audit data changed: %+v", event)
+		}
+		if event.Type == "workspace_file_uploaded" && event.Actor != "admin-web" || event.Type == "workspace_file_deleted" && (event.Actor != "operator" || event.Data["permanent"] != true || event.Data["type"] != "file") {
+			t.Fatalf("mutation audit owner/operation changed: %+v", event)
+		}
+	}
+	if counts["workspace_file_uploaded"] != 1 || counts["workspace_file_deleted"] != 1 {
+		t.Fatalf("missing or duplicate mutation audit: %+v", counts)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("mutations left staging files: %v err=%v", entries, err)
+	}
+}
+
+func TestWorkspaceCancelledMutationsDoNotChangeFilesOrAudit(t *testing.T) {
+	svc, root := newWorkspaceService(t, "read_write")
+	if err := os.WriteFile(filepath.Join(root, "keep.txt"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := svc.ListAudit(context.Background(), "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, err = svc.UploadWorkspaceFile(ctx, "project", "cancelled.txt", "", workspaceUploadReadFunc(func(buffer []byte) (int, error) {
+		cancel()
+		return copy(buffer, "partial"), io.EOF
+	}), "admin-web")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled upload = %v", err)
+	}
+	if _, err := svc.DeleteAdminWorkspaceEntry(ctx, "project", "keep.txt", "admin-web"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled delete = %v", err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "keep.txt" {
+		t.Fatalf("cancelled operations changed files: %v err=%v", entries, err)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "keep.txt"))
+	if err != nil || string(content) != "keep" {
+		t.Fatalf("cancelled delete changed original: %q err=%v", content, err)
+	}
+	after, err := svc.ListAudit(context.Background(), "", 100)
+	if err != nil || len(after) != len(before) {
+		t.Fatalf("cancelled operations wrote success audit: before=%d after=%d err=%v", len(before), len(after), err)
+	}
+}
+
+func TestWorkspaceMutationsKeepPathErrorClassification(t *testing.T) {
+	svc, _ := newWorkspaceService(t, "read_write")
+	ctx := context.Background()
+	for name, operation := range map[string]func() error{
+		"directory": func() error { return svc.CreateAdminWorkspaceDirectory(ctx, "project", "../outside") },
+		"upload": func() error {
+			_, err := svc.UploadWorkspaceFile(ctx, "project", "../outside", "", strings.NewReader("data"), "test")
+			return err
+		},
+		"delete": func() error {
+			_, err := svc.DeleteAdminWorkspaceEntry(ctx, "project", "../outside", "test")
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var invalid *InputValidationError
+			if err := operation(); !errors.As(err, &invalid) {
+				t.Fatalf("mutation path error lost classification: %v", err)
+			}
+		})
+	}
+}
 
 func TestWorkspaceUploadDirectoriesPreserveTree(t *testing.T) {
 	svc, root := newWorkspaceService(t, "read_write")
