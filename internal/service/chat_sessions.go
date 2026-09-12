@@ -125,7 +125,9 @@ func (s *Service) SetChatSessionWorkspace(ctx context.Context, sessionID, worksp
 	if current.WorkspaceID == workspaceID {
 		return current, nil
 	}
-	if s.hasActiveWorkspaceShellForSession(sessionID) {
+	if s.shells.hasActive(func(shell domain.SSHShell) bool {
+		return shell.Kind == domain.SSHShellKindWorkspace && shell.SessionID == sessionID
+	}) {
 		return domain.ChatSession{}, fmt.Errorf("conversation %q has an active Workspace terminal", sessionID)
 	}
 	session, err := s.store.SetChatSessionWorkspace(ctx, sessionID, workspaceID)
@@ -197,7 +199,7 @@ func (s *Service) DeleteChatSession(ctx context.Context, sessionID string, actor
 			}
 		}
 	}
-	if s.hasActiveSSHShellForSession(sessionID) {
+	if s.shells.hasActive(func(shell domain.SSHShell) bool { return shell.SessionID == sessionID }) {
 		return fmt.Errorf("conversation %q has an active terminal; close it before deleting the conversation", sessionID)
 	}
 	if s.hasActiveTaskForSession(sessionID) {

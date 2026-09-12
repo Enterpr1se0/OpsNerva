@@ -45,6 +45,16 @@ func TestAppendSSHShellEventsCommitsBatchAndSessionCursor(t *testing.T) {
 	if shell.LastSequence != 2 || len(stored) != 2 || stored[1].Content != "second" || recent != "firstsecond" {
 		t.Fatalf("batch persistence mismatch: shell=%#v events=%#v recent=%q", shell, stored, recent)
 	}
+	for _, staleSequence := range []uint64{0, 99} {
+		shell.LastSequence, shell.Status = staleSequence, "completed"
+		if err := st.UpdateSSHShell(ctx, shell); err != nil {
+			t.Fatal(err)
+		}
+		updated, err := st.GetSSHShell(ctx, shell.ID)
+		if err != nil || updated.LastSequence != 2 || updated.Status != "completed" {
+			t.Fatalf("metadata overwrote committed cursor: %#v err=%v", updated, err)
+		}
+	}
 }
 
 func TestAppendSSHShellEventsCompressesAndRestoresOutput(t *testing.T) {

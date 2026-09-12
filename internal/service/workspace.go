@@ -48,7 +48,9 @@ func (s *Service) UpdateAdminWorkspace(ctx context.Context, id string, input dom
 	if !exists {
 		return AdminWorkspaceCapability{}, fmt.Errorf("workspace %q not found", id)
 	}
-	if strings.TrimSpace(input.Access) != current.Access && s.hasActiveWorkspaceShell(id) {
+	if strings.TrimSpace(input.Access) != current.Access && s.shells.hasActive(func(shell domain.SSHShell) bool {
+		return shell.Kind == domain.SSHShellKindWorkspace && shell.WorkspaceID == id
+	}) {
 		return AdminWorkspaceCapability{}, fmt.Errorf("workspace %q has an active terminal", id)
 	}
 	workspace, err := s.workspaces.Update(ctx, id, input.Access)
@@ -64,7 +66,9 @@ func (s *Service) DeleteAdminWorkspace(ctx context.Context, id, actor string) er
 	if _, ok := s.workspaces.Get(id); !ok {
 		return fmt.Errorf("workspace %q not found", id)
 	}
-	if s.hasActiveWorkspaceShell(id) {
+	if s.shells.hasActive(func(shell domain.SSHShell) bool {
+		return shell.Kind == domain.SSHShellKindWorkspace && shell.WorkspaceID == id
+	}) {
 		return fmt.Errorf("workspace %q has an active terminal", id)
 	}
 	removed, err := s.workspaces.Delete(ctx, id)

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
@@ -28,6 +29,15 @@ type shellHistory interface {
 	RecentOutput(context.Context) (string, error)
 	LastAgentInputSequence(context.Context) (uint64, error)
 	AdvanceResponseSequence(context.Context, string, uint64) error
+}
+
+func (s *Service) historyForShell(id string) (shellHistory, *sshShellState) {
+	id = strings.TrimSpace(id)
+	state := s.shells.get(id)
+	if state != nil {
+		return state.history, state
+	}
+	return &persistentShellHistory{store: s.store, shellID: id}, nil
 }
 
 type persistentShellHistory struct {
@@ -100,6 +110,8 @@ func (h *memoryShellHistory) Update(_ context.Context, shell domain.SSHShell) er
 	if h.shell.ID == "" || h.shell.ID != shell.ID {
 		return store.ErrNotFound
 	}
+	// Event commits own the cursor; metadata snapshots may predate a flush.
+	shell.LastSequence = h.shell.LastSequence
 	h.shell = shell
 	return nil
 }

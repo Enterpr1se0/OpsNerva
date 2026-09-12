@@ -79,8 +79,7 @@ type Service struct {
 	unsubscribeStoreChanges func()
 	tunnelMu                sync.RWMutex
 	tunnels                 map[string]*sshTunnelState
-	shellMu                 sync.RWMutex
-	shells                  map[string]*sshShellState
+	shells                  *shellRegistry
 	hostShellProbes         singleflight.Group
 	webSearch               *websearch.Client
 }
@@ -103,7 +102,7 @@ func New(st *store.Store, transport sshx.Transport, encryptor *security.Encrypto
 		executionCtx:         executionCtx, executionCancel: executionCancel,
 		executionCancels: make(map[string]context.CancelFunc), cancelledExecutions: make(map[string]struct{}),
 		tunnels:   make(map[string]*sshTunnelState),
-		shells:    make(map[string]*sshShellState),
+		shells:    newShellRegistry(),
 		webSearch: websearch.New(redactor),
 	}
 	if len(runtimeConfig) > 0 {
@@ -121,6 +120,7 @@ func New(st *store.Store, transport sshx.Transport, encryptor *security.Encrypto
 func (s *Service) Store() *store.Store { return s.store }
 
 func (s *Service) Shutdown(ctx context.Context) error {
+	shellDone := s.shells.shutdown()
 	s.executionMu.Lock()
 	if !s.executionClosed {
 		s.executionClosed = true
@@ -135,11 +135,12 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	done := make(chan struct{})
 	go func() {
 		s.executionWG.Wait()
+		<-shellDone
 		close(done)
 	}()
 	select {
 	case <-done:
-		return nil
+		return s.shells.shutdownError()
 	case <-ctx.Done():
 		return ctx.Err()
 	}

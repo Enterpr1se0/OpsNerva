@@ -4,12 +4,9 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/Enterpr1se0/opsnerva/internal/domain"
 	"github.com/Enterpr1se0/opsnerva/internal/observability"
-	"github.com/Enterpr1se0/opsnerva/internal/store"
-	"github.com/Enterpr1se0/opsnerva/internal/terminaltext"
 )
 
 // ReconnectOperatorSSHShell starts a new transport generation inside an
@@ -20,61 +17,32 @@ func (s *Service) ReconnectOperatorSSHShell(ctx context.Context, id, actor strin
 	if id == "" {
 		return domain.SSHShell{}, fmt.Errorf("shell_id is required")
 	}
-	shellCtx, cancel := context.WithCancel(s.executionCtx)
-	s.shellMu.Lock()
-	state := s.shells[id]
-	if state == nil || s.historyForState(state).Persistent() {
-		s.shellMu.Unlock()
-		cancel()
-		return domain.SSHShell{}, store.ErrNotFound
+	shellCtx, cancel, err := s.shells.begin()
+	if err != nil {
+		return domain.SSHShell{}, err
 	}
+	running := false
+	defer func() {
+		if !running {
+			cancel()
+		}
+		s.shells.workers.Done()
+	}()
+	state, shell, generation, err := s.shells.beginReconnect(id, cancel)
+	if err != nil {
+		cancel()
+		return domain.SSHShell{}, err
+	}
+	state.lifecycleMu.Lock()
 	state.mu.Lock()
-	if !operatorShellReconnectable(state.shell) {
-		status := state.shell.Status
-		state.mu.Unlock()
-		s.shellMu.Unlock()
-		cancel()
-		return domain.SSHShell{}, fmt.Errorf("%w: interactive shell %q is %s", ErrSSHShellReconnectConflict, id, status)
-	}
-	activeTotal, activeHost := 0, 0
-	for currentID, current := range s.shells {
-		if currentID == id {
-			continue
-		}
-		current.mu.Lock()
-		active := shellStatusActive(current.shell.Status)
-		hostMatch := current.shell.HostID == state.shell.HostID
-		current.mu.Unlock()
-		if active {
-			activeTotal++
-			if hostMatch {
-				activeHost++
-			}
-		}
-	}
-	if activeTotal >= maxActiveSSHShells || activeHost >= maxActiveSSHShellsPerHost {
-		state.mu.Unlock()
-		s.shellMu.Unlock()
-		cancel()
-		return domain.SSHShell{}, fmt.Errorf("interactive shell limit reached")
-	}
-	state.generation++
-	generation := state.generation
-	state.cancel = cancel
-	state.session = nil
-	state.closing = false
-	state.reason = ""
-	state.secretPrompt = false
-	state.ansiStripper = terminaltext.Stripper{}
-	state.shell.Status = "starting"
-	state.shell.ExitCode = nil
-	state.shell.TerminationReason = ""
-	state.shell.Error = ""
-	state.shell.EndedAt = time.Time{}
-	shell := state.shell
+	valid := state.generation == generation && state.shell.Status == "starting" && !state.outputClosed
 	state.mu.Unlock()
-	s.shellMu.Unlock()
+	if !valid {
+		state.lifecycleMu.Unlock()
+		return domain.SSHShell{}, context.Canceled
+	}
 	if err := state.history.Update(context.WithoutCancel(ctx), shell); err != nil {
+		state.lifecycleMu.Unlock()
 		s.failSSHShellStart(state, generation, err, false)
 		return domain.SSHShell{}, err
 	}
@@ -83,6 +51,7 @@ func (s *Service) ReconnectOperatorSSHShell(ctx context.Context, id, actor strin
 	shell = state.shell
 	state.mu.Unlock()
 	s.publishShellState(shell, false)
+	state.lifecycleMu.Unlock()
 
 	host, opener, err := s.prepareOperatorShellReconnect(shellCtx, shell)
 	if err != nil {
@@ -107,6 +76,7 @@ func (s *Service) ReconnectOperatorSSHShell(ctx context.Context, id, actor strin
 	if err != nil {
 		return domain.SSHShell{}, err
 	}
+	running = true
 	observability.FromContext(ctx).InfoContext(ctx, "operator shell reconnected",
 		"component", interactiveShellComponent(shell.Kind), "shell_id", shell.ID,
 		"host_id", shell.HostID, "generation", generation, "actor", actor)
@@ -139,14 +109,4 @@ func (s *Service) prepareOperatorShellReconnect(ctx context.Context, shell domai
 	default:
 		return domain.Host{}, nil, fmt.Errorf("unsupported operator shell kind %q", shell.Kind)
 	}
-}
-
-func operatorShellReconnectable(shell domain.SSHShell) bool {
-	if shell.Surface != domain.SSHShellSurfaceQuick && shell.Surface != domain.SSHShellSurfaceWorkspace && shell.Surface != domain.WorkspaceShellSurfaceOperator {
-		return false
-	}
-	if shell.Status != "failed" {
-		return false
-	}
-	return shell.TerminationReason == "connection_lost" || shell.TerminationReason == "process_lost"
 }

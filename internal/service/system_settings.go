@@ -114,7 +114,9 @@ func (s *Service) SaveSystemSettings(ctx context.Context, input domain.SystemSet
 		mode := strings.ToLower(strings.TrimSpace(*input.WorkspaceShellMode))
 		switch mode {
 		case domain.WorkspaceShellModeSandbox, domain.WorkspaceShellModeHost, domain.WorkspaceShellModeDisabled:
-			if mode != current.WorkspaceShellMode && s.hasAnyActiveWorkspaceShell() {
+			if mode != current.WorkspaceShellMode && s.shells.hasActive(func(shell domain.SSHShell) bool {
+				return shell.Kind == domain.SSHShellKindWorkspace
+			}) {
 				return domain.SystemSettings{}, fmt.Errorf("close active Workspace terminals before changing workspace_shell_mode")
 			}
 			current.WorkspaceShellMode = mode

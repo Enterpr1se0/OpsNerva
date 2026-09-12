@@ -99,9 +99,7 @@ func TestWriteSSHShellDelaysBeforeReadingOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	shellID := approved.Shell.ID
-	svc.shellMu.RLock()
-	session := svc.shells[shellID].session.(*fakeShellSession)
-	svc.shellMu.RUnlock()
+	session := runningFakeShell(t, svc, shellID)
 	session.mu.Lock()
 	session.outputDelay = 40 * time.Millisecond
 	session.mu.Unlock()
@@ -153,9 +151,7 @@ func TestOperatorCanStartShellWithoutAgentConversation(t *testing.T) {
 	if len(stored) != 0 {
 		t.Fatalf("operator terminal was persisted: %#v", stored)
 	}
-	svc.shellMu.RLock()
-	operatorSession := svc.shells[shell.ID].session.(*fakeShellSession)
-	svc.shellMu.RUnlock()
+	operatorSession := runningFakeShell(t, svc, shell.ID)
 	operatorSession.callback("stdout", []byte("Password:"))
 	credentialInput := "password=operator-secret\r"
 	if err := svc.SendSSHShellInput(ctx, shell.ID, "", credentialInput, "", "admin-web"); err != nil {
@@ -236,9 +232,7 @@ func TestAgentRootShellInputStopsAfterAccessIsRevoked(t *testing.T) {
 		t.Fatal(err)
 	}
 	shellID := approved.Shell.ID
-	svc.shellMu.RLock()
-	session := svc.shells[shellID].session.(*fakeShellSession)
-	svc.shellMu.RUnlock()
+	session := runningFakeShell(t, svc, shellID)
 	if _, err := svc.SetHostAgentRootEnabled(ctx, host.ID, false, "operator"); err != nil {
 		t.Fatal(err)
 	}
@@ -315,44 +309,6 @@ func TestAgentShellOutputStreamsBeforeTheToolResult(t *testing.T) {
 	}
 }
 
-func TestSSHShellOutputBatchesPersistenceUntilFlush(t *testing.T) {
-	svc, _, _ := newTestService(t)
-	state := &sshShellState{
-		shell:   domain.SSHShell{ID: "shell-batched-output", Kind: domain.SSHShellKindSSH, Status: "running", StartedAt: time.Now().UTC()},
-		pending: make(map[string]string), notify: make(chan struct{}),
-	}
-	if err := svc.store.CreateSSHShell(context.Background(), state.shell); err != nil {
-		t.Fatal(err)
-	}
-	state.eventMu.Lock()
-	readable := svc.appendSSHShellOutputEventsLocked(state, "stdout", "firstsecond")
-	if readable != "firstsecond" || len(state.persistEvents) != 1 {
-		state.eventMu.Unlock()
-		t.Fatalf("queued output = %q, pending events = %d", readable, len(state.persistEvents))
-	}
-	storedBefore, err := svc.store.GetSSHShell(context.Background(), state.shell.ID)
-	if err != nil {
-		state.eventMu.Unlock()
-		t.Fatal(err)
-	}
-	if storedBefore.LastSequence != 0 {
-		state.eventMu.Unlock()
-		t.Fatalf("output persisted before batch flush: sequence=%d", storedBefore.LastSequence)
-	}
-	if err := svc.flushSSHShellEventsLocked(state); err != nil {
-		state.eventMu.Unlock()
-		t.Fatal(err)
-	}
-	state.eventMu.Unlock()
-	storedAfter, err := svc.store.GetSSHShell(context.Background(), state.shell.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if storedAfter.LastSequence != 1 || len(state.persistEvents) != 0 {
-		t.Fatalf("batch flush state: sequence=%d pending=%d", storedAfter.LastSequence, len(state.persistEvents))
-	}
-}
-
 func TestSSHShellUsageDescribesIncrementalOutput(t *testing.T) {
 	usage := sshShellUsage()
 	if usage == nil || !strings.Contains(usage.Input, "bounded output page") || !strings.Contains(usage.Output, "next_sequence") || !strings.Contains(usage.Output, "after_sequence") {
@@ -380,9 +336,7 @@ func TestShellOutputPagePaginatesReadableStreamsWithoutLoss(t *testing.T) {
 		t.Fatal(err)
 	}
 	after := shell.LastSequence
-	svc.shellMu.RLock()
-	session := svc.shells[shell.ID].session.(*fakeShellSession)
-	svc.shellMu.RUnlock()
+	session := runningFakeShell(t, svc, shell.ID)
 	session.callback("stdout", []byte("alpha"))
 	session.callback("stderr", []byte("warn"))
 	session.callback("stdout", []byte("omega"))
@@ -457,9 +411,7 @@ func TestShellOutputQueryDelayIsNotWokenByOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	after := shell.LastSequence
-	svc.shellMu.RLock()
-	session := svc.shells[shell.ID].session.(*fakeShellSession)
-	svc.shellMu.RUnlock()
+	session := runningFakeShell(t, svc, shell.ID)
 	go func() {
 		time.Sleep(10 * time.Millisecond)
 		session.callback("stdout", []byte("arrived-early\n"))
@@ -507,7 +459,7 @@ func TestContinuousShellOutputIsReadAfterQueryDelayWithoutStoppingThePTY(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, before, err := svc.liveSSHShell(approved.Shell.ID, sessionID)
+	_, interactive, before, err := svc.shells.running(approved.Shell.ID, sessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -526,7 +478,7 @@ func TestContinuousShellOutputIsReadAfterQueryDelayWithoutStoppingThePTY(t *test
 			case <-stop:
 				return
 			case <-ticker.C:
-				state.session.(*fakeShellSession).callback("stdout", []byte("top-frame\n"))
+				interactive.(*fakeShellSession).callback("stdout", []byte("top-frame\n"))
 			}
 		}
 	}()
@@ -566,10 +518,7 @@ func TestShellOutputIncludesDataProducedBetweenToolCalls(t *testing.T) {
 		t.Fatal(err)
 	}
 	inputSnapshot := inputPage.Snapshot
-	svc.shellMu.RLock()
-	state := svc.shells[approved.Shell.ID]
-	svc.shellMu.RUnlock()
-	state.session.(*fakeShellSession).callback("stdout", []byte("late-result\n"))
+	runningFakeShell(t, svc, approved.Shell.ID).callback("stdout", []byte("late-result\n"))
 
 	outputCtx := WithExecutionOwner(context.Background(), "call-shell-output", "ssh_shell", `{"action":"output"}`)
 	outputPage, err := svc.QuerySSHShellOutput(outputCtx, approved.Shell.ID, sessionID, nil, 0, 0, "", "eino-agent")
@@ -692,9 +641,7 @@ func TestInteractiveSSHShellApprovalIsolationCompleteOutputAndSensitiveRedaction
 		t.Fatalf("cross-session shell input was not hidden: %v", err)
 	}
 
-	svc.shellMu.RLock()
-	fakeSession := svc.shells[shellID].session.(*fakeShellSession)
-	svc.shellMu.RUnlock()
+	fakeSession := runningFakeShell(t, svc, shellID)
 	shellBeforeCoalesce, err := svc.store.GetSSHShell(context.Background(), shellID)
 	if err != nil {
 		t.Fatal(err)
@@ -857,9 +804,7 @@ func TestInteractiveSSHShellTerminationClassification(t *testing.T) {
 				t.Fatal(err)
 			}
 			shellID := approved.Shell.ID
-			svc.shellMu.RLock()
-			session := svc.shells[shellID].session.(*fakeShellSession)
-			svc.shellMu.RUnlock()
+			session := runningFakeShell(t, svc, shellID)
 			session.finish(testCase.exit)
 
 			deadline := time.Now().Add(time.Second)
@@ -1021,9 +966,7 @@ func waitForOperatorShellStatus(t *testing.T, svc *Service, shellID, status stri
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for {
-		svc.shellMu.RLock()
-		state := svc.shells[shellID]
-		svc.shellMu.RUnlock()
+		state := svc.shells.get(shellID)
 		if state != nil {
 			state.mu.Lock()
 			shell := state.shell
@@ -1043,10 +986,7 @@ func waitForMissingOperatorShell(t *testing.T, svc *Service, shellID string) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for {
-		svc.shellMu.RLock()
-		_, exists := svc.shells[shellID]
-		svc.shellMu.RUnlock()
-		if !exists {
+		if svc.shells.get(shellID) == nil {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -1054,4 +994,13 @@ func waitForMissingOperatorShell(t *testing.T, svc *Service, shellID string) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+func runningFakeShell(t *testing.T, svc *Service, id string) *fakeShellSession {
+	t.Helper()
+	_, session, _, err := svc.shells.running(id, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return session.(*fakeShellSession)
 }

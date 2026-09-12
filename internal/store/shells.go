@@ -54,9 +54,9 @@ func (s *Store) UpdateSSHShell(ctx context.Context, shell domain.SSHShell) error
 		exitCode = *shell.ExitCode
 	}
 	result, err := s.db.ExecContext(ctx, `UPDATE ssh_shell_sessions SET
-kind=?,surface=?,host_name=?,workspace_id=?,backend=?,username=?,elevated=?,cwd=?,status=?,cols=?,rows=?,last_sequence=?,exit_code=?,termination_reason=?,error=?,ended_at=?
+kind=?,surface=?,host_name=?,workspace_id=?,backend=?,username=?,elevated=?,cwd=?,status=?,cols=?,rows=?,exit_code=?,termination_reason=?,error=?,ended_at=?
 WHERE id=?`, shell.Kind, shell.Surface, shell.HostName, shell.WorkspaceID, shell.Backend, shell.User, elevated, shell.Cwd, shell.Status, shell.Cols, shell.Rows,
-		shell.LastSequence, exitCode, shell.TerminationReason, shell.Error, ended, shell.ID)
+		exitCode, shell.TerminationReason, shell.Error, ended, shell.ID)
 	if err != nil {
 		return err
 	}

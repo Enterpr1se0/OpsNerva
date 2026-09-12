@@ -123,16 +123,14 @@ func TestWorkspaceRegistryReloadKeepsPersistedAccessAndAudit(t *testing.T) {
 func TestWorkspaceRegistryRetainsActiveTerminalGuard(t *testing.T) {
 	svc, root := newWorkspaceService(t, "read_write")
 	// Keep this boundary test independent of local Bash/PTY availability.
-	svc.shellMu.Lock()
-	svc.shells["workspace-fixture"] = &sshShellState{shell: domain.SSHShell{
+	state := &sshShellState{shell: domain.SSHShell{
 		ID: "workspace-fixture", Kind: domain.SSHShellKindWorkspace, WorkspaceID: "project", Status: "running",
 	}}
-	svc.shellMu.Unlock()
-	defer func() {
-		svc.shellMu.Lock()
-		delete(svc.shells, "workspace-fixture")
-		svc.shellMu.Unlock()
-	}()
+	state.history = newMemoryShellHistory(state.shell)
+	if err := svc.shells.add(state); err != nil {
+		t.Fatal(err)
+	}
+	defer svc.shells.remove(state)
 	ctx := context.Background()
 	if _, err := svc.UpdateAdminWorkspace(ctx, "project", domain.WorkspaceInput{Access: "read_only"}, "operator"); err == nil || !strings.Contains(err.Error(), "active terminal") {
 		t.Fatalf("active terminal allowed access change: %v", err)
